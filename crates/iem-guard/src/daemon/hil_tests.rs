@@ -356,7 +356,14 @@ fn an_injected_fault_is_respawned_once_and_reported() {
     tick(&mut pc, &mut g, at + Duration::from_secs(5));
     assert_eq!(pc.engine_starts, [(false, true)]);
     let r = handle(&mut pc, &mut g, Request::Status, INIT);
-    assert_eq!(r.engine, Some(engine_of(1, Some(70))));
+    // The respawned engine is the guard's child: the reply names its pid.
+    assert_eq!(
+        r.engine,
+        Some(EngineStatus {
+            pid: Some(1001),
+            ..engine_of(1, Some(70))
+        })
+    );
     assert_eq!(g.state.mode, Mode::Dev);
     assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
 }

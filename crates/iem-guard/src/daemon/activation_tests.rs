@@ -4,7 +4,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::tests::{INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, record, steps, texts};
+use super::tests::{
+    INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, no_reaper, prod_on, record, steps,
+    texts,
+};
 use super::*;
 use crate::bundle::Hil;
 use crate::install;
@@ -419,6 +422,80 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     assert!(pc.called(Call::ReaperStart));
     assert_eq!(texts(&g)[0], "ServerStart: ports 80/443 are still held");
     assert_eq!(g.state.job, None, "no HIL job outside dev");
+}
+
+/// In prod a HIL job's engine restart that fails stops where it is, in dev
+/// with the job: never the event plan (the owner's decision on #11,
+/// 2026-10-19: in prod nothing goes to REAPER on its own). Its server
+/// failed after its engine armed, so the alarm says dev runs with that
+/// engine.
+#[test]
+fn in_prod_a_failed_job_restart_stops_without_reaper() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, None);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    pc.fail(Call::ServerStart, "ports 80/443 are still held");
+    let site = Request::InstallSite {
+        path: "site.toml".into(),
+    };
+    let r = handle(&mut pc, &mut g, site, INIT);
+    assert!(!r.ok, "{r:?}");
+    let failed = "ServerStart: ports 80/443 are still held; in prod nothing goes to REAPER on \
+                  its own: its engine was armed, so the PC is in dev with it (asking for it \
+                  again tries again)"
+        .to_owned();
+    assert!(
+        r.detail.starts_with(&format!("site installed; {failed}")),
+        "{}",
+        r.detail
+    );
+    assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    assert_eq!(texts(&g), [failed]);
+    assert!(g.alarms.last().unwrap().owner_question);
+}
+
+/// The review of PR #56, finding 6: a HIL job's engine restart in prod
+/// whose first step failed before anything changed (no engine ran, its
+/// preference check) says the PC stays in dev as it was instead of naming a
+/// live entry that would restart an engine; one whose engine stop failed
+/// (its request went out) names the ways on.
+#[test]
+fn in_prod_a_job_restart_that_changed_nothing_says_the_pc_stays_in_dev() {
+    let restart = |facts: Facts, call: Call, why: &str| {
+        let (mut pc, mut g) = (FakePc::new(facts), Guard::for_test(Mode::Dev));
+        g.state.lifecycle = prod_on(None, None);
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        g.state.pins.current = Some(SHA.into());
+        g.state.job = Some(7);
+        pc.fail(call, why);
+        let site = Request::InstallSite {
+            path: "site.toml".into(),
+        };
+        let r = handle(&mut pc, &mut g, site, INIT);
+        assert!(!r.ok, "{r:?}");
+        assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
+        assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+        (r.detail, texts(&g))
+    };
+    let failed = "PrefCheck: 3 restores failed; in prod nothing goes to REAPER on its own: no \
+                  step done changed what runs, so the PC stays in dev as it was (asking for it \
+                  again tries again)";
+    let (detail, alarms) = restart(Facts::default(), Call::PrefCheck, "3 restores failed");
+    assert!(
+        detail.starts_with(&format!("site installed; {failed}")),
+        "{detail}"
+    );
+    assert_eq!(alarms, [failed]);
+    let why = "no DriverReleased within 10 s";
+    let (_, alarms) = restart(iemmixer_up(), Call::EngineStop, why);
+    assert_eq!(alarms, [format!("EngineStop: {why}; {}", no_reaper(SHA))]);
 }
 
 /// Inside a HIL job the engine starts without a plan (`restart_in_job`,

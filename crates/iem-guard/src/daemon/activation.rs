@@ -224,8 +224,10 @@ fn offline_activation(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, Strin
 /// bundle and site, the engine with the job's HIL flags, after `PrefCheck`
 /// (REAPER's original back, as before every engine start). The runner (it
 /// runs the job) and the tray keep running, so this is no dev entry. A
-/// failure alarms and unwinds to event, as a failed dev entry does; "ide
-/// event" ends a wait and is served next.
+/// failure alarms and unwinds to event, as a failed dev entry does (in prod
+/// it stops where it is with the ways on, `lifecycle::ways_on`: nothing
+/// goes to REAPER on its own, #11 2026-10-19); "ide event" ends a wait and
+/// is served next.
 fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     let f = pc.facts();
     let mut steps = Vec::new();
@@ -243,13 +245,30 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
         Step::EngineArm,
         Step::ServerStart,
     ]);
+    let mut done: Vec<Step> = Vec::new();
     for step in steps {
         match run_step(pc, g, step, Mode::Dev) {
             // The children are saved after every step, so the guard an
             // activation hands over to adopts the new engine and server.
-            Ok(()) => g.done(pc, step),
+            Ok(()) => {
+                g.done(pc, step);
+                done.push(step);
+            }
             Err(StepError::Preempted) => return Err("pre-empted by event".to_owned()),
             Err(StepError::Failed(why)) => {
+                // In prod nothing goes to REAPER on its own (#11,
+                // 2026-10-19): the restart stops where it is, in dev, and
+                // asks the owner, its alarm by what the restart left (the
+                // review of PR #56: `lifecycle::after_stop`). The mode stays
+                // dev whatever it left: a held engine there is the job's own
+                // build, which dev may run.
+                let left = lifecycle::stops_in(Mode::Dev, Mode::Dev, &done, step);
+                if let Some(ways) =
+                    lifecycle::after_stop(&g.state.lifecycle, left, |sha| g.state.bundles.get(sha))
+                {
+                    g.alarm(step, &format!("{why}; {ways}"), true);
+                    return Err(format!("{step:?}: {why}; {ways}"));
+                }
                 g.alarm(step, &why, false);
                 let from = g.state.mode;
                 let out = run_switch(pc, g, from, Mode::Event);

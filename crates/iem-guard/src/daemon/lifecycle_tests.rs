@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, prod_on, record, texts,
+    INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, no_reaper, prod_on, record, texts,
 };
 use super::*;
 use crate::bundle::{Hil, Pins};
@@ -17,6 +17,7 @@ use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::Facts;
 use crate::proto::Request;
+use crate::state::Switching;
 
 /// The pins as an earlier guard left them: `OTHER`, nothing before it.
 fn other_pinned() -> Pins {
@@ -154,9 +155,12 @@ fn green_main(g: &mut Guard, shas: &[&str]) {
 }
 
 /// G8 on the crash path: a crash loop in maintenance whose pin HIL reported
-/// red goes back to REAPER, never live on it (the review of lane 1).
+/// red never goes live on it (the review of lane 1), and since the owner's
+/// decision of 2026-10-19 (#11: in prod nothing goes to REAPER on its own)
+/// not to REAPER either: the engine stays down, the session's build
+/// dropped, the alarm names the way to REAPER.
 #[test]
-fn a_crash_loop_in_maintenance_on_a_red_pin_goes_back_to_reaper() {
+fn a_crash_loop_in_maintenance_on_a_red_pin_stays_down() {
     let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Dev));
     g.state.lifecycle = prod_on(None, Some(NEW));
     g.state
@@ -164,16 +168,97 @@ fn a_crash_loop_in_maintenance_on_a_red_pin_goes_back_to_reaper() {
         .insert(SHA.into(), record(SHA, "main", Hil::Red));
     pc.exited = vec![(Kid::Engine, Some(70)); 3];
     tick(&mut pc, &mut g, Instant::now());
-    assert_eq!(g.state.mode, Mode::Event);
-    assert!(pc.called(Call::ReaperStart) && !pc.called(Call::EngineStart));
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::EngineStart));
     assert_eq!(g.state.lifecycle, prod_on(None, None));
     assert_eq!(
         texts(&g),
         [format!(
-            "the engine crashed 3 times in 10 min in maintenance, and {SHA}: HIL Red; live \
-             needs green: back to REAPER"
+            "the engine crashed 3 times in 10 min in maintenance, and the pin {SHA} may not go \
+             live ({SHA}: HIL Red; live needs green): the engine stays down; back to REAPER \
+             with iemmode event (the PC stays in prod)"
         )]
     );
+    tick(&mut pc, &mut g, Instant::now() + Duration::from_secs(20));
+    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+}
+
+/// In prod a crash loop of an engine in event (the held engine a stopped
+/// entry left) stays down: the event plan runs only on an explicit request
+/// (the owner's decision on #11, 2026-10-19).
+#[test]
+fn in_prod_a_crash_loop_in_event_stays_down() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.lifecycle = prod_on(None, None);
+    pc.exited = vec![(Kid::Engine, Some(70)); 3];
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::EngineStart));
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the engine crashed 3 times in 10 min in event on the pin {SHA}: the engine stays \
+             down; back to REAPER with iemmode event (the PC stays in prod)"
+        )]
+    );
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+}
+
+/// A dev or live entry a restarted guard (no reboot) finds cut off in prod
+/// stops where it was: no event plan, the switch dropped, an alarm naming
+/// it and the ways on, the owner's question (#11, 2026-10-19: in prod
+/// nothing goes to REAPER on its own); in event here, since it had stopped
+/// the engine (the review of PR #56). An event plan that was left resumes
+/// as before: it was asked for. Before the cutover a cut-off entry unwinds.
+#[test]
+fn in_prod_a_cut_off_entry_stops_at_a_guard_restart() {
+    let left = |from: Mode, to: Mode| {
+        let (pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(from));
+        g.state.lifecycle = prod_on(None, None);
+        green_main(&mut g, &[SHA]);
+        g.state.switching = Some(Switching {
+            from,
+            to,
+            done: vec![Step::Precheck, Step::EngineStop],
+            started: T0,
+        });
+        (pc, g)
+    };
+    let (mut pc, mut g) = left(Mode::Dev, Mode::Live);
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!(
+        (g.state.mode, g.state.switching.clone()),
+        (Mode::Event, None)
+    );
+    for c in [
+        Call::EngineStop,
+        Call::EngineStart,
+        Call::ReaperStart,
+        Call::AppStart,
+    ] {
+        assert!(!pc.called(c), "{c:?}");
+    }
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the guard started again during the switch dev → live (2 steps done); {}",
+            no_reaper(SHA)
+        )]
+    );
+    assert!(g.alarms.last().unwrap().owner_question);
+    assert_eq!(g.shared.view().switching, None);
+    // An event plan that was left resumes.
+    let (mut pc, mut g) = left(Mode::Live, Mode::Event);
+    assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart));
+    // Before the cutover a cut-off entry unwinds to event as before.
+    let (mut pc, mut g) = left(Mode::Dev, Mode::Live);
+    g.state.lifecycle = Lifecycle::Trial;
+    assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
 }
 
 #[test]
@@ -223,11 +308,14 @@ fn in_prod_a_reboot_goes_live_on_the_pin() {
     assert_eq!(back.lifecycle, promoted);
 }
 
-/// The boot's live entry is an entry like any other: a failure unwinds to
-/// REAPER. A maintenance build it would have made the pin is not (the
-/// review of lane 1): the lifecycle changes only once the PC is live.
+/// The boot's live entry is an entry like any other, and since the owner's
+/// decision of 2026-10-19 (#11: in prod nothing goes to REAPER on its own)
+/// a failure stops it where it is: the PC stays in event, REAPER and the
+/// app are not started, the alarm names the ways on. A maintenance build
+/// it would have made the pin is not (the review of lane 1): the lifecycle
+/// changes only once the PC is live.
 #[test]
-fn in_prod_a_failed_boot_into_live_unwinds_to_reaper() {
+fn in_prod_a_failed_boot_into_live_stops_without_reaper() {
     let dir = tempfile::tempdir().unwrap();
     let st = GuardState {
         lifecycle: prod_on(None, Some(NEW)),
@@ -236,15 +324,25 @@ fn in_prod_a_failed_boot_into_live_unwinds_to_reaper() {
     let mut g = saved(dir.path(), st, 1_000);
     let mut pc = FakePc::new(Facts::default());
     pc.fail(Call::EngineStart, "the engine did not start");
-    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
     assert_eq!(g.state.mode, Mode::Event);
-    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
     assert_eq!(pc.bundle.as_deref(), Some(NEW), "it tried the new pin");
     assert_eq!(g.state.lifecycle, prod_on(None, Some(NEW)));
+    // The way on names the pin a live entry runs: the session's build.
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "EngineStart: the engine did not start; {}",
+            no_reaper(NEW)
+        )]
+    );
 }
 
-/// G8 at the boot: a pin that is no green main build goes nowhere live;
-/// the start's checks run in event and the alarm names it.
+/// G8 at the boot: a pin that is no green main build goes nowhere live,
+/// and since the owner's decision of 2026-10-19 (#11: in prod nothing goes
+/// to REAPER on its own) no event plan runs either: the PC stays in event
+/// with nothing started, and the alarm names it and the way to REAPER.
 #[test]
 fn in_prod_a_reboot_on_a_red_pin_stays_in_event_with_an_alarm() {
     let dir = tempfile::tempdir().unwrap();
@@ -257,18 +355,25 @@ fn in_prod_a_reboot_on_a_red_pin_stays_in_event_with_an_alarm() {
     std::fs::create_dir_all(&gdir).unwrap();
     st.save(&gdir.join(STATE_FILE), 1_000).unwrap();
     let mut g = Guard::open(dir.path(), SiteConf::default(), fixed(T0));
-    let mut pc = FakePc::new(band_up());
-    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::Done));
+    let mut pc = FakePc::new(Facts::default());
+    assert_eq!(start(&mut pc, &mut g, 5_000), None);
     assert_eq!(g.state.mode, Mode::Event);
-    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperSaveQuit));
-    let alarm =
-        format!("after a reboot in prod: {SHA}: HIL Red; live needs green; the PC stays in event");
-    assert_eq!(texts(&g).first(), Some(&alarm));
+    // Nothing started; the only call is the alarm's notice to the engineer.
+    assert_eq!(pc.mutating_calls(), vec![Call::Notify]);
+    let alarm = format!(
+        "after a reboot in prod: {SHA}: HIL Red; live needs green; the PC stays in event with \
+         nothing started (in prod nothing goes to REAPER on its own): iemmode event starts \
+         REAPER, the PC stays prod"
+    );
+    assert_eq!(texts(&g), [alarm]);
     assert_eq!(g.state.lifecycle, prod_on(None, None));
 }
 
 /// A prod live entry that fails keeps the pin it would have ended
-/// maintenance on (the review of lane 1).
+/// maintenance on (the review of lane 1), and since the owner's decision of
+/// 2026-10-19 (#11: in prod nothing goes to REAPER on its own) it stops
+/// where it is, with the ways on: in event, since it had stopped
+/// maintenance's engine before the start failed (the review of PR #56).
 #[test]
 fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
     let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
@@ -288,8 +393,16 @@ fn in_prod_a_failed_live_entry_keeps_the_pin_and_the_session() {
     let r = handle(&mut pc, &mut g, live, INIT);
     assert!(!r.ok, "{r:?}");
     assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
     assert_eq!(g.state.lifecycle, prod_on(None, Some(NEW)));
     assert!(!r.detail.contains("becomes the pin"), "{}", r.detail);
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "EngineStart: the engine did not start; {}",
+            no_reaper(NEW)
+        )]
+    );
 }
 
 /// The Trial exclusions (the review of lane 1): HIL's `dev --build B` then

@@ -78,6 +78,16 @@ pub(super) fn prod_on(previous: Option<&str>, maintenance: Option<&str>) -> Life
     })
 }
 
+/// What an alarm adds in prod on the pin `pin` where a dev or live entry
+/// stops instead of the event plan (the owner's decision on #11,
+/// 2026-10-19: in prod nothing goes to REAPER on its own).
+pub(super) fn no_reaper(pin: &str) -> String {
+    format!(
+        "in prod nothing goes to REAPER on its own: iemmode live --build {pin} tries again, \
+         iemmode event starts REAPER (the PC stays prod)"
+    )
+}
+
 /// The calls without the reads every step makes (facts, children).
 pub(super) fn steps(pc: &FakePc) -> Vec<Call> {
     pc.calls()
@@ -110,6 +120,25 @@ pub(super) fn status_reply(g: &Guard) -> String {
 
 pub(super) fn fixed(t: u64) -> Clock {
     Clock::Fixed(Arc::new(AtomicU64::new(t)))
+}
+
+/// The boot after which [`booted_in_prod`]'s guard starts: later than its
+/// state.
+pub(super) const BOOT: u64 = 5_000;
+
+/// A guard live in prod on the pin `SHA` (a green `main` build) whose state
+/// was written before [`BOOT`], on a PC where nothing runs: its start is the
+/// boot's live entry on the pin (`startup::start_plan`). Its attempts wait
+/// 10 ms between them, not `BOOT_ARM_SPACING`.
+pub(super) fn booted_in_prod() -> (FakePc, Guard) {
+    let mut g = Guard::for_test(Mode::Live);
+    g.state.written_at = 1_000;
+    g.state.lifecycle = prod_on(None, None);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.boot_arm_spacing = Duration::from_millis(10);
+    (FakePc::new(Facts::default()), g)
 }
 
 /// What the event plan's check says of REAPER holding the card at 32.

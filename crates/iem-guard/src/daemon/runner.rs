@@ -1,18 +1,20 @@
 //! The switch runner (design §5.2): a plan's steps one at a time with the
 //! error policy (`plan::on_error`), "ide event"'s pre-emption, the unwind of
-//! a failed or pre-empted dev or live entry, and each step's `Pc` call.
+//! a failed or pre-empted dev or live entry (in prod a failed one stops
+//! where it is instead, in event once a step changed what runs:
+//! `lifecycle::stops_in`, `lifecycle::ways_on`), and each step's `Pc` call.
 
 use std::time::Instant;
 
 use tracing::{info, warn};
 
 use super::reply::outcome_text;
-use super::{Guard, Outcome, READY_S, mode_name, reaper};
+use super::{BOOT_ARM_RETRIES, Guard, Outcome, READY_S, mode_name, reaper};
 use crate::cancel::Cancel;
 use crate::crash;
 use crate::handover::{self, Audio};
 use crate::lifecycle::{self, Lifecycle};
-use crate::pc::{Pc, PrefSeen, R, Status, StepError};
+use crate::pc::{NotReady, Pc, PrefSeen, R, Status, StepError};
 use crate::plan::{Health, Mode, OnError, Step, on_error};
 use crate::shadow;
 use crate::state::Switching;
@@ -36,6 +38,8 @@ impl Guard {
             started: self.now(),
         });
         self.owner_failed.clear();
+        self.stopped = None;
+        self.job_cancelled = None;
         // An unwind goes on with the entry's clock.
         if self.unwinding.is_some() {
             self.laps.resume(Instant::now());
@@ -62,6 +66,15 @@ impl Guard {
         if let Some(s) = self.state.switching.as_mut() {
             s.done.push(step);
         }
+        self.keep_children(pc);
+    }
+
+    /// The guard's children as the PC has them now, saved, so a restarted
+    /// guard adopts what runs: after every step done, and after every
+    /// engine stop and start inside `EngineArm` (`engine_ready`'s restarts;
+    /// the review of PR #56: a failed step saved none of them, and the
+    /// engine that ran read as foreign).
+    pub(super) fn keep_children(&mut self, pc: &mut dyn Pc) {
         self.state.pids = pc.children();
         self.save();
     }
@@ -178,6 +191,38 @@ pub(super) fn switch(
                             );
                             return g.finish(pc, Outcome::NeedsOwner, from);
                         }
+                        // In prod nothing goes to REAPER on its own (#11,
+                        // 2026-10-19): the entry stops where it is and asks
+                        // the owner, unless "ide event" pre-empted it
+                        // meanwhile (that is the request for the event
+                        // plan): with its armed engine in its target, in
+                        // event once it changed what runs, else in the mode
+                        // it began from (the review of PR #56:
+                        // `lifecycle::stops_in`).
+                        let left = lifecycle::stops_in(from, to, done_steps(g), step);
+                        let ways = lifecycle::after_stop(&g.state.lifecycle, left, |sha| {
+                            g.state.bundles.get(sha)
+                        });
+                        if let Some(ways) = ways
+                            && may_end(g, to)
+                        {
+                            let ends = left.mode();
+                            info!(
+                                "{step:?} failed in prod: no event plan, the entry stops in {}",
+                                mode_name(ends)
+                            );
+                            g.alarm(step, &format!("{why}; {ways}"), true);
+                            g.stopped = Some(left);
+                            // Stopped in dev before its runner stopped: the
+                            // HIL job `JobsCancel` took still runs there.
+                            if left == lifecycle::Left::Unchanged(Mode::Dev)
+                                && !done_steps(g).contains(&Step::RunnerStop)
+                                && let Some(run) = g.job_cancelled.take()
+                            {
+                                g.state.job = Some(run);
+                            }
+                            return g.finish(pc, Outcome::NeedsOwner, ends);
+                        }
                         g.alarm(step, &why, false);
                         return back_to_event(pc, g, &why);
                     }
@@ -217,6 +262,14 @@ pub(super) fn switch(
         Outcome::NeedsOwner
     };
     g.finish(pc, outcome, to)
+}
+
+/// The steps the running switch finished, in order (none without one).
+fn done_steps(g: &Guard) -> &[Step] {
+    g.state
+        .switching
+        .as_ref()
+        .map_or(&[][..], |s| s.done.as_slice())
 }
 
 /// Whether a switch into `to` may end as it is: an event plan always; one
@@ -262,30 +315,127 @@ pub(super) fn failure(
 /// again, held, once, after `crash::BUSY_RETRY`, inside the step, with the
 /// preference checked right before as for every start (#32 F3-r4 4); any
 /// other end, or a second busy one, is the step's failure (the plan's
-/// error policy unwinds).
+/// error policy unwinds). In the boot's live entry in prod
+/// (`Guard::boot_entry`) an engine that missed periods after its warm-up
+/// restart is stopped and started again the same way after
+/// `Guard::boot_arm_spacing`, up to [`BOOT_ARM_RETRIES`] times (#11,
+/// 2026-10-19: the boot's own load); every other entry, and every other
+/// failure, fails at once as before. Every failure of the boot's entry
+/// after its first attempt names the attempt ([`at_attempt`]).
 fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Status> {
+    let boot = g.boot_entry;
     let mut restarted = false;
+    let mut attempt: u32 = 1;
     loop {
         let e = match pc.engine_ready(READY_S, c) {
-            Err(StepError::Failed(why)) => why,
-            done => return done,
+            Ok(status) => return Ok(status),
+            Err(NotReady::Missed(missed)) => {
+                let why = NotReady::Missed(missed).to_string();
+                if !boot_retry(boot, attempt) {
+                    return Err(StepError::Failed(missed_failure(why, boot, attempt)));
+                }
+                // The stop, the wait and the start belong to the next one.
+                restart_after_miss(pc, g, to, c, &why, attempt)
+                    .map_err(|e| at_attempt(e, boot, attempt + 1))?;
+                attempt += 1;
+                continue;
+            }
+            Err(NotReady::Step(StepError::Failed(why))) => why,
+            Err(NotReady::Step(e)) => return Err(e),
         };
         if !crash::ready_restart(pc.engine_exit(), restarted) {
-            return Err(StepError::Failed(e));
+            return Err(at_attempt(StepError::Failed(e), boot, attempt));
         }
         restarted = true;
-        g.info(format!(
-            "the engine ended with exit {} before it was ready (its state directory was \
-             held): starting it again in {} s",
-            crash::STATE_BUSY,
-            crash::BUSY_RETRY.as_secs()
-        ));
-        c.sleep(crash::BUSY_RETRY)?;
-        pref_step(pc, g, to)?;
-        let pid = pc.engine_start(true, g.hil_engine(to))?;
-        g.spawns += 1;
-        g.info(format!("engine started again, held (pid {pid})"));
+        busy_restart(pc, g, to, c).map_err(|e| at_attempt(e, boot, attempt))?;
     }
+}
+
+/// An engine that ended with exit 75 before it was ready, started again,
+/// held, after `crash::BUSY_RETRY`, the preference checked right before as
+/// for every start (#32 F3-r4 4).
+fn busy_restart(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<()> {
+    g.info(format!(
+        "the engine ended with exit {} before it was ready (its state directory was held): \
+         starting it again in {} s",
+        crash::STATE_BUSY,
+        crash::BUSY_RETRY.as_secs()
+    ));
+    c.sleep(crash::BUSY_RETRY)?;
+    pref_step(pc, g, to)?;
+    let pid = pc.engine_start(true, g.hil_engine(to))?;
+    g.spawns += 1;
+    g.keep_children(pc);
+    g.info(format!("engine started again, held (pid {pid})"));
+    Ok(())
+}
+
+/// A failure of the boot's live entry (`boot`) after its first attempt
+/// names the attempt it belongs to (the review of PR #56, finding 8): a
+/// fault or an early end of that attempt's engine, the stop of the engine
+/// that missed before it, the wait or the preference check before its start
+/// ("ide event" stays a pre-emption). The last miss names its attempts
+/// itself ([`missed_failure`]); every other entry's failure, and the first
+/// attempt's, read as before.
+fn at_attempt(e: StepError, boot: bool, attempt: u32) -> StepError {
+    match e {
+        StepError::Failed(why) if boot && attempt > 1 => StepError::Failed(format!(
+            "{why} (attempt {attempt} of {} after the boot)",
+            BOOT_ARM_RETRIES + 1
+        )),
+        other => other,
+    }
+}
+
+/// Whether a ready wait whose engine missed periods starts it again: only
+/// in the boot's live entry (`boot`), while its `attempt` (1: the plan's own
+/// start) is at most [`BOOT_ARM_RETRIES`], so `1 + BOOT_ARM_RETRIES`
+/// attempts at most.
+fn boot_retry(boot: bool, attempt: u32) -> bool {
+    boot && attempt <= BOOT_ARM_RETRIES
+}
+
+/// The step's failure after missed periods: the window's sentence, which
+/// the boot's live entry follows with its attempts.
+fn missed_failure(why: String, boot: bool, attempts: u32) -> String {
+    if boot {
+        format!("{why} ({attempts} attempts after the boot)")
+    } else {
+        why
+    }
+}
+
+/// The boot's live entry starts an engine that missed periods again (#11,
+/// 2026-10-19): the engine stopped as `EngineStop` stops it, the boot's
+/// load given `Guard::boot_arm_spacing` ("ide event" ends the wait), the
+/// preference checked as before every start, then the engine started again,
+/// held, as the busy restart starts it. Each attempt is logged.
+fn restart_after_miss(
+    pc: &mut dyn Pc,
+    g: &mut Guard,
+    to: Mode,
+    c: &Cancel,
+    why: &str,
+    attempt: u32,
+) -> R<()> {
+    let attempts = BOOT_ARM_RETRIES + 1;
+    g.info(format!(
+        "the boot's live entry, attempt {attempt} of {attempts}: {why}; the engine stops and \
+         starts again after {:?}",
+        g.boot_arm_spacing
+    ));
+    pc.engine_stop(c)?;
+    g.keep_children(pc);
+    c.sleep(g.boot_arm_spacing)?;
+    pref_step(pc, g, to)?;
+    let pid = pc.engine_start(true, g.hil_engine(to))?;
+    g.spawns += 1;
+    g.keep_children(pc);
+    g.info(format!(
+        "engine started again, held (pid {pid}): attempt {} of {attempts}",
+        attempt + 1
+    ));
+    Ok(())
 }
 
 /// One step, one `Pc` call (plus the verdicts of `handover`).
@@ -329,6 +479,11 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
             let hil = g.hil_engine(to);
             let pid = pc.engine_start(true, hil)?;
             g.spawns += 1;
+            // The entry's build runs from now on: the active bundle
+            // (`requests::entry`; the review of PR #56).
+            if let Some(sha) = g.entry_build.take() {
+                g.state.set_active(&sha);
+            }
             if hil {
                 g.info(format!(
                     "engine started, held, with its HIL flags (pid {pid})"
@@ -373,7 +528,8 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
         }
         Step::RunnerStart => pc.runner_start(),
         Step::JobsCancel => {
-            if let Some(run) = g.state.job.take() {
+            g.job_cancelled = g.state.job.take();
+            if let Some(run) = g.job_cancelled {
                 g.info(format!("HIL job {run} cancelled"));
             }
             Ok(())

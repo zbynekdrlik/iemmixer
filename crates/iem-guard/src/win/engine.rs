@@ -30,7 +30,7 @@ use tracing::{info, warn};
 use super::{WinPc, procs};
 use crate::cancel::Cancel;
 use crate::effects::engine::{self as proto, Msg, Ready, ReadyWindow, Shutdown, Stopped};
-use crate::pc::{EngineSeen, Kid, R, Status, StepError};
+use crate::pc::{EngineSeen, Kid, NotReady, R, Status, StepError};
 use crate::plan::Health;
 use crate::site::ENGINE_EXE;
 use crate::state;
@@ -349,7 +349,11 @@ pub(super) fn start(pc: &mut WinPc, hold: bool, hil: bool) -> R<u32> {
     procs::start_kid(pc, Kid::Engine, &mut cmd, false)
 }
 
-pub(super) fn ready(pc: &mut WinPc, secs: u32, c: &Cancel) -> R<Status> {
+/// The readiness window (`effects::engine::ReadyWindow`) over the engine's
+/// statuses; its second miss is [`NotReady::Missed`] (#11, 2026-10-19: the
+/// boot's live entry starts such an engine again), every other failure a
+/// step's error.
+pub(super) fn ready(pc: &mut WinPc, secs: u32, c: &Cancel) -> Result<Status, NotReady> {
     let sha = pc
         .bundle
         .clone()
@@ -360,7 +364,8 @@ pub(super) fn ready(pc: &mut WinPc, secs: u32, c: &Cancel) -> R<Status> {
     if !proto::build_matches(&build, &sha) {
         return Err(StepError::failed(format!(
             "the engine is build {build}, not the bundle {sha}"
-        )));
+        ))
+        .into());
     }
     let mut window = ReadyWindow::new(secs);
     let limit = Duration::from_secs(u64::from(secs) * 3 + 30);
@@ -372,7 +377,8 @@ pub(super) fn ready(pc: &mut WinPc, secs: u32, c: &Cancel) -> R<Status> {
             return Err(StepError::failed(format!(
                 "the engine sent no status for {} s",
                 STATUS_GAP.as_secs()
-            )));
+            ))
+            .into());
         };
         seen = seq;
         status.build.clone_from(&build);
@@ -385,13 +391,22 @@ pub(super) fn ready(pc: &mut WinPc, secs: u32, c: &Cancel) -> R<Status> {
                 );
                 return Ok(status);
             }
-            Ready::Failed(why) => return Err(StepError::Failed(why)),
+            Ready::Missed(missed) => {
+                warn!(
+                    "the engine is not ready: {missed} periods missed after the warm-up \
+                     restart ({} frames, {} callbacks, {} missed since its start)",
+                    status.frames, status.callbacks, status.missed
+                );
+                return Err(NotReady::Missed(missed));
+            }
+            Ready::Failed(why) => return Err(StepError::Failed(why).into()),
         }
         if start.elapsed() >= limit {
             return Err(StepError::failed(format!(
                 "the engine was not ready within {} s",
                 limit.as_secs()
-            )));
+            ))
+            .into());
         }
     }
 }

@@ -70,6 +70,17 @@ pub use self::watch::{session_end, tick};
 
 /// The engine's warm-up window before `Arm` (design §5.2 step 7).
 pub const READY_S: u32 = 10;
+/// The engine starts the boot's live entry in prod adds after the plan's
+/// own when the engine missed periods after its warm-up restart (#11,
+/// 2026-10-19): right after a graceful reboot Windows is still finishing
+/// its logon and startup, and that load cost the first arm, 37 s after the
+/// boot, one period, while every manual switch before and after armed with
+/// none. Only the boot gets them; the window's criterion stays the same.
+pub const BOOT_ARM_RETRIES: u32 = 3;
+/// The wait between two of the boot's attempts, so the boot's load can
+/// settle (#11, 2026-10-19: the miss came 37 s after the boot; with the
+/// window, four attempts span about two minutes after the first).
+pub const BOOT_ARM_SPACING: Duration = Duration::from_secs(20);
 /// The HIL test signal's ceiling (design §7).
 pub const HIL_MAX_DBFS: f64 = -20.0;
 /// The longest HIL test signal (s): the routing proof needs seconds, and the
@@ -165,6 +176,27 @@ pub struct Guard {
     /// The request of the switch in progress (`live --trial`), read by its
     /// precheck.
     trial: bool,
+    /// The build the dev or live entry in progress runs (`requests::entry`):
+    /// the active bundle once its engine starts (`EngineStart`), so an entry
+    /// that stops before then leaves the active bundle, its way back and
+    /// `pc`'s bundle as they were (the review of PR #56, #11 2026-10-19).
+    entry_build: Option<String>,
+    /// What the last switch, a prod dev or live entry that stopped, left
+    /// (`lifecycle::stops_in`), until the next switch begins: an entry whose
+    /// engine was armed is in its target, so its lifecycle change holds
+    /// (`requests::entry`).
+    stopped: Option<crate::lifecycle::Left>,
+    /// The HIL job the running switch's `JobsCancel` took (its run id): a
+    /// prod entry that stops in dev, nothing changed, before its runner
+    /// stopped puts it back, since the runner still runs it.
+    job_cancelled: Option<u64>,
+    /// The switch in progress is the boot's live entry in prod
+    /// (`startup::start_plan`): its `EngineArm` starts an engine that
+    /// missed periods again, up to [`BOOT_ARM_RETRIES`] times (#11).
+    boot_entry: bool,
+    /// The wait between two of the boot's attempts ([`BOOT_ARM_SPACING`];
+    /// a test's own).
+    boot_arm_spacing: Duration,
     /// What the request being handled did (the reply's detail).
     report: Vec<String>,
     /// What the last precheck named without refusing (a dev entry without
@@ -233,6 +265,11 @@ impl Guard {
             root,
             clock,
             trial: false,
+            entry_build: None,
+            stopped: None,
+            job_cancelled: None,
+            boot_entry: false,
+            boot_arm_spacing: BOOT_ARM_SPACING,
             report: Vec::new(),
             subscriptions_note: None,
             lan_note: None,
@@ -465,6 +502,8 @@ mod cutover_tests;
 mod event_tests;
 #[cfg(test)]
 mod hil_tests;
+#[cfg(test)]
+mod hold_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

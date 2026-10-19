@@ -100,12 +100,13 @@ fn engine_exited(pc: &mut dyn Pc, g: &mut Guard, code: Option<i32>, at: Instant,
 }
 
 /// A crash loop, as the lifecycle says (S8 design §3.4): back to REAPER
-/// (before the cutover), live on the pin (maintenance), the previous pin
-/// (prod live), or down with an alarm naming the way back to REAPER
-/// (`iemmode event`, the PC stays prod); a pin that may
-/// not go live is never a fallback (G8: REAPER from maintenance, down from
-/// live). A new engine on a pin starts a new crash window: "if that loops
-/// too" counts its own exits.
+/// (before the cutover only), live on the pin (maintenance), the previous
+/// pin (prod live), or down with an alarm naming the way back to REAPER
+/// (`iemmode event`, the PC stays prod): in prod nothing goes to REAPER on
+/// its own (#11, 2026-10-19), so a pin that may not go live (G8) in
+/// maintenance or live, and an engine in event, stay down. A new engine on
+/// a pin starts a new crash window: "if that loops too" counts its own
+/// exits.
 fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant) {
     let (fallback, next) =
         lifecycle::crash_loop(&g.state.lifecycle, mode, |sha| g.state.bundles.get(sha));
@@ -114,14 +115,6 @@ fn crash_loop(pc: &mut dyn Pc, g: &mut Guard, mode: Mode, n: usize, at: Instant)
     match fallback {
         Fallback::Event => {
             g.raise(None, &format!("{crashed}: back to REAPER"), false);
-            run_switch(pc, g, mode, Mode::Event);
-        }
-        Fallback::Reaper(why) => {
-            g.raise(
-                None,
-                &format!("{crashed} in maintenance, and {why}: back to REAPER"),
-                false,
-            );
             run_switch(pc, g, mode, Mode::Event);
         }
         Fallback::Pin(pin) => {

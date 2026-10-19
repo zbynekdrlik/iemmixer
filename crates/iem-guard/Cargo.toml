@@ -41,7 +41,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # curl.exe, schannel with the system's roots (Task 9).
 ureq = { version = "3.4", default-features = false }
 # Bundle install: deflate only (the zips come from Compress-Archive).
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # The guard pipe's security descriptor (SDDL as UTF-16), as interprocess
 # takes it; already in the closure through interprocess.

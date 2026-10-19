@@ -5,7 +5,7 @@
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use super::reply::outcome_text;
+use super::reply::{outcome_text, switch_text};
 use super::{DETAIL_CHARS, Outcome, cut, mode_name};
 use crate::alarms::Alarm;
 use crate::cancel::Cancel;
@@ -90,18 +90,26 @@ impl View {
     /// "ide event" once no switch runs: done when the last switch ended in
     /// `event`, or in prod in `live` (S8 lane 5: after the cutover iemmixer
     /// serves the band at an event, so a switch to live is what "ide event"
-    /// waits for, never what it cancels).
+    /// waits for, never what it cancels). In prod a switch to live that did
+    /// not get in (it stopped, in event once it changed what runs) is named
+    /// as that switch with the mode the PC is in, never as an event (the
+    /// review of PR #56).
     pub fn event_reply(&self, note: &str) -> Reply {
-        let target = if self.prod && self.mode == Mode::Live {
+        let live = self.mode == Mode::Live || matches!(self.began, Some((_, Mode::Live)));
+        let target = if self.prod && live {
             Mode::Live
         } else {
             Mode::Event
         };
         let ok = self.running.is_none() && self.mode == target && self.last == Some(Outcome::Done);
-        let how = if self.last == Some(Outcome::NeedsOwner) && !self.last_owner.is_empty() {
-            needs_owner_text("event", mode_name(self.mode), &self.last_owner)
-        } else {
-            format!("{}: {}", mode_name(target), outcome_text(self.last))
+        let how = match self.last {
+            Some(out) if target == Mode::Live && self.mode != Mode::Live => {
+                switch_text(Mode::Live, out, self.mode, &self.last_owner)
+            }
+            Some(Outcome::NeedsOwner) if !self.last_owner.is_empty() => {
+                needs_owner_text("event", mode_name(self.mode), &self.last_owner)
+            }
+            _ => format!("{}: {}", mode_name(target), outcome_text(self.last)),
         };
         self.reply(ok, &format!("{note}; {how}"))
     }
@@ -188,9 +196,11 @@ impl Shared {
     /// Decides under the view's lock, so "ide event" either pre-empts a
     /// switch that is not an event plan or waits for the event plan, never
     /// both: an event plan clears the token under the same lock as it
-    /// begins. "Ide event" moves the fence, so a dev or live entry queued
-    /// before it never runs after it; one routed while the start's checks
-    /// run is queued behind them (#42).
+    /// begins. In prod the owner's "ide event" (`signal`) pre-empts no
+    /// switch: it waits for one to live and is queued behind one to dev.
+    /// "Ide event" moves the fence, so a dev or live entry queued before it
+    /// never runs after it; one routed while the start's checks run is
+    /// queued behind them (#42).
     pub fn route(&self, req: &Request) -> Route {
         let mut v = self.lock();
         if matches!(req, Request::Event { dry_run: false, .. }) {
@@ -212,6 +222,18 @@ impl Shared {
                 },
                 Some(Mode::Live),
             ) if v.prod => Route::AwaitEnd("waited for the switch to live in prod"),
+            // …and is queued behind a dev entry (maintenance), the token
+            // untouched (the review of PR #56): a pre-emption would unwind
+            // it to the event plan, REAPER on its own. Once the entry ended,
+            // "ide event" goes live on the pin (`lifecycle::on_event`). The
+            // button pre-empts it, as before the cutover.
+            (
+                Request::Event {
+                    dry_run: false,
+                    signal: true,
+                },
+                Some(Mode::Dev),
+            ) if v.prod => Route::Queue(v.generation()),
             (Request::Event { dry_run: false, .. }, Some(_)) => {
                 self.cancel.preempt();
                 Route::AwaitEnd("pre-empted the switch in progress")

@@ -4,23 +4,10 @@ use super::*;
 
 fn status(frames: u32, callbacks: u64, missed: u64) -> Status {
     Status {
-        build: String::new(),
         frames,
         callbacks,
         missed,
-        resets: 0,
-        faulted: false,
-        parked: false,
-        hil: Vec::new(),
-        loopback_samples: 0,
-        late: 0,
-        overruns: 0,
-        process_max_us: 0.0,
-        hist_top_us: 0,
-        interval_hist: Vec::new(),
-        process_hist: Vec::new(),
-        last_reopen_us: 0,
-        fault_callback_us: 0.0,
+        ..Status::default()
     }
 }
 
@@ -292,23 +279,14 @@ fn engine_messages_are_read_field_by_field() {
             json!({"type": "status", "callbacks": 3000, "frames": 32, "missed": 2, "resets": 1, "faulted": true, "parked": true, "late": 1})
         ),
         Msg::Status(Status {
-            build: String::new(),
             frames: 32,
             callbacks: 3000,
             missed: 2,
             resets: 1,
             faulted: true,
             parked: true,
-            hil: Vec::new(),
-            loopback_samples: 0,
             late: 1,
-            overruns: 0,
-            process_max_us: 0.0,
-            hist_top_us: 0,
-            interval_hist: Vec::new(),
-            process_hist: Vec::new(),
-            last_reopen_us: 0,
-            fault_callback_us: 0.0,
+            ..Status::default()
         })
     );
     // S7 HIL v2 (#10): the last reopen's time and the faulting callback's
@@ -515,6 +493,7 @@ fn the_reply_names_the_engine_by_its_commit() {
             process_hist: vec![(60, 360_000)],
             last_reopen_us: 104_000,
             fault_callback_us: 412.5,
+            ..Status::default()
         },
         pipe_private: true,
         pipe_server_pid: Some(4242),
@@ -678,10 +657,10 @@ fn one_warm_up_miss_restarts_the_window_once() {
     let mut w = ReadyWindow::new(10);
     assert_eq!(w.observe(&status(32, 1000, 0), at(0)), Ready::Wait);
     assert_eq!(w.observe(&status(32, 2000, 1), at(1)), Ready::Wait);
-    assert_eq!(
-        w.observe(&status(32, 3000, 3), at(2)),
-        Ready::Failed("2 periods missed after the warm-up restart".into())
-    );
+    // A second miss fails, by its own variant (#11, 2026-10-19: the boot's
+    // live entry starts such an engine again), with the periods missed
+    // since the restart.
+    assert_eq!(w.observe(&status(32, 3000, 3), at(2)), Ready::Missed(2));
 }
 
 #[test]
@@ -752,4 +731,30 @@ fn health_needs_advancing_callbacks_without_fault_or_park() {
         health(&first_faulted, &status(32, 2000, 0)),
         Health::Healthy
     );
+}
+
+/// The review of PR #56 (#11, 2026-10-19): an engine started with `--hold`
+/// and not armed yet plays nothing, whatever its callbacks do, so it is
+/// never healthy: the owner's "ide event" in prod never leaves it as the
+/// band's system ("nothing switched"), and a failed release at an event
+/// never keeps it serving. The newest status decides (an engine armed
+/// between the two reads plays); an older engine sends no flag.
+#[test]
+fn a_held_engine_is_never_healthy() {
+    let read = |v: Value| match p(v) {
+        Msg::Status(s) => s,
+        other => panic!("{other:?}"),
+    };
+    let st = |callbacks: u64, held: bool| {
+        read(json!({"type": "status", "frames": 32, "callbacks": callbacks, "held": held}))
+    };
+    assert_eq!(health(&st(1000, true), &st(2000, true)), Health::Dead);
+    assert_eq!(health(&st(1000, false), &st(2000, true)), Health::Dead);
+    assert_eq!(health(&st(1000, true), &st(2000, false)), Health::Healthy);
+    assert_eq!(health(&st(1000, false), &st(2000, false)), Health::Healthy);
+    let older = read(json!({"type": "status", "frames": 32, "callbacks": 2000}));
+    assert_eq!(health(&st(1000, false), &older), Health::Healthy);
+    // A parked one stays parked, held or not.
+    let parked = read(json!({"type": "status", "callbacks": 2000, "parked": true, "held": true}));
+    assert_eq!(health(&st(1000, true), &parked), Health::Parked);
 }
