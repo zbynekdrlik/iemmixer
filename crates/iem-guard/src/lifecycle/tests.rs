@@ -8,13 +8,13 @@ use super::*;
 use crate::bundle::{Hil, Pins};
 use crate::state::GuardState;
 
-const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
-const PREV: &str = "89abcdef0123456789abcdef0123456789abcdef";
-const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+pub(super) const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
+pub(super) const PREV: &str = "89abcdef0123456789abcdef0123456789abcdef";
+pub(super) const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const DEV: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SINCE: u64 = 1_790_000_000;
 
-fn rec(sha: &str, branch: &str, hil: Hil) -> Record {
+pub(super) fn rec(sha: &str, branch: &str, hil: Hil) -> Record {
     Record {
         sha: sha.to_owned(),
         branch: branch.to_owned(),
@@ -25,7 +25,7 @@ fn rec(sha: &str, branch: &str, hil: Hil) -> Record {
 }
 
 /// `PIN`, `PREV` and `NEW` green on main, `DEV` green on dev.
-fn installed() -> BTreeMap<String, Record> {
+pub(super) fn installed() -> BTreeMap<String, Record> {
     let mut b = BTreeMap::new();
     for sha in [PIN, PREV, NEW] {
         b.insert(sha.to_owned(), rec(sha, "main", Hil::Green));
@@ -34,7 +34,7 @@ fn installed() -> BTreeMap<String, Record> {
     b
 }
 
-fn prod(previous: Option<&str>, maintenance: Option<&str>) -> Prod {
+pub(super) fn prod(previous: Option<&str>, maintenance: Option<&str>) -> Prod {
     Prod {
         since: SINCE,
         pin: PIN.to_owned(),
@@ -501,29 +501,6 @@ fn a_crash_loop_never_falls_back_live_on_a_pin_that_may_not_go_live() {
              installed)"
         ))
     );
-}
-
-/// In prod a stopped entry names the ways on (the owner's decision on #11,
-/// 2026-10-19: in prod nothing goes to REAPER on its own): a live entry on
-/// the pin it runs, a green maintenance build that becomes the pin
-/// included, and the explicit event plan; before the cutover none (the
-/// event plan, as before).
-#[test]
-fn in_prod_a_stopped_entry_names_the_ways_on() {
-    let mut b = installed();
-    assert_eq!(ways_on(&Lifecycle::Trial, |sha| b.get(sha)), None);
-    let ways = |pin: &str| {
-        format!(
-            "in prod nothing goes to REAPER on its own: iemmode live --build {pin} tries again, \
-             iemmode event starts REAPER (the PC stays prod)"
-        )
-    };
-    let lc = Lifecycle::Prod(prod(Some(PREV), None));
-    assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
-    let lc = Lifecycle::Prod(prod(None, Some(NEW)));
-    assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(NEW)));
-    b.insert(NEW.into(), rec(NEW, "main", Hil::Red));
-    assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
 }
 
 // ---- exclusions and status ----

@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use super::requests::{dry_event, event_now};
 use super::runner::switch;
 use super::{Guard, Outcome, mode_name, send_notices};
-use crate::lifecycle::{self, Start, Started};
+use crate::lifecycle::{self, Left, Lifecycle, Start, Started};
 use crate::pc::{Pc, job_note};
 use crate::plan::Mode;
 use crate::proto::Reply;
@@ -51,9 +51,10 @@ pub(super) fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
 /// event, in prod a reboot goes live on the pin), then the children a
 /// previous guard started, then an unfinished switch unwinds to event (or
 /// resumes, when it was one; in prod an unfinished dev or live entry stops
-/// instead, #11 2026-10-19). From event the event plan is the start's
-/// checks: a dev or live entry the pipe queues meanwhile runs after them
-/// (#42). The outcome of a plan that ran.
+/// instead, #11 2026-10-19, also with the band's system up: it is held
+/// before the reboot rule could reset it, `lifecycle::holds_cut_off`). From
+/// event the event plan is the start's checks: a dev or live entry the pipe
+/// queues meanwhile runs after them (#42). The outcome of a plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let job = pc.job();
     if let Err(e) = &job {
@@ -68,9 +69,13 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     // the PC goes to event (S8); its elevated undos after the event plan.
     let cut_off = super::cutover::recover(pc, g);
     let p = pc.procs();
-    let reset = cut_off.is_some()
-        || state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty());
     let rebooted = boot > g.state.written_at;
+    // In prod a left dev or live entry is held before the reboot rule could
+    // reset it to the event plan (`lifecycle::holds_cut_off`).
+    let left = g.state.switching.as_ref().map(|s| s.to);
+    let held = lifecycle::holds_cut_off(&g.state.lifecycle, rebooted, left);
+    let reset = cut_off.is_some()
+        || (!held && state::reset_to_event(&g.state, boot, p.band_up(), !p.engine.is_empty()));
     // S8: the lifecycle decides (before the cutover: event, as G1 says).
     let Started {
         start: go,
@@ -150,10 +155,14 @@ fn start_plan(
     if target.is_none()
         && let Some(left) = g.state.switching.clone()
         && left.to != Mode::Event
-        && let Some(ways) = lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
     {
-        hold_cut_off(g, &left, &ways);
-        return None;
+        let stopped = cut_off_left(g, &left);
+        if let Some(ways) =
+            lifecycle::after_stop(&g.state.lifecycle, stopped, |sha| g.state.bundles.get(sha))
+        {
+            hold_cut_off(g, &left, stopped, &ways);
+            return None;
+        }
     }
     match target {
         // Prod after a reboot: no trial, the pin's own entry. The pin a
@@ -181,19 +190,47 @@ fn start_plan(
     }
 }
 
+/// What a cut-off entry left (`lifecycle::cut_off_in`, the step it was in
+/// being unknown): its armed engine only when this guard adopted an engine
+/// (the second review of the fixes for PR #56), else nothing of it runs and
+/// the PC is in event.
+fn cut_off_left(g: &Guard, left: &Switching) -> Left {
+    match lifecycle::cut_off_in(left.from, left.to, &left.done) {
+        Left::Armed(_) if g.state.pids.engine.is_none() => Left::Changed,
+        stopped => stopped,
+    }
+}
+
 /// A dev or live entry a restarted guard (no reboot: a crash, a hand-over)
 /// finds cut off in prod (#11, 2026-10-19: in prod nothing goes to REAPER
-/// on its own): it stops where it was, in the mode it began from with what
-/// runs as it is, never the event plan; the alarm asks the owner with the
-/// ways on. An event plan that was left resumes as before: it was asked
-/// for.
-fn hold_cut_off(g: &mut Guard, left: &Switching, ways: &str) {
+/// on its own): it stops where it was with what runs as it is, never the
+/// event plan; as `stopped` says ([`cut_off_left`]): with its armed engine
+/// in its target, a live entry's lifecycle change then holding as a failed
+/// entry's does ([`armed_live_lifecycle`]), in the mode it began from only
+/// when it was cut off in its precheck, else in event (a HIL job lives in
+/// dev only). The alarm asks the owner with `ways` (`lifecycle::after_stop`).
+/// An event plan that was left resumes as before: it was asked for.
+fn hold_cut_off(g: &mut Guard, left: &Switching, stopped: Left, ways: &str) {
+    let ends = stopped.mode();
     info!(
-        "a switch {} → {} was left in prod: it stops, no event plan",
+        "a switch {} → {} was left in prod: it stops in {}, no event plan",
         mode_name(left.from),
-        mode_name(left.to)
+        mode_name(left.to),
+        mode_name(ends)
     );
     g.state.switching = None;
+    g.state.mode = ends;
+    if ends != Mode::Dev {
+        g.state.job = None;
+    }
+    if stopped == Left::Armed(Mode::Live)
+        && let Some((next, note)) = armed_live_lifecycle(g)
+    {
+        g.state.lifecycle = next;
+        if let Some(n) = note {
+            g.info(n);
+        }
+    }
     g.raise(
         None,
         &format!(
@@ -204,6 +241,25 @@ fn hold_cut_off(g: &mut Guard, left: &Switching, ways: &str) {
         ),
         true,
     );
+}
+
+/// The lifecycle a cut-off live entry whose engine was armed is in, with
+/// what it decided about the pin: the live entry's own change
+/// (`lifecycle::entry`: a maintenance build that becomes the pin), when it
+/// runs the active bundle, the build that engine runs since its
+/// `EngineStart`; none when it does not (the PC's lifecycle stays). A
+/// cut-off dev entry keeps the lifecycle: whether it named a build is not
+/// known (a plain `dev` keeps the session; the third review of the fixes
+/// for PR #56).
+fn armed_live_lifecycle(g: &Guard) -> Option<(Lifecycle, Option<String>)> {
+    let active = g.state.active_bundle()?;
+    let ask = lifecycle::Ask {
+        to: Mode::Live,
+        build: None,
+        trial: false,
+    };
+    let entered = lifecycle::entry(&g.state.lifecycle, ask, |sha| g.state.bundles.get(sha)).ok()?;
+    (entered.runs.as_deref() == Some(active)).then_some((entered.lifecycle, entered.note))
 }
 
 /// `iemmode event --direct` (design §5.1): without a guard, the same event

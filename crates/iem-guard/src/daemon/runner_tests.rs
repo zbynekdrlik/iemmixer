@@ -7,8 +7,8 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    HELD, INIT, SHA, ask, band_up, dev, event, iemmixer_up, no_reaper, preempt_after, prod_on,
-    record, status_reply, steps, texts,
+    BOOT, HELD, INIT, SHA, ask, band_up, booted_in_prod, dev, event, iemmixer_up, no_reaper,
+    preempt_after, prod_on, record, status_reply, steps, texts,
 };
 use super::*;
 use crate::bundle::Hil;
@@ -565,24 +565,6 @@ fn an_engine_that_finds_its_state_directory_busy_is_started_again_within_the_ste
 
 // ---- the boot's live entry in prod: an engine that missed periods (#11) ----
 
-/// The boot after which the guards below start: later than their state.
-const BOOT: u64 = 5_000;
-
-/// A guard live in prod on the pin `SHA` (a green `main` build) whose state
-/// was written before [`BOOT`], on a PC where nothing runs: its start is the
-/// boot's live entry on the pin (`startup::start_plan`). Its attempts wait
-/// 10 ms between them, not `BOOT_ARM_SPACING`.
-fn booted_in_prod() -> (FakePc, Guard) {
-    let mut g = Guard::for_test(Mode::Live);
-    g.state.written_at = 1_000;
-    g.state.lifecycle = prod_on(None, None);
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    g.boot_arm_spacing = Duration::from_millis(10);
-    (FakePc::new(Facts::default()), g)
-}
-
 /// `iemmode live` in prod: the pin's live entry.
 fn live() -> Request {
     Request::Live {
@@ -711,9 +693,9 @@ fn the_boot_s_live_entry_stops_after_its_last_attempt() {
 /// Only the boot's entry gets more attempts: a manual live entry in prod
 /// and a live trial fail at their first miss after the warm-up restart, as
 /// before (a dev entry: `engine_ready_restarts_its_window_once`). The trial
-/// unwinds to event; the prod entry stops in the mode it began from (the
-/// owner's decision on #11, 2026-10-19: in prod nothing goes to REAPER on
-/// its own).
+/// unwinds to event; the prod entry stops where it is, in event once it
+/// stopped maintenance's engine (the owner's decision on #11, 2026-10-19:
+/// in prod nothing goes to REAPER on its own; the review of PR #56).
 #[test]
 fn a_manual_live_entry_or_a_trial_fails_at_its_first_miss() {
     let trial = Request::Live {
@@ -747,7 +729,7 @@ fn a_manual_live_entry_or_a_trial_fails_at_its_first_miss() {
         pc.ready_misses = vec![1; 4];
         let r = handle(&mut pc, &mut g, entry, INIT);
         assert!(!r.ok, "{lifecycle:?}: {r:?}");
-        assert_eq!(g.state.mode, mode, "{lifecycle:?}");
+        assert_eq!(g.state.mode, Mode::Event, "{lifecycle:?}");
         assert_eq!(pc.engine_starts.len(), 1, "{lifecycle:?}");
         assert_eq!(pc.count(Call::EngineReady), 1, "{lifecycle:?}");
         assert_eq!(pc.ready_misses, [1; 3], "{lifecycle:?}");

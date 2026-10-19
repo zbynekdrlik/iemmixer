@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::bundle::{Record, may_go_live};
 use crate::plan::{self, Facts, Mode, Step};
+use crate::view::mode_name;
 
 /// Where the PC is in its life (design §3.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +186,20 @@ pub fn start<'r>(
     }
 }
 
+/// Whether a starting guard holds the switch it finds left (`left`: its
+/// target) instead of applying the reboot rule (`state::reset_to_event`):
+/// in prod, after a guard restart (no reboot), a dev or live entry stops
+/// where it was (`daemon::startup::hold_cut_off`), even with the band's
+/// system up and no engine of ours (the review of PR #56: a guard that died
+/// during "ide event"'s live entry, the app stopped and REAPER not yet
+/// quit, ran the event plan at its restart, so the owner's live request
+/// silently became REAPER). An event plan that was left resumes, and a
+/// start with none left keeps the rule; after a reboot the PC goes live on
+/// the pin ([`start`]); before the cutover a left entry unwinds.
+pub fn holds_cut_off(lc: &Lifecycle, rebooted: bool, left: Option<Mode>) -> bool {
+    is_prod(lc) && !rebooted && left.is_some_and(|to| to != Mode::Event)
+}
+
 /// In prod nothing goes to REAPER on its own (the owner's decision on #11,
 /// 2026-10-19, "na reaper sa už nevraciame"): a dev or live entry that
 /// fails (`daemon::runner`), one a restarted guard finds cut off
@@ -192,19 +207,162 @@ pub fn start<'r>(
 /// (`daemon::activation`) stop where they are instead of the event plan,
 /// and the alarm names these ways on: a live entry again on the pin it runs
 /// (a maintenance build that becomes the pin by [`Prod::end_maintenance`]
-/// included), or REAPER by an explicit `iemmode event`. `None` before the
-/// cutover: the event plan, as before. A pre-empted entry still unwinds:
-/// the pre-emption is the request for the event plan.
+/// included), or REAPER by an explicit `iemmode event` (through
+/// [`after_stop`], which says what is left instead after a stop that
+/// changed nothing in live or dev, or after an armed engine). `None` before
+/// the cutover: the event plan, as before. A pre-empted entry still
+/// unwinds: the pre-emption is the request for the event plan.
 pub fn ways_on<'r>(lc: &Lifecycle, record: impl Fn(&str) -> Option<&'r Record>) -> Option<String> {
+    let pin = live_pin(lc, &record)?;
+    Some(format!(
+        "in prod nothing goes to REAPER on its own: iemmode live --build {pin} tries again, \
+         iemmode event starts REAPER (the PC stays prod)"
+    ))
+}
+
+/// The pin a prod live entry runs ([`Prod::end_maintenance`]); none before
+/// the cutover.
+fn live_pin<'r>(lc: &Lifecycle, record: &impl Fn(&str) -> Option<&'r Record>) -> Option<String> {
     let Lifecycle::Prod(p) = lc else {
         return None;
     };
-    let (next, _) = p.end_maintenance(&record);
-    Some(format!(
-        "in prod nothing goes to REAPER on its own: iemmode live --build {} tries again, \
-         iemmode event starts REAPER (the PC stays prod)",
-        next.pin
-    ))
+    Some(p.end_maintenance(record).0.pin)
+}
+
+/// What a prod alarm says after a dev or live entry stopped (`left`:
+/// [`stops_in`], [`cut_off_in`]; the review of PR #56, #11 2026-10-19):
+/// after a stop that changed nothing in live or dev, that the PC stays
+/// there as it was, and after a dev entry whose engine was armed, that the
+/// PC is in dev with it, each followed by "asking for it again tries
+/// again": [`ways_on`]'s live entry would restart an engine that may play,
+/// and nothing here claims an engine plays (one that "ide event" found not
+/// playing stays so). After a live entry whose engine was armed, that the
+/// PC is in live with it, which "ide event" keeps as it is (asking it again
+/// retries nothing), and the live entry that starts it all again or the way
+/// to REAPER. After a stop that changed what runs (the PC in event, nothing
+/// of iemmixer playing), or from event, [`ways_on`]. `None` before the
+/// cutover, as [`ways_on`].
+pub fn after_stop<'r>(
+    lc: &Lifecycle,
+    left: Left,
+    record: impl Fn(&str) -> Option<&'r Record>,
+) -> Option<String> {
+    let pin = live_pin(lc, &record)?;
+    let what = match left {
+        Left::Unchanged(m @ (Mode::Dev | Mode::Live)) => format!(
+            "no step done changed what runs, so the PC stays in {} as it was (asking for it \
+             again tries again)",
+            mode_name(m)
+        ),
+        Left::Armed(Mode::Dev) => {
+            "its engine was armed, so the PC is in dev with it (asking for it again tries again)"
+                .to_owned()
+        }
+        Left::Armed(Mode::Live) => format!(
+            "its engine was armed, so the PC is in live with it (ide event keeps it as it is): \
+             iemmode live --build {pin} starts it all again, iemmode event starts REAPER (the \
+             PC stays prod)"
+        ),
+        Left::Unchanged(Mode::Event) | Left::Armed(Mode::Event) | Left::Changed => {
+            return ways_on(lc, record);
+        }
+    };
+    Some(format!("in prod nothing goes to REAPER on its own: {what}"))
+}
+
+/// What a prod dev or live entry that stops leaves running ([`stops_in`],
+/// [`cut_off_in`]), which its alarm says ([`after_stop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// Nothing it did changed what plays the band or serves its phones: the
+    /// PC stays in the mode the entry began from, as it was.
+    Unchanged(Mode),
+    /// It stopped or started what plays the band or serves its phones (the
+    /// app, REAPER, the old engine, server or tray stopped, a stop's request
+    /// sent, its own engine started, held): the PC is in event, where the
+    /// crash watch respawns nothing and both ways on run from (a HIL job's
+    /// engine restart, `daemon::activation`, keeps dev whatever it left: a
+    /// held engine there is the job's own build).
+    Changed,
+    /// Its engine was armed, so it plays, before a later step failed (the
+    /// server, the tray, the identity check, the runner): the PC is in the
+    /// entry's target with that engine, whose crash the watch respawns. In
+    /// prod a live entry's engine is the pin's (G8), a dev entry's the
+    /// maintenance build's.
+    Armed(Mode),
+}
+
+impl Left {
+    /// The mode the stopped entry ends in.
+    pub fn mode(self) -> Mode {
+        match self {
+            Self::Unchanged(mode) | Self::Armed(mode) => mode,
+            Self::Changed => Mode::Event,
+        }
+    }
+}
+
+/// Whether a finished `step` changed what plays the band or serves its
+/// phones; the HIL job and its runner, the tuning, the shadow import, the
+/// data, the preference and the identity check change none of it.
+fn changes_what_runs(step: Step) -> bool {
+    matches!(
+        step,
+        Step::AppStop
+            | Step::ReaperSaveQuit
+            | Step::EngineStop
+            | Step::ServerStop
+            | Step::TrayStop
+            | Step::EngineStart
+            | Step::EngineArm
+            | Step::ServerStart
+            | Step::TrayStart
+    )
+}
+
+/// Whether a `step` that failed may still have changed what plays: a stop
+/// whose request went out (the app's tray command, REAPER's save and quit,
+/// the engine's `Shutdown`, the server's or the tray's quit).
+fn sent_a_stop(step: Step) -> bool {
+    matches!(
+        step,
+        Step::AppStop | Step::ReaperSaveQuit | Step::EngineStop | Step::ServerStop | Step::TrayStop
+    )
+}
+
+/// Where a prod dev or live entry from `from` to `to` that stops at the
+/// failed step `failed` ends, from the steps it finished (`done`; the review
+/// of PR #56, #11 2026-10-19): with its engine armed, in `to`
+/// ([`Left::Armed`]); once a finished step, or the failed one's sent
+/// request, changed what plays the band or serves its phones, in event
+/// ([`Left::Changed`]); else in `from`. An entry that stopped in live after
+/// it stopped the old engine and started its own, held, left a silent
+/// engine in live: "ide event" read its advancing callbacks as the band's
+/// system, and its crash respawned it unheld in live, whatever its build
+/// (G8). In event nothing respawns, and both ways on (a live entry on the
+/// pin, the explicit event plan) run from there.
+pub fn stops_in(from: Mode, to: Mode, done: &[Step], failed: Step) -> Left {
+    left_by(from, to, done, sent_a_stop(failed))
+}
+
+/// [`stops_in`] for an entry a restarted guard finds cut off
+/// (`daemon::startup`): the step it was in is unknown, so once any step
+/// finished (only the precheck, the first, is sure to change nothing) it
+/// may have changed what runs.
+pub fn cut_off_in(from: Mode, to: Mode, done: &[Step]) -> Left {
+    left_by(from, to, done, !done.is_empty())
+}
+
+/// [`stops_in`]'s rule, `unsure`: the step after `done` may have changed
+/// what runs.
+fn left_by(from: Mode, to: Mode, done: &[Step], unsure: bool) -> Left {
+    if done.contains(&Step::EngineArm) {
+        Left::Armed(to)
+    } else if unsure || done.iter().any(|s| changes_what_runs(*s)) {
+        Left::Changed
+    } else {
+        Left::Unchanged(from)
+    }
 }
 
 /// A dev or live entry as asked (`iemmode dev|live`).
@@ -218,8 +376,8 @@ pub struct Ask<'a> {
 /// What an allowed entry does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entered {
-    /// The bundle the entry runs, which becomes the active bundle; none:
-    /// the active bundle as it is.
+    /// The bundle the entry runs, which becomes the active bundle once its
+    /// engine starts; none: the active bundle as it is.
     pub runs: Option<String>,
     /// The lifecycle once the entry is done (saved only when it entered).
     pub lifecycle: Lifecycle,
@@ -534,5 +692,7 @@ pub fn unreadable_in(path: &Path) -> Option<String> {
     ))
 }
 
+#[cfg(test)]
+mod stop_tests;
 #[cfg(test)]
 mod tests;

@@ -255,10 +255,13 @@ pub(super) fn event_now(pc: &mut dyn Pc, g: &mut Guard) -> (bool, String) {
 /// A dev or live entry runs at once: only the owner's signal decides
 /// whether the PC may change, so no step waits for a quiet stage or refuses
 /// on activity (#38, owner 2026-10-06). The lifecycle's gates decide
-/// whether it may run and on which build (S8: `lifecycle::entry`); the
-/// build becomes the active bundle, never the pin, and the lifecycle's
-/// change (a maintenance build, the pin it ends on) holds only once the
-/// entry is in.
+/// whether it may run and on which build (S8: `lifecycle::entry`); `pc`
+/// runs the build from the entry's precheck on, and it becomes the active
+/// bundle (never the pin) once its engine starts (`runner::run_step`'s
+/// `EngineStart`; the review of PR #56: an entry that stopped before its
+/// engine started left the old engine playing with the build active, so a
+/// crash respawned the build). The lifecycle's change (a maintenance
+/// build, the pin it ends on) holds only once the entry is in.
 pub(super) fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) {
     let ask = lifecycle::Ask {
         to: e.to,
@@ -272,15 +275,24 @@ pub(super) fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) 
     if e.dry_run {
         return dry_entry(pc, g, &e, entered.runs, entered.note);
     }
-    if let Some(sha) = entered.runs {
+    if let Some(sha) = &entered.runs {
         pc.set_bundle(Some(sha.as_str()));
-        g.state.set_active(&sha);
     }
+    g.entry_build.clone_from(&entered.runs);
     g.trial = e.trial;
     let from = g.state.mode;
     let out = run_switch(pc, g, from, e.to);
+    g.entry_build = None;
+    if entered.runs.is_some() {
+        // `pc` runs the active bundle: the entry's build once its engine
+        // started, else the one before the entry.
+        pc.set_bundle(g.state.active_bundle());
+    }
     let done = out == Outcome::Done && g.state.mode == e.to;
-    if done {
+    // A prod entry that stopped after its engine armed is in, with that
+    // engine (`lifecycle::Left::Armed`): its lifecycle change holds too.
+    let armed = matches!(g.stopped, Some(lifecycle::Left::Armed(_)));
+    if done || armed {
         g.state.lifecycle = entered.lifecycle;
         if let Some(n) = entered.note {
             g.info(n);

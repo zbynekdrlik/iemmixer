@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::daemon::{Route, Shared};
 use crate::proto::Request;
+use crate::state::Child;
 
 /// Every `Pc` method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -228,6 +229,8 @@ pub struct FakePc {
     pub routed: Option<Route>,
     calls: Vec<(Call, Instant)>,
     fails: HashMap<Call, String>,
+    /// A call that succeeds so many times, then fails with this.
+    fails_after: HashMap<Call, (usize, String)>,
     blocked: Vec<Call>,
     delays: HashMap<Call, Duration>,
     health: Health,
@@ -256,20 +259,7 @@ impl FakePc {
                 build: "2.0.0+test".into(),
                 frames: 32,
                 callbacks: 30_000,
-                missed: 0,
-                resets: 0,
-                faulted: false,
-                parked: false,
-                hil: Vec::new(),
-                loopback_samples: 0,
-                late: 0,
-                overruns: 0,
-                process_max_us: 0.0,
-                hist_top_us: 0,
-                interval_hist: Vec::new(),
-                process_hist: Vec::new(),
-                last_reopen_us: 0,
-                fault_callback_us: 0.0,
+                ..Status::default()
             },
             pref_attempts: 0,
             pref_value: "32".into(),
@@ -322,6 +312,7 @@ impl FakePc {
             routed: None,
             calls: Vec::new(),
             fails: HashMap::new(),
+            fails_after: HashMap::new(),
             blocked: Vec::new(),
             delays: HashMap::new(),
             health: Health::Dead,
@@ -337,6 +328,12 @@ impl FakePc {
     /// `call` succeeds again (a failure that went away).
     pub fn heal(&mut self, call: Call) {
         self.fails.remove(&call);
+    }
+
+    /// `call` succeeds `n` times, then fails with `why` at every later call
+    /// (and changes nothing), as [`FakePc::fail`] makes it fail at once.
+    pub fn fail_after(&mut self, call: Call, n: usize, why: &str) {
+        self.fails_after.insert(call, (n, why.to_owned()));
     }
 
     /// `call` waits until its token is pre-empted, as `WinPc` waits, and
@@ -447,6 +444,11 @@ impl FakePc {
         }
         if let Some(d) = self.delays.get(&call) {
             thread::sleep(*d);
+        }
+        if let Some((n, why)) = self.fails_after.get(&call)
+            && self.count(call) > *n
+        {
+            return Err(StepError::Failed(why.clone()));
         }
         match self.fails.get(&call) {
             Some(why) => Err(StepError::Failed(why.clone())),
@@ -583,13 +585,21 @@ impl Pc for FakePc {
         ))
     }
 
+    /// The started engine is the guard's child until it is stopped
+    /// (`children` names it, as `WinPc`'s does).
     fn engine_start(&mut self, hold: bool, hil: bool) -> R<u32> {
         self.enter(Call::EngineStart, None)?;
         self.engine_starts.push((hold, hil));
         self.facts.engine = true;
         self.ending = (!self.early_exits.is_empty()).then(|| self.early_exits.remove(0));
         self.exit = None;
-        Ok(self.pid())
+        let pid = self.pid();
+        self.kids.engine = Some(Child {
+            pid,
+            start_time: u64::from(pid),
+            image: "iem-engine.exe".to_owned(),
+        });
+        Ok(pid)
     }
 
     fn engine_ready(&mut self, secs: u32, c: &Cancel) -> Result<Status, NotReady> {
@@ -621,6 +631,7 @@ impl Pc for FakePc {
     fn engine_stop(&mut self, c: &Cancel) -> R<()> {
         self.enter(Call::EngineStop, Some(c))?;
         self.facts.engine = false;
+        self.kids.engine = None;
         Ok(())
     }
 

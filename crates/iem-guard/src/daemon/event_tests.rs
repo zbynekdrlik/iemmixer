@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::tests::{INIT, SHA, T0, ask, band_up, iemmixer_up, prod_on, record, texts};
+use super::tests::{INIT, OTHER, SHA, T0, ask, band_up, iemmixer_up, prod_on, record, texts};
 use super::*;
 use crate::bundle::Hil;
 use crate::lifecycle::Lifecycle;
@@ -259,6 +259,92 @@ fn in_prod_ide_event_waits_for_a_switch_to_live() {
     assert!(!trial.shared.await_end("waited", Duration::ZERO).ok);
 }
 
+/// The review of PR #56, finding 2: in prod the owner's "ide event" routed
+/// while a dev entry runs pre-empted it like the button, and the entry
+/// unwound to the event plan: REAPER on its own. In prod it is queued, the
+/// token untouched (the button still pre-empts: it is the request for the
+/// event plan); before the cutover it pre-empts as before.
+#[test]
+fn in_prod_ide_event_routed_during_a_dev_switch_is_queued() {
+    let (_, mut g) = prod_live();
+    g.save();
+    g.shared.update(|v| v.running = Some(Mode::Dev));
+    let seen = g.shared.generation();
+    assert_eq!(
+        g.shared.route(&event(true)),
+        Route::Queue(Generation {
+            epoch: seen.epoch,
+            fence: seen.fence + 1,
+        })
+    );
+    assert!(
+        !g.cancel.preempted(),
+        "ide event never pre-empts it in prod"
+    );
+    assert_eq!(
+        g.shared.route(&event(false)),
+        Route::AwaitEnd("pre-empted the switch in progress")
+    );
+    assert!(g.cancel.preempted(), "the button pre-empts it");
+    let mut trial = Guard::for_test(Mode::Dev);
+    trial.save();
+    trial.shared.update(|v| v.running = Some(Mode::Dev));
+    assert_eq!(
+        trial.shared.route(&event(true)),
+        Route::AwaitEnd("pre-empted the switch in progress")
+    );
+    assert!(trial.cancel.preempted(), "before the cutover it pre-empts");
+}
+
+/// The whole case (the review of PR #56, finding 2): the owner's "ide
+/// event" comes while a maintenance entry on a dev build runs; the entry
+/// goes on to dev, then "ide event" goes live on the pin. REAPER and the app
+/// never start. The button routed at the same moment pre-empts the entry,
+/// which unwinds to the event plan.
+#[test]
+fn in_prod_ide_event_during_a_dev_entry_goes_live_on_the_pin_after_it() {
+    let maintenance = || {
+        let (pc, mut g) = prod_live();
+        g.state
+            .bundles
+            .insert(OTHER.into(), record(OTHER, "dev", Hil::Pending));
+        g.save();
+        (pc, g)
+    };
+    let dev_other = || Request::Dev {
+        build: Some(OTHER.into()),
+        dry_run: false,
+    };
+    let (mut pc, mut g) = maintenance();
+    pc.route_at = Some((Call::EngineStart, Arc::clone(&g.shared), event(true)));
+    let r = handle(&mut pc, &mut g, dev_other(), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Dev);
+    let Some(Route::Queue(seen)) = pc.routed.clone() else {
+        panic!("not queued: {:?}", pc.routed)
+    };
+    let r = handle(&mut pc, &mut g, event(true), seen);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    for c in [Call::ReaperSaveQuit, Call::ReaperStart, Call::AppStart] {
+        assert!(!pc.called(c), "{c:?}");
+    }
+    // The button: the entry unwinds to the event plan.
+    let (mut pc, mut g) = maintenance();
+    pc.route_at = Some((Call::EngineStart, Arc::clone(&g.shared), event(false)));
+    let r = handle(&mut pc, &mut g, dev_other(), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        matches!(pc.routed, Some(Route::AwaitEnd(_))),
+        "{:?}",
+        pc.routed
+    );
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+}
+
 /// The whole case: the first "ide event" in maintenance goes live on the
 /// pin, and a second one routed meanwhile, before the entry began its steps
 /// or during them, waits for it; REAPER never starts.
@@ -281,6 +367,58 @@ fn a_second_ide_event_in_prod_never_cancels_the_first_one_s_live_entry() {
         let second = g.shared.await_end("waited", Duration::ZERO);
         assert!(second.ok && second.mode == Mode::Live, "{at:?}: {second:?}");
     }
+}
+
+/// The review of PR #56, finding 7: an "ide event" that waited for a prod
+/// switch to live (the first "ide event"'s own) which then stopped was
+/// answered "event: stopped; the owner decides", though in prod "ide event"
+/// never asks for event. The reply names the switch to live it waited for
+/// and, when the PC is not live, the mode it is in.
+#[test]
+fn a_waited_ide_event_names_the_switch_to_live_that_stopped() {
+    const WAITED: &str = "waited for the switch to live in prod";
+    // From maintenance: the entry stopped the engine, then did not arm.
+    let (mut pc, mut g) = prod_live();
+    g.state.mode = Mode::Dev;
+    g.save();
+    pc.fail(Call::EngineReady, "the engine faulted");
+    pc.route_at = Some((Call::EngineStart, Arc::clone(&g.shared), event(true)));
+    let r = handle(&mut pc, &mut g, event(true), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.routed, Some(Route::AwaitEnd(WAITED)));
+    let second = g.shared.await_end(WAITED, Duration::ZERO);
+    assert!(!second.ok, "{second:?}");
+    assert_eq!(
+        second.detail,
+        format!("{WAITED}; live: stopped; the owner decides; the mode is event")
+    );
+    // From a live whose engine does not play, stopped at its precheck: the
+    // PC is still live.
+    let (mut pc, mut g) = prod_live();
+    pc.health(Health::Dead);
+    pc.fail(Call::Precheck, "no PWA notification subscription");
+    pc.route_at = Some((Call::Precheck, Arc::clone(&g.shared), event(true)));
+    let r = handle(&mut pc, &mut g, event(true), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.routed, Some(Route::AwaitEnd(WAITED)));
+    let second = g.shared.await_end(WAITED, Duration::ZERO);
+    assert!(!second.ok, "{second:?}");
+    assert_eq!(
+        second.detail,
+        format!("{WAITED}; live: stopped; the owner decides")
+    );
+    // Its alarm claims nothing plays: the engine is one that does not (the
+    // review of the fix of PR #56's finding 6).
+    assert_eq!(
+        texts(&g),
+        [
+            "Precheck: no PWA notification subscription; in prod nothing goes to REAPER on its \
+          own: no step done changed what runs, so the PC stays in live as it was (asking for \
+          it again tries again)"
+        ]
+    );
 }
 
 /// In prod a button queued before a switch began runs all the same, the
