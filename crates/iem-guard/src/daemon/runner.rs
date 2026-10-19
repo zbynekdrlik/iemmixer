@@ -38,6 +38,7 @@ impl Guard {
             started: self.now(),
         });
         self.owner_failed.clear();
+        self.stopped = None;
         // An unwind goes on with the entry's clock.
         if self.unwinding.is_some() {
             self.laps.resume(Instant::now());
@@ -193,10 +194,11 @@ pub(super) fn switch(
                         // 2026-10-19): the entry stops where it is and asks
                         // the owner, unless "ide event" pre-empted it
                         // meanwhile (that is the request for the event
-                        // plan); in the mode it began from only while none
-                        // of its steps changed what runs, else in event
-                        // (the review of PR #56: `lifecycle::stops_in`).
-                        let left = lifecycle::stops_in(from, done_steps(g));
+                        // plan): with its armed engine in its target, in
+                        // event once it changed what runs, else in the mode
+                        // it began from (the review of PR #56:
+                        // `lifecycle::stops_in`).
+                        let left = lifecycle::stops_in(from, to, done_steps(g), step);
                         let ways = lifecycle::after_stop(&g.state.lifecycle, left, |sha| {
                             g.state.bundles.get(sha)
                         });
@@ -209,6 +211,7 @@ pub(super) fn switch(
                                 mode_name(ends)
                             );
                             g.alarm(step, &format!("{why}; {ways}"), true);
+                            g.stopped = Some(left);
                             return g.finish(pc, Outcome::NeedsOwner, ends);
                         }
                         g.alarm(step, &why, false);

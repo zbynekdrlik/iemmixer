@@ -181,6 +181,11 @@ pub struct Guard {
     /// that stops before then leaves the active bundle, its way back and
     /// `pc`'s bundle as they were (the review of PR #56, #11 2026-10-19).
     entry_build: Option<String>,
+    /// What the last switch, a prod dev or live entry that stopped, left
+    /// (`lifecycle::stops_in`), until the next switch begins: an entry whose
+    /// engine was armed is in its target, so its lifecycle change holds
+    /// (`requests::entry`).
+    stopped: Option<crate::lifecycle::Left>,
     /// The switch in progress is the boot's live entry in prod
     /// (`startup::start_plan`): its `EngineArm` starts an engine that
     /// missed periods again, up to [`BOOT_ARM_RETRIES`] times (#11).
@@ -257,6 +262,7 @@ impl Guard {
             clock,
             trial: false,
             entry_build: None,
+            stopped: None,
             boot_entry: false,
             boot_arm_spacing: BOOT_ARM_SPACING,
             report: Vec::new(),

@@ -289,7 +289,10 @@ pub(super) fn entry(pc: &mut dyn Pc, g: &mut Guard, e: Entry) -> (bool, String) 
         pc.set_bundle(g.state.active_bundle());
     }
     let done = out == Outcome::Done && g.state.mode == e.to;
-    if done {
+    // A prod entry that stopped after its engine armed is in, with that
+    // engine (`lifecycle::Left::Armed`): its lifecycle change holds too.
+    let armed = matches!(g.stopped, Some(lifecycle::Left::Armed(_)));
+    if done || armed {
         g.state.lifecycle = entered.lifecycle;
         if let Some(n) = entered.note {
             g.info(n);

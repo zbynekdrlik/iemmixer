@@ -258,9 +258,11 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
             Err(StepError::Failed(why)) => {
                 // In prod nothing goes to REAPER on its own (#11,
                 // 2026-10-19): the restart stops where it is, in dev, and
-                // asks the owner; a restart whose first step failed changed
-                // nothing (the review of PR #56: `lifecycle::after_stop`).
-                let left = lifecycle::stops_in(Mode::Dev, &done);
+                // asks the owner, its alarm by what the restart left (the
+                // review of PR #56: `lifecycle::after_stop`). The mode stays
+                // dev whatever it left: a held engine there is the job's own
+                // build, which dev may run.
+                let left = lifecycle::stops_in(Mode::Dev, Mode::Dev, &done, step);
                 if let Some(ways) =
                     lifecycle::after_stop(&g.state.lifecycle, left, |sha| g.state.bundles.get(sha))
                 {
