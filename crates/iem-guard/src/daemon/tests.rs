@@ -78,6 +78,16 @@ pub(super) fn prod_on(previous: Option<&str>, maintenance: Option<&str>) -> Life
     })
 }
 
+/// What an alarm adds in prod on the pin `pin` where a dev or live entry
+/// stops instead of the event plan (the owner's decision on #11,
+/// 2026-10-19: in prod nothing goes to REAPER on its own).
+pub(super) fn no_reaper(pin: &str) -> String {
+    format!(
+        "in prod nothing goes to REAPER on its own: iemmode live --build {pin} tries again, \
+         iemmode event starts REAPER (the PC stays prod)"
+    )
+}
+
 /// The calls without the reads every step makes (facts, children).
 pub(super) fn steps(pc: &FakePc) -> Vec<Call> {
     pc.calls()

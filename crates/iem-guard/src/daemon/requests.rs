@@ -178,10 +178,12 @@ pub(super) fn dry_event(pc: &mut dyn Pc) -> (bool, String) {
 }
 
 /// `iemmode event [--signal] [--dry-run]` (`lifecycle::on_event`): the
-/// event plan; in prod "ide event" (`--signal`) instead goes live on the pin
-/// from maintenance, or leaves a healthy live as it is (S8 lane 3; the
-/// rollback dropped, the owner's ROZHODNUTÉ on #11: in prod the button is
-/// the event plan and the PC stays prod).
+/// event plan; in prod "ide event" (`--signal`) instead leaves a healthy
+/// live as it is and goes live on the pin from anything else (S8 lane 3;
+/// the rollback dropped, the owner's ROZHODNUTÉ on #11: in prod the button
+/// is the event plan and the PC stays prod; since 2026-10-19 nothing goes
+/// to REAPER on its own, so a pin that may not go live switches nothing and
+/// alarms, and a failed entry stops where it is).
 fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool) -> (bool, String) {
     // The pipe pre-empted the token as it routed this request: that
     // pre-emption is this request's, whatever it does (a stay, a refusal),
@@ -205,6 +207,23 @@ fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool) -> (bool, 
             ),
         ),
         OnEvent::Live => {
+            // The pin may not go live: nothing switches, never REAPER on its
+            // own (#11, 2026-10-19); the alarm names the way to REAPER.
+            let gate = lifecycle::Ask {
+                to: Mode::Live,
+                build: None,
+                trial: false,
+            };
+            if let Err(why) = lifecycle::entry(&lc, gate, |sha| g.state.bundles.get(sha)) {
+                let text = format!(
+                    "ide event in prod: {why}; nothing switched (in prod nothing goes to REAPER \
+                     on its own): iemmode event starts REAPER, the PC stays prod"
+                );
+                if !dry_run {
+                    g.raise(None, &text, true);
+                }
+                return (false, text);
+            }
             // A second "ide event" routed from here on waits for this switch
             // to live and never cancels it (S8 lane 5).
             if !dry_run {
@@ -216,14 +235,8 @@ fn event(pc: &mut dyn Pc, g: &mut Guard, dry_run: bool, signal: bool) -> (bool, 
                 trial: false,
                 dry_run,
             };
-            let (ok, detail) = entry(pc, g, ask);
-            if ok || dry_run || g.state.mode != Mode::Dev {
-                return (ok, detail);
-            }
-            // The pin may not go live (refused before any step): REAPER
-            // serves this event.
-            let (ok, plan) = event_now(pc, g);
-            (ok, format!("{detail}; {plan}"))
+            // A failed entry stops where it is (`runner::switch`, in prod).
+            entry(pc, g, ask)
         }
     }
 }

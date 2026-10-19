@@ -6,8 +6,8 @@
 use std::time::{Duration, Instant};
 
 use super::tests::{
-    INIT, OTHER, SHA, ask, band_up, dev, event, iemmixer_up, prod_on, record, status_reply, steps,
-    texts,
+    INIT, OTHER, SHA, ask, band_up, dev, event, iemmixer_up, no_reaper, prod_on, record,
+    status_reply, steps, texts,
 };
 use super::*;
 use crate::bundle::{Hil, Pins};
@@ -562,7 +562,16 @@ fn a_live_entry_without_a_pwa_subscription_is_refused() {
         assert!(!r.ok, "{r:?}");
         assert_eq!(g.state.mode, Mode::Event);
         assert!(!pc.called(Call::EngineStart));
-        assert_eq!(texts(&g), [format!("Precheck: {NO_SUBSCRIPTION}")]);
+        // In prod a failed entry stops where it is, with the ways on, and
+        // REAPER is not started (the owner's decision on #11, 2026-10-19);
+        // a trial unwinds to the event plan as before.
+        let alarm = if trial {
+            format!("Precheck: {NO_SUBSCRIPTION}")
+        } else {
+            format!("Precheck: {NO_SUBSCRIPTION}; {}", no_reaper(SHA))
+        };
+        assert_eq!(texts(&g), [alarm], "trial {trial}");
+        assert_eq!(pc.called(Call::ReaperStart), trial, "trial {trial}");
     }
 }
 

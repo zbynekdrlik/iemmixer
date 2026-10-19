@@ -40,7 +40,8 @@ Refuses unless: `Trial`, the build is the active main bundle with green `hil/iem
 ### 3.3 No rollback (the owner's decision, 2026-10-10)
 
 **ROZHODNUTÉ on #11: no rollback machinery.** REAPER and the predecessor stay installed on the PC and in git; going back to REAPER after the cutover is the same event switch as today (the event plan: iemmixer stopped, REAPER and the predecessor app started), run by hand when needed. Program spec D4's rollback window is dropped. Lane 3 built a rollback (`iemmode rollback`/`iempc rollback`, a persisted record and `RollingBack`, an export of the band's data swapped into the REAPER project's place, the button rolling back in prod, the drill); lane 5 removed it, with the review's findings 2(b), 3 and 5 on it.
-- **`iemmode event`:** the button (`iemmode event`, no flag) is the event plan in every lifecycle; in prod the lifecycle stays prod and the next boot goes live on the pin. "Ide event" (`--signal`, `iempc event`) keeps lane 3's prod behaviour: maintenance ends live on the pin (REAPER when the pin may not go live), a healthy live stays, and an engine that does not play or a PC already in event gets the event plan, still prod.
+- **`iemmode event`:** the button (`iemmode event`, no flag) is the event plan in every lifecycle; in prod the lifecycle stays prod and the next boot goes live on the pin. "Ide event" (`--signal`, `iempc event`) in prod: a healthy live stays, and maintenance, a live whose engine does not play and a PC already in event go live on the pin.
+- **In prod nothing goes to REAPER on its own (the owner's decision on #11, 2026-10-19, "na reaper sa už nevraciame").** The event plan runs only on an explicit request: the button (no flag) and `--direct`. "Ide event" never runs it (a pin that may not go live switches nothing and alarms); a failed dev or live entry, the boot's included, stops where it is with an alarm naming the ways on (`iemmode live --build <pin>`, `iemmode event`), and so does an entry a restarted guard finds cut off; a reboot on a pin that may not go live starts nothing. A pre-empted entry still unwinds to the event plan.
 - **A state lane 3's guard saved** while rolling back reads as trial (every boot event) and its load alarms it.
 - **What a lost prod leaves** (an older guard took over: `pin_changes` open, the predecessor's autostarts disabled) is put back by hand; the next cutover refuses until it is (§3.5a).
 - `iempc switch-test` runs in trial and in prod: its plain event leg is the event plan.
@@ -48,7 +49,7 @@ Refuses unless: `Trial`, the build is the active main bundle with green `hil/iem
 ### 3.4 Pin and maintenance (fixes the early promotion)
 
 - An entry never promotes the pin. `Prod` keeps `pin`; a maintenance dev entry `dev --build SHA` runs that build; when it ends (`live` again), the pin becomes SHA only if its HIL is green, else the old pin returns.
-- A crash loop in maintenance stops iemmixer and goes back to `live` on the pin; a crash loop in prod reverts to the previous pin and, if that loops too, stops and alarms naming the way back to REAPER (`iemmode event`, the PC staying prod).
+- A crash loop in maintenance stops iemmixer and goes back to `live` on the pin; a crash loop in prod reverts to the previous pin and, if that loops too, stops and alarms naming the way back to REAPER (`iemmode event`, the PC staying prod). A pin that may not go live is never a fallback: from maintenance too the engine stays down with that alarm, never REAPER (#11, 2026-10-19), and so does an engine in event.
 
 ### 3.5 Shadow imports without waiting
 
