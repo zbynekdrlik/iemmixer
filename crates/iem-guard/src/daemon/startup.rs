@@ -138,9 +138,13 @@ fn start_plan(
     let resume = g.state.switching.is_some();
     match target {
         // Prod after a reboot: no trial, the pin's own entry. The pin a
-        // maintenance session ended on holds once the PC is live.
+        // maintenance session ended on holds once the PC is live. Its arm
+        // starts an engine that missed periods again (the boot's load,
+        // #11 2026-10-19; `runner::engine_ready`), for this switch only.
         Some(Mode::Live) => {
+            g.boot_entry = true;
             let out = switch(pc, g, Mode::Event, Mode::Live, false);
+            g.boot_entry = false;
             if g.state.mode == Mode::Live {
                 g.state.lifecycle = next;
                 if let Some(n) = live_note {

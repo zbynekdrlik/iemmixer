@@ -332,12 +332,17 @@ pub fn build_matches(build: &str, sha: &str) -> bool {
 pub enum Ready {
     Wait,
     Done,
+    /// Periods missed after the warm-up restart: how many since it. Its
+    /// own variant (#11, 2026-10-19): the boot's live entry in prod starts
+    /// such an engine again (`pc::NotReady::Missed`), never one that failed
+    /// any other way.
+    Missed(u64),
     Failed(String),
 }
 
 /// The warm-up after `--hold` (design §5.2 step 7): the measured period is
 /// 32, callbacks advance, and no period is missed for the whole window; the
-/// first miss restarts the window once, a second one fails.
+/// first miss restarts the window once, a second one fails ([`Ready::Missed`]).
 #[derive(Debug, Clone)]
 pub struct ReadyWindow {
     window: Duration,
@@ -384,10 +389,7 @@ impl ReadyWindow {
             }
             Some((_, missed)) if s.missed > missed => {
                 if self.restarted {
-                    return Ready::Failed(format!(
-                        "{} periods missed after the warm-up restart",
-                        s.missed - missed
-                    ));
+                    return Ready::Missed(s.missed - missed);
                 }
                 self.restarted = true;
                 self.start = Some((now, s.missed));
