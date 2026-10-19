@@ -38,3 +38,15 @@ reason = "proc-macro-error unmaintained (no vulnerability); a proc-macro depende
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0173"
 reason = "proc-macro-error2 unmaintained (no vulnerability); a proc-macro dependency, it runs only at build time"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0370"
+reason = "zvariant unmaintained (no vulnerability); only via zbus, the Linux D-Bus path of tauri-plugin-single-instance; the tray ships for Windows only, where zbus is not built"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0371"
+reason = "zbus_names unmaintained (no vulnerability); only via zbus, the Linux D-Bus path of tauri-plugin-single-instance; the tray ships for Windows only, where zbus is not built"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0372"
+reason = "zvariant_derive unmaintained (no vulnerability); only via zbus, the Linux D-Bus path of tauri-plugin-single-instance; the tray ships for Windows only, where zbus is not built"

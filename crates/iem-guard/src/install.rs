@@ -95,7 +95,11 @@ fn extract(archive: &mut ZipArchive<File>, into: &Path) -> Result<(), String> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("zip entry {i}: {e}"))?;
-        let name = entry.name().to_owned();
+        // zip 9: a name that is no valid text is an error, never a lossy guess.
+        let name = entry
+            .name()
+            .map_err(|e| format!("zip entry {i}: {e}"))?
+            .into_owned();
         if entry.is_symlink() {
             return Err(format!("{name:?}: a link is refused"));
         }
