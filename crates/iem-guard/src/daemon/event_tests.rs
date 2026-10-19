@@ -409,6 +409,16 @@ fn a_waited_ide_event_names_the_switch_to_live_that_stopped() {
         second.detail,
         format!("{WAITED}; live: stopped; the owner decides")
     );
+    // Its alarm claims nothing plays: the engine is one that does not (the
+    // review of the fix of PR #56's finding 6).
+    assert_eq!(
+        texts(&g),
+        [
+            "Precheck: no PWA notification subscription; in prod nothing goes to REAPER on its \
+          own: no step done changed what runs, so the PC stays in live as it was (asking for \
+          it again tries again)"
+        ]
+    );
 }
 
 /// In prod a button queued before a switch began runs all the same, the

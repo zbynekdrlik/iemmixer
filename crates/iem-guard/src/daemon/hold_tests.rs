@@ -12,7 +12,7 @@ use super::tests::{INIT, OTHER, SHA, T0, ask, iemmixer_up, no_reaper, prod_on, r
 use super::*;
 use crate::bundle::{Hil, Pins};
 use crate::crash;
-use crate::lifecycle::Lifecycle;
+use crate::lifecycle::{Lifecycle, Prod};
 use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::{Facts, Health};
@@ -108,10 +108,11 @@ fn a_prod_entry_from_live_that_stops_after_its_stops_ends_in_event() {
 }
 
 /// The same rule for an entry a restarted guard (no reboot) finds cut off
-/// in prod (the review of PR #56, finding 1): once a step it finished
-/// changed what runs it stops in event (a HIL job, which lives in dev only,
-/// ends with dev); while only its precheck finished it stays in the mode it
-/// began from. Nothing starts and nothing stops either way.
+/// in prod (the review of PR #56, finding 1): the step it was in is
+/// unknown, so once any step finished it stops in event (a HIL job, which
+/// lives in dev only, ends with dev); cut off in its precheck, the first,
+/// it stays in the mode it began from. Nothing starts and nothing stops
+/// either way.
 #[test]
 fn a_cut_off_prod_entry_ends_in_event_once_a_step_changed_what_runs() {
     let left = |from: Mode, to: Mode, done: Vec<Step>| {
@@ -147,19 +148,19 @@ fn a_cut_off_prod_entry_ends_in_event_once_a_step_changed_what_runs() {
         (Mode::Live, Mode::Live),
         (Mode::Event, Mode::Live),
     ] {
-        let g = left(from, to, vec![Step::Precheck, Step::EngineStop]);
-        assert_eq!(g.state.mode, Mode::Event, "{from:?} → {to:?}");
-        assert_eq!(g.shared.view().mode, Mode::Event, "{from:?} → {to:?}");
-        assert_eq!(g.state.job, None, "{from:?} → {to:?}");
-        for done in [vec![Step::Precheck], Vec::new()] {
+        for done in [vec![Step::Precheck, Step::EngineStop], vec![Step::Precheck]] {
             let g = left(from, to, done.clone());
-            assert_eq!(g.state.mode, from, "{from:?} → {to:?} {done:?}");
-            assert_eq!(
-                g.state.job,
-                (from == Mode::Dev).then_some(7),
-                "{from:?} → {to:?} {done:?}"
-            );
+            assert_eq!(g.state.mode, Mode::Event, "{from:?} → {to:?} {done:?}");
+            assert_eq!(g.shared.view().mode, Mode::Event, "{from:?} → {to:?}");
+            assert_eq!(g.state.job, None, "{from:?} → {to:?} {done:?}");
         }
+        let g = left(from, to, Vec::new());
+        assert_eq!(g.state.mode, from, "{from:?} → {to:?}");
+        assert_eq!(
+            g.state.job,
+            (from == Mode::Dev).then_some(7),
+            "{from:?} → {to:?}"
+        );
     }
 }
 
@@ -174,52 +175,49 @@ fn actives(g: &Guard) -> (Option<String>, Option<String>, Pins) {
 
 /// The review of PR #56, finding 3: an entry made its build the active
 /// bundle (and `pc`'s) before its first step, so a prod entry from live that
-/// stopped before it changed anything (its precheck, or the old engine's
-/// stop) left the pin's engine playing in live with another build active:
-/// that engine's next crash respawned the other build unheld in live (G8),
-/// and the status and the identity check named it. The entry's build
-/// becomes the active bundle once its engine starts; until then the active
-/// bundle, its way back and the legacy pins stay as they were, and `pc`
-/// runs the active bundle again.
+/// stopped before it changed anything (its precheck) left the pin's engine
+/// playing in live with another build active: that engine's next crash
+/// respawned the other build unheld in live (G8), and the status and the
+/// identity check named it. The entry's build becomes the active bundle
+/// once its engine starts; until then the active bundle, its way back and
+/// the legacy pins stay as they were, and `pc` runs the active bundle
+/// again.
 #[test]
 fn an_entry_s_build_becomes_the_active_bundle_only_once_its_engine_starts() {
+    let (mut pc, mut g) = prod_live();
+    let before = actives(&g);
+    pc.fail(Call::Precheck, "no PWA notification subscription");
+    let r = handle(&mut pc, &mut g, dev_other(), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(actives(&g), before);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    let status = status_text(&g);
+    assert!(status.contains(&format!("bundle {SHA}")), "{status}");
+    // The pin's engine ends: the pin's engine again, unheld.
+    pc.exited = vec![(Kid::Engine, Some(70))];
+    pc.facts.engine = false;
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + Duration::from_secs(20));
+    assert_eq!(pc.engine_starts, [(false, false)]);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    // Stopped at the old engine's stop, or after it, before its own engine
+    // started: in event, and the active bundle stays.
     for (call, why) in [
-        (Call::Precheck, "no PWA notification subscription"),
         (Call::EngineStop, "no DriverReleased within 10 s"),
+        (Call::PrefCheck, "3 restores failed"),
     ] {
         let (mut pc, mut g) = prod_live();
         let before = actives(&g);
         pc.fail(call, why);
         let r = handle(&mut pc, &mut g, dev_other(), INIT);
         assert!(!r.ok, "{call:?}: {r:?}");
-        assert_eq!(g.state.mode, Mode::Live, "{call:?}");
+        assert_eq!(g.state.mode, Mode::Event, "{call:?}");
+        assert!(pc.engine_starts.is_empty(), "{call:?}");
         assert_eq!(actives(&g), before, "{call:?}");
         assert_eq!(pc.bundle.as_deref(), Some(SHA), "{call:?}");
-        let status = status_text(&g);
-        assert!(
-            status.contains(&format!("bundle {SHA}")),
-            "{call:?}: {status}"
-        );
-        // The pin's engine ends: the pin's engine again, unheld.
-        pc.exited = vec![(Kid::Engine, Some(70))];
-        pc.facts.engine = false;
-        let at = Instant::now();
-        tick(&mut pc, &mut g, at);
-        tick(&mut pc, &mut g, at + Duration::from_secs(20));
-        assert_eq!(pc.engine_starts, [(false, false)], "{call:?}");
-        assert_eq!(pc.bundle.as_deref(), Some(SHA), "{call:?}");
     }
-    // Stopped after the old engine's stop, before its own engine started:
-    // nothing runs, and the active bundle stays.
-    let (mut pc, mut g) = prod_live();
-    let before = actives(&g);
-    pc.fail(Call::PrefCheck, "3 restores failed");
-    let r = handle(&mut pc, &mut g, dev_other(), INIT);
-    assert!(!r.ok, "{r:?}");
-    assert_eq!(g.state.mode, Mode::Event);
-    assert!(pc.engine_starts.is_empty());
-    assert_eq!(actives(&g), before);
-    assert_eq!(pc.bundle.as_deref(), Some(SHA));
     // Its engine started, held, and did not arm: that build runs, so it is
     // the active bundle, the pin the way back.
     let (mut pc, mut g) = prod_live();
@@ -383,23 +381,22 @@ fn in_prod_a_guard_restart_with_reaper_up_holds_a_left_entry() {
 
 /// What a prod alarm says after a hold from live that changed nothing.
 const PLAYS_ON: &str = "in prod nothing goes to REAPER on its own: no step done changed what \
-                        runs, so iemmixer keeps playing live as before (the same request \
-                        tries again)";
+                        runs, so the PC stays in live as it was (asking for it again tries \
+                        again)";
 
 /// …and after one from dev (maintenance).
 const RUNS_ON: &str = "in prod nothing goes to REAPER on its own: no step done changed what \
-                       runs, so iemmixer keeps running in dev as before (the same request \
-                       tries again)";
+                       runs, so the PC stays in dev as it was (asking for it again tries again)";
 
 /// The review of PR #56, finding 6: after a hold that changed nothing (the
 /// PC in the mode it began from, the old engine still playing) the alarm
 /// named `iemmode live --build <pin>` as the way on, which would restart a
-/// healthy engine. Such an alarm says iemmixer plays (or runs in dev) as
-/// before and that the same request tries again; a hold from event, and one
-/// that changed what runs (now in event, nothing of iemmixer playing), keep
-/// the ways on.
+/// healthy engine. Such an alarm says the PC stays as it was and that
+/// asking again tries again, never that anything plays (the engine may be
+/// one that does not); a hold from event, and one that changed what runs
+/// (now in event, nothing of iemmixer playing), keep the ways on.
 #[test]
-fn an_alarm_after_a_hold_that_changed_nothing_says_iemmixer_plays_on() {
+fn an_alarm_after_a_hold_that_changed_nothing_says_the_pc_stays_as_it_was() {
     const REFUSED: &str = "no PWA notification subscription";
     let live = || Request::Live {
         build: None,
@@ -418,6 +415,20 @@ fn an_alarm_after_a_hold_that_changed_nothing_says_iemmixer_plays_on() {
     assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
     assert_eq!(g.state.mode, Mode::Dev);
     assert_eq!(texts(&g), [format!("Precheck: {REFUSED}; {RUNS_ON}")]);
+    // The HIL job and its runner are nothing that plays: a runner that did
+    // not stop changed nothing either.
+    let (mut pc, mut g) = prod_live();
+    g.state.mode = Mode::Dev;
+    g.state.job = Some(7);
+    pc.facts.runner = true;
+    pc.fail(Call::RunnerStop, "the runner did not stop");
+    assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert!(pc.facts.engine && !pc.called(Call::EngineStop));
+    assert_eq!(
+        texts(&g),
+        [format!("RunnerStop: the runner did not stop; {RUNS_ON}")]
+    );
     // From event nothing of iemmixer played: the ways on.
     let (mut pc, mut g) = prod_live();
     g.state.mode = Mode::Event;
@@ -429,12 +440,13 @@ fn an_alarm_after_a_hold_that_changed_nothing_says_iemmixer_plays_on() {
         texts(&g),
         [format!("Precheck: {REFUSED}; {}", no_reaper(SHA))]
     );
-    // A cut-off entry from live that changed nothing says the same.
+    // A cut-off entry from live that changed nothing (cut off in its
+    // precheck) says the same.
     let (mut pc, mut g) = prod_live();
     g.state.switching = Some(Switching {
         from: Mode::Live,
         to: Mode::Dev,
-        done: vec![Step::Precheck],
+        done: Vec::new(),
         started: T0,
     });
     g.state.written_at = 0;
@@ -443,9 +455,90 @@ fn an_alarm_after_a_hold_that_changed_nothing_says_iemmixer_plays_on() {
     assert_eq!(
         texts(&g),
         [format!(
-            "the guard started again during the switch live → dev (1 steps done); {PLAYS_ON}"
+            "the guard started again during the switch live → dev (0 steps done); {PLAYS_ON}"
         )]
     );
+}
+
+/// The review of the fix of PR #56's finding 1: a prod entry whose engine
+/// was armed before a later step failed (the server, the tray, the
+/// identity check, the runner) has that engine playing. It stays in the
+/// entry's target with it, where the crash watch respawns it and "ide
+/// event" finds the band's system; the entry's lifecycle change holds (the
+/// maintenance build that became the pin, a maintenance session's build);
+/// its alarm says so. In prod a live entry's engine is the pin's (G8).
+#[test]
+fn a_prod_hold_after_its_engine_armed_keeps_that_engine_in_the_entry_s_mode() {
+    const HELD: &str = "ports 80/443 are still held";
+    let armed = |m: &str| {
+        [format!(
+            "ServerStart: {HELD}; in prod nothing goes to REAPER on its own: its engine was \
+             armed, so the PC is in {m} with it (asking for it again tries again)"
+        )]
+    };
+    let live = || Request::Live {
+        build: None,
+        trial: false,
+        dry_run: false,
+    };
+    // Live again on the pin.
+    let (mut pc, mut g) = prod_live();
+    pc.fail(Call::ServerStart, HELD);
+    assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(texts(&g), armed("live"));
+    assert_eq!(
+        (g.state.active_bundle(), pc.bundle.as_deref()),
+        (Some(SHA), Some(SHA))
+    );
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    pc.health(Health::Healthy);
+    let r = ask(&mut pc, &mut g, event(true));
+    assert!(r.ok && r.detail.contains("nothing switched"), "{r:?}");
+    pc.exited = vec![(Kid::Engine, Some(70))];
+    pc.facts.engine = false;
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + Duration::from_secs(20));
+    assert_eq!(pc.engine_starts, [(true, false), (false, false)]);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    // The live entry that ends maintenance on a green main build: that
+    // build plays, so it is the pin.
+    let (mut pc, mut g) = prod_live();
+    g.state.mode = Mode::Dev;
+    g.state
+        .bundles
+        .insert(OTHER.into(), record(OTHER, "main", Hil::Green));
+    g.state.lifecycle = prod_on(None, Some(OTHER));
+    pc.fail(Call::ServerStart, HELD);
+    assert!(!handle(&mut pc, &mut g, live(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(
+        g.state.lifecycle,
+        Lifecycle::Prod(Prod {
+            since: T0,
+            pin: OTHER.into(),
+            previous: Some(SHA.into()),
+            maintenance: None,
+        })
+    );
+    assert_eq!(g.state.active_bundle(), Some(OTHER));
+    // Maintenance on a dev build: its engine plays in dev, the session's
+    // build is recorded.
+    let (mut pc, mut g) = prod_live();
+    pc.fail(Call::ServerStart, HELD);
+    assert!(!handle(&mut pc, &mut g, dev_other(), INIT).ok);
+    assert_eq!(g.state.mode, Mode::Dev);
+    assert_eq!(texts(&g), armed("dev"));
+    assert_eq!(g.state.lifecycle, prod_on(None, Some(OTHER)));
+    assert_eq!(g.state.active_bundle(), Some(OTHER));
+    // The boot's live entry: live with the pin's engine.
+    let (mut pc, mut g) = booted_in_prod();
+    pc.fail(Call::ServerStart, HELD);
+    assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(texts(&g), armed("live"));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
 }
 
 /// The review of PR #56, finding 8: only the boot's last miss named its

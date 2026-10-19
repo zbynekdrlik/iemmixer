@@ -458,35 +458,42 @@ fn in_prod_a_failed_job_restart_stops_without_reaper() {
 }
 
 /// The review of PR #56, finding 6: a HIL job's engine restart in prod
-/// whose first step (the engine's stop) failed changed nothing, so its
-/// alarm says iemmixer runs in dev as before instead of naming a live
-/// entry that would restart it.
+/// whose first step failed before anything changed (no engine ran, its
+/// preference check) says the PC stays in dev as it was instead of naming a
+/// live entry that would restart an engine; one whose engine stop failed
+/// (its request went out) names the ways on.
 #[test]
-fn in_prod_a_job_restart_that_changed_nothing_says_iemmixer_runs_on() {
-    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
-    g.state.lifecycle = prod_on(None, None);
-    g.state
-        .bundles
-        .insert(SHA.into(), record(SHA, "main", Hil::Green));
-    g.state.pins.current = Some(SHA.into());
-    g.state.job = Some(7);
-    pc.fail(Call::EngineStop, "no DriverReleased within 10 s");
-    let site = Request::InstallSite {
-        path: "site.toml".into(),
+fn in_prod_a_job_restart_that_changed_nothing_says_the_pc_stays_in_dev() {
+    let restart = |facts: Facts, call: Call, why: &str| {
+        let (mut pc, mut g) = (FakePc::new(facts), Guard::for_test(Mode::Dev));
+        g.state.lifecycle = prod_on(None, None);
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        g.state.pins.current = Some(SHA.into());
+        g.state.job = Some(7);
+        pc.fail(call, why);
+        let site = Request::InstallSite {
+            path: "site.toml".into(),
+        };
+        let r = handle(&mut pc, &mut g, site, INIT);
+        assert!(!r.ok, "{r:?}");
+        assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
+        assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+        (r.detail, texts(&g))
     };
-    let r = handle(&mut pc, &mut g, site, INIT);
-    assert!(!r.ok, "{r:?}");
-    let failed = "EngineStop: no DriverReleased within 10 s; in prod nothing goes to REAPER on \
-                  its own: no step done changed what runs, so iemmixer keeps running in dev as \
-                  before (the same request tries again)";
+    let failed = "PrefCheck: 3 restores failed; in prod nothing goes to REAPER on its own: no \
+                  step done changed what runs, so the PC stays in dev as it was (asking for it \
+                  again tries again)";
+    let (detail, alarms) = restart(Facts::default(), Call::PrefCheck, "3 restores failed");
     assert!(
-        r.detail.starts_with(&format!("site installed; {failed}")),
-        "{}",
-        r.detail
+        detail.starts_with(&format!("site installed; {failed}")),
+        "{detail}"
     );
-    assert_eq!(texts(&g), [failed]);
-    assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
-    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+    assert_eq!(alarms, [failed]);
+    let why = "no DriverReleased within 10 s";
+    let (_, alarms) = restart(iemmixer_up(), Call::EngineStop, why);
+    assert_eq!(alarms, [format!("EngineStop: {why}; {}", no_reaper(SHA))]);
 }
 
 /// Inside a HIL job the engine starts without a plan (`restart_in_job`,
