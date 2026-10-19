@@ -369,6 +369,48 @@ fn a_second_ide_event_in_prod_never_cancels_the_first_one_s_live_entry() {
     }
 }
 
+/// The review of PR #56, finding 7: an "ide event" that waited for a prod
+/// switch to live (the first "ide event"'s own) which then stopped was
+/// answered "event: stopped; the owner decides", though in prod "ide event"
+/// never asks for event. The reply names the switch to live it waited for
+/// and, when the PC is not live, the mode it is in.
+#[test]
+fn a_waited_ide_event_names_the_switch_to_live_that_stopped() {
+    const WAITED: &str = "waited for the switch to live in prod";
+    // From maintenance: the entry stopped the engine, then did not arm.
+    let (mut pc, mut g) = prod_live();
+    g.state.mode = Mode::Dev;
+    g.save();
+    pc.fail(Call::EngineReady, "the engine faulted");
+    pc.route_at = Some((Call::EngineStart, Arc::clone(&g.shared), event(true)));
+    let r = handle(&mut pc, &mut g, event(true), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert_eq!(pc.routed, Some(Route::AwaitEnd(WAITED)));
+    let second = g.shared.await_end(WAITED, Duration::ZERO);
+    assert!(!second.ok, "{second:?}");
+    assert_eq!(
+        second.detail,
+        format!("{WAITED}; live: stopped; the owner decides; the mode is event")
+    );
+    // From a live whose engine does not play, stopped at its precheck: the
+    // PC is still live.
+    let (mut pc, mut g) = prod_live();
+    pc.health(Health::Dead);
+    pc.fail(Call::Precheck, "no PWA notification subscription");
+    pc.route_at = Some((Call::Precheck, Arc::clone(&g.shared), event(true)));
+    let r = handle(&mut pc, &mut g, event(true), INIT);
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.routed, Some(Route::AwaitEnd(WAITED)));
+    let second = g.shared.await_end(WAITED, Duration::ZERO);
+    assert!(!second.ok, "{second:?}");
+    assert_eq!(
+        second.detail,
+        format!("{WAITED}; live: stopped; the owner decides")
+    );
+}
+
 /// In prod a button queued before a switch began runs all the same, the
 /// event plan: "ide event"'s switch to live may have cleared its
 /// pre-emption as it claimed the view, and live is no end for the button.
