@@ -197,8 +197,10 @@ pub(super) fn switch(
                         // of its steps changed what runs, else in event
                         // (the review of PR #56: `lifecycle::stops_in`).
                         let left = lifecycle::stops_in(from, done_steps(g));
-                        if let Some(ways) =
-                            lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
+                        let ways = lifecycle::after_stop(&g.state.lifecycle, left, |sha| {
+                            g.state.bundles.get(sha)
+                        });
+                        if let Some(ways) = ways
                             && may_end(g, to)
                         {
                             let ends = left.mode();

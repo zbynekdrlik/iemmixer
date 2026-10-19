@@ -53,9 +53,8 @@ pub(super) fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
 /// resumes, when it was one; in prod an unfinished dev or live entry stops
 /// instead, #11 2026-10-19, also with the band's system up: it is held
 /// before the reboot rule could reset it, `lifecycle::holds_cut_off`). From
-/// event the event plan is the start's
-/// checks: a dev or live entry the pipe queues meanwhile runs after them
-/// (#42). The outcome of a plan that ran.
+/// event the event plan is the start's checks: a dev or live entry the pipe
+/// queues meanwhile runs after them (#42). The outcome of a plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
     let job = pc.job();
     if let Err(e) = &job {
@@ -156,7 +155,11 @@ fn start_plan(
     if target.is_none()
         && let Some(left) = g.state.switching.clone()
         && left.to != Mode::Event
-        && let Some(ways) = lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
+        && let Some(ways) = lifecycle::after_stop(
+            &g.state.lifecycle,
+            lifecycle::stops_in(left.from, &left.done),
+            |sha| g.state.bundles.get(sha),
+        )
     {
         hold_cut_off(g, &left, &ways);
         return None;
@@ -193,8 +196,8 @@ fn start_plan(
 /// event plan; in the mode it began from only while none of the steps it
 /// finished changed what runs, else in event (the review of PR #56:
 /// `lifecycle::stops_in`, as a failed entry stops; a HIL job lives in dev
-/// only). The alarm asks the owner with the ways on. An event plan that was
-/// left resumes as before: it was asked for.
+/// only). The alarm asks the owner with `ways` (`lifecycle::after_stop`).
+/// An event plan that was left resumes as before: it was asked for.
 fn hold_cut_off(g: &mut Guard, left: &Switching, ways: &str) {
     let ends = lifecycle::stops_in(left.from, &left.done).mode();
     info!(

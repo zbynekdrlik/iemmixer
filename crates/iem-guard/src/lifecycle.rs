@@ -206,9 +206,11 @@ pub fn holds_cut_off(lc: &Lifecycle, rebooted: bool, left: Option<Mode>) -> bool
 /// (`daemon::activation`) stop where they are instead of the event plan,
 /// and the alarm names these ways on: a live entry again on the pin it runs
 /// (a maintenance build that becomes the pin by [`Prod::end_maintenance`]
-/// included), or REAPER by an explicit `iemmode event`. `None` before the
-/// cutover: the event plan, as before. A pre-empted entry still unwinds:
-/// the pre-emption is the request for the event plan.
+/// included), or REAPER by an explicit `iemmode event` (through
+/// [`after_stop`], which says iemmixer plays on instead after a stop that
+/// changed nothing in live or dev). `None` before the cutover: the event
+/// plan, as before. A pre-empted entry still unwinds: the pre-emption is
+/// the request for the event plan.
 pub fn ways_on<'r>(lc: &Lifecycle, record: impl Fn(&str) -> Option<&'r Record>) -> Option<String> {
     let Lifecycle::Prod(p) = lc else {
         return None;
@@ -221,8 +223,32 @@ pub fn ways_on<'r>(lc: &Lifecycle, record: impl Fn(&str) -> Option<&'r Record>) 
     ))
 }
 
-/// What a prod dev or live entry that stops ([`ways_on`]) leaves running:
-/// [`stops_in`].
+/// What a prod alarm says after a dev or live entry stopped (`left`:
+/// [`stops_in`]; the review of PR #56, #11 2026-10-19): after a stop that
+/// changed nothing from live or dev, that iemmixer keeps playing (running)
+/// as before and the same request tries again, since [`ways_on`]'s live
+/// entry would restart a healthy engine; after a stop that changed what
+/// runs (the PC in event, nothing of iemmixer playing), or from event,
+/// [`ways_on`]. `None` before the cutover, as [`ways_on`].
+pub fn after_stop<'r>(
+    lc: &Lifecycle,
+    left: Left,
+    record: impl Fn(&str) -> Option<&'r Record>,
+) -> Option<String> {
+    let ways = ways_on(lc, record)?;
+    let what = match left {
+        Left::Unchanged(Mode::Live) => "keeps playing live",
+        Left::Unchanged(Mode::Dev) => "keeps running in dev",
+        Left::Unchanged(Mode::Event) | Left::Changed => return Some(ways),
+    };
+    Some(format!(
+        "in prod nothing goes to REAPER on its own: no step done changed what runs, so \
+         iemmixer {what} as before (the same request tries again)"
+    ))
+}
+
+/// What a prod dev or live entry that stops leaves running ([`stops_in`]),
+/// which its alarm says ([`after_stop`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Left {
     /// No step it finished changed what runs: the PC stays in the mode the

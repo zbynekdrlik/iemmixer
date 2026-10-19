@@ -245,18 +245,24 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
         Step::EngineArm,
         Step::ServerStart,
     ]);
+    let mut done: Vec<Step> = Vec::new();
     for step in steps {
         match run_step(pc, g, step, Mode::Dev) {
             // The children are saved after every step, so the guard an
             // activation hands over to adopts the new engine and server.
-            Ok(()) => g.done(pc, step),
+            Ok(()) => {
+                g.done(pc, step);
+                done.push(step);
+            }
             Err(StepError::Preempted) => return Err("pre-empted by event".to_owned()),
             Err(StepError::Failed(why)) => {
                 // In prod nothing goes to REAPER on its own (#11,
                 // 2026-10-19): the restart stops where it is, in dev, and
-                // asks the owner.
+                // asks the owner; a restart whose first step failed changed
+                // nothing (the review of PR #56: `lifecycle::after_stop`).
+                let left = lifecycle::stops_in(Mode::Dev, &done);
                 if let Some(ways) =
-                    lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
+                    lifecycle::after_stop(&g.state.lifecycle, left, |sha| g.state.bundles.get(sha))
                 {
                     g.alarm(step, &format!("{why}; {ways}"), true);
                     return Err(format!("{step:?}: {why}; {ways}"));
