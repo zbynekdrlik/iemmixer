@@ -151,6 +151,11 @@ pub struct FakePc {
     /// has one, `engine_ready` fails as `WinPc`'s does when its child
     /// ends.
     pub early_exits: Vec<Option<i32>>,
+    /// Ready waits that miss periods after the warm-up restart, in call
+    /// order: each `engine_ready` takes the first and fails with that many
+    /// missed periods ([`NotReady::Missed`], as `WinPc`'s window does); the
+    /// engine still runs. Empty: the wait passes.
+    pub ready_misses: Vec<u64>,
     /// How the engine started last will end before it is ready.
     ending: Option<Option<i32>>,
     /// How it ended, once it did (`engine_exit`).
@@ -279,6 +284,7 @@ impl FakePc {
             sites: Vec::new(),
             engine_starts: Vec::new(),
             early_exits: Vec::new(),
+            ready_misses: Vec::new(),
             ending: None,
             exit: None,
             excluded: Vec::new(),
@@ -586,7 +592,7 @@ impl Pc for FakePc {
         Ok(self.pid())
     }
 
-    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> R<Status> {
+    fn engine_ready(&mut self, secs: u32, c: &Cancel) -> Result<Status, NotReady> {
         self.ready_secs.push(secs);
         self.enter(Call::EngineReady, Some(c))?;
         if let Some(code) = self.ending.take() {
@@ -594,7 +600,11 @@ impl Pc for FakePc {
             self.exit = Some(code);
             return Err(StepError::failed(format!(
                 "the engine ended ({code:?}) before it was ready"
-            )));
+            ))
+            .into());
+        }
+        if !self.ready_misses.is_empty() {
+            return Err(NotReady::Missed(self.ready_misses.remove(0)));
         }
         Ok(self.status.clone())
     }
