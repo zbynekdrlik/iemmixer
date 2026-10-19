@@ -308,8 +308,10 @@ pub(super) fn failure(
 /// restart is stopped and started again the same way after
 /// `Guard::boot_arm_spacing`, up to [`BOOT_ARM_RETRIES`] times (#11,
 /// 2026-10-19: the boot's own load); every other entry, and every other
-/// failure, fails at once as before.
+/// failure, fails at once as before. Every failure of the boot's entry
+/// after its first attempt names the attempt ([`at_attempt`]).
 fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Status> {
+    let boot = g.boot_entry;
     let mut restarted = false;
     let mut attempt: u32 = 1;
     loop {
@@ -317,14 +319,12 @@ fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Statu
             Ok(status) => return Ok(status),
             Err(NotReady::Missed(missed)) => {
                 let why = NotReady::Missed(missed).to_string();
-                if !boot_retry(g.boot_entry, attempt) {
-                    return Err(StepError::Failed(missed_failure(
-                        why,
-                        g.boot_entry,
-                        attempt,
-                    )));
+                if !boot_retry(boot, attempt) {
+                    return Err(StepError::Failed(missed_failure(why, boot, attempt)));
                 }
-                restart_after_miss(pc, g, to, c, &why, attempt)?;
+                // The stop, the wait and the start belong to the next one.
+                restart_after_miss(pc, g, to, c, &why, attempt)
+                    .map_err(|e| at_attempt(e, boot, attempt + 1))?;
                 attempt += 1;
                 continue;
             }
@@ -332,21 +332,46 @@ fn engine_ready(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<Statu
             Err(NotReady::Step(e)) => return Err(e),
         };
         if !crash::ready_restart(pc.engine_exit(), restarted) {
-            return Err(StepError::Failed(e));
+            return Err(at_attempt(StepError::Failed(e), boot, attempt));
         }
         restarted = true;
-        g.info(format!(
-            "the engine ended with exit {} before it was ready (its state directory was \
-             held): starting it again in {} s",
-            crash::STATE_BUSY,
-            crash::BUSY_RETRY.as_secs()
-        ));
-        c.sleep(crash::BUSY_RETRY)?;
-        pref_step(pc, g, to)?;
-        let pid = pc.engine_start(true, g.hil_engine(to))?;
-        g.spawns += 1;
-        g.keep_children(pc);
-        g.info(format!("engine started again, held (pid {pid})"));
+        busy_restart(pc, g, to, c).map_err(|e| at_attempt(e, boot, attempt))?;
+    }
+}
+
+/// An engine that ended with exit 75 before it was ready, started again,
+/// held, after `crash::BUSY_RETRY`, the preference checked right before as
+/// for every start (#32 F3-r4 4).
+fn busy_restart(pc: &mut dyn Pc, g: &mut Guard, to: Mode, c: &Cancel) -> R<()> {
+    g.info(format!(
+        "the engine ended with exit {} before it was ready (its state directory was held): \
+         starting it again in {} s",
+        crash::STATE_BUSY,
+        crash::BUSY_RETRY.as_secs()
+    ));
+    c.sleep(crash::BUSY_RETRY)?;
+    pref_step(pc, g, to)?;
+    let pid = pc.engine_start(true, g.hil_engine(to))?;
+    g.spawns += 1;
+    g.keep_children(pc);
+    g.info(format!("engine started again, held (pid {pid})"));
+    Ok(())
+}
+
+/// A failure of the boot's live entry (`boot`) after its first attempt
+/// names the attempt it belongs to (the review of PR #56, finding 8): a
+/// fault or an early end of that attempt's engine, the stop of the engine
+/// that missed before it, the wait or the preference check before its start
+/// ("ide event" stays a pre-emption). The last miss names its attempts
+/// itself ([`missed_failure`]); every other entry's failure, and the first
+/// attempt's, read as before.
+fn at_attempt(e: StepError, boot: bool, attempt: u32) -> StepError {
+    match e {
+        StepError::Failed(why) if boot && attempt > 1 => StepError::Failed(format!(
+            "{why} (attempt {attempt} of {} after the boot)",
+            BOOT_ARM_RETRIES + 1
+        )),
+        other => other,
     }
 }
 
