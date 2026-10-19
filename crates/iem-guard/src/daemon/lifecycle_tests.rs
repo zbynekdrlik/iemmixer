@@ -17,6 +17,7 @@ use crate::pc::Kid;
 use crate::pc::fake::{Call, FakePc};
 use crate::plan::Facts;
 use crate::proto::Request;
+use crate::state::Switching;
 
 /// The pins as an earlier guard left them: `OTHER`, nothing before it.
 fn other_pinned() -> Pins {
@@ -180,6 +181,80 @@ fn a_crash_loop_in_maintenance_on_a_red_pin_stays_down() {
     );
     tick(&mut pc, &mut g, Instant::now() + Duration::from_secs(20));
     assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperStart));
+}
+
+/// In prod a crash loop of an engine in event (the held engine a stopped
+/// entry left) stays down: the event plan runs only on an explicit request
+/// (the owner's decision on #11, 2026-10-19).
+#[test]
+fn in_prod_a_crash_loop_in_event_stays_down() {
+    let (mut pc, mut g) = (FakePc::new(Facts::default()), Guard::for_test(Mode::Event));
+    g.state.lifecycle = prod_on(None, None);
+    pc.exited = vec![(Kid::Engine, Some(70)); 3];
+    tick(&mut pc, &mut g, Instant::now());
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::EngineStart));
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the engine crashed 3 times in 10 min in event on the pin {SHA}: the engine stays \
+             down; back to REAPER with iemmode event (the PC stays in prod)"
+        )]
+    );
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+}
+
+/// A dev or live entry a restarted guard (no reboot) finds cut off in prod
+/// stops where it was: no event plan, the switch dropped, an alarm naming
+/// it and the ways on, the owner's question (#11, 2026-10-19: in prod
+/// nothing goes to REAPER on its own). An event plan that was left resumes
+/// as before: it was asked for. Before the cutover a cut-off entry unwinds.
+#[test]
+fn in_prod_a_cut_off_entry_stops_at_a_guard_restart() {
+    let left = |from: Mode, to: Mode| {
+        let (pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(from));
+        g.state.lifecycle = prod_on(None, None);
+        green_main(&mut g, &[SHA]);
+        g.state.switching = Some(Switching {
+            from,
+            to,
+            done: vec![Step::Precheck, Step::EngineStop],
+            started: T0,
+        });
+        (pc, g)
+    };
+    let (mut pc, mut g) = left(Mode::Dev, Mode::Live);
+    assert_eq!(start(&mut pc, &mut g, 0), None);
+    assert_eq!((g.state.mode, g.state.switching.clone()), (Mode::Dev, None));
+    for c in [
+        Call::EngineStop,
+        Call::EngineStart,
+        Call::ReaperStart,
+        Call::AppStart,
+    ] {
+        assert!(!pc.called(c), "{c:?}");
+    }
+    assert_eq!(
+        texts(&g),
+        [format!(
+            "the guard started again during the switch dev → live (2 steps done); {}",
+            no_reaper(SHA)
+        )]
+    );
+    assert!(g.alarms.last().unwrap().owner_question);
+    assert_eq!(g.shared.view().switching, None);
+    // An event plan that was left resumes.
+    let (mut pc, mut g) = left(Mode::Live, Mode::Event);
+    assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart));
+    // Before the cutover a cut-off entry unwinds to event as before.
+    let (mut pc, mut g) = left(Mode::Dev, Mode::Live);
+    g.state.lifecycle = Lifecycle::Trial;
+    assert_eq!(start(&mut pc, &mut g, 0), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart));
+    assert!(g.alarms.all().is_empty(), "{:?}", texts(&g));
 }
 
 #[test]

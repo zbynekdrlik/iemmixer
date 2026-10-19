@@ -503,6 +503,29 @@ fn a_crash_loop_never_falls_back_live_on_a_pin_that_may_not_go_live() {
     );
 }
 
+/// In prod a stopped entry names the ways on (the owner's decision on #11,
+/// 2026-10-19: in prod nothing goes to REAPER on its own): a live entry on
+/// the pin it runs, a green maintenance build that becomes the pin
+/// included, and the explicit event plan; before the cutover none (the
+/// event plan, as before).
+#[test]
+fn in_prod_a_stopped_entry_names_the_ways_on() {
+    let mut b = installed();
+    assert_eq!(ways_on(&Lifecycle::Trial, |sha| b.get(sha)), None);
+    let ways = |pin: &str| {
+        format!(
+            "in prod nothing goes to REAPER on its own: iemmode live --build {pin} tries again, \
+             iemmode event starts REAPER (the PC stays prod)"
+        )
+    };
+    let lc = Lifecycle::Prod(prod(Some(PREV), None));
+    assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
+    let lc = Lifecycle::Prod(prod(None, Some(NEW)));
+    assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(NEW)));
+    b.insert(NEW.into(), rec(NEW, "main", Hil::Red));
+    assert_eq!(ways_on(&lc, |sha| b.get(sha)), Some(ways(PIN)));
+}
+
 // ---- exclusions and status ----
 
 #[test]

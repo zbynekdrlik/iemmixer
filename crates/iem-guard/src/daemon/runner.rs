@@ -1,6 +1,7 @@
 //! The switch runner (design §5.2): a plan's steps one at a time with the
 //! error policy (`plan::on_error`), "ide event"'s pre-emption, the unwind of
-//! a failed or pre-empted dev or live entry, and each step's `Pc` call.
+//! a failed or pre-empted dev or live entry (in prod a failed one stops
+//! where it is instead, `lifecycle::ways_on`), and each step's `Pc` call.
 
 use std::time::Instant;
 
@@ -176,6 +177,19 @@ pub(super) fn switch(
                                 &format!("{why}; the rehearsal never starts REAPER"),
                                 true,
                             );
+                            return g.finish(pc, Outcome::NeedsOwner, from);
+                        }
+                        // In prod nothing goes to REAPER on its own (#11,
+                        // 2026-10-19): the entry stops where it is, in the
+                        // mode it began from, and asks the owner, unless
+                        // "ide event" pre-empted it meanwhile (that is the
+                        // request for the event plan).
+                        if let Some(ways) =
+                            lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
+                            && may_end(g, to)
+                        {
+                            info!("{step:?} failed in prod: no event plan, the entry stops");
+                            g.alarm(step, &format!("{why}; {ways}"), true);
                             return g.finish(pc, Outcome::NeedsOwner, from);
                         }
                         g.alarm(step, &why, false);

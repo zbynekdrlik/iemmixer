@@ -17,7 +17,7 @@ use crate::effects::engine::{Ready, ReadyWindow};
 use crate::effects::tuning::{Logon, LogonPref};
 use crate::lifecycle::Lifecycle;
 use crate::pc::fake::{Call, FakePc};
-use crate::pc::{CardHolders, PrefHeld, Status};
+use crate::pc::{CardHolders, Kid, PrefHeld, Status};
 use crate::plan::{Facts, Health};
 use crate::proto::Request;
 
@@ -793,6 +793,77 @@ fn the_boot_s_live_entry_retries_only_missed_periods() {
             no_reaper(SHA)
         )]
     );
+}
+
+/// What the stop of a failed prod entry leaves (the owner's decision on
+/// #11, 2026-10-19: in prod nothing goes to REAPER on its own): the boot's
+/// entry that failed at its arm stops in event, its held engine running,
+/// no switch left. The crash watch starts nothing there (no respawn in
+/// event), and both ways on run from it: a live entry on the pin, and the
+/// explicit event plan, the PC staying prod.
+#[test]
+fn a_stopped_boot_entry_leaves_a_state_both_ways_on_run_from() {
+    let stopped = || {
+        let (mut pc, mut g) = booted_in_prod();
+        pc.fail(Call::EngineReady, "the engine faulted");
+        assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::NeedsOwner));
+        pc.heal(Call::EngineReady);
+        (pc, g)
+    };
+    let (mut pc, mut g) = stopped();
+    assert_eq!(
+        (g.state.mode, g.state.switching.clone()),
+        (Mode::Event, None)
+    );
+    assert!(pc.facts.engine, "the held engine runs");
+    let v = g.shared.view();
+    assert_eq!((v.running, v.last), (None, Some(Outcome::NeedsOwner)));
+    // Its engine ends: nothing starts again, no REAPER.
+    pc.exited = vec![(Kid::Engine, Some(70))];
+    pc.facts.engine = false;
+    let at = Instant::now();
+    tick(&mut pc, &mut g, at);
+    tick(&mut pc, &mut g, at + Duration::from_secs(20));
+    assert_eq!(pc.engine_starts.len(), 1);
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    assert_eq!(g.state.mode, Mode::Event);
+    // `iemmode live --build <pin>`: live on the pin.
+    let (mut pc, mut g) = stopped();
+    let live_on_pin = Request::Live {
+        build: Some(SHA.into()),
+        trial: false,
+        dry_run: false,
+    };
+    let r = ask(&mut pc, &mut g, live_on_pin);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    // The held engine is stopped before the pin's engine starts.
+    assert_eq!(pc.engine_starts.len(), 2);
+    assert!(pc.called(Call::EngineStop) && pc.called(Call::EngineArm));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    // `iemmode event`: REAPER by hand, the PC stays prod.
+    let (mut pc, mut g) = stopped();
+    let r = ask(&mut pc, &mut g, event(false));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::EngineStop));
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+}
+
+/// A pre-empted entry keeps the event plan in prod too: "ide event" (the
+/// button) that came during a step which then failed is the request for it
+/// (#11, 2026-10-19: only what runs on its own stops).
+#[test]
+fn in_prod_an_entry_preempted_during_a_failing_step_still_unwinds() {
+    let (mut pc, mut g) = booted_in_prod();
+    pc.preempt_at = Some((Call::ServerStart, g.cancel.clone()));
+    pc.fail(Call::ServerStart, "ports 80/443 are still held");
+    assert_eq!(start(&mut pc, &mut g, BOOT), Some(Outcome::Done));
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(pc.called(Call::ReaperStart) && pc.called(Call::AppStart));
+    assert_eq!(texts(&g), ["ServerStart: ports 80/443 are still held"]);
+    assert!(!g.alarms.last().unwrap().owner_question);
 }
 
 /// The wait between two of the boot's attempts takes the switch's token:

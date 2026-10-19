@@ -6,12 +6,12 @@ use tracing::{info, warn};
 
 use super::requests::{dry_event, event_now};
 use super::runner::switch;
-use super::{Guard, Outcome, send_notices};
+use super::{Guard, Outcome, mode_name, send_notices};
 use crate::lifecycle::{self, Start, Started};
 use crate::pc::{Pc, job_note};
 use crate::plan::Mode;
 use crate::proto::Reply;
-use crate::state;
+use crate::state::{self, Switching};
 
 /// What the elevated logon task (G1) left, taken once per run of it (its
 /// `at`, `GuardState::logon_seen`), at the guard's start and hourly (#9
@@ -50,7 +50,8 @@ pub(super) fn take_logon(pc: &mut dyn Pc, g: &mut Guard) {
 /// as the lifecycle applies it (S8: `lifecycle::start`; before the cutover
 /// event, in prod a reboot goes live on the pin), then the children a
 /// previous guard started, then an unfinished switch unwinds to event (or
-/// resumes, when it was one). From event the event plan is the start's
+/// resumes, when it was one; in prod an unfinished dev or live entry stops
+/// instead, #11 2026-10-19). From event the event plan is the start's
 /// checks: a dev or live entry the pipe queues meanwhile runs after them
 /// (#42). The outcome of a plan that ran.
 pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
@@ -90,7 +91,8 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
         g.info(n);
     }
     if let Some(why) = alarm {
-        g.raise(None, &why, false);
+        // Nothing plays after a hold: the owner decides.
+        g.raise(None, &why, matches!(go, Start::Hold));
     }
     let target = match go {
         Start::Keep => None,
@@ -100,6 +102,14 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
             }
             g.state.reset();
             Some(Mode::Event)
+        }
+        // Prod after a reboot on a pin that may not go live: in event with
+        // nothing started, no event plan (#11, 2026-10-19: in prod nothing
+        // goes to REAPER on its own); the alarm names the way on.
+        Start::Hold => {
+            g.info("after a reboot in prod on a pin that may not go live: nothing started");
+            g.state.reset();
+            None
         }
         Start::Live(pin) => {
             g.info(format!(
@@ -127,7 +137,8 @@ pub fn start(pc: &mut dyn Pc, g: &mut Guard, boot: u64) -> Option<Outcome> {
 }
 
 /// The start's plan: the pin's own live entry in prod after a reboot, else
-/// the event plan when the start goes to event or a switch was left.
+/// the event plan when the start goes to event or a switch was left (in
+/// prod only an event plan that was left: [`hold_cut_off`]).
 fn start_plan(
     pc: &mut dyn Pc,
     g: &mut Guard,
@@ -136,6 +147,14 @@ fn start_plan(
     live_note: Option<String>,
 ) -> Option<Outcome> {
     let resume = g.state.switching.is_some();
+    if target.is_none()
+        && let Some(left) = g.state.switching.clone()
+        && left.to != Mode::Event
+        && let Some(ways) = lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
+    {
+        hold_cut_off(g, &left, &ways);
+        return None;
+    }
     match target {
         // Prod after a reboot: no trial, the pin's own entry. The pin a
         // maintenance session ended on holds once the PC is live. Its arm
@@ -160,6 +179,31 @@ fn start_plan(
         }
         _ => None,
     }
+}
+
+/// A dev or live entry a restarted guard (no reboot: a crash, a hand-over)
+/// finds cut off in prod (#11, 2026-10-19: in prod nothing goes to REAPER
+/// on its own): it stops where it was, in the mode it began from with what
+/// runs as it is, never the event plan; the alarm asks the owner with the
+/// ways on. An event plan that was left resumes as before: it was asked
+/// for.
+fn hold_cut_off(g: &mut Guard, left: &Switching, ways: &str) {
+    info!(
+        "a switch {} → {} was left in prod: it stops, no event plan",
+        mode_name(left.from),
+        mode_name(left.to)
+    );
+    g.state.switching = None;
+    g.raise(
+        None,
+        &format!(
+            "the guard started again during the switch {} → {} ({} steps done); {ways}",
+            mode_name(left.from),
+            mode_name(left.to),
+            left.done.len()
+        ),
+        true,
+    );
 }
 
 /// `iemmode event --direct` (design §5.1): without a guard, the same event

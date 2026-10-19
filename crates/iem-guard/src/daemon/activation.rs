@@ -224,8 +224,10 @@ fn offline_activation(pc: &mut dyn Pc, g: &mut Guard, sha: &str) -> (bool, Strin
 /// bundle and site, the engine with the job's HIL flags, after `PrefCheck`
 /// (REAPER's original back, as before every engine start). The runner (it
 /// runs the job) and the tray keep running, so this is no dev entry. A
-/// failure alarms and unwinds to event, as a failed dev entry does; "ide
-/// event" ends a wait and is served next.
+/// failure alarms and unwinds to event, as a failed dev entry does (in prod
+/// it stops where it is with the ways on, `lifecycle::ways_on`: nothing
+/// goes to REAPER on its own, #11 2026-10-19); "ide event" ends a wait and
+/// is served next.
 fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
     let f = pc.facts();
     let mut steps = Vec::new();
@@ -250,6 +252,15 @@ fn restart_in_job(pc: &mut dyn Pc, g: &mut Guard) -> Result<(), String> {
             Ok(()) => g.done(pc, step),
             Err(StepError::Preempted) => return Err("pre-empted by event".to_owned()),
             Err(StepError::Failed(why)) => {
+                // In prod nothing goes to REAPER on its own (#11,
+                // 2026-10-19): the restart stops where it is, in dev, and
+                // asks the owner.
+                if let Some(ways) =
+                    lifecycle::ways_on(&g.state.lifecycle, |sha| g.state.bundles.get(sha))
+                {
+                    g.alarm(step, &format!("{why}; {ways}"), true);
+                    return Err(format!("{step:?}: {why}; {ways}"));
+                }
                 g.alarm(step, &why, false);
                 let from = g.state.mode;
                 let out = run_switch(pc, g, from, Mode::Event);

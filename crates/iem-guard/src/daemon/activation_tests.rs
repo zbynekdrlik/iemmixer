@@ -4,7 +4,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::tests::{INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, record, steps, texts};
+use super::tests::{
+    INIT, OTHER, SHA, T0, ask, band_up, fixed, iemmixer_up, no_reaper, prod_on, record, steps,
+    texts,
+};
 use super::*;
 use crate::bundle::Hil;
 use crate::install;
@@ -419,6 +422,39 @@ fn install_site_in_a_job_restarts_only_the_engine_and_the_server() {
     assert!(pc.called(Call::ReaperStart));
     assert_eq!(texts(&g)[0], "ServerStart: ports 80/443 are still held");
     assert_eq!(g.state.job, None, "no HIL job outside dev");
+}
+
+/// In prod a HIL job's engine restart that fails stops where it is, in dev
+/// with the job, and names the ways on: never the event plan (the owner's
+/// decision on #11, 2026-10-19: in prod nothing goes to REAPER on its own).
+#[test]
+fn in_prod_a_failed_job_restart_stops_without_reaper() {
+    let (mut pc, mut g) = (FakePc::new(iemmixer_up()), Guard::for_test(Mode::Dev));
+    g.state.lifecycle = prod_on(None, None);
+    g.state
+        .bundles
+        .insert(SHA.into(), record(SHA, "main", Hil::Green));
+    g.state.pins.current = Some(SHA.into());
+    g.state.job = Some(7);
+    pc.fail(Call::ServerStart, "ports 80/443 are still held");
+    let site = Request::InstallSite {
+        path: "site.toml".into(),
+    };
+    let r = handle(&mut pc, &mut g, site, INIT);
+    assert!(!r.ok, "{r:?}");
+    let failed = format!(
+        "ServerStart: ports 80/443 are still held; {}",
+        no_reaper(SHA)
+    );
+    assert!(
+        r.detail.starts_with(&format!("site installed; {failed}")),
+        "{}",
+        r.detail
+    );
+    assert_eq!((g.state.mode, g.state.job), (Mode::Dev, Some(7)));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    assert_eq!(texts(&g), [failed]);
+    assert!(g.alarms.last().unwrap().owner_question);
 }
 
 /// Inside a HIL job the engine starts without a plan (`restart_in_job`,

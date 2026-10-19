@@ -138,6 +138,44 @@ fn in_prod_the_button_is_the_event_plan_and_ide_event_keeps_the_band_s_system() 
     }
 }
 
+/// "ide event" in prod with the PC in event (REAPER serving after an
+/// explicit `iemmode event`, or a stopped entry) goes live on the pin: in
+/// prod iemmixer serves the band at an event, and nothing stays on or goes
+/// to REAPER on its own (the owner's decision on #11, 2026-10-19). The
+/// engine's health is not read there; the button stays the event plan.
+#[test]
+fn in_prod_ide_event_in_event_goes_live_on_the_pin() {
+    let in_event = || {
+        let mut pc = FakePc::new(band_up());
+        pc.health(Health::Healthy);
+        let mut g = Guard::for_test(Mode::Event);
+        g.state.lifecycle = prod_on(None, None);
+        g.state
+            .bundles
+            .insert(SHA.into(), record(SHA, "main", Hil::Green));
+        (pc, g)
+    };
+    let (mut pc, mut g) = in_event();
+    let r = handle(&mut pc, &mut g, event(true), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Live);
+    assert_eq!(pc.bundle.as_deref(), Some(SHA));
+    assert!(pc.called(Call::ReaperSaveQuit) && pc.called(Call::EngineStart));
+    assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+    assert!(
+        !pc.called(Call::EngineHealth),
+        "health is read in live only"
+    );
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
+    assert_eq!(g.shared.view().running, None);
+    // The button: the event plan's checks, nothing of iemmixer.
+    let (mut pc, mut g) = in_event();
+    let r = handle(&mut pc, &mut g, event(false), INIT);
+    assert!(r.ok, "{r:?}");
+    assert_eq!(g.state.mode, Mode::Event);
+    assert!(!pc.called(Call::EngineStart) && !pc.called(Call::ReaperSaveQuit));
+}
+
 /// "ide event --dry-run" in maintenance changes nothing, a pin that may not
 /// go live included (the real one only alarms since the owner's decision
 /// of 2026-10-19 on #11, no REAPER).
