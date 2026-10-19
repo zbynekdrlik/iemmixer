@@ -100,6 +100,28 @@ fn the_fake_names_the_engine_it_started_as_the_guard_s_child() {
     assert_eq!(pid(&mut pc), Some(third));
 }
 
+/// `fail_after`: a call succeeds so many times, then fails every time and
+/// changes nothing (the review of PR #56, finding 8: a boot attempt after
+/// the first that fails otherwise than by missed periods).
+#[test]
+fn a_fake_call_fails_after_its_scripted_successes() {
+    let c = Cancel::default();
+    let mut pc = FakePc::new(Facts::default());
+    pc.fail_after(Call::EngineReady, 2, "the engine faulted");
+    assert!(pc.engine_ready(10, &c).is_ok());
+    assert!(pc.engine_ready(10, &c).is_ok());
+    for _ in 0..2 {
+        assert_eq!(
+            pc.engine_ready(10, &c),
+            Err(NotReady::Step(StepError::failed("the engine faulted")))
+        );
+    }
+    pc.facts.engine = true;
+    pc.fail_after(Call::EngineStop, 0, "refused");
+    assert_eq!(pc.engine_stop(&c), Err(StepError::failed("refused")));
+    assert!(pc.facts.engine, "a failed stop changes nothing");
+}
+
 /// #10: a REAPER still ending shows so until the wait sees it gone
 /// (unless it outlasts the wait); one that ends by itself does so at
 /// the scripted call, once; a start may show late.

@@ -229,6 +229,8 @@ pub struct FakePc {
     pub routed: Option<Route>,
     calls: Vec<(Call, Instant)>,
     fails: HashMap<Call, String>,
+    /// A call that succeeds so many times, then fails with this.
+    fails_after: HashMap<Call, (usize, String)>,
     blocked: Vec<Call>,
     delays: HashMap<Call, Duration>,
     health: Health,
@@ -310,6 +312,7 @@ impl FakePc {
             routed: None,
             calls: Vec::new(),
             fails: HashMap::new(),
+            fails_after: HashMap::new(),
             blocked: Vec::new(),
             delays: HashMap::new(),
             health: Health::Dead,
@@ -325,6 +328,12 @@ impl FakePc {
     /// `call` succeeds again (a failure that went away).
     pub fn heal(&mut self, call: Call) {
         self.fails.remove(&call);
+    }
+
+    /// `call` succeeds `n` times, then fails with `why` at every later call
+    /// (and changes nothing), as [`FakePc::fail`] makes it fail at once.
+    pub fn fail_after(&mut self, call: Call, n: usize, why: &str) {
+        self.fails_after.insert(call, (n, why.to_owned()));
     }
 
     /// `call` waits until its token is pre-empted, as `WinPc` waits, and
@@ -435,6 +444,11 @@ impl FakePc {
         }
         if let Some(d) = self.delays.get(&call) {
             thread::sleep(*d);
+        }
+        if let Some((n, why)) = self.fails_after.get(&call)
+            && self.count(call) > *n
+        {
+            return Err(StepError::Failed(why.clone()));
         }
         match self.fails.get(&call) {
             Some(why) => Err(StepError::Failed(why.clone())),

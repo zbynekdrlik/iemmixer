@@ -447,3 +447,49 @@ fn an_alarm_after_a_hold_that_changed_nothing_says_iemmixer_plays_on() {
         )]
     );
 }
+
+/// The review of PR #56, finding 8: only the boot's last miss named its
+/// attempts; any other failure after the first attempt (a fault, the
+/// stop of the engine that missed, the preference check before the next
+/// start) read as the first attempt's. Every failure of the boot's live
+/// entry after its first attempt names the attempt; the first attempt's
+/// own failure names none (`the_boot_s_live_entry_retries_only_missed_periods`).
+#[test]
+fn every_failure_after_the_boot_s_first_attempt_names_it() {
+    let failed = |script: &dyn Fn(&mut FakePc)| {
+        let (mut pc, mut g) = booted_in_prod();
+        script(&mut pc);
+        assert_eq!(start(&mut pc, &mut g, 5_000), Some(Outcome::NeedsOwner));
+        assert_eq!(g.state.mode, Mode::Event);
+        assert!(!pc.called(Call::ReaperStart) && !pc.called(Call::AppStart));
+        texts(&g)
+    };
+    let alarm = |why: &str, attempt: u32| {
+        [format!(
+            "EngineArm: {why} (attempt {attempt} of 4 after the boot); {}",
+            no_reaper(SHA)
+        )]
+    };
+    let faulted = "the engine faulted";
+    let fault_at = |misses: Vec<u64>| {
+        move |pc: &mut FakePc| {
+            pc.fail_after(Call::EngineReady, misses.len(), faulted);
+            pc.ready_misses.clone_from(&misses);
+        }
+    };
+    assert_eq!(failed(&fault_at(vec![1])), alarm(faulted, 2));
+    assert_eq!(failed(&fault_at(vec![1, 2])), alarm(faulted, 3));
+    assert_eq!(failed(&fault_at(vec![1, 2, 1])), alarm(faulted, 4));
+    let stop = "no DriverReleased within 10 s";
+    let t = failed(&|pc: &mut FakePc| {
+        pc.ready_misses = vec![1];
+        pc.fail(Call::EngineStop, stop);
+    });
+    assert_eq!(t, alarm(stop, 2));
+    let pref = "3 restores failed";
+    let t = failed(&|pc: &mut FakePc| {
+        pc.ready_misses = vec![1, 1];
+        pc.fail_after(Call::PrefCheck, 2, pref);
+    });
+    assert_eq!(t, alarm(pref, 3));
+}
