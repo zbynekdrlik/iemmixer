@@ -188,9 +188,11 @@ impl Shared {
     /// Decides under the view's lock, so "ide event" either pre-empts a
     /// switch that is not an event plan or waits for the event plan, never
     /// both: an event plan clears the token under the same lock as it
-    /// begins. "Ide event" moves the fence, so a dev or live entry queued
-    /// before it never runs after it; one routed while the start's checks
-    /// run is queued behind them (#42).
+    /// begins. In prod the owner's "ide event" (`signal`) pre-empts no
+    /// switch: it waits for one to live and is queued behind one to dev.
+    /// "Ide event" moves the fence, so a dev or live entry queued before it
+    /// never runs after it; one routed while the start's checks run is
+    /// queued behind them (#42).
     pub fn route(&self, req: &Request) -> Route {
         let mut v = self.lock();
         if matches!(req, Request::Event { dry_run: false, .. }) {
@@ -212,6 +214,18 @@ impl Shared {
                 },
                 Some(Mode::Live),
             ) if v.prod => Route::AwaitEnd("waited for the switch to live in prod"),
+            // …and is queued behind a dev entry (maintenance), the token
+            // untouched (the review of PR #56): a pre-emption would unwind
+            // it to the event plan, REAPER on its own. Once the entry ended,
+            // "ide event" goes live on the pin (`lifecycle::on_event`). The
+            // button pre-empts it, as before the cutover.
+            (
+                Request::Event {
+                    dry_run: false,
+                    signal: true,
+                },
+                Some(Mode::Dev),
+            ) if v.prod => Route::Queue(v.generation()),
             (Request::Event { dry_run: false, .. }, Some(_)) => {
                 self.cancel.preempt();
                 Route::AwaitEnd("pre-empted the switch in progress")
