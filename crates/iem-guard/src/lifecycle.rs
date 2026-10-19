@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::bundle::{Record, may_go_live};
 use crate::plan::{self, Facts, Mode, Step};
+use crate::view::mode_name;
 
 /// Where the PC is in its life (design §3.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,58 +213,61 @@ pub fn holds_cut_off(lc: &Lifecycle, rebooted: bool, left: Option<Mode>) -> bool
 /// the cutover: the event plan, as before. A pre-empted entry still
 /// unwinds: the pre-emption is the request for the event plan.
 pub fn ways_on<'r>(lc: &Lifecycle, record: impl Fn(&str) -> Option<&'r Record>) -> Option<String> {
+    let pin = live_pin(lc, &record)?;
+    Some(format!(
+        "in prod nothing goes to REAPER on its own: iemmode live --build {pin} tries again, \
+         iemmode event starts REAPER (the PC stays prod)"
+    ))
+}
+
+/// The pin a prod live entry runs ([`Prod::end_maintenance`]); none before
+/// the cutover.
+fn live_pin<'r>(lc: &Lifecycle, record: &impl Fn(&str) -> Option<&'r Record>) -> Option<String> {
     let Lifecycle::Prod(p) = lc else {
         return None;
     };
-    let (next, _) = p.end_maintenance(&record);
-    Some(format!(
-        "in prod nothing goes to REAPER on its own: iemmode live --build {} tries again, \
-         iemmode event starts REAPER (the PC stays prod)",
-        next.pin
-    ))
+    Some(p.end_maintenance(record).0.pin)
 }
 
 /// What a prod alarm says after a dev or live entry stopped (`left`:
 /// [`stops_in`], [`cut_off_in`]; the review of PR #56, #11 2026-10-19):
 /// after a stop that changed nothing in live or dev, that the PC stays
-/// there as it was, and after one whose engine was armed, that the PC is in
-/// the entry's target with it, each followed by "asking for it again tries
+/// there as it was, and after a dev entry whose engine was armed, that the
+/// PC is in dev with it, each followed by "asking for it again tries
 /// again": [`ways_on`]'s live entry would restart an engine that may play,
 /// and nothing here claims an engine plays (one that "ide event" found not
-/// playing stays so). After a stop that changed what runs (the PC in event,
-/// nothing of iemmixer playing), or from event, [`ways_on`]. `None` before
-/// the cutover, as [`ways_on`].
+/// playing stays so). After a live entry whose engine was armed, that the
+/// PC is in live with it, which "ide event" keeps as it is (asking it again
+/// retries nothing), and the live entry that starts it all again or the way
+/// to REAPER. After a stop that changed what runs (the PC in event, nothing
+/// of iemmixer playing), or from event, [`ways_on`]. `None` before the
+/// cutover, as [`ways_on`].
 pub fn after_stop<'r>(
     lc: &Lifecycle,
     left: Left,
     record: impl Fn(&str) -> Option<&'r Record>,
 ) -> Option<String> {
-    let ways = ways_on(lc, record)?;
+    let pin = live_pin(lc, &record)?;
     let what = match left {
         Left::Unchanged(m @ (Mode::Dev | Mode::Live)) => format!(
-            "no step done changed what runs, so the PC stays in {} as it was",
-            mode_word(m)
+            "no step done changed what runs, so the PC stays in {} as it was (asking for it \
+             again tries again)",
+            mode_name(m)
         ),
-        Left::Armed(m @ (Mode::Dev | Mode::Live)) => format!(
-            "its engine was armed, so the PC is in {} with it",
-            mode_word(m)
+        Left::Armed(Mode::Dev) => {
+            "its engine was armed, so the PC is in dev with it (asking for it again tries again)"
+                .to_owned()
+        }
+        Left::Armed(Mode::Live) => format!(
+            "its engine was armed, so the PC is in live with it (ide event keeps it as it is): \
+             iemmode live --build {pin} starts it all again, iemmode event starts REAPER (the \
+             PC stays prod)"
         ),
         Left::Unchanged(Mode::Event) | Left::Armed(Mode::Event) | Left::Changed => {
-            return Some(ways);
+            return ways_on(lc, record);
         }
     };
-    Some(format!(
-        "in prod nothing goes to REAPER on its own: {what} (asking for it again tries again)"
-    ))
-}
-
-/// A mode as the alarms name it.
-fn mode_word(m: Mode) -> &'static str {
-    match m {
-        Mode::Event => "event",
-        Mode::Dev => "dev",
-        Mode::Live => "live",
-    }
+    Some(format!("in prod nothing goes to REAPER on its own: {what}"))
 }
 
 /// What a prod dev or live entry that stops leaves running ([`stops_in`],
@@ -276,7 +280,9 @@ pub enum Left {
     /// It stopped or started what plays the band or serves its phones (the
     /// app, REAPER, the old engine, server or tray stopped, a stop's request
     /// sent, its own engine started, held): the PC is in event, where the
-    /// crash watch respawns nothing and both ways on run from.
+    /// crash watch respawns nothing and both ways on run from (a HIL job's
+    /// engine restart, `daemon::activation`, keeps dev whatever it left: a
+    /// held engine there is the job's own build).
     Changed,
     /// Its engine was armed, so it plays, before a later step failed (the
     /// server, the tray, the identity check, the runner): the PC is in the

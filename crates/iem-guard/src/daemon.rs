@@ -186,6 +186,10 @@ pub struct Guard {
     /// engine was armed is in its target, so its lifecycle change holds
     /// (`requests::entry`).
     stopped: Option<crate::lifecycle::Left>,
+    /// The HIL job the running switch's `JobsCancel` took (its run id): a
+    /// prod entry that stops in dev, nothing changed, before its runner
+    /// stopped puts it back, since the runner still runs it.
+    job_cancelled: Option<u64>,
     /// The switch in progress is the boot's live entry in prod
     /// (`startup::start_plan`): its `EngineArm` starts an engine that
     /// missed periods again, up to [`BOOT_ARM_RETRIES`] times (#11).
@@ -263,6 +267,7 @@ impl Guard {
             trial: false,
             entry_build: None,
             stopped: None,
+            job_cancelled: None,
             boot_entry: false,
             boot_arm_spacing: BOOT_ARM_SPACING,
             report: Vec::new(),

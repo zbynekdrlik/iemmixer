@@ -39,6 +39,7 @@ impl Guard {
         });
         self.owner_failed.clear();
         self.stopped = None;
+        self.job_cancelled = None;
         // An unwind goes on with the entry's clock.
         if self.unwinding.is_some() {
             self.laps.resume(Instant::now());
@@ -212,6 +213,14 @@ pub(super) fn switch(
                             );
                             g.alarm(step, &format!("{why}; {ways}"), true);
                             g.stopped = Some(left);
+                            // Stopped in dev before its runner stopped: the
+                            // HIL job `JobsCancel` took still runs there.
+                            if left == lifecycle::Left::Unchanged(Mode::Dev)
+                                && !done_steps(g).contains(&Step::RunnerStop)
+                                && let Some(run) = g.job_cancelled.take()
+                            {
+                                g.state.job = Some(run);
+                            }
                             return g.finish(pc, Outcome::NeedsOwner, ends);
                         }
                         g.alarm(step, &why, false);
@@ -519,7 +528,8 @@ pub(super) fn run_step(pc: &mut dyn Pc, g: &mut Guard, step: Step, to: Mode) -> 
         }
         Step::RunnerStart => pc.runner_start(),
         Step::JobsCancel => {
-            if let Some(run) = g.state.job.take() {
+            g.job_cancelled = g.state.job.take();
+            if let Some(run) = g.job_cancelled {
                 g.info(format!("HIL job {run} cancelled"));
             }
             Ok(())
