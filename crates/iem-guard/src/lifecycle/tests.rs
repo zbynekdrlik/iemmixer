@@ -593,6 +593,7 @@ fn a_restarted_guard_in_prod_holds_a_left_entry_before_any_reset() {
 /// watch respawns nothing and both ways on run from.
 #[test]
 fn a_stopped_entry_ends_where_it_began_only_while_nothing_changed() {
+    let unchanged: [&[Step]; 2] = [&[], &[Step::Precheck]];
     let changed: [&[Step]; 4] = [
         &[Step::Precheck, Step::EngineStop],
         &[Step::Precheck, Step::AppStop],
@@ -600,7 +601,7 @@ fn a_stopped_entry_ends_where_it_began_only_while_nothing_changed() {
         &[Step::EngineStop],
     ];
     for from in [Mode::Event, Mode::Dev, Mode::Live] {
-        for done in [&[][..], &[Step::Precheck][..]] {
+        for done in unchanged {
             let left = stops_in(from, done);
             assert_eq!(left, Left::Unchanged(from), "{from:?} {done:?}");
             assert_eq!(left.mode(), from, "{from:?} {done:?}");
