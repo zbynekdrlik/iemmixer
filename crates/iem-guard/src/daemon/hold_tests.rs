@@ -544,9 +544,11 @@ fn a_prod_hold_after_its_engine_armed_keeps_that_engine_in_the_entry_s_mode() {
 /// The second review of the fixes for PR #56: a restarted guard that finds
 /// a prod entry cut off after its engine armed is in the entry's target
 /// with that engine only when it adopted an engine (else nothing of it
-/// runs: event), and then the entry's lifecycle change holds as for a
-/// failed one (here the live entry that ends maintenance on a green main
-/// build makes it the pin).
+/// runs: event). A live entry's lifecycle change then holds as for a failed
+/// one (here the live entry that ends maintenance on a green main build
+/// makes it the pin, and says so); a dev entry's build is not known after
+/// the cut (a plain `dev` keeps the session), so dev keeps the lifecycle
+/// (the third review).
 #[test]
 fn a_cut_off_prod_entry_after_its_engine_armed_is_in_with_the_adopted_engine() {
     let cut_off = |adopted: bool| {
@@ -595,6 +597,8 @@ fn a_cut_off_prod_entry_after_its_engine_armed_is_in_with_the_adopted_engine() {
             maintenance: None,
         })
     );
+    let note = format!("maintenance build {OTHER} becomes the pin; {SHA} is the previous pin");
+    assert!(g.report.contains(&note), "{:?}", g.report);
     assert_eq!(
         texts(&g),
         [format!(
@@ -608,7 +612,8 @@ fn a_cut_off_prod_entry_after_its_engine_armed_is_in_with_the_adopted_engine() {
     assert_eq!(g.state.lifecycle, prod_on(None, Some(OTHER)));
     assert_eq!(texts(&g), [format!("{head}; {}", no_reaper(OTHER))]);
     // A maintenance entry on a dev build from live, cut off after its engine
-    // armed: dev with that engine, the session's build recorded.
+    // armed: dev with that engine; the lifecycle stays (whether the entry
+    // named a build is not known).
     let (mut pc, mut g) = prod_live();
     g.state.set_active(OTHER);
     g.state.pids.engine = Some(crate::state::Child {
@@ -630,7 +635,7 @@ fn a_cut_off_prod_entry_after_its_engine_armed_is_in_with_the_adopted_engine() {
     g.state.written_at = 0;
     assert_eq!(start(&mut pc, &mut g, 0), None);
     assert_eq!(g.state.mode, Mode::Dev);
-    assert_eq!(g.state.lifecycle, prod_on(None, Some(OTHER)));
+    assert_eq!(g.state.lifecycle, prod_on(None, None));
     assert_eq!(
         texts(&g),
         [
