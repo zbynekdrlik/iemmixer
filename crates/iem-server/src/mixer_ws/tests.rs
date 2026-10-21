@@ -376,6 +376,110 @@ fn page_mix_changes_are_told_apart() {
     ));
 }
 
+/// A state with the test roster, `active` playing, on a fake engine whose
+/// mirror holds no level and `solo`; the engine's end.
+async fn on_fake_engine(
+    dir: &std::path::Path,
+    active: &str,
+    solo: Vec<iem_engine_proto::Solo>,
+) -> (AppState, crate::engine::client::fake::Peer) {
+    let mut s = AppState::new(crate::site_view::tests::test_config(), dir);
+    s.set_roster(Some(crate::roster_state::tests::test_roster(active)));
+    let (engine, mut peer) =
+        crate::engine::client::fake::announced(crate::site_view::tests::test_topology()).await;
+    s.engine = engine;
+    peer.send(&iem_engine_proto::EngineMsg::State {
+        rev: 1,
+        state: Default::default(),
+        transient: iem_engine_proto::Transient {
+            solo,
+            ..Default::default()
+        },
+    })
+    .await;
+    let t0 = std::time::Instant::now();
+    while !s.engine.mirror().synced {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "synced");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    (s, peer)
+}
+
+/// #58 review: the echo of a session's own solo shows the channels its
+/// viewer sees: the engineer on member10's page (youth) gets the heard
+/// mixes' masks, which member10 does not see.
+#[tokio::test]
+async fn the_echo_of_an_own_solo_is_the_viewers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mix1 = MixId::new("member1");
+    let sources = vec![Source::Input(InputId::new("mic1"))];
+    let solo = iem_engine_proto::Solo {
+        mix: mix1.clone(),
+        sources: sources.clone(),
+    };
+    let (s, _peer) = on_fake_engine(dir.path(), "youth", vec![solo]).await;
+    let page = s.page("member10").unwrap();
+    let changes = std::sync::Arc::new(vec![Change::Solo { mix: mix1, sources }]);
+    let echo = |v: &Viewer| -> Vec<String> {
+        let ev = EngineEvent::Changed {
+            origin: Some(5),
+            changes: std::sync::Arc::clone(&changes),
+        };
+        engine_event(&s, 5, &page, v, ev)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::ChannelUpdate { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    };
+    let engineer = echo(&viewer("engineer", true));
+    assert!(
+        engineer.contains(&"member3".to_string()) && engineer.contains(&"member4".to_string()),
+        "{engineer:?}"
+    );
+    let own = echo(&viewer("member10", false));
+    assert!(
+        !own.is_empty() && !own.contains(&"member3".to_string()),
+        "{own:?}"
+    );
+}
+
+/// #58 review: a person's page hears nothing of the engine while a switch
+/// runs or once its band no longer plays: the new band's values never
+/// reach a page that is about to close (4003).
+#[tokio::test]
+async fn a_frozen_or_stale_persons_page_hears_nothing_of_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _peer) = on_fake_engine(dir.path(), "main", Vec::new()).await;
+    let page = s.page("member1").unwrap();
+    let m1 = viewer("member1", false);
+    let changes = std::sync::Arc::new(vec![Change::Level {
+        mix: MixId::new("member1"),
+        source: Source::Input(InputId::new("keys")),
+        level: iem_engine_proto::Level {
+            gain_db: -6.0,
+            pan: 0.0,
+            muted: false,
+        },
+    }]);
+    let heard = || {
+        let ev = EngineEvent::Changed {
+            origin: None,
+            changes: std::sync::Arc::clone(&changes),
+        };
+        engine_event(&s, 5, &page, &m1, ev)
+    };
+    assert_eq!(heard().len(), 1, "its band plays");
+    s.frozen.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(heard().is_empty(), "a switch runs");
+    assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
+    s.frozen.store(false, std::sync::atomic::Ordering::SeqCst);
+    s.set_roster(Some(crate::roster_state::tests::test_roster("youth")));
+    assert!(heard().is_empty(), "member1 plays no part of youth");
+    assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
+}
+
 /// Commands, engine events and meters against the real engine (NullRt).
 #[cfg(unix)]
 mod live {
