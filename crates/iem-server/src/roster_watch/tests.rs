@@ -905,3 +905,159 @@ async fn a_legacy_server_adopts_its_first_roster() {
     ));
     assert_eq!(legacy.roster(), None);
 }
+
+/// Youth's running state as a switch leaves it: youth's rules hold.
+fn youth_running() -> MixState {
+    let mut live = running();
+    let r = test_roster("youth");
+    fit(&mut live, &r.roster, r.lineup());
+    live
+}
+
+/// #58 review: a reload tried while the engine is not synced waits, and
+/// the watcher's next try once it is puts the roster's rules into the
+/// running state and records the roster.
+#[tokio::test]
+async fn a_deferred_reload_brings_its_rules_once_the_engine_is_synced() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "youth");
+    let text = without_member11();
+    std::fs::write(d.join(ROSTER_FILE), &text).unwrap();
+    assert!(matches!(
+        check_file(&state).await,
+        Some(Applied::Deferred(_))
+    ));
+    assert!(!d.join(STATUS_FILE).exists(), "tried again");
+    let mut peer = synced(&mut state, youth_running()).await;
+    let check = {
+        let s = state.clone();
+        tokio::spawn(async move { check_file(&s).await })
+    };
+    let imported = imports(&mut peer).await;
+    assert_eq!(within(check).await, Some(applied(&[], &["member11"])));
+    assert!(
+        imported.mixes[&MixId::new("member4")].out.muted,
+        "nobody wears set member4 in youth now"
+    );
+    assert_eq!(
+        LineupStore::new(d).applied_roster().unwrap().as_deref(),
+        Some(text.as_str())
+    );
+}
+
+/// #58 review: a roster changed while the server was down moves the mixes
+/// of the people it moves once the engine has synced (the roster the
+/// states followed was recorded), and the pages hear of it.
+#[tokio::test]
+async fn the_start_moves_the_mixes_of_a_roster_changed_while_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    let text = moved();
+    std::fs::write(d.join(ROSTER_FILE), &text).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let mut rx = state.lineup_tx.subscribe();
+    let mut peer = synced(&mut state, running()).await;
+    let settle = tokio::spawn(settle_when_synced(state.clone()));
+    let imported = imports(&mut peer).await;
+    within(settle).await;
+    let keys = |id: &str| imported.mixes[&MixId::new(id)].inputs[&InputId::new("keys")].gain_db;
+    assert_eq!(keys("member9"), -6.0, "member5's mix is on set member9");
+    assert!(
+        imported.mixes[&MixId::new("member5")].out.muted,
+        "nobody wears set member5 now"
+    );
+    assert_eq!(rx.try_recv().unwrap().id, "main");
+    assert_eq!(
+        store.applied_roster().unwrap().as_deref(),
+        Some(text.as_str())
+    );
+}
+
+/// #58 review: a roster that cannot reach the states (a stored state that
+/// cannot be read) does not keep the pages refused: after a few tries the
+/// engineer's devices hear of it once and the pages are free.
+#[tokio::test]
+async fn a_settle_that_keeps_failing_alarms_and_frees_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    std::fs::create_dir_all(store.data_dir("youth").join("state.json")).unwrap();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    let _peer = synced(&mut state, running()).await;
+    tokio::time::timeout(Duration::from_secs(15), settle_when_synced(state.clone()))
+        .await
+        .expect("given up within 15 s");
+    assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
+    let page = state.page("member2").unwrap();
+    assert_eq!(state.may_change(&page), Ok(()));
+    assert_eq!(
+        store.applied_roster().unwrap(),
+        None,
+        "the states do not follow it"
+    );
+}
+
+/// #58 review: no page changes a mix while a reload's import runs.
+#[tokio::test]
+async fn the_pages_are_frozen_during_a_reloads_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let mut peer = synced(&mut state, running()).await;
+    let page = state.page("member1").unwrap();
+    let task = spawn_apply(&state, &swapped());
+    let (id, imported) = fake::next_import(&mut peer).await;
+    assert_eq!(
+        state.may_change(&page),
+        Err(crate::view::ViewError::Switching)
+    );
+    fake::answer_import(&mut peer, id, 2, imported).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    assert_eq!(state.may_change(&page), Ok(()));
+}
+
+/// #58 review: a reload that comes while a switch runs waits for it, then
+/// applies to the lineup the switch made active.
+#[tokio::test]
+async fn a_reload_waits_for_a_switch_and_applies_to_its_lineup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let mut peer = synced(&mut state, running()).await;
+    let switch = {
+        let s = state.clone();
+        let engineer = iem_core::AuthClaims {
+            sub: "engineer".into(),
+            engineer: true,
+            exp: u64::MAX,
+            iat: 0,
+        };
+        tokio::spawn(
+            async move { crate::lineup_switch::switch_lineup(&s, "youth", &engineer).await },
+        )
+    };
+    let (id, to_youth) = fake::next_import(&mut peer).await;
+    let reload = spawn_apply(&state, &without_member11());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!reload.is_finished(), "the switch holds the lock");
+    fake::answer_import(&mut peer, id, 2, to_youth.clone()).await;
+    assert_eq!(within(switch).await, Ok(()));
+    // Youth plays now: member11 leaves its set member4, silent after it.
+    let imported = fake::imports(&mut peer, 3).await;
+    assert_eq!(within(reload).await, applied(&[], &["member11"]));
+    assert!(!to_youth.mixes[&MixId::new("member4")].out.muted);
+    assert!(imported.mixes[&MixId::new("member4")].out.muted);
+    assert_eq!(state.roster().unwrap().active, "youth");
+}
