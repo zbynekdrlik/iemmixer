@@ -127,8 +127,12 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
     let Ok(_running) = state.switching.try_lock() else {
         return Err(SwitchError::Busy);
     };
-    // The roster as it is now that no reload runs.
+    // The roster as it is now that no reload runs: one that ran since the
+    // first look may have taken the right away.
     let roster = state.roster().ok_or(SwitchError::NotConfigured)?;
+    if !may_switch(&roster.roster, by) {
+        return Err(SwitchError::Forbidden);
+    }
     let from = roster.lineup().id.clone();
     let target = roster
         .roster
