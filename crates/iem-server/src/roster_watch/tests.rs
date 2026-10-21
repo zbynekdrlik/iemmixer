@@ -1500,3 +1500,46 @@ async fn a_start_after_a_cut_transition_moves_nobody_twice() {
         "moved once, not a copy of the set member5 left"
     );
 }
+
+/// [`moved`] without member11 (youth's set member4 is empty).
+fn moved_without_member11() -> String {
+    let t = without_member11();
+    let t = edit(&t, "member5 = \"member5\"\n", "");
+    let t = edit(&t, "member9 = \"member9\"\n", "member9 = \"member5\"\n");
+    edit(
+        &t,
+        "mic10 = { name = \"MEMBER9 mic\", owner = \"member9\" }\n",
+        "mic10 = { name = \"MEMBER9 mic\" }\n",
+    )
+}
+
+/// #58 re-review: a settle that gives up frees the pages but keeps what
+/// the states follow: the next roster change still moves the mixes of the
+/// people a roster moved while the server was down.
+#[tokio::test]
+async fn a_settle_that_gave_up_still_moves_people_at_the_next_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    let youth = store.data_dir("youth").join("state.json");
+    std::fs::create_dir_all(&youth).unwrap();
+    std::fs::write(d.join(ROSTER_FILE), moved()).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let mut peer = synced(&mut state, running()).await;
+    state.retry = Duration::from_millis(20);
+    within(tokio::spawn(settle_when_synced(state.clone()))).await;
+    let page = state.page("member1").unwrap();
+    assert_eq!(state.may_change(&page), Ok(()), "the pages are free");
+    std::fs::remove_dir(&youth).unwrap();
+    let task = spawn_apply(&state, &moved_without_member11());
+    let imported = imports(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &["member11"]));
+    let set9 = &imported.mixes[&MixId::new("member9")];
+    assert_eq!(
+        set9.inputs[&InputId::new("keys")].gain_db,
+        -6.0,
+        "member5's mix, moved now"
+    );
+}
