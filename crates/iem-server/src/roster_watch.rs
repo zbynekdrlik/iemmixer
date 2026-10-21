@@ -764,9 +764,8 @@ async fn transition(
     // A solo ends on every set of the active lineup whose wearer changes
     // (no `base`: who wore which set is not known, every solo stays).
     let before = base.and_then(|b| b.lineup(active));
-    let soloed_now = |t: &Transient| {
-        before.map_or_else(Vec::new, |b| soloed_changing(t, b, &lineup))
-    };
+    let soloed_now =
+        |t: &Transient| before.map_or_else(Vec::new, |b| soloed_changing(t, b, &lineup));
     let (current, soloed) = {
         let m = state.engine.mirror();
         (m.state.clone(), soloed_now(&m.transient))
