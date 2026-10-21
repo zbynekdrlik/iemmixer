@@ -989,8 +989,14 @@ async fn transition(
     // and the new one list; a roster learned from a marker below only moves
     // people (#58 fourth review).
     let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
-    // Every other lineup's stored state and what the running state follows,
-    // each marker's roster learned from the kept ones.
+    // What the running state follows, first: reading it resolves and saves
+    // a pending import against the synced engine's state, whatever fails
+    // after (#58 fifth review).
+    let held = state_digest(&state.engine.mirror().state);
+    let (marker, recorded) = running_for(&store, active, &held);
+    follows.learn(&store, marker.as_deref());
+    // Every other lineup's stored state, each marker's roster learned from
+    // the kept ones.
     let mut stored_states = Vec::new();
     for l in new.lineups.iter().filter(|l| l.id != active) {
         match store.state(&l.id) {
@@ -1008,9 +1014,6 @@ async fn transition(
             }
         }
     }
-    let held = state_digest(&state.engine.mirror().state);
-    let (marker, recorded) = running_for(&store, active, &held);
-    follows.learn(&store, marker.as_deref());
     // The stored states, worked out first.
     let mut planned: Vec<Planned> = Vec::new();
     for (l, stored) in stored_states {
