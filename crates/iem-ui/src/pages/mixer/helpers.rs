@@ -647,8 +647,18 @@ mod tests {
         // A leader who does not play has it on the notice instead.
         let away = LineupView::Roster(info("youth", false, true));
         assert_eq!(away.switch_here("member1", "member1", false), None);
-        let rereading = LineupView::Rereading(info("main", true, true));
-        assert_eq!(rereading.switch_here("member3", "member3", false), None);
+        // Read again after the 4003 close its own switch caused: it stays,
+        // with its answer.
+        let rereading = LineupView::Rereading(info("youth", true, true));
+        assert_eq!(
+            rereading.switch_here("member3", "member3", false),
+            Some(&info("youth", true, true))
+        );
+        assert_eq!(rereading.switch_here("member1", "member3", false), None);
+        assert_eq!(
+            LineupView::Reading.switch_here("engineer", "engineer", true),
+            None
+        );
     }
 
     #[test]
