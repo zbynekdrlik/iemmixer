@@ -920,6 +920,9 @@ fn absent_alarm_due(alarmed: bool, waited: Duration, after: Duration) -> bool {
 /// Why a roster waits: its rules reach the running state only through a
 /// synced engine.
 const NOT_SYNCED: &str = "the engine state is not synced: the roster waits for it";
+/// Why a roster waits: what the running state follows once its import is in
+/// could not be written before it (`Running::pending`), so nothing went.
+const NOT_RECORDED: &str = "what the running state follows could not be written: the roster waits";
 /// Why a roster waits: a switch a restart cut short is not finished, so
 /// which band's state the engine holds is not known.
 const UNFINISHED_SWITCH: &str = "a band switch is not finished: the roster waits for it";
@@ -1102,7 +1105,8 @@ async fn transition(
         } else {
             // What the running state follows once the import is in, written
             // before it: its answer may be lost with the server (#58 third
-            // review); a failed import puts the record before back.
+            // review). Unwritten, nothing is imported (#58 fourth review);
+            // a failed import puts the record before back.
             let prior = Running {
                 lineup: active.to_string(),
                 follows: marker.clone(),
@@ -1114,34 +1118,36 @@ async fn transition(
                 silenced: running.silenced.clone(),
                 digest: state_digest(&next),
             };
-            note_running(
-                &store,
-                &Running {
-                    pending: Some(pending),
-                    ..prior.clone()
-                },
-            );
-            let sent = match state
-                .engine
-                .request_applied(import(next.clone()), None)
-                .await
-            {
-                Ok(()) => Ok(running),
-                Err(e @ EngineError::Refused(_)) => Err(failed(&e)),
-                Err(e) => {
-                    tracing::warn!(lineup = %active, error = %e, "a roster's import got no answer: waiting for the engine to answer again");
-                    if landed(state, &next).await {
-                        tracing::info!(lineup = %active, "the engine had taken the roster's import");
-                        Ok(running)
-                    } else {
-                        Err(failed(&e))
+            let noted = store.set_running(&Running {
+                pending: Some(pending),
+                ..prior.clone()
+            });
+            if let Err(e) = noted {
+                tracing::error!(lineup = %active, error = %e, "what the running state follows was not recorded before the import: nothing imported");
+                Err(Applied::Deferred(vec![NOT_RECORDED.to_string()]))
+            } else {
+                let sent = match state
+                    .engine
+                    .request_applied(import(next.clone()), None)
+                    .await
+                {
+                    Ok(()) => Ok(running),
+                    Err(e @ EngineError::Refused(_)) => Err(failed(&e)),
+                    Err(e) => {
+                        tracing::warn!(lineup = %active, error = %e, "a roster's import got no answer: waiting for the engine to answer again");
+                        if landed(state, &next).await {
+                            tracing::info!(lineup = %active, "the engine had taken the roster's import");
+                            Ok(running)
+                        } else {
+                            Err(failed(&e))
+                        }
                     }
+                };
+                if sent.is_err() {
+                    note_running(&store, &prior);
                 }
-            };
-            if sent.is_err() {
-                note_running(&store, &prior);
+                sent
             }
-            sent
         }
     } else {
         Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]))
