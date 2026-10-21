@@ -2406,3 +2406,31 @@ fn what_the_running_state_follows_is_only_its_own_lineups() {
     );
     assert_eq!(running_for(&store, "main", ""), (None, BTreeSet::new()));
 }
+
+/// A stored state that cannot be written refuses a reload after the pages
+/// were frozen for it: they are free again (they were free before), and
+/// the stored states stay as they were.
+#[tokio::test]
+async fn a_stored_state_that_cannot_be_written_frees_the_pages_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "main");
+    let store = LineupStore::new(d);
+    let stored = MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, running());
+    store.save_state("youth", &stored).unwrap();
+    // The write's temporary file cannot be made: a directory holds its name.
+    std::fs::create_dir_all(store.data_dir("youth").join("state.tmp")).unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    let task = spawn_apply(&state, &swapped());
+    // The freeze's barrier: the running state changes, so the pages freeze.
+    fake::answer_ping(&mut peer).await;
+    let result = within(task).await;
+    assert!(
+        matches!(&result, Applied::Refused(p) if p.len() == 1
+            && p[0].starts_with("the stored state of lineup youth was not written")),
+        "{result:?}"
+    );
+    assert!(!state.frozen_now(), "free again");
+    assert_eq!(store.state("youth").unwrap(), Some(stored));
+    assert_eq!(state.roster(), Some(test_roster("main")));
+}
