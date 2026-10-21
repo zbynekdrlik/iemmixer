@@ -1598,3 +1598,71 @@ async fn a_reload_waits_for_an_unfinished_switch() {
         "nothing sent"
     );
 }
+
+/// A site whose `roster.toml` the start cannot use (two main lineups)
+/// beside the roster applied last (the test roster), main playing, the
+/// engineer's device subscribed: the server starts with the copy.
+async fn fallen_back(d: &Path) -> (AppState, crate::push::tests::Seen) {
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    let two = edit(
+        TEXT,
+        "name = \"Youth band\"\n",
+        "name = \"Youth band\"\nmain = true\n",
+    );
+    std::fs::write(d.join(ROSTER_FILE), two).unwrap();
+    let state = AppState::new(test_config(), d);
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    (state, seen)
+}
+
+/// #58 re-review: after a start on the roster applied last, the status
+/// keeps saying so while `roster.toml` stays refused, and stops once it
+/// can be used.
+#[tokio::test]
+async fn the_status_says_the_fallback_until_a_roster_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let (state, _) = fallen_back(d).await;
+    let fallback = "in use instead: the roster applied last".to_string();
+    assert_eq!(status(d).problems.last(), Some(&fallback));
+    assert!(matches!(
+        check_file(&state).await,
+        Some(Applied::Refused(_))
+    ));
+    let s = status(d);
+    assert_eq!(
+        s.problems,
+        [
+            "exactly one lineup must be main, not 2".to_string(),
+            fallback
+        ]
+    );
+    // roster.toml is the roster in use again: in use, nothing refused.
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    check_file(&state).await;
+    let s = status(d);
+    assert!(s.ok && s.applied, "{s:?}");
+    assert_eq!(s.sha256, sha256_hex(TEXT.as_bytes()));
+}
+
+/// #58 re-review: a start on the roster applied last tells the engineer's
+/// devices once; a start on `roster.toml` does not.
+#[tokio::test]
+async fn a_fallback_start_alarms_the_engineer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, seen) = fallen_back(dir.path()).await;
+    assert_eq!(fallback_alarm(&state).await, 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    std::fs::write(dir.path().join(ROSTER_FILE), TEXT).unwrap();
+    let state = AppState::new(test_config(), dir.path());
+    assert_eq!(fallback_alarm(&state).await, 0, "roster.toml is in use");
+}
