@@ -1160,9 +1160,14 @@ async fn a_settle_that_keeps_failing_alarms_and_frees_the_pages() {
         .add(crate::push::tests::subscription(format!("{base}/201")))
         .unwrap();
     let _peer = synced(&mut state, running()).await;
+    let t0 = std::time::Instant::now();
     tokio::time::timeout(Duration::from_secs(15), settle_when_synced(state.clone()))
         .await
         .expect("given up within 15 s");
+    assert!(
+        t0.elapsed() >= REPLAY_RETRY * (MAX_SETTLES - 1),
+        "{MAX_SETTLES} tries, {REPLAY_RETRY:?} apart"
+    );
     assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
     let page = state.page("member2").unwrap();
     assert_eq!(state.may_change(&page), Ok(()));
@@ -1256,4 +1261,76 @@ async fn the_watcher_reads_a_waiting_roster_again_at_every_poll() {
     let edited = stamp(&path);
     assert_eq!(poll(&state, &path, edited).await, edited);
     assert_eq!(state.roster().unwrap().sha256, in_use, "not read");
+}
+
+/// A settle tries again, uncounted, while the roster waits for the engine.
+#[test]
+fn only_a_refusal_counts_against_a_settle() {
+    assert!(waits(&Applied::Deferred(vec![NOT_SYNCED.to_string()])));
+    assert!(!waits(&Applied::Refused(Vec::new())));
+}
+
+/// #58 review: a set the rules silenced in an inactive lineup's stored
+/// state sounds again there once someone wears it.
+#[tokio::test]
+async fn an_inactive_lineups_silenced_set_sounds_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    store
+        .save_state("youth", &MixerBackup::new("t".into(), 1, youth_running()))
+        .unwrap();
+    let _peer = synced(&mut state, running()).await;
+    let set4 = || {
+        store.state("youth").unwrap().unwrap().state.mixes[&MixId::new("member4")]
+            .out
+            .muted
+    };
+    assert_eq!(
+        within(spawn_apply(&state, &without_member11())).await,
+        applied(&[], &["member11"])
+    );
+    assert!(set4(), "nobody wears it in youth");
+    assert_eq!(
+        within(spawn_apply(&state, TEXT)).await,
+        applied(&["member11"], &[])
+    );
+    assert!(!set4(), "member11 wears it again");
+}
+
+/// #58 review: until the roster has reached the engine's state no switch
+/// and no restore runs beside it.
+#[tokio::test]
+async fn nothing_switches_or_restores_before_the_roster_is_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let (state, api) = crate::routes::api_tests::app(d);
+    assert!(state.unsettled().is_some());
+    let engineer = iem_core::AuthClaims {
+        sub: "engineer".into(),
+        engineer: true,
+        exp: u64::MAX,
+        iat: 0,
+    };
+    assert_eq!(
+        crate::lineup_switch::switch_lineup(&state, "youth", &engineer).await,
+        Err(crate::lineup_switch::SwitchError::Busy)
+    );
+    let b = MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, MixState::default());
+    let name = state.backup_store.save(&b).unwrap();
+    let eng = crate::routes::api_tests::token("engineer", true);
+    let (status, json) = crate::routes::api_tests::call(
+        &api,
+        axum::http::Method::POST,
+        &format!("/api/backups/{name}/restore"),
+        Some(&eng),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, json["code"].as_str()),
+        (axum::http::StatusCode::CONFLICT, Some("SWITCHING")),
+        "{json}"
+    );
 }

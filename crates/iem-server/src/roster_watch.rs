@@ -952,34 +952,39 @@ pub async fn settle_when_synced(state: AppState) {
         }
         let synced = state.engine.mirror().synced;
         if synced {
-            match settle(&state).await {
-                Ok(()) => return,
-                Err(Applied::Deferred(why)) => {
-                    tracing::info!(reasons = why.len(), "the roster waits for the engine");
-                }
-                Err(not) => {
-                    refusals += 1;
-                    tracing::error!(?not, refusals, "the roster did not reach the states");
-                    if refusals == MAX_SETTLES {
-                        state.set_unsettled(None);
-                        let devices = crate::notify::push_alarm(
-                            &state,
-                            "Zostava neplatí v mixoch",
-                            "Server po zmene zostavy nevedel upraviť mixy (napr. stíšiť prázdne \
-                             sety): mixy zostávajú, ako boli.",
-                        )
-                        .await;
-                        tracing::warn!(
-                            devices,
-                            "the engineer's devices heard the roster did not reach the states"
-                        );
-                        return;
-                    }
+            let Err(not) = settle(&state).await else {
+                return;
+            };
+            if waits(&not) {
+                tracing::info!(?not, "the roster waits for the engine");
+            } else {
+                refusals += 1;
+                tracing::error!(?not, refusals, "the roster did not reach the states");
+                if refusals == MAX_SETTLES {
+                    state.set_unsettled(None);
+                    let devices = crate::notify::push_alarm(
+                        &state,
+                        "Zostava neplatí v mixoch",
+                        "Server po zmene zostavy nevedel upraviť mixy (napr. stíšiť prázdne \
+                         sety): mixy zostávajú, ako boli.",
+                    )
+                    .await;
+                    tracing::warn!(
+                        devices,
+                        "the engineer's devices heard the roster did not reach the states"
+                    );
+                    return;
                 }
             }
         }
         tokio::time::sleep(REPLAY_RETRY).await;
     }
+}
+
+/// Whether a roster that did not reach the states waits for the engine
+/// (gone, silent, not synced: tried again) rather than being refused.
+fn waits(not: &Applied) -> bool {
+    matches!(not, Applied::Deferred(_))
 }
 
 /// Reads `roster.toml` once and applies it ([`apply_text`]), writing the
