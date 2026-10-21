@@ -230,6 +230,18 @@ fn a_roster_is_kept_under_its_sha256_only() {
     }
 }
 
+/// Clearing a switch's intent: none there is fine, one that cannot be
+/// removed (here a directory holds its name) is an error, never taken for
+/// gone.
+#[test]
+fn an_intent_that_cannot_be_removed_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = LineupStore::new(dir.path());
+    assert!(s.clear_intent().is_ok(), "none");
+    fs::create_dir_all(dir.path().join(SWITCH_FILE).join("x")).unwrap();
+    assert!(s.clear_intent().is_err());
+}
+
 /// #58 fourth review: a roster kept already is not written again (the
 /// start and every deferred poll keep the roster in use; a file of that
 /// name is the same roster, its name being its SHA-256).
