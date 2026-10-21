@@ -95,8 +95,8 @@ pub(crate) async fn apply_ramp(
     if !state.engine.connected() {
         return Err(engine_unavailable());
     }
+    // The daily snapshot is taken by the first step (`AppState::apply`).
     let (steps, skipped) = ramp(&site, &state.engine.mirror(), page, sends, groups);
-    state.auto_snapshot(page);
     let changed = steps.first().map_or(0, Vec::len);
     let mut steps = steps.into_iter();
     if let Some(first) = steps.next() {
