@@ -1,10 +1,12 @@
 //! A worst-case processor workload shared by the RT-safety tests (`rt.rs`
 //! under `assert_no_alloc`, `rtsan.rs` under RealtimeSanitizer): the program
-//! site with every level open, hot inputs driving the limiters, a command
+//! site with every member's set hearing every other's as a peer (#58: nine
+//! shadows, `every_set_topology`, as the bench's third case) and every level
+//! open, hot inputs driving the limiters, a command
 //! group every block (volume, input/mix/group EQ, processing, levels of an
-//! input, a heard mix and a peer, a group strip, solo, listen, limiter raise
-//! and lower, the EQ, limiter and volume of a shadowed mix (#58: member1,
-//! which member3 hears as a peer), test signal, the HIL test signal on both
+//! input, a whole heard mix (the engineer's) and a peer, a group strip, solo,
+//! listen, limiter raise and lower, the EQ, limiter and volume of a shadowed
+//! mix (member1), test signal, the HIL test signal on both
 //! spare outputs with its listen probe while both listen slots are listened
 //! (S7), an Arm, a full
 //! import), the D5(b) loopback returns (a one-block synthetic loopback of the
@@ -48,6 +50,28 @@ pub fn site_path() -> PathBuf {
 
 pub fn topology() -> Arc<Topology> {
     Arc::new(compile(&load(&site_path()).unwrap()).unwrap())
+}
+
+/// The test site with every member's set hearing the other eight as peers
+/// and no whole mix (#58: nine shadows); the engineer still hears every
+/// member's whole mix. The bench builds the same for its third case.
+pub fn every_set_topology() -> Arc<Topology> {
+    let mut site = load(&site_path()).unwrap();
+    let members: Vec<String> = site
+        .mixes
+        .iter()
+        .filter(|m| m.id.starts_with("member"))
+        .map(|m| m.id.clone())
+        .collect();
+    for m in &mut site.mixes {
+        if members.contains(&m.id) {
+            m.mixes.clear();
+            m.peers = members.iter().filter(|p| **p != m.id).cloned().collect();
+        }
+    }
+    let topo = compile(&site).unwrap();
+    assert_eq!(topo.mixes.iter().filter(|n| n.shadow).count(), 9);
+    Arc::new(topo)
 }
 
 /// Every level at −12 dB (inputs, heard mixes and peers), every group strip
@@ -124,7 +148,7 @@ fn level(m: &str, source: Source, gain_db: f64, pan: f64) -> Cmd {
 }
 
 pub fn scenario() -> Scenario {
-    let topo = topology();
+    let topo = every_set_topology();
     let state = open_state(&topo);
     let flags = Flags {
         test_signal: true,
@@ -141,8 +165,10 @@ pub fn scenario() -> Scenario {
         group: GroupId::new("stems"),
     };
     let heard = Source::Mix(mix("member2"));
-    // #58: member3 hears member1 as a peer; member1 is shadowed.
+    // #58: member3 hears member1 as a peer; member1 is shadowed. The
+    // engineer hears member1 whole.
     let peer = Source::Mix(mix("member1"));
+    let whole = Source::Mix(mix("member1"));
     let cmds = vec![
         Cmd::SetMix {
             mix: mix("member1"),
@@ -195,6 +221,7 @@ pub fn scenario() -> Scenario {
         level("member1", Source::Input(input("mic1")), -6.0, 0.3),
         level("member1", heard.clone(), -6.0, -0.3),
         level("member3", peer.clone(), -6.0, 0.2),
+        level("engineer", whole.clone(), -6.0, -0.2),
         Cmd::SetEq {
             target: EqTarget::Mix(mix("member1")),
             eq,
@@ -242,6 +269,7 @@ pub fn scenario() -> Scenario {
         level("member1", Source::Input(input("mic1")), -12.0, 0.0),
         level("member1", heard, -12.0, 0.0),
         level("member3", peer, -12.0, 0.0),
+        level("engineer", whole, -12.0, 0.0),
         Cmd::SetEq {
             target: EqTarget::Mix(mix("member1")),
             eq: Eq::default(),

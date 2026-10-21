@@ -1,19 +1,24 @@
 //! CPU benchmark of `process()` at B = 32, 96 kHz (period 333.3 µs; program
-//! spec I2, §3.5; design note §3.8). Two cases on `config/test-site.toml`:
+//! spec I2, §3.5; design note §3.8). Three cases:
 //!
-//! - `typical`: every level open (member3's peers included, #58), sine
-//!   inputs, EQs flat, the site at rest;
-//! - `worst`: all 230 EQ bands (inputs, mixes, group strips) enabled and
-//!   moving, and those of member1's shadow (#58: member3 hears it as a
-//!   peer), every level and strip ramping, the limiters in gain reduction,
-//!   both listen taps, talkback, the HIL test signal on all eight spare
-//!   outputs with its listen probe on both slots (S7) and their D5(b)
-//!   loopback returns open (busy returns: the round-trip probe scans every
-//!   return sample of every block) and a 512-command group every block.
+//! - `typical` on `config/test-site.toml`: every level open (member1's and
+//!   member3's peers included, #58), sine inputs, EQs flat, the site at rest;
+//! - `worst` on `config/test-site.toml`: all 230 EQ bands (inputs, mixes,
+//!   group strips) enabled and moving, and those of member1's and member3's
+//!   shadows (#58: they hear each other as peers), every level and strip
+//!   ramping, the limiters in gain reduction, both listen taps, talkback,
+//!   the HIL test signal on all eight spare outputs with its listen probe on
+//!   both slots (S7) and their D5(b) loopback returns open (busy returns: the
+//!   round-trip probe scans every return sample of every block) and a
+//!   512-command group every block;
+//! - `worst, every set hearing every other`: the same on the test site with
+//!   every member's set hearing the other eight as peers and no whole mix
+//!   (#58 design §13: nine shadows, all moving), built here; the engineer
+//!   still hears every whole mix.
 //!
 //! Prints p50/p99/p99.9/max per case, and beside them the p99.9 the stream
 //! histogram gives (S7: 1 µs buckets, the soak's rule, `hist::quantile_us`).
-//! Exits 1 when the typical median exceeds 25 % of the period or the
+//! Exits 1 when the typical median exceeds 25 % of the period or either
 //! worst-case median exceeds the period; hosted runners preempt, so tails are
 //! reported, not gated (the §3.5 p99.9 gate is measured on the PC in S7).
 //!
@@ -30,7 +35,7 @@ use iem_dsp::eq::{BandKind, EqParams};
 use iem_engine::cmd::{MAX_HIL, RtOp, push_group};
 use iem_engine::params::InputParams;
 use iem_engine::rt::{Options, Processor};
-use iem_engine::site::load;
+use iem_engine::site::{Site, load};
 use iem_engine::topology::{Topology, compile};
 use iem_engine::{MAX_CMDS_PER_BLOCK, SAMPLE_RATE};
 use iem_engine_proto::{Level, Mix, MixGroup, MixId, MixState};
@@ -39,9 +44,35 @@ const B: usize = 32;
 const WARMUP: usize = 3_000;
 const CALLS: usize = 30_000;
 
-fn topology() -> Arc<Topology> {
+fn site() -> Site {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test-site.toml");
-    Arc::new(compile(&load(&path).expect("site")).expect("topology"))
+    load(&path).expect("site")
+}
+
+fn topology() -> Arc<Topology> {
+    Arc::new(compile(&site()).expect("topology"))
+}
+
+/// The test site with every member's set hearing the other eight as peers
+/// and no whole mix (#58: nine shadows); the engineer still hears every
+/// member's whole mix. The test site itself keeps its two leaders.
+fn every_set_hears_every_other() -> Arc<Topology> {
+    let mut site = site();
+    let members: Vec<String> = site
+        .mixes
+        .iter()
+        .filter(|m| m.id.starts_with("member"))
+        .map(|m| m.id.clone())
+        .collect();
+    for m in &mut site.mixes {
+        if members.contains(&m.id) {
+            m.mixes.clear();
+            m.peers = members.iter().filter(|p| **p != m.id).cloned().collect();
+        }
+    }
+    let topo = compile(&site).expect("every set hears every other");
+    assert_eq!(topo.mixes.iter().filter(|n| n.shadow).count(), 9);
+    Arc::new(topo)
 }
 
 /// Every level at −12 dB: inputs, heard mixes and peers (#58).
@@ -159,8 +190,7 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
     sorted[i.min(sorted.len() - 1)]
 }
 
-fn bench(name: &str, worst: bool) -> f64 {
-    let topo = topology();
+fn bench(name: &str, worst: bool, topo: Arc<Topology>) -> f64 {
     // HIL's spare outputs and their loopback returns: the worst case only (a
     // live engine opens neither).
     let hil = if worst { MAX_HIL } else { 0 };
@@ -252,14 +282,19 @@ fn bench(name: &str, worst: bool) -> f64 {
 }
 
 fn main() {
-    let typical = bench("typical", false);
-    let worst = bench("worst", true);
+    let typical = bench("typical", false, topology());
+    let worst = bench("worst", true, topology());
+    let every = bench(
+        "worst, every set hearing every other",
+        true,
+        every_set_hears_every_other(),
+    );
     if typical > 0.25 {
         eprintln!("bench: the typical median exceeds 25 % of the 32-sample period");
         std::process::exit(1);
     }
-    if worst > 1.0 {
-        eprintln!("bench: the worst-case median exceeds the 32-sample period");
+    if worst > 1.0 || every > 1.0 {
+        eprintln!("bench: a worst-case median exceeds the 32-sample period");
         std::process::exit(1);
     }
 }
