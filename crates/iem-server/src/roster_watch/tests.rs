@@ -1356,3 +1356,144 @@ async fn nothing_switches_or_restores_before_the_roster_is_settled() {
         "{json}"
     );
 }
+
+/// Connects `state` to a fake engine that can come back after a drop (its
+/// next connections arrive on the receiver), its mirror holding `running`
+/// at revision 1; retries 50 ms apart.
+async fn reconnecting(
+    state: &mut AppState,
+    running: MixState,
+) -> (fake::Peer, tokio::sync::mpsc::UnboundedReceiver<fake::Peer>) {
+    let (connector, mut peers) = fake::connector();
+    state.engine = crate::engine::EngineClient::spawn_with(connector, "test".into());
+    state.retry = Duration::from_millis(50);
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 1, running).await;
+    (peer, peers)
+}
+
+/// #58 re-review: the engine applied a reload's import and went away
+/// before its answer: the pages stay frozen until it is back, and since
+/// its state is the one sent the reload finishes, nobody moved twice.
+#[tokio::test]
+async fn a_reload_whose_import_went_in_before_the_engine_went_away_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let (mut peer, mut peers) = reconnecting(&mut state, running()).await;
+    let text = swapped();
+    let task = spawn_apply(&state, &text);
+    let (_, sent) = fake::next_import(&mut peer).await;
+    peer.send(&iem_engine_proto::EngineMsg::State {
+        rev: 2,
+        state: sent.clone(),
+        transient: iem_engine_proto::Transient::default(),
+    })
+    .await;
+    drop(peer);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.frozen_now(), "frozen until it is known");
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 2, sent.clone()).await;
+    fake::answer_ping(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    assert_eq!(state.roster().unwrap().sha256, sha256_hex(text.as_bytes()));
+    assert!(!state.frozen_now());
+    assert_eq!(state.engine.mirror().state, sent, "moved once");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "no import again"
+    );
+}
+
+/// #58 re-review: the engine went away before it applied a reload's
+/// import: once it is back with its state as it was, the stored states go
+/// back and the reload waits; the next try moves everyone once.
+#[tokio::test]
+async fn a_reload_whose_import_was_lost_with_the_engine_tries_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    let stored = MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, running());
+    store.save_state("youth", &stored).unwrap();
+    let (mut peer, mut peers) = reconnecting(&mut state, running()).await;
+    let task = spawn_apply(&state, &swapped());
+    fake::next_import(&mut peer).await;
+    drop(peer);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.frozen_now(), "frozen until it is known");
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 2, running()).await;
+    fake::answer_ping(&mut peer).await;
+    let result = within(task).await;
+    assert!(matches!(&result, Applied::Deferred(_)), "{result:?}");
+    assert_eq!(store.state("youth").unwrap(), Some(stored), "put back");
+    assert_eq!(state.roster(), Some(test_roster("main")));
+    assert!(!state.frozen_now());
+    // The next try moves member5's and member6's mixes once.
+    let task = spawn_apply(&state, &swapped());
+    let imported = fake::imports(&mut peer, 3).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    let keys = |id: &str| {
+        imported.mixes[&MixId::new(id)]
+            .inputs
+            .get(&InputId::new("keys"))
+            .map(|l| l.gain_db)
+    };
+    assert_eq!(
+        (keys("member6"), keys("member5")),
+        (Some(-6.0), None),
+        "swapped once"
+    );
+}
+
+/// #58 re-review: a transition stopped after it wrote the stored states
+/// (the server stopped or crashed during the import): the next start
+/// moves nobody a second time.
+#[tokio::test]
+async fn a_start_after_a_cut_transition_moves_nobody_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("youth", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    store
+        .save_state("main", &MixerBackup::new("t".into(), 1, running()))
+        .unwrap();
+    // The new roster: member5 wears set member9 in main, member11 leaves
+    // youth (so youth's running state changes too).
+    let new = {
+        let t = without_member11();
+        let t = edit(&t, "member5 = \"member5\"\n", "");
+        let t = edit(&t, "member9 = \"member9\"\n", "member9 = \"member5\"\n");
+        edit(
+            &t,
+            "mic10 = { name = \"MEMBER9 mic\", owner = \"member9\" }\n",
+            "mic10 = { name = \"MEMBER9 mic\" }\n",
+        )
+    };
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut first = AppState::new(test_config(), d);
+    let mut peer = synced(&mut first, youth_running()).await;
+    let task = spawn_apply(&first, &new);
+    fake::next_import(&mut peer).await;
+    // The server stops here: main's stored state is written, the import
+    // never answered.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop((first, peer));
+    std::fs::write(d.join(ROSTER_FILE), &new).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let mut peer = synced(&mut state, youth_running()).await;
+    let settle = tokio::spawn(settle_when_synced(state.clone()));
+    imports(&mut peer).await;
+    within(settle).await;
+    let main = store.state("main").unwrap().unwrap().state;
+    let set9 = &main.mixes[&MixId::new("member9")];
+    assert_eq!(set9.inputs[&InputId::new("keys")].gain_db, -6.0);
+    assert!(
+        !set9.out.muted,
+        "moved once, not a copy of the set member5 left"
+    );
+}
