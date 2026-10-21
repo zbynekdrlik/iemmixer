@@ -707,6 +707,82 @@ async fn a_reload_waits_for_a_synced_engine_even_without_a_move() {
     assert_eq!(state.roster(), Some(test_roster("main")));
 }
 
+/// Waits (≤ 5 s) until `done` holds.
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !done() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "{what} within 5 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// #58 review: the roster a server starts with reaches the running state
+/// once the engine has synced (youth's empty sets silent, the heard mixes
+/// of a set no leader wears off); until then no page changes a mix, and
+/// then the roster is recorded as the one the states follow.
+#[tokio::test]
+async fn the_rules_reach_the_running_state_after_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    LineupStore::new(d).set_active("youth", 1).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    assert_eq!(state.roster().unwrap().active, "youth");
+    let page = state.page("member3").unwrap();
+    assert_eq!(
+        state.may_change(&page),
+        Err(crate::view::ViewError::Switching),
+        "not settled yet"
+    );
+    let mut peer = synced(&mut state, running()).await;
+    let settle = tokio::spawn(settle_when_synced(state.clone()));
+    let imported = imports(&mut peer).await;
+    within(settle).await;
+    let mix = |id: &str| &imported.mixes[&MixId::new(id)];
+    assert!(
+        mix("member2").out.muted,
+        "nobody wears set member2 in youth"
+    );
+    assert!(!mix("member3").out.muted);
+    assert!(
+        mix("member1").mixes.values().all(|l| l.muted),
+        "member10 leads nothing"
+    );
+    assert!(!mix("member3").mixes[&MixId::new("member1")].muted);
+    let page = state.page("member3").unwrap();
+    assert_eq!(state.may_change(&page), Ok(()));
+    assert_eq!(
+        LineupStore::new(d).applied_roster().unwrap().as_deref(),
+        Some(TEXT),
+        "the roster the states follow"
+    );
+}
+
+/// #58 review: a legacy server that adopts its first roster with the
+/// engine synced puts the main lineup's rules into the running state.
+#[tokio::test]
+async fn an_adopted_roster_reaches_the_running_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = AppState::new(test_config(), d);
+    let mut live = running();
+    // Set member2 hears member1: member2 leads nothing in main.
+    mix_mut(&mut live, "member2")
+        .mixes
+        .insert(MixId::new("member1"), level(0.0));
+    let mut peer = synced(&mut state, live).await;
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    assert_eq!(check_file(&state).await, Some(applied(&[], &[])));
+    let imported = imports(&mut peer).await;
+    assert!(imported.mixes[&MixId::new("member2")].mixes[&MixId::new("member1")].muted);
+    assert!(
+        !imported.mixes[&MixId::new("member1")].mixes[&MixId::new("member2")].muted,
+        "a leader keeps what they hear"
+    );
+    let page = state.page("member2").unwrap();
+    until("the pages free", || state.may_change(&page).is_ok()).await;
+}
+
 /// A person's mix moves only through the engine: without a synced one the
 /// roster waits.
 #[tokio::test]

@@ -519,4 +519,38 @@ mod tests {
         .await;
         until("the switch free", || state.switching.try_lock().is_ok()).await;
     }
+
+    /// #58 review: a restore's import holds the active lineup's rules, as a
+    /// switch's does: a set nobody wears in youth is silent.
+    #[tokio::test]
+    async fn a_restore_holds_the_lineups_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = app(dir.path());
+        state.set_roster(Some(crate::roster_state::tests::test_roster("youth")));
+        let topology = crate::site_view::tests::test_topology();
+        let mut live = MixState::default();
+        for m in &topology.mixes {
+            live.mixes.insert(m.id.clone(), Default::default());
+        }
+        let (engine, mut peer) = fake::announced(topology).await;
+        state.engine = engine;
+        fake::sync(&state.engine, &mut peer, 1, MixState::default()).await;
+        let mut b = iem_core::backup::MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, live);
+        b.lineup = Some("youth".into());
+        let name = state.backup_store.save(&b).unwrap();
+        let api = router(state.clone());
+        let eng = token("engineer", true);
+        let uri = format!("/api/backups/{name}/restore");
+        let request =
+            tokio::spawn(async move { call(&api, Method::POST, &uri, Some(&eng), None).await });
+        let imported = fake::imports(&mut peer, 2).await;
+        let (status, json) = request.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let mix = |id: &str| &imported.mixes[&iem_engine_proto::MixId::new(id)];
+        assert!(
+            mix("member2").out.muted,
+            "nobody wears set member2 in youth"
+        );
+        assert!(!mix("member3").out.muted);
+    }
 }
