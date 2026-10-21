@@ -249,7 +249,7 @@ impl AppState {
             base: if cut_short {
                 None
             } else {
-                roster_watch::applied_base(config_dir).map(Arc::new)
+                roster_watch::applied_base(config_dir)
             },
         });
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only

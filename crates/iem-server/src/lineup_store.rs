@@ -5,10 +5,10 @@
 //! `customizations/`, keyed by person). `lineups/active.json` names the
 //! active lineup; `lineups/switch.json` exists only while a switch runs (its
 //! intent, replayed after a crash); `lineups/applied-roster.toml` is a copy
-//! of the roster the stored states and the running one follow, and
-//! `lineups/<id>/silenced.json` names the sets of a lineup its rules
-//! silenced because nobody wore them. Every write is a synced temporary
-//! file renamed over the old one.
+//! of the roster the states follow, and `lineups/running.json` says what the
+//! engine's running state follows ([`Running`]). A stored state carries what
+//! it follows itself (`MixerBackup::follows`, `silenced`). Every write is a
+//! synced temporary file renamed over the old one.
 //!
 //! Also the one-time migration of the legacy layout (no
 //! `lineups/active.json`): today's per-member files and the engineer's
@@ -40,6 +40,8 @@ pub const SWITCH_FILE: &str = "lineups/switch.json";
 /// start moves people's mixes from, and what the start falls back to when
 /// `roster.toml` cannot be used.
 pub const APPLIED_FILE: &str = "lineups/applied-roster.toml";
+/// What the engine's running state follows ([`Running`]).
+pub const RUNNING_FILE: &str = "lineups/running.json";
 /// The active file's format.
 pub const ACTIVE_FORMAT: &str = "iemmixer-active-lineup";
 /// The migration builds `lineups/` here and renames it as its commit.
@@ -56,7 +58,7 @@ const ACTIVE_NAME: &str = "active.json";
 const SWITCH_NAME: &str = "switch.json";
 const STATE_NAME: &str = "state.json";
 const APPLIED_NAME: &str = "applied-roster.toml";
-const SILENCED_NAME: &str = "silenced.json";
+const RUNNING_NAME: &str = "running.json";
 const PENDING_NAME: &str = "migration.json";
 
 /// How often a rename a transient Windows error fails is tried, and the
@@ -71,6 +73,19 @@ const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 pub struct SwitchIntent {
     pub from: String,
     pub to: String,
+}
+
+/// What the engine's running state follows (#58 re-review), written right
+/// after every import that changes it: whose state it is, the SHA-256 of
+/// the roster file it follows (none: not known, a backup's restored state
+/// or a state from before), and the sets the lineup's rules silenced in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Running {
+    pub lineup: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub silenced: BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,21 +237,22 @@ impl LineupStore {
         write_durable(&self.data_dir(id).join(STATE_NAME), &json)
     }
 
-    /// The sets of lineup `id` its rules silenced because nobody wore them
-    /// (`roster_watch::fit_recorded`); none before any was recorded.
-    pub fn silenced(&self, id: &str) -> io::Result<BTreeSet<String>> {
-        check_id(id)?;
-        let path = self.data_dir(id).join(SILENCED_NAME);
+    /// What the running state follows; `None` before it was recorded.
+    pub fn running(&self) -> io::Result<Option<Running>> {
+        let path = self.dir.join(RUNNING_NAME);
         let Some(text) = read_optional(&path)? else {
-            return Ok(BTreeSet::new());
+            return Ok(None);
         };
-        serde_json::from_str(&text).map_err(|e| invalid(format!("{}: {e}", path.display())))
+        let running: Running =
+            serde_json::from_str(&text).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+        check_id(&running.lineup).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+        Ok(Some(running))
     }
 
-    pub fn set_silenced(&self, id: &str, sets: &BTreeSet<String>) -> io::Result<()> {
-        check_id(id)?;
-        let json = serde_json::to_string(sets).map_err(io::Error::other)?;
-        write_durable(&self.data_dir(id).join(SILENCED_NAME), &json)
+    pub fn set_running(&self, running: &Running) -> io::Result<()> {
+        check_id(&running.lineup)?;
+        let json = serde_json::to_string(running).map_err(io::Error::other)?;
+        write_durable(&self.dir.join(RUNNING_NAME), &json)
     }
 
     /// The roster the states follow ([`APPLIED_FILE`]); `None` before one

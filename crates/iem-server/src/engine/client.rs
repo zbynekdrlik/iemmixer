@@ -197,6 +197,24 @@ impl EngineClient {
         self.inner.events.subscribe()
     }
 
+    /// Waits until the mirror is synced (a `State` arrived since the last
+    /// (re)connect), at most `within`, woken by the engine's events rather
+    /// than a poll: whether it is.
+    pub async fn wait_synced(&self, within: Duration) -> bool {
+        let mut events = self.subscribe();
+        let synced = async {
+            loop {
+                if self.mirror().synced {
+                    return;
+                }
+                if let Err(broadcast::error::RecvError::Closed) = events.recv().await {
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::time::timeout(within, synced).await.is_ok()
+    }
+
     fn emit(&self, e: EngineEvent) {
         let _ = self.inner.events.send(e);
     }

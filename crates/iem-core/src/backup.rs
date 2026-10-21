@@ -2,7 +2,7 @@
 //! one revision plus every member's pins and hides. A backup never holds a
 //! PIN or a secret. Restores are previewed as a diff of two states first.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use iem_engine_proto::MixState;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,16 @@ pub struct MixerBackup {
     /// Additive: empty in legacy mode, and then not written.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lineups: BTreeMap<String, MixerBackup>,
+    /// A lineup's stored state (#58): the SHA-256 of the roster file it
+    /// follows, written with it so a roster change that stops half-way
+    /// never moves a person's mix twice. None in a backup's live state and
+    /// in every state written before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follows: Option<String>,
+    /// A lineup's stored state (#58): the sets its rules silenced because
+    /// nobody wore them, unmuted again once someone does.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub silenced: BTreeSet<String>,
 }
 
 /// Why a file is not a readable backup.
@@ -58,6 +68,8 @@ impl MixerBackup {
             customizations: BTreeMap::new(),
             lineup: None,
             lineups: BTreeMap::new(),
+            follows: None,
+            silenced: BTreeSet::new(),
         }
     }
 

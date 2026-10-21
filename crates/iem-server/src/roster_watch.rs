@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 use crate::AppState;
 use crate::engine::client::EngineError;
 use crate::lineup_store::{
-    ACTIVE_FILE, LineupStore, SWITCH_FILE, migrate_legacy, migration_problems,
+    ACTIVE_FILE, LineupStore, Running, SWITCH_FILE, migrate_legacy, migration_problems,
 };
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
@@ -59,20 +59,31 @@ const NOT_UTF8: &str = "roster file: not UTF-8 text";
 /// Refused tries [`settle_when_synced`] makes before it gives up.
 pub const MAX_SETTLES: u32 = 3;
 
+/// A roster the states may follow, and the SHA-256 of its file (what a
+/// state's marker names: `MixerBackup::follows`, `Running::follows`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Base {
+    pub roster: Arc<Roster>,
+    pub sha256: String,
+}
+
 /// The roster in use has not reached the states yet ([`settle`]): they
 /// follow `base` (`None`: not known, a legacy layout or a switch a restart
 /// cut short, so nobody's mix moves).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Unsettled {
-    pub base: Option<Arc<Roster>>,
+    pub base: Option<Base>,
 }
 
 /// What the states follow at the start: the roster recorded last (`None`
 /// when there is none or it cannot be read, each logged).
-pub fn applied_base(config_dir: &Path) -> Option<Roster> {
+pub fn applied_base(config_dir: &Path) -> Option<Base> {
     match LineupStore::new(config_dir).applied_roster() {
         Ok(Some(text)) => match Roster::parse(&text) {
-            Ok(roster) => Some(roster),
+            Ok(roster) => Some(Base {
+                roster: Arc::new(roster),
+                sha256: sha256_hex(text.as_bytes()),
+            }),
             Err(e) => {
                 tracing::error!(error = %e, "the roster applied last does not parse: nobody's mix moves");
                 None
@@ -563,20 +574,30 @@ pub(crate) async fn end_solos(state: &AppState, mixes: &[MixId]) {
     }
 }
 
-/// Lineup `id`'s record of the sets its rules silenced (one that cannot be
-/// read is logged: none).
-pub(crate) fn silenced_of(store: &LineupStore, id: &str) -> BTreeSet<String> {
-    store.silenced(id).unwrap_or_else(|e| {
-        tracing::error!(lineup = %id, error = %e, "the sets the rules silenced are unknown");
-        BTreeSet::new()
+/// What the running state follows (one that cannot be read is logged: not
+/// known).
+pub(crate) fn running_of(store: &LineupStore) -> Option<Running> {
+    store.running().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "what the running state follows is unknown");
+        None
     })
 }
 
-/// Writes lineup `id`'s record (a failure is logged: a set the rules
-/// silenced then stays muted once someone wears it).
-pub(crate) fn keep_silenced(store: &LineupStore, id: &str, silenced: &BTreeSet<String>) {
-    if let Err(e) = store.set_silenced(id, silenced) {
-        tracing::error!(lineup = %id, error = %e, "the sets the rules silenced were not recorded");
+/// What the running state follows when it is `lineup`'s: its marker and
+/// the record of the sets the rules silenced (none and none otherwise).
+pub(crate) fn running_for(store: &LineupStore, lineup: &str) -> (Option<String>, BTreeSet<String>) {
+    match running_of(store) {
+        Some(r) if r.lineup == lineup => (r.follows, r.silenced),
+        _ => (None, BTreeSet::new()),
+    }
+}
+
+/// Records what the running state follows (a failure is logged: a later
+/// roster change may move a person's mix there again, and a set the rules
+/// silenced may stay muted once someone wears it).
+pub(crate) fn note_running(store: &LineupStore, running: &Running) {
+    if let Err(e) = store.set_running(running) {
+        tracing::error!(error = %e, "what the running state follows was not recorded");
     }
 }
 
@@ -642,12 +663,97 @@ async fn adopt_live(state: &AppState, roster: Roster, sha256: &str) -> Applied {
     }
 }
 
-/// Writes back stored states a refused reload had changed (best effort).
-fn undo(store: &LineupStore, written: &[(String, MixerBackup)]) {
-    for (id, original) in written {
+/// A stored state a transition writes: the lineup, the state as it was,
+/// the state it writes.
+type Planned = (String, MixerBackup, MixerBackup);
+
+/// Writes back the stored states a transition had written (best effort).
+fn undo(store: &LineupStore, written: &[Planned]) {
+    for (id, original, _) in written {
         if let Err(e) = store.save_state(id, original) {
             tracing::error!(lineup = %id, error = %e, "a lineup's stored state was not put back");
         }
+    }
+}
+
+/// Writes the planned stored states; on a failure puts back those it
+/// wrote and says why.
+fn write_planned(store: &LineupStore, planned: &[Planned]) -> Result<(), Applied> {
+    for (n, (id, _, next)) in planned.iter().enumerate() {
+        if let Err(e) = store.save_state(id, next) {
+            undo(store, &planned[..n]);
+            return Err(Applied::Refused(vec![format!(
+                "the stored state of lineup {id} was not written: {}",
+                e.kind()
+            )]));
+        }
+    }
+    Ok(())
+}
+
+/// The rosters the states may follow, for a [`transition`] (#58
+/// re-review): a state's marker names one by its SHA-256; a state without
+/// one (written before markers, or a backup's) follows `unmarked`.
+struct Follows<'a> {
+    known: Vec<&'a Base>,
+    unmarked: Option<&'a Base>,
+}
+
+impl Follows<'_> {
+    /// The roster a state marked `marker` moves people's mixes from on its
+    /// way to the roster `new_sha`: none when it follows that one already,
+    /// or one not known (nobody's mix moves then).
+    fn base_of(&self, marker: Option<&str>, new_sha: &str) -> Option<&Roster> {
+        match marker {
+            Some(sha) if sha == new_sha => None,
+            Some(sha) => self
+                .known
+                .iter()
+                .find(|b| b.sha256 == sha)
+                .map(|b| &*b.roster),
+            None => self.unmarked.map(|b| &*b.roster),
+        }
+    }
+
+    /// Every set a roster the states may follow lists.
+    fn sets(&self) -> BTreeSet<String> {
+        self.known
+            .iter()
+            .chain(&self.unmarked)
+            .flat_map(|b| roster_sets(&b.roster))
+            .collect()
+    }
+}
+
+/// `state` and its record `silenced` made to follow `new`: a person who
+/// wears another set of `lineup` in `new` than in `from` takes their mix
+/// along (nobody without `from`), then `lineup`'s rules hold on `sets`.
+fn follow(
+    state: &mut MixState,
+    silenced: &mut BTreeSet<String>,
+    from: Option<&Roster>,
+    new: &Roster,
+    sets: &BTreeSet<String>,
+    lineup: &Lineup,
+) {
+    let shift = from.map(|f| moves(f, new, &lineup.id)).unwrap_or_default();
+    apply_moves(state, &shift);
+    move_silenced(silenced, &shift);
+    fit_sets(state, sets, lineup, silenced);
+}
+
+/// Whether the engine took `sent`, an import whose answer was lost (#58
+/// re-review): waits, the pages frozen and nothing put back, until the
+/// engine answers a `Ping` again (every change it made before is in the
+/// mirror then), and compares the mirror's state with `sent`.
+async fn landed(state: &AppState, sent: &MixState) -> bool {
+    loop {
+        if state.engine.wait_synced(state.retry).await
+            && state.engine.request_applied(Cmd::Ping, None).await.is_ok()
+        {
+            return state.engine.mirror().state == *sent;
+        }
+        tokio::time::sleep(state.retry).await;
     }
 }
 
@@ -664,21 +770,30 @@ struct Transition {
     frozen: Option<bool>,
 }
 
-/// The states go from following `base` to following `new`, whose lineup
+/// The states go over to following `new` (SHA-256 `new_sha`), whose lineup
 /// `active` plays: every other lineup's stored state, then the running
-/// state through one import. A person who wears another set of a lineup
-/// in `new` than in `base` takes their mix along ([`moves`]; no `base`:
-/// nobody moves), and `new`'s rules hold on every set `base` or `new` lists
-/// ([`fit_sets`]: a set only `base` lists is worn by nobody now). Waits
-/// (`Deferred`) for a synced engine before it touches anything; the running
-/// state is read again once the pages are frozen ([`AppState::freeze`],
-/// only when something changes), and they stay frozen for the caller. On a
-/// failure every stored state it wrote is put back and the pages are free
+/// state through one import. Each state moves from the roster its marker
+/// names ([`Follows`]): a person who wears another set of a lineup there
+/// than in `new` takes their mix along (nobody when that roster is not
+/// known, or the state follows `new` already), and `new`'s rules hold on
+/// every set either lists ([`fit_sets`]: a set only the old one lists is
+/// worn by nobody now). A state is written with its marker and record in
+/// one file (the running one's in `running.json`, right after the import),
+/// so a transition cut short (a stop, a crash) never moves anyone twice.
+///
+/// Waits (`Deferred`) for a synced engine before it touches anything.
+/// When the running state changes the pages are frozen
+/// ([`AppState::freeze`]) before any file is written and the running state
+/// is read again; they stay frozen for the caller. An import whose answer
+/// is lost (no engine, no answer) is waited out, still frozen
+/// ([`landed`]): taken, the transition goes on; not taken, every stored
+/// state it wrote is put back, as on any other failure, and the pages are
 /// as before.
 async fn transition(
     state: &AppState,
-    base: Option<&Roster>,
+    follows: &Follows<'_>,
     new: &Roster,
+    new_sha: &str,
     active: &str,
 ) -> Result<Transition, Applied> {
     let Some(lineup) = new.lineup(active).cloned() else {
@@ -688,24 +803,14 @@ async fn transition(
         return Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]));
     }
     let store = LineupStore::new(&state.config_dir);
-    let sets: BTreeSet<String> = base
-        .map(roster_sets)
-        .unwrap_or_default()
-        .into_iter()
-        .chain(roster_sets(new))
-        .collect();
-    let shift_of = |id: &str| base.map(|b| moves(b, new, id)).unwrap_or_default();
-    // The other lineups' stored states first, each original kept so a
-    // failure below can put it back; the records of what the rules
-    // silenced are written once all went well.
-    let mut written: Vec<(String, MixerBackup)> = Vec::new();
-    let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
+    let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
+    // Every other lineup's stored state, worked out first.
+    let mut planned: Vec<Planned> = Vec::new();
     for l in new.lineups.iter().filter(|l| l.id != active) {
         let stored = match store.state(&l.id) {
             Ok(Some(b)) => b,
             Ok(None) => continue,
             Err(e) => {
-                undo(&store, &written);
                 return Err(Applied::Refused(vec![format!(
                     "the stored state of lineup {} is unreadable: {}",
                     l.id,
@@ -713,66 +818,48 @@ async fn transition(
                 )]));
             }
         };
-        let recorded = silenced_of(&store, &l.id);
-        let mut silenced = recorded.clone();
         let mut next = stored.clone();
-        let shift = shift_of(&l.id);
-        apply_moves(&mut next.state, &shift);
-        move_silenced(&mut silenced, &shift);
-        fit_sets(&mut next.state, &sets, l, &mut silenced);
-        if silenced != recorded {
-            records.push((l.id.clone(), silenced));
+        let from = follows.base_of(stored.follows.as_deref(), new_sha);
+        follow(&mut next.state, &mut next.silenced, from, new, &sets, l);
+        next.follows = Some(new_sha.to_string());
+        if next != stored {
+            planned.push((l.id.clone(), stored, next));
         }
-        if next.state == stored.state {
-            continue;
-        }
-        if let Err(e) = store.save_state(&l.id, &next) {
-            undo(&store, &written);
-            return Err(Applied::Refused(vec![format!(
-                "the stored state of lineup {} was not written: {}",
-                l.id,
-                e.kind()
-            )]));
-        }
-        written.push((l.id.clone(), stored));
     }
-    // The active lineup's running state, through one import.
-    let shift = shift_of(active);
-    let recorded = silenced_of(&store, active);
+    // The running state, through one import.
+    let (marker, recorded) = running_for(&store, active);
+    let from = follows.base_of(marker.as_deref(), new_sha);
+    let moved = from.map_or(0, |f| moves(f, new, active).len());
     let next_of = |current: &MixState| {
         let mut next = current.clone();
         let mut silenced = recorded.clone();
-        apply_moves(&mut next, &shift);
-        move_silenced(&mut silenced, &shift);
-        fit_sets(&mut next, &sets, &lineup, &mut silenced);
-        (next, silenced)
-    };
-    let keep_records = |active_silenced: BTreeSet<String>| {
-        for (id, silenced) in &records {
-            keep_silenced(&store, id, silenced);
-        }
-        if active_silenced != recorded {
-            keep_silenced(&store, active, &active_silenced);
-        }
+        follow(&mut next, &mut silenced, from, new, &sets, &lineup);
+        let running = Running {
+            lineup: active.to_string(),
+            follows: Some(new_sha.to_string()),
+            silenced,
+        };
+        (next, running)
     };
     // A solo ends on every set of the active lineup whose wearer changes
-    // (no `base`: who wore which set is not known, every solo stays).
-    let before = base.and_then(|b| b.lineup(active));
+    // (when who wore it is not known, every solo stays).
+    let before = from.and_then(|f| f.lineup(active));
     let soloed_now =
         |t: &Transient| before.map_or_else(Vec::new, |b| soloed_changing(t, b, &lineup));
     let (current, soloed) = {
         let m = state.engine.mirror();
         (m.state.clone(), soloed_now(&m.transient))
     };
-    let (next, silenced) = next_of(&current);
+    let (next, running) = next_of(&current);
     if next == current && soloed.is_empty() {
-        keep_records(silenced);
+        write_planned(&store, &planned)?;
+        note_running(&store, &running);
         return Ok(Transition {
-            moved: shift.len(),
+            moved,
             frozen: None,
         });
     }
-    let failed = |e: EngineError| {
+    let failed = |e: &EngineError| {
         let why = vec![format!(
             "the engine did not take lineup {active}'s new mixes: {e}"
         )];
@@ -786,51 +873,65 @@ async fn transition(
     // No page's change lands between the state read here and the import.
     let was = match state.freeze().await {
         Ok(was) => was,
-        Err(e) => {
-            undo(&store, &written);
-            return Err(failed(e));
-        }
+        Err(e) => return Err(failed(&e)),
     };
+    if let Err(not) = write_planned(&store, &planned) {
+        state.frozen.store(was, Ordering::SeqCst);
+        return Err(not);
+    }
     let (synced, current, soloed) = {
         let m = state.engine.mirror();
         (m.synced, m.state.clone(), soloed_now(&m.transient))
     };
-    let imported = if synced {
-        let (next, silenced) = next_of(&current);
+    let taken = if synced {
+        let (next, running) = next_of(&current);
         if next == current {
-            Ok(silenced)
+            Ok(running)
         } else {
-            state
+            match state
                 .engine
-                .request_applied(
-                    Cmd::ImportState {
-                        state: next,
-                        baseline: false,
-                    },
-                    None,
-                )
+                .request_applied(import(next.clone()), None)
                 .await
-                .map(|()| silenced)
-                .map_err(failed)
+            {
+                Ok(()) => Ok(running),
+                Err(e @ EngineError::Refused(_)) => Err(failed(&e)),
+                Err(e) => {
+                    tracing::warn!(lineup = %active, error = %e, "a roster's import got no answer: waiting for the engine to answer again");
+                    if landed(state, &next).await {
+                        tracing::info!(lineup = %active, "the engine had taken the roster's import");
+                        Ok(running)
+                    } else {
+                        Err(failed(&e))
+                    }
+                }
+            }
         }
     } else {
         Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]))
     };
-    match imported {
-        Ok(silenced) => {
-            keep_records(silenced);
+    match taken {
+        Ok(running) => {
+            note_running(&store, &running);
             end_solos(state, &soloed).await;
         }
         Err(not) => {
+            undo(&store, &planned);
             state.frozen.store(was, Ordering::SeqCst);
-            undo(&store, &written);
             return Err(not);
         }
     }
     Ok(Transition {
-        moved: shift.len(),
+        moved,
         frozen: Some(was),
     })
+}
+
+/// The import of `state` as the engine's whole running state.
+fn import(state: MixState) -> Cmd {
+    Cmd::ImportState {
+        state,
+        baseline: false,
+    }
 }
 
 /// A new roster (`text`) in place of `old` (see [`apply_text`]): the states
@@ -845,11 +946,20 @@ async fn reload(
 ) -> Applied {
     let active = old.lineup().id.clone();
     let unsettled = state.unsettled();
-    let base = match &unsettled {
-        Some(u) => u.base.as_deref(),
-        None => Some(&*old.roster),
+    let old_base = Base {
+        roster: Arc::clone(&old.roster),
+        sha256: old.sha256.clone(),
     };
-    let done = match transition(state, base, &new, &active).await {
+    let base = unsettled.as_ref().and_then(|u| u.base.as_ref());
+    let follows = Follows {
+        known: std::iter::once(&old_base).chain(base).collect(),
+        unmarked: if unsettled.is_some() {
+            base
+        } else {
+            Some(&old_base)
+        },
+    };
+    let done = match transition(state, &follows, &new, sha256, &active).await {
         Ok(done) => done,
         Err(not) => return not,
     };
@@ -901,7 +1011,11 @@ pub async fn settle(state: &AppState) -> Result<(), Applied> {
         return Ok(());
     };
     let active = r.lineup().id.clone();
-    let done = transition(state, unsettled.base.as_deref(), &r.roster, &active).await?;
+    let follows = Follows {
+        known: unsettled.base.iter().collect(),
+        unmarked: unsettled.base.as_ref(),
+    };
+    let done = transition(state, &follows, &r.roster, &r.sha256, &active).await?;
     state.set_unsettled(None);
     if let Some(was) = done.frozen {
         state.frozen.store(was, Ordering::SeqCst);
