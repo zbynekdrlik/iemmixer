@@ -1853,7 +1853,7 @@ async fn a_start_after_a_cut_switch_still_moves_people() {
 }
 
 /// #58 third review: every roster a state may follow is kept
-/// (`lineups/rosters/<sha>.toml`), so a stored state whose marker names a
+/// (`lineups/rosters.kept/<sha>.toml`), so a stored state whose marker names a
 /// roster this server applied before (here as a backup restored it) moves
 /// from that roster: member10 to set member2 in youth.
 #[tokio::test]

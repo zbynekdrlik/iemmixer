@@ -200,7 +200,7 @@ fn a_missing_state_reads_as_none() {
 }
 
 /// #58 third review: a roster is kept under its SHA-256 in
-/// `lineups/rosters/`, and only a SHA-256 (64 lowercase hex digits) names
+/// `lineups/rosters.kept/`, and only a SHA-256 (64 lowercase hex digits) names
 /// one: anything else is refused when kept and none when read.
 #[test]
 fn a_roster_is_kept_under_its_sha256_only() {
