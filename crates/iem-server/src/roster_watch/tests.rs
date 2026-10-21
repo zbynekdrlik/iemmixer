@@ -815,16 +815,12 @@ async fn an_adopted_roster_reaches_the_running_state() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     let mut state = AppState::new(test_config(), d);
-    let mut live = running();
-    // Set member2 hears member1: member2 leads nothing in main.
-    mix_mut(&mut live, "member2")
-        .mixes
-        .insert(MixId::new("member1"), level(0.0));
-    let mut peer = synced(&mut state, live).await;
-    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    // The roster where member5 wears set member9: nobody wears set member5.
+    std::fs::write(d.join(ROSTER_FILE), moved()).unwrap();
     assert_eq!(check_file(&state).await, Some(applied(&[], &[])));
     let imported = imports(&mut peer).await;
-    assert!(imported.mixes[&MixId::new("member2")].mixes[&MixId::new("member1")].muted);
+    assert!(imported.mixes[&MixId::new("member5")].out.muted);
     assert!(
         !imported.mixes[&MixId::new("member1")].mixes[&MixId::new("member2")].muted,
         "a leader keeps what they hear"
@@ -1448,7 +1444,7 @@ async fn a_reload_whose_import_was_lost_with_the_engine_tries_again() {
     };
     assert_eq!(
         (keys("member6"), keys("member5")),
-        (Some(-6.0), None),
+        (Some(-6.0), Some(Level::default().gain_db)),
         "swapped once"
     );
 }
