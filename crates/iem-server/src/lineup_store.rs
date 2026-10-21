@@ -504,7 +504,7 @@ fn finish(config_dir: &Path, roster: &Roster, pins: &mut PinStore) -> io::Result
             archived.push(id.clone());
         }
     }
-    fs::remove_file(&path)?;
+    fs::remove_file(path)?;
     Ok(archived)
 }
 
