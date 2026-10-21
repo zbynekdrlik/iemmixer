@@ -79,7 +79,7 @@ async fn members_are_the_sites() {
     assert_eq!(list.len(), 10);
     assert_eq!(
         list[0],
-        serde_json::json!({"id": "member1", "name": "Member1", "has_photo": false})
+        serde_json::json!({"id": "member1", "name": "Member1", "has_photo": false, "playing": true})
     );
     assert_eq!(list[9]["id"], "engineer");
 }
