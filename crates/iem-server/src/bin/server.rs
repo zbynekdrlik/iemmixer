@@ -8,6 +8,9 @@
 //!                                   push a technical alarm to the engineer's devices
 //!                                   (the mixer app's notification subscriptions)
 //!   iem-server notify --count alarm print the number of those subscriptions
+//!   iem-server roster check <file>  check a roster against the site file: one
+//!                                   JSON line {"ok","problems","sha256"}, exit 0
+//!                                   when it can be installed, 1 when not
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
@@ -27,7 +30,7 @@ use iem_server::ServerConfig;
 use iem_server::notify::Audience;
 use iem_server::provision::{self, PinTarget, ProvisionError};
 
-const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm]   (a PIN is read from stdin)";
+const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file>]   (a PIN is read from stdin)";
 
 fn config_path() -> PathBuf {
     PathBuf::from(std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string()))
@@ -51,7 +54,26 @@ fn main() -> ExitCode {
             None => usage(),
         },
         ["notify", "--count", "alarm"] => count_command(),
+        ["roster", "check", file] => roster_check(file),
         _ => usage(),
+    }
+}
+
+/// One JSON line on stdout; exit 0 when the roster can be installed, 1 when
+/// not (its problems are in the line, ids only).
+fn roster_check(file: &str) -> ExitCode {
+    let report = iem_server::roster_watch::check_cli(std::path::Path::new(file), &config_path());
+    match serde_json::to_string(&report) {
+        Ok(line) => println!("{line}"),
+        Err(e) => {
+            eprintln!("iem-server: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

@@ -29,6 +29,11 @@ use crate::{AppState, To};
 
 /// Close code telling a page without a (current) protocol to reload.
 pub const CLOSE_RELOAD: u16 = 4001;
+/// Close code of a person's page after the band was switched or the roster
+/// changed (#58; 4002 is `ws_alive::CLOSE_SILENT`): the page reads
+/// `/api/lineup` and connects again, or shows which band plays. Never a
+/// reload.
+pub const CLOSE_LINEUP: u16 = 4003;
 
 /// Query parameters of the page and media sockets.
 #[derive(Debug, serde::Deserialize)]
@@ -98,6 +103,10 @@ pub async fn ws_mixer(
             crate::routes::detect_network_mode(&headers, &config.local_public_ip),
         )
     };
+    if !crate::auth::subject_known(&state, &claims) {
+        tracing::warn!(page = %page_id, "WS denied: the token's person is no longer in the roster");
+        return Err(crate::auth::subject_gone());
+    }
     if !claims.engineer && claims.sub != page_id {
         tracing::warn!(page = %page_id, sub = %claims.sub, "WS denied: cross-member access");
         return Err((
@@ -186,7 +195,11 @@ fn solo_msg(state: &AppState, page: &Page) -> ServerMsg {
 }
 
 fn customization_msg(state: &AppState, page: &Page) -> ServerMsg {
-    let (pinned, hidden) = match page.member.as_deref().map(|m| state.band.customization(m)) {
+    let (pinned, hidden) = match page
+        .member
+        .as_deref()
+        .map(|m| state.band().customization(m))
+    {
         Some(Ok(c)) => (
             c.pinned.iter().map(ToString::to_string).collect(),
             c.hidden.iter().map(ToString::to_string).collect(),
@@ -229,6 +242,37 @@ pub fn alert_catchup(
     }
 }
 
+/// What a mixer session does when the band was switched or the roster
+/// changed (#58).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnLineup {
+    /// A person's page closes with [`CLOSE_LINEUP`]: whether they play,
+    /// on which set, and under which names is the new band's.
+    Close(CloseFrame),
+    /// The engineer's page and a page without a person stay; their names
+    /// and pins and hides are the new band's, sent again.
+    Refresh(Vec<ServerMsg>),
+}
+
+/// [`OnLineup`] for a session on `page`.
+pub fn on_lineup(state: &AppState, page: &Page, viewer: &Viewer) -> OnLineup {
+    let person = page
+        .member
+        .as_deref()
+        .is_some_and(|m| m != crate::pin_store::ENGINEER_ID);
+    if person {
+        OnLineup::Close(CloseFrame {
+            code: CLOSE_LINEUP,
+            reason: "lineup".into(),
+        })
+    } else {
+        OnLineup::Refresh(vec![
+            full_state(state, page, viewer),
+            customization_msg(state, page),
+        ])
+    }
+}
+
 /// Whether an app event for `to` goes to this connection.
 pub fn addressed(to: &To, page: &str, session: u64) -> bool {
     match to {
@@ -264,6 +308,7 @@ async fn session(
     let mut engine_rx = state.engine.subscribe();
     let mut meters_rx = state.meters_tx.subscribe();
     let mut app_rx = state.event_tx.subscribe();
+    let mut lineup_rx = state.lineup_tx.subscribe();
     lock(&state.solo).connected(&page.mix.0);
 
     let mut first = vec![
@@ -354,6 +399,20 @@ async fn session(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            ev = lineup_rx.recv() => match ev {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    match on_lineup(&state, &page, &viewer) {
+                        OnLineup::Close(frame) => {
+                            tracing::info!(page = %page.id, session, "the band changed: closing the page (4003)");
+                            let close = socket.send(Message::Close(Some(frame)));
+                            let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, close).await;
+                            break;
+                        }
+                        OnLineup::Refresh(msgs) => msgs,
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             Some(m) = out_rx.recv() => vec![m],
         };
         let mut failed = false;
@@ -401,15 +460,18 @@ fn engine_event(
             full_state(state, page, viewer),
         ],
         EngineEvent::Disconnected => vec![ServerMsg::ConnectionChanged { connected: false }],
+        // A person's page about to close (#58 review): never the next band's
+        // values.
+        EngineEvent::Reset | EngineEvent::Changed { .. } if closing(state, page) => Vec::new(),
         EngineEvent::Reset => vec![full_state(state, page, viewer), solo_msg(state, page)],
         EngineEvent::Changed { origin, changes } => {
             let Some(site) = state.site() else {
                 return Vec::new();
             };
             let mut out = if origin == Some(session) {
-                own_echo(&site, &state.engine.mirror(), page, &changes)
+                own_echo_seen(&site, &state.engine.mirror(), page, viewer, &changes)
             } else {
-                view::updates_for(&site, &state.engine.mirror(), page, &changes)
+                view::updates_seen(&site, &state.engine.mirror(), page, viewer, &changes)
             };
             if viewer.engineer {
                 out.extend(crate::console::input_updates(&site, &changes));
@@ -420,13 +482,30 @@ fn engine_event(
     }
 }
 
+/// Whether `page` is a person's page that hears nothing of the engine now
+/// (#58 review): a switch runs (its import may already be in), or the
+/// active lineup no longer gives the page as it is (its socket closes with
+/// [`CLOSE_LINEUP`]). The engineer's and the other mixes' pages stay: they
+/// get their state again after a switch ([`on_lineup`]). Asked only for an
+/// event the page then drops: one dropped while frozen makes the thaw
+/// announce the band (`AppState::frozen_for_page`, #58 fifth review).
+fn closing(state: &AppState, page: &Page) -> bool {
+    let person = page
+        .member
+        .as_deref()
+        .is_some_and(|m| m != crate::pin_store::ENGINEER_ID);
+    person && (state.frozen_for_page() || state.page(&page.id).as_ref() != Some(page))
+}
+
 /// What a session hears back from its own change: nothing (it applied the
 /// change optimistically), except the channel mutes a solo change shows (the
-/// mask is the server's view; the page cannot know every level's own mute).
-pub fn own_echo(
+/// mask is the server's view; the page cannot know every level's own mute),
+/// on the channels the session's `viewer` sees.
+pub fn own_echo_seen(
     site: &crate::site_view::SiteView,
     mirror: &crate::engine::mirror::Mirror,
     page: &Page,
+    viewer: &Viewer,
     changes: &[Change],
 ) -> Vec<ServerMsg> {
     let solo: Vec<Change> = changes
@@ -434,7 +513,7 @@ pub fn own_echo(
         .filter(|c| matches!(c, Change::Solo { .. }))
         .cloned()
         .collect();
-    view::updates_for(site, mirror, page, &solo)
+    view::updates_seen(site, mirror, page, viewer, &solo)
         .into_iter()
         .filter(|m| matches!(m, ServerMsg::ChannelUpdate { .. }))
         .collect()
@@ -458,7 +537,7 @@ pub fn changes_mix(cmd: &Cmd, mix: &MixId) -> bool {
 }
 
 /// One UI command.
-async fn handle(
+pub(crate) async fn handle(
     state: &AppState,
     session: u64,
     page: &Page,
@@ -482,8 +561,13 @@ async fn handle(
             };
             let (pinned_ids, pinned_src) = known(pinned);
             let (hidden_ids, hidden_src) = known(hidden);
+            // Another band's page would write into this band's files.
+            if let Err(e) = state.may_change(page) {
+                tracing::warn!(page = %page.id, error = %e, "pins and hides refused");
+                return;
+            }
             if let Err(e) = state
-                .band
+                .band()
                 .save_customization(member, pinned_src, hidden_src)
             {
                 tracing::error!(%member, error = %e, "saving pins and hides failed");
@@ -551,18 +635,18 @@ async fn handle(
                 tracing::warn!(page = %page.id, "command before the engine's topology: dropped");
                 return;
             };
+            // The mirror's guard is gone before `apply` checks the page.
             let cmds = view::command(&site, &state.engine.mirror(), page, viewer, &msg);
             match cmds {
-                Ok(cmds) => {
-                    if cmds.iter().any(|c| changes_mix(c, &page.mix)) {
-                        state.auto_snapshot(page);
+                Ok(cmds) => match state.apply(page, cmds, Some(session)).await {
+                    Ok(()) => {}
+                    Err(crate::ChangeError::Refused(e)) => {
+                        tracing::warn!(page = %page.id, error = %e, "WS command refused");
                     }
-                    for cmd in cmds {
-                        if let Err(e) = state.engine.request_applied(cmd, Some(session)).await {
-                            tracing::warn!(page = %page.id, error = %e, "WS command failed");
-                        }
+                    Err(crate::ChangeError::Engine(e)) => {
+                        tracing::warn!(page = %page.id, error = %e, "WS command failed");
                     }
-                }
+                },
                 Err(e) => tracing::warn!(page = %page.id, error = %e, "WS command refused"),
             }
         }

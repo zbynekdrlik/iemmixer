@@ -336,3 +336,50 @@ fn a_peer_level_is_kept_with_the_heard_levels_and_round_trips() {
     let (_, dropped) = reconcile(&t, &more);
     assert_eq!(dropped, vec!["mix member3 hearing member3"]);
 }
+
+/// #58 fourth review: the engine holds exactly what the protocol's shaping
+/// gives (`iem_engine_proto::shape::reconcile`), which the server sends a
+/// roster's import as, compares the engine's state with after a lost
+/// answer, and digests into `running.json`. An unshaped state (a peer's
+/// level, a heard mix's, an unknown input, mix and heard mix, a value out
+/// of range, mixes and slots missing) laid out in the topology's order and
+/// read back is the shaped state, and both name the same dropped ids.
+#[test]
+fn the_engine_holds_the_state_the_protocol_shapes() {
+    let t = test_site();
+    let level = |gain_db: f64| Level {
+        gain_db,
+        ..Level::default()
+    };
+    let mut s = MixState::default();
+    let mut m3 = Mix::default();
+    m3.out.volume_db = 50.0;
+    m3.mixes.insert(mix("member1"), level(-4.0));
+    m3.mixes.insert(mix("ghost"), level(-1.0));
+    m3.inputs.insert(input("mic1"), level(-7.0));
+    m3.inputs.insert(input("ghost"), level(-3.0));
+    s.mixes.insert(mix("member3"), m3);
+    let mut engineer = Mix::default();
+    engineer.mixes.insert(mix("member9"), level(-2.0));
+    s.mixes.insert(mix("engineer"), engineer);
+    s.mixes.insert(mix("ghost"), Mix::default());
+    s.inputs.insert(input("ghost"), InputState::default());
+    s.inputs.insert(
+        input("mic1"),
+        InputState {
+            trim_db: 99.0,
+            ..InputState::default()
+        },
+    );
+    let (r, dropped) = reconcile(&t, &s);
+    let (shaped, named) = iem_engine_proto::shape::reconcile(&t.info(), &s);
+    assert_eq!(to_state(&t, &r), shaped);
+    assert_eq!(dropped, named);
+    assert_eq!(dropped.len(), 4, "{dropped:?}");
+    assert_eq!(shaped.mixes.len(), t.mixes.len(), "the missing mixes too");
+    assert_eq!(shaped.mixes[&mix("member3")].mixes.len(), 8, "its peers");
+    assert_eq!(
+        shaped.mixes[&mix("member3")].mixes[&mix("member1")].gain_db,
+        -4.0
+    );
+}

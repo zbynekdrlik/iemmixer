@@ -6,6 +6,8 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+use iem_core::roster::{ROSTER_FILE, Roster};
+
 use crate::pepper;
 use crate::pin_hash::{PinHasher, is_valid_pin_format};
 use crate::pin_store::{ENGINEER_ID, PinStore};
@@ -63,6 +65,17 @@ pub fn read_pin(mut input: impl BufRead) -> Result<String, ProvisionError> {
 
 /// A member target must be a configured member other than the engineer.
 pub fn check_target(config: &iem_core::Config, target: &PinTarget) -> Result<(), ProvisionError> {
+    check_target_in(config, None, target)
+}
+
+/// [`check_target`] with the site's roster, if it has one (#58): then a
+/// member target must be one of its people (a site member who is no person
+/// is archived, never given a PIN).
+pub fn check_target_in(
+    config: &iem_core::Config,
+    roster: Option<&Roster>,
+    target: &PinTarget,
+) -> Result<(), ProvisionError> {
     if let PinTarget::Member(id) = target {
         if id == ENGINEER_ID {
             return Err(ProvisionError::Invalid(
@@ -70,13 +83,33 @@ pub fn check_target(config: &iem_core::Config, target: &PinTarget) -> Result<(),
             ));
         }
         iem_core::config::validate_member_id(id).map_err(ProvisionError::Invalid)?;
-        if !config.members.iter().any(|m| m.id == *id) {
+        let (known, place) = match roster {
+            Some(r) => (r.person(id).is_some(), "the roster"),
+            None => (
+                config.members.iter().any(|m| m.id == *id),
+                "the site config",
+            ),
+        };
+        if !known {
             return Err(ProvisionError::Invalid(format!(
-                "unknown member `{id}` (not in the site config)"
+                "unknown member `{id}` (not in {place})"
             )));
         }
     }
     Ok(())
+}
+
+/// The roster beside the site file (`roster.toml`), if there is one.
+pub fn site_roster(config_dir: &Path) -> Result<Option<Roster>, ProvisionError> {
+    let path = config_dir.join(ROSTER_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ProvisionError::Io(e)),
+    };
+    Roster::parse(&text)
+        .map(Some)
+        .map_err(|e| ProvisionError::Config(e.to_string()))
 }
 
 /// Hash `pin` with the installation's pepper and store it.
@@ -100,7 +133,8 @@ pub fn run(
 ) -> Result<(), ProvisionError> {
     let config =
         iem_core::Config::load(config_path).map_err(|e| ProvisionError::Config(e.to_string()))?;
-    check_target(&config, target)?;
+    let roster = site_roster(&config_dir_of(config_path))?;
+    check_target_in(&config, roster.as_ref(), target)?;
     let pin = read_pin(input)?;
     store_pin(&config_dir_of(config_path), target, &pin)
 }
@@ -141,6 +175,58 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    const ROSTER: &str = "[[people]]\nid = \"member10\"\nname = \"Member 10\"\n\n\
+        [[lineups]]\nid = \"main\"\nname = \"Main\"\nmain = true\n\n\
+        [lineups.sets]\nmember1 = \"member10\"\n";
+
+    /// #58: with a roster beside the site, a PIN goes to one of its people;
+    /// a site member who is no person gets none.
+    #[test]
+    fn a_roster_names_the_members_who_may_get_a_pin() {
+        let config = site();
+        let r = Roster::parse(ROSTER).unwrap();
+        let member = |id: &str| PinTarget::Member(id.to_string());
+        assert!(check_target_in(&config, Some(&r), &member("member10")).is_ok());
+        assert!(check_target_in(&config, Some(&r), &PinTarget::Engineer).is_ok());
+        for bad in ["member1", "member11", "engineer", "../x"] {
+            assert!(
+                matches!(
+                    check_target_in(&config, Some(&r), &member(bad)),
+                    Err(ProvisionError::Invalid(_))
+                ),
+                "{bad}"
+            );
+        }
+        let err = check_target_in(&config, Some(&r), &member("member1")).unwrap_err();
+        assert!(err.to_string().contains("not in the roster"), "{err}");
+        // Legacy: the site's members, as before.
+        assert!(check_target_in(&config, None, &member("member1")).is_ok());
+        let err = check_target_in(&config, None, &member("member10")).unwrap_err();
+        assert!(err.to_string().contains("not in the site config"), "{err}");
+    }
+
+    #[test]
+    fn the_roster_is_read_beside_the_site_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(site_roster(dir.path()).unwrap().is_none(), "legacy mode");
+        let path = dir.path().join(ROSTER_FILE);
+        std::fs::write(&path, "people = 3\n").unwrap();
+        assert!(matches!(
+            site_roster(dir.path()),
+            Err(ProvisionError::Config(_))
+        ));
+        std::fs::write(&path, ROSTER).unwrap();
+        let r = site_roster(dir.path()).unwrap().expect("the roster");
+        assert_eq!(r.people[0].id, "member10");
+        // One that cannot be read is an error, never "no roster".
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            site_roster(dir.path()),
+            Err(ProvisionError::Io(_))
+        ));
     }
 
     #[test]

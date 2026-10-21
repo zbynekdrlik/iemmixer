@@ -21,6 +21,7 @@ use iem_server::band_import::{
     import_pins, import_push, import_secret, import_tls, parse_default_pins, parse_legacy_config,
     read_photo,
 };
+use iem_server::lineup_store::ACTIVE_FILE;
 use iem_server::pin_hash::is_valid_pin_format;
 use iem_server::pin_store::ENGINEER_ID;
 use iem_server::secrets::{JWT_SECRET_FILE, SECRETS_DIR, VAPID_PRIVATE_FILE};
@@ -579,6 +580,7 @@ impl<'a> Plan<'a> {
                 PinOutcome::Set => "set",
                 PinOutcome::Unchanged => "unchanged",
                 PinOutcome::KeptIemmixerPin => "kept (set in iemmixer)",
+                PinOutcome::Archived => "skipped (archived)",
             };
             self.report.push(format!("pin {owner}: {what}"));
         }
@@ -606,6 +608,18 @@ pub fn run_with(args: &[String], fail: &dyn Fn(Step) -> io::Result<()>) -> Resul
     let legacy = a.path("--legacy")?;
     let out = a.path("--out")?;
     let dry = a.flag("--dry-run");
+    // The roster layout (#58): the band data lives per lineup there, and a
+    // legacy import would write beside it what nobody reads.
+    let roster_layout = out
+        .join(ACTIVE_FILE)
+        .try_exists()
+        .map_err(|e| Failure::io(format!("{}: {e}", out.display())))?;
+    if roster_layout {
+        return Err(Failure::io(format!(
+            "{}: holds the roster layout ({ACTIVE_FILE}); the band import writes only the legacy layout, so nothing is written",
+            out.display()
+        )));
+    }
     if !legacy.is_dir() {
         return Err(Failure::input(format!(
             "{}: not a directory",

@@ -60,7 +60,7 @@ async fn list_snapshots(
 ) -> Result<Json<Vec<SnapshotInfo>>, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     let list = state
-        .band
+        .band()
         .snapshots(&m)
         .map_err(|e| store_error(e, "reading the history"))?;
     Ok(Json(list.iter().map(SnapshotInfo::from).collect()))
@@ -93,7 +93,7 @@ async fn create_snapshot(
     };
     // The entry's id: the next free second when this one is taken.
     let timestamp = state
-        .band
+        .band()
         .add_snapshot(&m, snapshot)
         .map_err(|e| store_error(e, "saving the snapshot"))?;
     tracing::info!(member = %m, timestamp, "manual snapshot saved");
@@ -110,7 +110,7 @@ async fn delete_snapshot(
 ) -> Result<StatusCode, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     if state
-        .band
+        .band()
         .delete_snapshot(&m, timestamp)
         .map_err(|e| store_error(e, "deleting the snapshot"))?
     {
@@ -130,7 +130,7 @@ async fn pin(
 ) -> Result<StatusCode, Reject> {
     let (_, m) = member_page(state, headers, member).await?;
     if state
-        .band
+        .band()
         .pin_snapshot(&m, timestamp, pinned, label)
         .map_err(|e| store_error(e, "pinning the snapshot"))?
     {
@@ -164,7 +164,7 @@ async fn restore_snapshot(
 ) -> Result<Json<serde_json::Value>, Reject> {
     let (page, m) = member_page(&state, &headers, &member).await?;
     let snap = state
-        .band
+        .band()
         .snapshot(&m, timestamp)
         .map_err(|e| store_error(e, "reading the history"))?
         .ok_or((StatusCode::NOT_FOUND, Json(ApiError::not_found("Snapshot"))))?;

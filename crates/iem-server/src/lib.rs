@@ -14,11 +14,15 @@ pub mod band_import;
 pub mod band_store;
 pub mod console;
 pub mod engine;
+pub mod lineup_routes;
+pub mod lineup_store;
+pub mod lineup_switch;
 pub mod login_guard;
 pub mod meters;
 pub mod mixer_ws;
 pub mod notify;
 pub mod peer_route;
+pub mod people_archive;
 pub mod pepper;
 pub mod photo_store;
 pub mod pin_hash;
@@ -27,6 +31,8 @@ pub mod preset_routes;
 pub mod provision;
 pub mod push;
 pub mod push_store;
+pub mod roster_state;
+pub mod roster_watch;
 pub mod routes;
 pub mod secrets;
 pub mod site_view;
@@ -87,8 +93,15 @@ pub enum To {
     Session(u64),
 }
 
-/// The site view built for one topology (keyed by its hash).
-type SiteCacheEntry = (String, Arc<SiteView>);
+/// What a site view is built from: the topology's hash and, in roster mode,
+/// the roster's SHA-256 and the active lineup.
+type SiteCacheKey = (String, Option<(String, String)>);
+
+/// The site view built for one key.
+type SiteCacheEntry = (SiteCacheKey, Arc<SiteView>);
+
+/// The band store of each lineup (`None`: legacy mode, the config dir).
+type BandStores = HashMap<Option<String>, Arc<band_store::BandStore>>;
 
 /// Talkback runtime metrics (`GET /api/talkback/diagnostics`, F28).
 #[cfg(feature = "audio")]
@@ -123,6 +136,9 @@ pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     /// The site as loaded at start (members and inputs never change at runtime)
     pub site_config: Arc<Config>,
+    /// The roster and its active lineup (#58); `None` is legacy mode, the
+    /// site's `[[members]]` as before. A std lock: read without awaiting.
+    pub roster: Arc<std::sync::RwLock<Option<roster_state::RosterState>>>,
     /// The directory of the site file (stores, secrets, push subscriptions)
     pub config_dir: Arc<std::path::PathBuf>,
     /// HTTP client (Web Push, public-IP detection)
@@ -132,6 +148,42 @@ pub struct AppState {
     site_cache: Arc<Mutex<Option<SiteCacheEntry>>>,
     /// UI events that do not come from the engine (SOS, pins, talk, tunnel)
     pub event_tx: broadcast::Sender<(To, ServerMsg)>,
+    /// The active lineup after a switch or a roster change (#58):
+    /// [`AppState::announce_lineup`]
+    pub lineup_tx: broadcast::Sender<iem_core::LineupRef>,
+    /// One lineup switch or roster reload at a time (#58 design §7).
+    pub switching: Arc<tokio::sync::Mutex<()>>,
+    /// Set while a switch runs (and, after a restart that cut one short,
+    /// until it is finished): no page's change reaches the engine
+    /// ([`AppState::may_change`]).
+    pub frozen: Arc<std::sync::atomic::AtomicBool>,
+    /// How long the replay of a switch and the settle of a roster wait
+    /// between two tries (`lineup_switch::REPLAY_RETRY`; tests shorten it).
+    pub retry: std::time::Duration,
+    /// How long a roster's import whose answer was lost waits for an absent
+    /// engine before the engineer's devices hear of it, once
+    /// (`roster_watch::ABSENT_ALARM`; tests shorten it).
+    pub absent_alarm: std::time::Duration,
+    /// Reloads in a row whose pending record could not be written
+    /// (`roster_watch::NOT_RECORDED`): the engineer's devices hear of it once
+    /// the count reaches `roster_watch::MAX_SETTLES`; a reload that applies
+    /// starts it again.
+    pub(crate) unrecorded: Arc<std::sync::atomic::AtomicU32>,
+    /// The server started on the roster applied last because `roster.toml`
+    /// could not be used (`roster_watch::Loaded::fallback`), until a roster
+    /// file is in use again: the status says so.
+    pub fallback: Arc<std::sync::atomic::AtomicBool>,
+    /// A page's change is checked and queued under the read side, `frozen`
+    /// is set under the write side ([`AppState::apply`],
+    /// [`AppState::freeze`]). A std lock: never held across an `.await`.
+    change_gate: Arc<std::sync::RwLock<()>>,
+    /// A person's page dropped an engine event while frozen
+    /// ([`AppState::frozen_for_page`]): the next thaw announces the band
+    /// even when nothing changed ([`AppState::thaw_unchanged`]).
+    missed: Arc<std::sync::atomic::AtomicBool>,
+    /// The roster in use has not reached the engine's state yet
+    /// (`roster_watch::settle`): no page's change, switch or restore runs.
+    unsettled: Arc<Mutex<Option<roster_watch::Unsettled>>>,
     /// Merged meters every 100 ms
     pub meters_tx: broadcast::Sender<Arc<Merged>>,
     /// Latest limiter active seconds per mix (topology order)
@@ -141,7 +193,7 @@ pub struct AppState {
     pub talk: Arc<Mutex<talk::TalkLock>>,
     /// Active SOS alerts: member id → (member id, display name)
     pub alerts: Arc<Mutex<HashMap<String, (String, String)>>>,
-    /// Members whose daily auto-snapshot is taken: member → UTC day
+    /// Members whose daily auto-snapshot is taken: [`snapshot_key`] → UTC day
     auto_snapshots: Arc<Mutex<HashMap<String, String>>>,
     /// Argon2id PIN hashes (`<config dir>/secrets/pin_hashes.json`)
     pub pin_store: Arc<RwLock<pin_store::PinStore>>,
@@ -151,8 +203,9 @@ pub struct AppState {
     pub login_guard: Arc<login_guard::LoginGuard>,
     /// Bounded concurrency for argon2id work
     pub hash_gate: Arc<login_guard::HashGate>,
-    /// Presets, history, pins and hides (band schema 3)
-    pub band: Arc<band_store::BandStore>,
+    /// Presets, history, pins and hides (band schema 3), one store per
+    /// lineup: [`AppState::band`], [`AppState::band_of`]
+    bands: Arc<Mutex<BandStores>>,
     /// Backup files
     pub backup_store: Arc<backup_store::BackupStore>,
     /// Profile photo storage (per-member JPEG files)
@@ -175,12 +228,45 @@ impl AppState {
     /// Production constructor. Loads the PIN pepper and the PIN hashes from
     /// `<config dir>/secrets/`; an unreadable pepper or a corrupt or plaintext
     /// PIN store is an error — never regenerated, never ignored — so the server
-    /// refuses to start. The engine and media links start detached;
-    /// `start_server` connects them.
+    /// refuses to start. So is a roster (`roster.toml`) that cannot be used
+    /// (`roster_watch::load`, which migrates the legacy layout first); without
+    /// one the server runs in legacy mode. The engine and media links start
+    /// detached; `start_server` connects them.
     pub fn try_new(config: Config, config_dir: &std::path::Path) -> std::io::Result<Self> {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
-        let pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        let mut pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        // A roster is checked against the site's own `[engine]` table, as
+        // `iem-server roster check` does (a site config built in code has
+        // none, and one the engine could not read either is only logged:
+        // no topology check until the engine speaks).
+        let facts = config
+            .engine
+            .as_ref()
+            .and_then(|t| match iem_core::roster::engine_facts(t) {
+                Ok(facts) => Some(facts),
+                Err(e) => {
+                    tracing::error!(error = %e, "the site's [engine] table: a roster is checked once the engine speaks");
+                    None
+                }
+            });
+        let loaded = roster_watch::load(config_dir, &config, &mut pin_store, facts.as_ref())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let fallback = loaded.as_ref().is_some_and(|l| l.fallback);
+        let roster = loaded.map(|l| l.roster);
+        // A switch a restart cut short: no change until it is finished
+        // (`lineup_switch::replay_when_synced`).
+        let cut_short = roster.is_some()
+            && lineup_store::LineupStore::new(config_dir)
+                .intent()?
+                .is_some();
+        // The roster reaches the states once the engine has synced
+        // (`roster_watch::settle_when_synced`): each state from the roster
+        // its marker names (a kept one), one without a marker from the roster
+        // applied last, also after a switch a restart cut short.
+        let unsettled = roster
+            .as_ref()
+            .map(|_| roster_watch::Unsettled::new(roster_watch::applied_base(config_dir)));
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
         // from loopback and this host's own addresses (design note §6).
         let host = login_guard::HostAddrs::read();
@@ -195,8 +281,10 @@ impl AppState {
         }
         let (event_tx, _) = broadcast::channel(256);
         let (meters_tx, _) = broadcast::channel(16);
+        let (lineup_tx, _) = broadcast::channel(16);
         Ok(Self {
             site_config: Arc::new(config.clone()),
+            roster: Arc::new(std::sync::RwLock::new(roster)),
             config_dir: Arc::new(config_dir.to_path_buf()),
             config: Arc::new(RwLock::new(config)),
             http_client: reqwest::Client::builder()
@@ -207,6 +295,16 @@ impl AppState {
             engine: EngineClient::detached(),
             site_cache: Arc::new(Mutex::new(None)),
             event_tx,
+            lineup_tx,
+            switching: Arc::new(tokio::sync::Mutex::new(())),
+            frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
+            retry: lineup_switch::REPLAY_RETRY,
+            absent_alarm: roster_watch::ABSENT_ALARM,
+            unrecorded: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            fallback: Arc::new(std::sync::atomic::AtomicBool::new(fallback)),
+            change_gate: Arc::new(std::sync::RwLock::new(())),
+            missed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unsettled: Arc::new(Mutex::new(unsettled)),
             meters_tx,
             active_s: Arc::new(Mutex::new(Vec::new())),
             sessions: Arc::new(AtomicU64::new(1)),
@@ -221,7 +319,7 @@ impl AppState {
                 login_guard::HASH_CONCURRENCY,
                 login_guard::HASH_QUEUE,
             )),
-            band: Arc::new(band_store::BandStore::new(config_dir)),
+            bands: Arc::new(Mutex::new(HashMap::new())),
             backup_store: Arc::new(backup_store::BackupStore::new(config_dir)),
             photo_store: Arc::new(photo_store::PhotoStore::new(config_dir)),
             push_store: Arc::new(RwLock::new(push_store::PushStore::load(config_dir))),
@@ -243,37 +341,131 @@ impl AppState {
         Self::try_new(config, config_dir).expect("test AppState: pepper and PIN store")
     }
 
+    /// The presets, history and pins/hides store of the active lineup (the
+    /// one the site view shows: `RosterState::lineup`), or in legacy mode
+    /// the config directory's.
+    pub fn band(&self) -> Arc<band_store::BandStore> {
+        let roster = self.roster();
+        self.band_of(roster.as_ref().map(|r| r.lineup().id.as_str()))
+    }
+
+    /// The store of `lineup`'s files (`lineups/<id>/`; `None`: the config
+    /// directory, legacy mode). One store per lineup for the server's life,
+    /// so every writer of a lineup's files shares its lock.
+    pub fn band_of(&self, lineup: Option<&str>) -> Arc<band_store::BandStore> {
+        let mut bands = lock(&self.bands);
+        let store = bands.entry(lineup.map(str::to_string)).or_insert_with(|| {
+            let dir = match lineup {
+                Some(id) => lineup_store::LineupStore::new(&self.config_dir).data_dir(id),
+                None => self.config_dir.to_path_buf(),
+            };
+            Arc::new(band_store::BandStore::new(&dir))
+        });
+        Arc::clone(store)
+    }
+
+    /// The roster in use (a copy; its roster is shared), `None` in legacy
+    /// mode.
+    pub fn roster(&self) -> Option<roster_state::RosterState> {
+        self.roster
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Puts `roster` into use (`None`: legacy mode).
+    pub fn set_roster(&self, roster: Option<roster_state::RosterState>) {
+        *self.roster.write().unwrap_or_else(PoisonError::into_inner) = roster;
+    }
+
+    /// Tells every mixer page that the lineup or the roster changed (#58):
+    /// the active lineup on [`AppState::lineup_tx`]. Nothing in legacy mode.
+    pub fn announce_lineup(&self) {
+        if let Some(r) = self.roster() {
+            let l = r.lineup();
+            let _ = self.lineup_tx.send(iem_core::LineupRef {
+                id: l.id.clone(),
+                name: l.name.clone(),
+            });
+        }
+    }
+
+    /// Whether a switch runs (or one a restart cut short is not finished).
+    pub fn frozen_now(&self) -> bool {
+        self.frozen.load(Ordering::SeqCst)
+    }
+
+    /// What the states follow while the roster in use has not reached them
+    /// (`None`: it has, or legacy mode).
+    pub fn unsettled(&self) -> Option<roster_watch::Unsettled> {
+        lock(&self.unsettled).clone()
+    }
+
+    pub fn set_unsettled(&self, unsettled: Option<roster_watch::Unsettled>) {
+        *lock(&self.unsettled) = unsettled;
+    }
+
+    /// Whether the pages wait for the roster in use to reach the engine's
+    /// state (`roster_watch::Unsettled::refusing`).
+    pub fn settling(&self) -> bool {
+        lock(&self.unsettled).as_ref().is_some_and(|u| u.refusing)
+    }
+
+    /// Whether a change from `page` may reach the engine (or the page's
+    /// pins and hides) now (#58 design §7): not while a switch runs or the
+    /// roster in use has not reached the engine's state yet, and not from a
+    /// page the active lineup no longer gives as it is (another band plays:
+    /// the page's socket is closing, its change would land on another
+    /// person's mix).
+    pub fn may_change(&self, page: &Page) -> Result<(), view::ViewError> {
+        if self.frozen_now() || self.settling() || self.page(&page.id).as_ref() != Some(page) {
+            return Err(view::ViewError::Switching);
+        }
+        Ok(())
+    }
+
     /// The site view over the engine's current topology (`None` until the
-    /// engine announced one). Rebuilt when the topology hash changes.
+    /// engine announced one). Rebuilt when the topology hash, the roster or
+    /// its active lineup changes.
     pub fn site(&self) -> Option<Arc<SiteView>> {
         let topo = self.engine.mirror().topology.clone()?;
+        let roster = self.roster();
+        let key: SiteCacheKey = (
+            topo.hash.clone(),
+            roster
+                .as_ref()
+                .map(|r| (r.sha256.clone(), r.active.clone())),
+        );
         let mut cache = lock(&self.site_cache);
-        if let Some((hash, view)) = cache.as_ref()
-            && *hash == topo.hash
+        if let Some((built_for, view)) = cache.as_ref()
+            && *built_for == key
         {
             return Some(Arc::clone(view));
         }
-        let (view, problems) = SiteView::build(&self.site_config, &topo);
+        let (view, problems) = SiteView::build_with(&self.site_config, roster.as_ref(), &topo);
         for p in &problems {
             tracing::error!(problem = %p, "site config and engine topology differ");
         }
         let view = Arc::new(view);
-        *cache = Some((topo.hash.clone(), Arc::clone(&view)));
+        *cache = Some((key, Arc::clone(&view)));
         Some(view)
     }
 
-    /// The page `id`: from the site view, or (engine not seen yet) a
-    /// configured member.
+    /// The page `id`: from the site view, or (engine not seen yet) a member
+    /// as the site, or the roster's active lineup, places them.
     pub fn page(&self, id: &str) -> Option<Page> {
         if let Some(view) = self.site() {
             return view.page(id);
         }
-        self.site_config.member(id).map(|m| Page {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            mix: iem_engine_proto::MixId::new(m.mix.clone()),
-            member: Some(m.id.clone()),
-        })
+        roster_state::site_members(&self.site_config, self.roster().as_ref())
+            .into_iter()
+            .find(|m| m.id == id)
+            .map(|m| Page {
+                id: m.id.clone(),
+                name: m.name,
+                mix: iem_engine_proto::MixId::new(m.mix),
+                member: Some(m.id),
+            })
     }
 
     /// A new WebSocket session id (the engine's `origin`).
@@ -294,17 +486,22 @@ impl AppState {
     }
 
     /// Takes the member's daily auto-snapshot (F14) if today has none: the
-    /// mix as it is before the first change of the day.
+    /// mix as it is before the first change of the day. In roster mode
+    /// each lineup's history is its own, so a person who plays in two
+    /// bands the same day gets one in each (#58).
     pub fn auto_snapshot(&self, page: &Page) {
         let Some(member) = page.member.as_deref() else {
             return;
         };
+        let lineup = self.roster().map(|r| r.lineup().id.clone());
+        let band = self.band_of(lineup.as_deref());
+        let key = snapshot_key(lineup.as_deref(), member);
         let now = chrono::Utc::now().timestamp();
         let today = band_store::utc_day(now);
-        if lock(&self.auto_snapshots).get(member) == Some(&today) {
+        if lock(&self.auto_snapshots).get(&key) == Some(&today) {
             return;
         }
-        match self.band.has_auto_snapshot_on(member, &today) {
+        match band.has_auto_snapshot_on(member, &today) {
             Ok(true) => {}
             Ok(false) => {
                 let Some(view) = self.site() else {
@@ -321,7 +518,7 @@ impl AppState {
                     archived: false,
                     legacy_member: None,
                 };
-                if let Err(e) = self.band.add_snapshot(member, snap) {
+                if let Err(e) = band.add_snapshot(member, snap) {
                     tracing::error!(%member, error = %e, "daily auto-snapshot failed");
                     return;
                 }
@@ -332,21 +529,131 @@ impl AppState {
                 return;
             }
         }
-        lock(&self.auto_snapshots).insert(member.to_string(), today);
+        lock(&self.auto_snapshots).insert(key, today);
     }
 
-    /// Sends commands that change `page`'s mix, after its daily snapshot.
+    /// Sends a page's commands to the engine and waits until the mirror
+    /// holds each: refused while a switch runs or from a page whose band no
+    /// longer plays ([`AppState::may_change`]); when they change the page's
+    /// mix, its daily snapshot is taken first. The check, the snapshot and
+    /// the queueing happen under the read side of the change gate, which a
+    /// switch or a reload holds to freeze ([`AppState::freeze`]): no change
+    /// slips in between its check and the freeze (#58).
     pub async fn apply(
         &self,
         page: &Page,
         cmds: Vec<Cmd>,
         origin: Option<u64>,
-    ) -> Result<(), EngineError> {
-        self.auto_snapshot(page);
-        for cmd in cmds {
-            self.engine.request_applied(cmd, origin).await?;
+    ) -> Result<(), ChangeError> {
+        let sent = {
+            let _gate = self
+                .change_gate
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.may_change(page)?;
+            if cmds.iter().any(|c| mixer_ws::changes_mix(c, &page.mix)) {
+                self.auto_snapshot(page);
+            }
+            cmds.into_iter()
+                .map(|cmd| self.engine.send(cmd, origin))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for s in sent {
+            s.applied().await?;
         }
         Ok(())
+    }
+
+    /// Freezes every page's changes for a switch or a reload: `frozen` set
+    /// under the change gate's write side (no page is between its check and
+    /// its queueing), then a `Ping` that comes back only after every change
+    /// queued before it reached the mirror. Returns whether `frozen` was set
+    /// already (a switch a restart cut short); a failed barrier puts it back
+    /// as it was.
+    pub async fn freeze(&self) -> Result<bool, EngineError> {
+        let was = {
+            let _gate = self
+                .change_gate
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.frozen.swap(true, Ordering::SeqCst)
+        };
+        if let Err(e) = self.engine.request_applied(Cmd::Ping, None).await {
+            if !was {
+                self.thaw_unchanged();
+            }
+            return Err(e);
+        }
+        Ok(was)
+    }
+
+    /// Frees the pages' changes again after a change for them (an import,
+    /// another band or roster; #58 re-review): a person's page heard nothing
+    /// of the engine while they were frozen (`mixer_ws::closing`), so every
+    /// page hears which band plays ([`AppState::announce_lineup`]).
+    pub fn thaw(&self) {
+        self.thaw_after(true);
+    }
+
+    /// Frees the pages' changes again after a try that changed nothing for
+    /// them (no import went in): the band is announced, closing the people's
+    /// sockets, only when a person's page dropped an engine event while
+    /// frozen (#58 fifth review), so a try repeated every poll does not
+    /// reconnect every phone.
+    pub fn thaw_unchanged(&self) {
+        self.thaw_after(false);
+    }
+
+    fn thaw_after(&self, changed: bool) {
+        let (was, missed) = {
+            let _gate = self
+                .change_gate
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            (
+                self.frozen.swap(false, Ordering::SeqCst),
+                self.missed.swap(false, Ordering::SeqCst),
+            )
+        };
+        if was && (changed || missed) {
+            self.announce_lineup();
+        }
+    }
+
+    /// Whether the pages are frozen, for a person's page about to drop an
+    /// engine event (`mixer_ws::closing`): one dropped while frozen is noted
+    /// for the thaw, under the change gate's read side, so no thaw falls
+    /// between the look and the note.
+    pub fn frozen_for_page(&self) -> bool {
+        let _gate = self
+            .change_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let frozen = self.frozen_now();
+        if frozen {
+            self.missed.store(true, Ordering::SeqCst);
+        }
+        frozen
+    }
+}
+
+/// Why a page's commands did not reach the engine ([`AppState::apply`]).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ChangeError {
+    /// [`AppState::may_change`] refused: a switch runs, or the page's band
+    /// no longer plays.
+    #[error(transparent)]
+    Refused(#[from] view::ViewError),
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+}
+
+/// What [`AppState::auto_snapshot`] records a day's snapshot under: the
+/// member in legacy mode, `<lineup>/<member>` in roster mode.
+fn snapshot_key(lineup: Option<&str>, member: &str) -> String {
+    match lineup {
+        Some(l) => format!("{l}/{member}"),
+        None => member.to_string(),
     }
 }
 
@@ -436,7 +743,7 @@ where
     config.vapid_private_key = secrets.vapid_private_key;
     let pipe = config.engine_pipe.clone();
     let mut state = AppState::try_new(config, &server_config.config_dir)
-        .context("loading the PIN pepper and PIN hashes")?;
+        .context("loading the PIN pepper, the PIN hashes and the roster")?;
     state.engine = EngineClient::spawn(pipe.clone(), iem_core::VERSION.to_string());
     #[cfg(feature = "audio")]
     {
@@ -465,6 +772,25 @@ where
     console::spawn_tasks(state.clone());
     backup_daemon::spawn(state.clone());
     tunnel_watch::spawn_tunnel_watch(state.clone());
+    tokio::spawn(roster_watch::watch(state.clone()));
+    {
+        // A switch a restart cut short first, then the roster into the
+        // states (each once the engine has synced).
+        let s = state.clone();
+        tokio::spawn(async move {
+            let replayed = lineup_switch::replay_when_synced(s.clone()).await;
+            tracing::info!(
+                ?replayed,
+                "the start's replay of an unfinished switch is done"
+            );
+            roster_watch::settle_when_synced(s).await;
+        });
+        // A start on the roster applied last: the engineer hears of it.
+        let s = state.clone();
+        tokio::spawn(async move {
+            roster_watch::fallback_alarm(&s).await;
+        });
+    }
 
     let app = app_router(state.clone());
 

@@ -1,9 +1,10 @@
 //! Presets, history and pins/hides in the band schema-3 files (F8, F13, F14;
 //! S4 design note §3.4, S5 design note §6): `presets/<member>.json`,
-//! `snapshots/<member>.json`, `customizations/<member>.json` in the config
-//! directory. A file of another format or schema is an error and is never
-//! overwritten. Archived entries (a renamed member's history, D8) are
-//! loadable but never changed.
+//! `snapshots/<member>.json`, `customizations/<member>.json` in a data
+//! directory: the config directory in legacy mode, the active lineup's
+//! `lineups/<id>/` in roster mode (#58). A file of another format or schema
+//! is an error and is never overwritten. Archived entries (a renamed
+//! member's history, D8) are loadable but never changed.
 //!
 //! Also the two pure halves of presets and snapshots: `capture` (the page
 //! mix from the mirror) and `ramp` (applying one as a 50 ms ramp).
@@ -88,9 +89,10 @@ pub fn utc_day(ts: i64) -> String {
 }
 
 impl BandStore {
-    pub fn new(config_dir: &Path) -> Self {
+    /// A store over `data_dir` (see the module docs).
+    pub fn new(data_dir: &Path) -> Self {
         Self {
-            dir: config_dir.to_path_buf(),
+            dir: data_dir.to_path_buf(),
             lock: Mutex::new(()),
         }
     }
@@ -396,7 +398,9 @@ fn same(a: f64, b: f64) -> bool {
 /// silence and is muted at the last step, one being unmuted is unmuted at
 /// the first step and fades in; unchanged levels are not sent. A last
 /// batch sets the stored gain of levels that ended muted. Sources and groups
-/// the page mix does not have are skipped and counted.
+/// the page mix does not have are skipped and counted, and so are the
+/// heard mixes of a page whose member leads no part of the band (#58: an old
+/// entry never opens another person's mix in a non-leader's ears).
 pub fn ramp(
     view: &SiteView,
     mirror: &Mirror,
@@ -405,6 +409,7 @@ pub fn ramp(
     groups: &BTreeMap<GroupId, f64>,
 ) -> (Vec<Vec<Cmd>>, usize) {
     let mix = &page.mix;
+    let heard = crate::view::heard(view, page, &crate::view::Viewer::of_page(page));
     let mut steps: Vec<Vec<Cmd>> = vec![Vec::new(); RAMP_STEPS];
     let mut settle = Vec::new();
     let mut skipped = 0;
@@ -412,7 +417,7 @@ pub fn ramp(
     for s in sends {
         let known = match &s.src {
             Source::Input(i) => view.input(&i.0).is_some(),
-            Source::Mix(m) => view.mix(mix).is_some_and(|v| v.hears.contains(m)),
+            Source::Mix(m) => heard.contains(&m),
         };
         if !known {
             skipped += 1;

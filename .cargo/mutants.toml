@@ -232,8 +232,8 @@ exclude_re = [
   # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
   # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.
-  # anchor 46: } else if p < 0.0 {
-  "iem-server/src/backup\\.rs:46:.*replace < with <= in pan$",
+  # anchor 143: } else if p < 0.0 {
+  "iem-server/src/backup\\.rs:143:.*replace < with <= in pan$",
   # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
   # Unobservable (S5): Listen commands on the mixer socket are ignored either
@@ -245,6 +245,9 @@ exclude_re = [
   # replacement only); its steps are tested functions (due, settle,
   # RefusalAlarms, refusal_alarm).
   "iem-server/src/backup_daemon\\.rs.*replace run with \\(\\)$",
+  # The roster watcher's endless 2 s poll (#58), every mutant of it; its
+  # steps are the tested stamp and check_file.
+  "iem-server/src/roster_watch\\.rs.*\\bwatch\\b",
   # Equivalent (S6): the creation flags (the children's and the guard's
   # helpers') are distinct bits, so `^` gives the same value as `|`.
   "iem-win/src/decide\\.rs.*replace \\| with \\^ in (creation_flags|helper_flags)$",

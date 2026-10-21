@@ -29,6 +29,10 @@ struct PinFile {
     /// predecessor's PIN and was not changed in iemmixer since.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     imported: BTreeSet<String>,
+    /// Hashes of archived people (#58 decision 6), member id → hash: kept
+    /// for their return, never a login.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    archived: BTreeMap<String, String>,
 }
 
 /// Engineer and member PIN hashes, persisted atomically.
@@ -78,10 +82,45 @@ impl PinStore {
         if let Some(phc) = &file.engineer {
             check_phc(ENGINEER_ID, phc)?;
         }
-        for (member, phc) in &file.members {
+        for (member, phc) in file.members.iter().chain(&file.archived) {
             check_phc(member, phc)?;
         }
         Ok(Self { file, path })
+    }
+
+    /// An archived person's hash (never one a login reads).
+    pub fn archived_hash(&self, member_id: &str) -> Option<&str> {
+        self.file.archived.get(member_id).map(String::as_str)
+    }
+
+    /// Moves a member's hash to the archive (#58 decision 6): no login
+    /// finds it, a restore brings it back. Its import mark goes: a restored
+    /// hash counts as set in iemmixer. `false` when there is none.
+    pub fn archive_member(&mut self, member_id: &str) -> io::Result<bool> {
+        check_member(member_id)?;
+        let Some(phc) = self.file.members.remove(member_id) else {
+            return Ok(false);
+        };
+        self.file.archived.insert(member_id.to_string(), phc);
+        self.file.imported.remove(member_id);
+        self.save()?;
+        Ok(true)
+    }
+
+    /// Brings an archived hash back. A hash set since (the engineer's reset
+    /// for the returning person) is kept and the archived one dropped.
+    /// `true` when the archived hash is the member's again.
+    pub fn restore_member(&mut self, member_id: &str) -> io::Result<bool> {
+        check_member(member_id)?;
+        let Some(phc) = self.file.archived.remove(member_id) else {
+            return Ok(false);
+        };
+        let restored = !self.file.members.contains_key(member_id);
+        if restored {
+            self.file.members.insert(member_id.to_string(), phc);
+        }
+        self.save()?;
+        Ok(restored)
     }
 
     pub fn engineer_hash(&self) -> Option<&str> {
@@ -92,9 +131,18 @@ impl PinStore {
         self.file.members.get(member_id).map(String::as_str)
     }
 
-    /// Whether any PIN hash (engineer or member) is stored.
+    /// Every member with a live PIN hash (not the engineer, not an
+    /// archived one), in id order.
+    pub fn member_ids(&self) -> Vec<String> {
+        self.file.members.keys().cloned().collect()
+    }
+
+    /// Whether any PIN hash (engineer, member or archived) is stored: a new
+    /// pepper would void each of them.
     pub fn has_hashes(&self) -> bool {
-        self.file.engineer.is_some() || !self.file.members.is_empty()
+        self.file.engineer.is_some()
+            || !self.file.members.is_empty()
+            || !self.file.archived.is_empty()
     }
 
     /// Whether `owner`'s hash (a member id or `engineer`) came from an import.
@@ -290,6 +338,100 @@ mod tests {
         let store = PinStore::load(dir.path()).unwrap();
         assert!(store.member_hash("member1").is_some());
         assert!(!store.is_imported("member1"));
+    }
+
+    /// #58: a file from before the archive loads with nobody archived, and
+    /// is written back the same.
+    #[test]
+    fn archived_hashes_load_from_an_older_file_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let text = format!(r#"{{"members":{{"member1":"{}"}}}}"#, h.hash("1357"));
+        std::fs::write(dir.path().join(PIN_HASHES_FILE), &text).unwrap();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        assert_eq!(store.archived_hash("member1"), None);
+        assert!(store.member_hash("member1").is_some());
+        assert!(
+            !store.archive_member("member2").unwrap(),
+            "no hash: nothing"
+        );
+        assert!(!store.restore_member("member1").unwrap(), "none archived");
+        assert!(store.member_hash("member1").is_some());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(PIN_HASHES_FILE)).unwrap(),
+            text,
+            "nothing was written"
+        );
+        store.set_member_hash("member2", h.hash("2468")).unwrap();
+        let written = std::fs::read_to_string(dir.path().join(PIN_HASHES_FILE)).unwrap();
+        assert!(!written.contains("archived"), "{written}");
+    }
+
+    /// #58 decision 6: an archived hash is no login, survives a reload and
+    /// comes back with the person.
+    #[test]
+    fn an_archived_hash_is_kept_for_the_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store.import_member_hash("member1", h.hash("1357")).unwrap();
+        store.set_member_hash("member2", h.hash("2468")).unwrap();
+        assert!(store.archive_member("member1").unwrap());
+        assert_eq!(store.member_hash("member1"), None, "no login");
+        assert!(!store.is_imported("member1"));
+        let mut store = PinStore::load(dir.path()).unwrap();
+        assert!(h.verify("1357", store.archived_hash("member1").unwrap()));
+        assert!(store.restore_member("member1").unwrap());
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+        assert_eq!(store.archived_hash("member1"), None);
+        assert!(h.verify("2468", store.member_hash("member2").unwrap()));
+        // A PIN set while archived (the engineer's reset) wins over it.
+        store.archive_member("member2").unwrap();
+        store.set_member_hash("member2", h.hash("8642")).unwrap();
+        assert!(!store.restore_member("member2").unwrap());
+        assert!(h.verify("8642", store.member_hash("member2").unwrap()));
+        let store = PinStore::load(dir.path()).unwrap();
+        assert_eq!(store.archived_hash("member2"), None, "the old one is gone");
+        // Ids are checked, the engineer is never archived.
+        let mut store = store;
+        assert!(store.archive_member(ENGINEER_ID).is_err());
+        assert!(store.restore_member("../x").is_err());
+    }
+
+    /// #58: the roster's watcher archives whoever holds a live PIN and is
+    /// no person any more.
+    #[test]
+    fn member_ids_are_the_live_member_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        assert!(store.member_ids().is_empty());
+        store.set_engineer_hash(h.hash("2468")).unwrap();
+        for id in ["member2", "member1", "member3"] {
+            store.set_member_hash(id, h.hash("1357")).unwrap();
+        }
+        store.archive_member("member3").unwrap();
+        assert_eq!(store.member_ids(), ["member1", "member2"]);
+    }
+
+    #[test]
+    fn an_archived_hash_alone_still_counts_and_must_be_argon2id() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store.set_member_hash("member1", h.hash("1357")).unwrap();
+        store.archive_member("member1").unwrap();
+        // The pepper must never be made anew next to an archived hash.
+        assert!(PinStore::load(dir.path()).unwrap().has_hashes());
+        std::fs::write(
+            dir.path().join(PIN_HASHES_FILE),
+            r#"{"archived":{"member1":"1357"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            PinStore::load(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

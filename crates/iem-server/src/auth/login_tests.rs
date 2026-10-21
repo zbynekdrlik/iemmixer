@@ -648,3 +648,76 @@ async fn the_engineer_pin_check_is_a_guarded_login() {
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(state.login_guard.stats().lan_failures, 3);
 }
+
+/// The test roster with `active` playing, minus the people in `gone` (who
+/// left: archived).
+fn roster_without(active: &str, gone: &[&str]) -> crate::roster_state::RosterState {
+    let mut r = crate::roster_state::tests::test_roster(active);
+    let roster = std::sync::Arc::make_mut(&mut r.roster);
+    roster.people.retain(|p| !gone.contains(&p.id.as_str()));
+    for l in &mut roster.lineups {
+        l.sets.retain(|_, p| !gone.contains(&p.as_str()));
+        l.leaders.retain(|p| !gone.contains(&p.as_str()));
+    }
+    r
+}
+
+/// #58: a person of the roster logs in whether or not they play in the band
+/// that plays (their page then says which one does); someone who is no
+/// person is unknown.
+#[tokio::test]
+async fn a_person_not_playing_may_log_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    state.set_roster(Some(roster_without("youth", &[])));
+    let app = app(state, LAN);
+    // member1 plays in main only; youth plays.
+    let resp = login_as(&app, "member1", MEMBER_PIN, &[]).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["member"], "member1");
+    // member10 is a person (no PIN yet): a wrong PIN, not an unknown login.
+    assert_eq!(
+        login_as(&app, "member10", MEMBER_PIN, &[]).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login_as(&app, "nobody", MEMBER_PIN, &[]).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    // The engineer's tile is the site's.
+    let body = json_body(login_as(&app, "engineer", ENGINEER_PIN, &[]).await).await;
+    assert_eq!(body["engineer"], true);
+}
+
+/// #58 decision 6: a person the roster no longer holds logs in nowhere,
+/// even with a PIN hash still stored, and their old token changes no PIN.
+#[tokio::test]
+async fn an_archived_person_may_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    state.set_roster(Some(roster_without("main", &["member1"])));
+    let app = app(state, LAN);
+    let resp = login_as(&app, "member1", MEMBER_PIN, &[]).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(json_body(resp).await.get("token").is_none());
+    let resp = change(
+        &app,
+        &bearer("member1", false),
+        serde_json::json!({ "old_pin": MEMBER_PIN, "new_pin": NEW_PIN }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // The engineer resets no PIN of theirs either.
+    let resp = change(
+        &app,
+        &bearer("engineer", true),
+        serde_json::json!({ "member": "member1", "new_pin": NEW_PIN }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // The others still log in.
+    assert_eq!(
+        login_as(&app, "member2", ENGINEER_PIN, &[]).await.status(),
+        StatusCode::OK
+    );
+}

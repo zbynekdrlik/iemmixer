@@ -68,11 +68,13 @@ fn a_session_hears_back_only_the_mutes_its_solo_shows() {
         source: mic2.clone(),
         level: Default::default(),
     };
-    assert!(own_echo(&v, &m, &page, std::slice::from_ref(&level)).is_empty());
-    let echo = own_echo(
+    let own = Viewer::of_page(&page);
+    assert!(own_echo_seen(&v, &m, &page, &own, std::slice::from_ref(&level)).is_empty());
+    let echo = own_echo_seen(
         &v,
         &m,
         &page,
+        &own,
         &[
             level,
             Change::Solo {
@@ -376,6 +378,146 @@ fn page_mix_changes_are_told_apart() {
     ));
 }
 
+/// A state with the test roster, `active` playing, on a fake engine whose
+/// mirror holds no level and `solo`; the engine's end.
+async fn on_fake_engine(
+    dir: &std::path::Path,
+    active: &str,
+    solo: Vec<iem_engine_proto::Solo>,
+) -> (AppState, crate::engine::client::fake::Peer) {
+    let mut s = AppState::new(crate::site_view::tests::test_config(), dir);
+    s.set_roster(Some(crate::roster_state::tests::test_roster(active)));
+    let (engine, mut peer) =
+        crate::engine::client::fake::announced(crate::site_view::tests::test_topology()).await;
+    s.engine = engine;
+    peer.send(&iem_engine_proto::EngineMsg::State {
+        rev: 1,
+        state: Default::default(),
+        transient: iem_engine_proto::Transient {
+            solo,
+            ..Default::default()
+        },
+    })
+    .await;
+    let t0 = std::time::Instant::now();
+    while !s.engine.mirror().synced {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "synced");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    (s, peer)
+}
+
+/// #58 review: the echo of a session's own solo shows the channels its
+/// viewer sees: the engineer on member10's page (youth) gets the heard
+/// mixes' masks, which member10 does not see.
+#[tokio::test]
+async fn the_echo_of_an_own_solo_is_the_viewers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mix1 = MixId::new("member1");
+    let sources = vec![Source::Input(InputId::new("mic1"))];
+    let solo = iem_engine_proto::Solo {
+        mix: mix1.clone(),
+        sources: sources.clone(),
+    };
+    let (s, _peer) = on_fake_engine(dir.path(), "youth", vec![solo]).await;
+    let page = s.page("member10").unwrap();
+    let changes = std::sync::Arc::new(vec![Change::Solo { mix: mix1, sources }]);
+    let echo = |v: &Viewer| -> Vec<String> {
+        let ev = EngineEvent::Changed {
+            origin: Some(5),
+            changes: std::sync::Arc::clone(&changes),
+        };
+        engine_event(&s, 5, &page, v, ev)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::ChannelUpdate { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    };
+    let engineer = echo(&viewer("engineer", true));
+    assert!(
+        engineer.contains(&"member3".to_string()) && engineer.contains(&"member4".to_string()),
+        "{engineer:?}"
+    );
+    let own = echo(&viewer("member10", false));
+    assert!(
+        !own.is_empty() && !own.contains(&"member3".to_string()),
+        "{own:?}"
+    );
+}
+
+/// #58 review: a person's page hears nothing of the engine while a switch
+/// runs or once its band no longer plays: the new band's values never
+/// reach a page that is about to close (4003).
+#[tokio::test]
+async fn a_frozen_or_stale_persons_page_hears_nothing_of_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _peer) = on_fake_engine(dir.path(), "main", Vec::new()).await;
+    let page = s.page("member1").unwrap();
+    let m1 = viewer("member1", false);
+    let changes = std::sync::Arc::new(vec![Change::Level {
+        mix: MixId::new("member1"),
+        source: Source::Input(InputId::new("keys")),
+        level: iem_engine_proto::Level {
+            gain_db: -6.0,
+            pan: 0.0,
+            muted: false,
+        },
+    }]);
+    let heard = || {
+        let ev = EngineEvent::Changed {
+            origin: None,
+            changes: std::sync::Arc::clone(&changes),
+        };
+        engine_event(&s, 5, &page, &m1, ev)
+    };
+    assert_eq!(heard().len(), 1, "its band plays");
+    s.frozen.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(heard().is_empty(), "a switch runs");
+    assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
+    s.frozen.store(false, std::sync::atomic::Ordering::SeqCst);
+    s.set_roster(Some(crate::roster_state::tests::test_roster("youth")));
+    assert!(heard().is_empty(), "member1 plays no part of youth");
+    assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
+}
+
+/// #58 fifth review: a thaw after a try that changed nothing for the pages
+/// (`AppState::thaw_unchanged`) announces the band only when a person's page
+/// dropped an engine event while frozen, so that page hears the band again
+/// (#9's guarantee) and no other thaw closes the people's sockets. A thaw
+/// after a change (`AppState::thaw`) always announces.
+#[tokio::test]
+async fn a_quiet_thaw_announces_only_after_a_page_missed_an_engine_event() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _peer) = on_fake_engine(dir.path(), "main", Vec::new()).await;
+    let page = s.page("member1").unwrap();
+    let m1 = viewer("member1", false);
+    let engineer = s.page("engineer").unwrap();
+    let eng = viewer("engineer", true);
+    let mut rx = s.lineup_tx.subscribe();
+    s.frozen.store(true, SeqCst);
+    s.thaw_unchanged();
+    assert!(!s.frozen_now());
+    assert!(rx.try_recv().is_err(), "nothing missed");
+    s.frozen.store(true, SeqCst);
+    // The engineer's page hears the engine while frozen: it misses nothing.
+    assert!(!engine_event(&s, 6, &engineer, &eng, EngineEvent::Reset).is_empty());
+    s.thaw_unchanged();
+    assert!(rx.try_recv().is_err(), "the engineer missed nothing");
+    s.frozen.store(true, SeqCst);
+    assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
+    s.thaw_unchanged();
+    assert_eq!(rx.try_recv().unwrap().id, "main", "member1 missed one");
+    s.frozen.store(true, SeqCst);
+    s.thaw_unchanged();
+    assert!(rx.try_recv().is_err(), "told once: the mark is gone");
+    s.frozen.store(true, SeqCst);
+    s.thaw();
+    assert_eq!(rx.try_recv().unwrap().id, "main", "after a change");
+}
+
 /// Commands, engine events and meters against the real engine (NullRt).
 #[cfg(unix)]
 mod live {
@@ -399,7 +541,7 @@ mod live {
             hidden: vec!["keys".into()],
         };
         handle(&s, 1, &page, &m2, pins, &tx).await;
-        let c = s.band.customization("member2").unwrap();
+        let c = s.band().customization("member2").unwrap();
         assert_eq!(c.pinned, vec![Source::Input(InputId::new("mic1"))]);
         assert_eq!(c.hidden, vec![Source::Input(InputId::new("keys"))]);
         let told = ServerMsg::CustomizationUpdate {

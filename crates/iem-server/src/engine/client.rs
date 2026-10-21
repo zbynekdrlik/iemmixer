@@ -81,6 +81,42 @@ pub struct EngineClient {
     inner: Arc<Inner>,
 }
 
+/// A request queued with [`EngineClient::send`], its reply still due.
+pub struct Sent {
+    client: EngineClient,
+    id: u64,
+    rx: oneshot::Receiver<Result<u64, ErrorBody>>,
+}
+
+impl Sent {
+    /// Waits for the reply: the revision after the request.
+    pub async fn reply(self) -> Result<u64, EngineError> {
+        match tokio::time::timeout(REQUEST_TIMEOUT, self.rx).await {
+            Ok(Ok(Ok(rev))) => Ok(rev),
+            Ok(Ok(Err(body))) => Err(EngineError::Refused(body)),
+            Ok(Err(_)) => Err(EngineError::Disconnected),
+            Err(_) => {
+                lock(&self.client.inner.pending).remove(&self.id);
+                Err(EngineError::Timeout)
+            }
+        }
+    }
+
+    /// Waits for the reply, then until the mirror holds the request's
+    /// effect.
+    pub async fn applied(self) -> Result<(), EngineError> {
+        let client = self.client.clone();
+        let rev = self.reply().await?;
+        let mut watch = client.inner.rev.subscribe();
+        let reached = tokio::time::timeout(APPLY_TIMEOUT, watch.wait_for(|r| *r >= rev)).await;
+        match reached {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) => Err(EngineError::Disconnected),
+            Err(_) => Err(EngineError::Timeout),
+        }
+    }
+}
+
 /// Why one connection ended.
 #[derive(Debug, PartialEq)]
 enum End {
@@ -161,12 +197,32 @@ impl EngineClient {
         self.inner.events.subscribe()
     }
 
+    /// Waits until the mirror is synced (a `State` arrived since the last
+    /// (re)connect), at most `within`, woken by the engine's events rather
+    /// than a poll: whether it is.
+    pub async fn wait_synced(&self, within: Duration) -> bool {
+        let mut events = self.subscribe();
+        let synced = async {
+            loop {
+                if self.mirror().synced {
+                    return;
+                }
+                if let Err(broadcast::error::RecvError::Closed) = events.recv().await {
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::time::timeout(within, synced).await.is_ok()
+    }
+
     fn emit(&self, e: EngineEvent) {
         let _ = self.inner.events.send(e);
     }
 
-    /// Sends `cmd` and waits for its reply: the revision after it.
-    pub async fn request(&self, cmd: Cmd, origin: Option<u64>) -> Result<u64, EngineError> {
+    /// Queues `cmd` for the engine now (no await: its place among every
+    /// other request is taken here); its reply is awaited with
+    /// [`Sent::reply`] or [`Sent::applied`].
+    pub fn send(&self, cmd: Cmd, origin: Option<u64>) -> Result<Sent, EngineError> {
         if !self.connected() {
             return Err(EngineError::Disconnected);
         }
@@ -182,27 +238,21 @@ impl EngineClient {
             lock(&self.inner.pending).remove(&id);
             return Err(EngineError::Disconnected);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(Ok(rev))) => Ok(rev),
-            Ok(Ok(Err(body))) => Err(EngineError::Refused(body)),
-            Ok(Err(_)) => Err(EngineError::Disconnected),
-            Err(_) => {
-                lock(&self.inner.pending).remove(&id);
-                Err(EngineError::Timeout)
-            }
-        }
+        Ok(Sent {
+            client: self.clone(),
+            id,
+            rx,
+        })
+    }
+
+    /// Sends `cmd` and waits for its reply: the revision after it.
+    pub async fn request(&self, cmd: Cmd, origin: Option<u64>) -> Result<u64, EngineError> {
+        self.send(cmd, origin)?.reply().await
     }
 
     /// Sends `cmd`, then waits until the mirror holds its effect.
     pub async fn request_applied(&self, cmd: Cmd, origin: Option<u64>) -> Result<(), EngineError> {
-        let rev = self.request(cmd, origin).await?;
-        let mut watch = self.inner.rev.subscribe();
-        let reached = tokio::time::timeout(APPLY_TIMEOUT, watch.wait_for(|r| *r >= rev)).await;
-        match reached {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(_)) => Err(EngineError::Disconnected),
-            Err(_) => Err(EngineError::Timeout),
-        }
+        self.send(cmd, origin)?.applied().await
     }
 
     async fn run(&self) {
@@ -396,16 +446,23 @@ pub(crate) mod fake {
     //! of the code above it that must not depend on a real engine.
 
     use super::*;
-    use iem_engine_proto::{Hello, MixState, TopologyInfo, Transient};
+    use iem_engine_proto::{ErrCode, Hello, MixState, Reply, TopologyInfo, Transient};
     use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 
     /// The engine's end of one connection.
     pub struct Peer {
         pub r: ReadHalf<DuplexStream>,
         pub w: WriteHalf<DuplexStream>,
+        /// The engine's revision as far as this end told the client: the
+        /// highest of every state, delta and successful reply it sent.
+        pub rev: u64,
     }
 
     impl Peer {
+        pub fn new(r: ReadHalf<DuplexStream>, w: WriteHalf<DuplexStream>) -> Self {
+            Self { r, w, rev: 0 }
+        }
+
         pub async fn recv(&mut self) -> ClientMsg {
             let body = tokio::time::timeout(Duration::from_secs(5), wire::read_frame(&mut self.r))
                 .await
@@ -415,6 +472,14 @@ pub(crate) mod fake {
         }
 
         pub async fn send(&mut self, msg: &EngineMsg) {
+            let rev = match msg {
+                EngineMsg::State { rev, .. } | EngineMsg::Delta { rev, .. } => Some(*rev),
+                EngineMsg::Reply(r) if r.error.is_none() => Some(r.rev),
+                _ => None,
+            };
+            if let Some(rev) = rev {
+                self.rev = self.rev.max(rev);
+            }
             wire::write_msg(&mut self.w, msg).await.expect("send");
         }
     }
@@ -429,7 +494,7 @@ pub(crate) mod fake {
                 let (client, engine) = tokio::io::duplex(1 << 20);
                 let (cr, cw) = tokio::io::split(client);
                 let (er, ew) = tokio::io::split(engine);
-                tx.send(Peer { r: er, w: ew })
+                tx.send(Peer::new(er, ew))
                     .map_err(|_| io::Error::other("test over"))?;
                 Ok((Box::new(cr) as Reader, Box::new(cw) as Writer))
             })
@@ -437,12 +502,10 @@ pub(crate) mod fake {
         (connector, rx)
     }
 
-    /// A client connected to a fake engine that said hello and announced
-    /// `topology` but sent no state yet (the mirror is not synced); the
-    /// engine's end of the connection, the client's hello already read.
-    pub async fn announced(topology: TopologyInfo) -> (EngineClient, Peer) {
-        let (c, mut peers) = connector();
-        let client = EngineClient::spawn_with(c, "test".into());
+    /// The engine's end of a client's next connection on `peers` (≤ 5 s):
+    /// the client's hello read, the engine's hello and `topology` sent, no
+    /// state yet.
+    pub async fn accept(peers: &mut mpsc::UnboundedReceiver<Peer>, topology: TopologyInfo) -> Peer {
         let mut peer = tokio::time::timeout(Duration::from_secs(5), peers.recv())
             .await
             .expect("a connection within 5 s")
@@ -459,6 +522,16 @@ pub(crate) mod fake {
         }))
         .await;
         peer.send(&EngineMsg::Topology(topology)).await;
+        peer
+    }
+
+    /// A client connected to a fake engine that said hello and announced
+    /// `topology` but sent no state yet (the mirror is not synced); the
+    /// engine's end of the connection, the client's hello already read.
+    pub async fn announced(topology: TopologyInfo) -> (EngineClient, Peer) {
+        let (c, mut peers) = connector();
+        let client = EngineClient::spawn_with(c, "test".into());
+        let peer = accept(&mut peers, topology).await;
         let t0 = std::time::Instant::now();
         while client.mirror().topology.is_none() {
             assert!(
@@ -468,6 +541,96 @@ pub(crate) mod fake {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         (client, peer)
+    }
+
+    /// The next request that is no `Ping` (a freeze's barrier: every
+    /// `Ping` before it is answered at once, at the engine's current
+    /// revision, [`Peer::rev`]): its id and command.
+    pub async fn next_request(peer: &mut Peer) -> (u64, Cmd) {
+        loop {
+            let ClientMsg::Request { id, cmd, .. } = peer.recv().await else {
+                panic!("a request");
+            };
+            if cmd != Cmd::Ping {
+                return (id, cmd);
+            }
+            let rev = peer.rev;
+            peer.send(&EngineMsg::Reply(Reply {
+                id,
+                rev,
+                error: None,
+            }))
+            .await;
+        }
+    }
+
+    /// Answers the next request, which must be a `Ping`, at the engine's
+    /// current revision.
+    pub async fn answer_ping(peer: &mut Peer) {
+        let ClientMsg::Request { id, cmd, .. } = peer.recv().await else {
+            panic!("a request");
+        };
+        assert_eq!(cmd, Cmd::Ping, "a Ping");
+        let rev = peer.rev;
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev,
+            error: None,
+        }))
+        .await;
+    }
+
+    /// [`next_request`], which must be an `ImportState`: its id and the
+    /// state, not answered yet.
+    pub async fn next_import(peer: &mut Peer) -> (u64, MixState) {
+        match next_request(peer).await {
+            (id, Cmd::ImportState { state, baseline }) => {
+                assert!(!baseline, "a lineup's state is no baseline");
+                (id, state)
+            }
+            (_, other) => panic!("an ImportState, got {other:?}"),
+        }
+    }
+
+    /// Answers request `id`, an import of `state`, as the engine does: the
+    /// reply at `rev`, then the state.
+    pub async fn answer_import(peer: &mut Peer, id: u64, rev: u64, state: MixState) {
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev,
+            error: None,
+        }))
+        .await;
+        peer.send(&EngineMsg::State {
+            rev,
+            state,
+            transient: Transient::default(),
+        })
+        .await;
+    }
+
+    /// Answers the next request but `Ping`s, which must be an
+    /// `ImportState`, as the engine does: the reply at `rev`, then the
+    /// imported state. Returns what was imported.
+    pub async fn imports(peer: &mut Peer, rev: u64) -> MixState {
+        let (id, state) = next_import(peer).await;
+        answer_import(peer, id, rev, state.clone()).await;
+        state
+    }
+
+    /// Refuses the next request but `Ping`s, which must be an
+    /// `ImportState`.
+    pub async fn refuses(peer: &mut Peer) {
+        let (id, _) = next_import(peer).await;
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev: 0,
+            error: Some(ErrorBody {
+                code: ErrCode::BadRequest,
+                msg: "refused".into(),
+            }),
+        }))
+        .await;
     }
 
     /// Sends `state` and waits (≤ 5 s) until the mirror holds it.
@@ -814,7 +977,7 @@ mod tests {
                 let (client, engine) = tokio::io::duplex(1 << 20);
                 let (cr, cw) = tokio::io::split(client);
                 let (er, ew) = tokio::io::split(engine);
-                tx.send(Peer { r: er, w: ew })
+                tx.send(Peer::new(er, ew))
                     .map_err(|_| io::Error::other("test over"))?;
                 let writer = tokio::io::BufWriter::new(cw);
                 Ok((Box::new(cr) as Reader, Box::new(writer) as Writer))

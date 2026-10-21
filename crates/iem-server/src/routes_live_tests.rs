@@ -488,7 +488,7 @@ async fn a_preset_is_saved_listed_loaded_and_deleted() {
     let (status, p) = call(&app, Method::POST, "/api/presets/member6", Some(&m6), body).await;
     assert_eq!(status, StatusCode::CREATED, "{p}");
     assert_eq!(p["name"], "rehearsal", "the name is trimmed");
-    let stored = s.band.preset("member6", "rehearsal").unwrap().unwrap();
+    let stored = s.band().preset("member6", "rehearsal").unwrap().unwrap();
     let k = stored.sends.iter().find(|x| x.src == keys).unwrap();
     assert_eq!(k.gain_db, -6.0, "the page mix as it was");
     let (status, list) = call(&app, Method::GET, "/api/presets/member6", Some(&m6), None).await;
@@ -515,7 +515,7 @@ async fn a_preset_is_saved_listed_loaded_and_deleted() {
         call(&app, Method::DELETE, one, Some(&m6), None).await.0,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(s.band.preset("member6", "rehearsal").unwrap(), None);
+    assert_eq!(s.band().preset("member6", "rehearsal").unwrap(), None);
     assert_eq!(
         call(&app, Method::DELETE, one, Some(&m6), None).await.0,
         StatusCode::NOT_FOUND
@@ -553,14 +553,14 @@ async fn a_history_entry_is_taken_pinned_unpinned_and_deleted() {
         call(&app, Method::POST, &pin, Some(&m6), gig).await.0,
         StatusCode::OK
     );
-    let entry = s.band.snapshot("member6", ts).unwrap().unwrap();
+    let entry = s.band().snapshot("member6", ts).unwrap().unwrap();
     assert_eq!((entry.pinned, entry.label.as_str()), (true, "gig"));
     let unpin = format!("/api/snapshots/member6/{ts}/unpin");
     assert_eq!(
         call(&app, Method::POST, &unpin, Some(&m6), None).await.0,
         StatusCode::OK
     );
-    let entry = s.band.snapshot("member6", ts).unwrap().unwrap();
+    let entry = s.band().snapshot("member6", ts).unwrap().unwrap();
     assert_eq!((entry.pinned, entry.label.as_str()), (false, "gig"));
 
     // An unknown entry is not found.
@@ -584,9 +584,78 @@ async fn a_history_entry_is_taken_pinned_unpinned_and_deleted() {
         call(&app, Method::DELETE, &one, Some(&m6), None).await.0,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(s.band.snapshot("member6", ts).unwrap(), None);
+    assert_eq!(s.band().snapshot("member6", ts).unwrap(), None);
     assert_eq!(
         call(&app, Method::DELETE, &one, Some(&m6), None).await.0,
         StatusCode::NOT_FOUND
+    );
+}
+
+/// #58: in roster mode a restore writes the inactive lineups' stored states
+/// and their people's pins and hides back, the preview names them, and a
+/// write that fails is the caller's to see (500), never only a log line.
+#[tokio::test]
+async fn a_roster_restore_writes_youth_back_and_says_so() {
+    use crate::lineup_store::LineupStore;
+    use iem_core::band::CustomizationFile;
+
+    let h = EngineHarness::start();
+    let (dir, s, app) = live(&h).await;
+    *s.roster.write().unwrap() = Some(crate::roster_state::tests::test_roster("main"));
+    let eng = token("engineer", true);
+    let store = LineupStore::new(dir.path());
+    let mic1 = || vec![Source::Input(InputId::new("mic1"))];
+    let mut youth = MixerBackup::new("t".into(), 1, Default::default());
+    youth.customizations.insert(
+        "member10".into(),
+        CustomizationFile::new("member10", mic1(), vec![]),
+    );
+    store.save_state("youth", &youth).unwrap();
+    let (status, info) = call(&app, Method::POST, "/api/backups/capture", Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{info}");
+    let name = info["filename"].as_str().unwrap().to_string();
+    assert_eq!(s.backup_store.load(&name).unwrap().lineups["youth"], youth);
+
+    // Youth's stored state and member10's pins change since.
+    store
+        .save_state(
+            "youth",
+            &MixerBackup::new("u".into(), 2, Default::default()),
+        )
+        .unwrap();
+    s.band_of(Some("youth"))
+        .save_customization("member10", vec![], mic1())
+        .unwrap();
+    let preview = format!("/api/backups/{name}/preview");
+    let (status, p) = call(&app, Method::POST, &preview, Some(&eng), None).await;
+    assert_eq!(
+        (status, &p["lineups"]),
+        (StatusCode::OK, &serde_json::json!(["youth"]))
+    );
+    let restore = format!("/api/backups/{name}/restore");
+    let (status, r) = call(&app, Method::POST, &restore, Some(&eng), None).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(store.state("youth").unwrap(), Some(youth));
+    let c = s.band_of(Some("youth")).customization("member10").unwrap();
+    assert_eq!((c.pinned, c.hidden), (mic1(), vec![]));
+
+    // youth's state file cannot be written: the restore says so.
+    let state_file = store.data_dir("youth").join("state.json");
+    std::fs::remove_file(&state_file).unwrap();
+    std::fs::create_dir_all(state_file).unwrap();
+    let (status, e) = call(&app, Method::POST, &restore, Some(&eng), None).await;
+    assert_eq!(
+        (status, e["code"].as_str()),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("RESTORE_INCOMPLETE")
+        ),
+        "{e}"
+    );
+    let message = e["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("the live state was restored, but ")
+            && message.contains("lineup youth"),
+        "{message}"
     );
 }

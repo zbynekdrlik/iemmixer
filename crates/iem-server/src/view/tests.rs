@@ -574,6 +574,133 @@ fn member3_mutes_its_peer_member1() {
     assert!(updates_for(&v, &changed, &page(&v, "member2"), &unheard).is_empty());
 }
 
+/// #58 design §8: in roster mode the Mixes tab is the band's leaders' (and
+/// the engineer's). Youth plays: member10 on member1's set sees and moves
+/// no heard mix; member3, youth's leader, hears the youth sets named by
+/// their people; a set nobody wears has no channel at all.
+#[test]
+fn only_a_leader_sees_and_moves_heard_mixes() {
+    let roster = crate::roster_state::tests::test_roster("youth");
+    let (v, problems) = SiteView::build_with(
+        &crate::site_view::tests::test_config(),
+        Some(&roster),
+        &crate::site_view::tests::test_topology(),
+    );
+    assert_eq!(problems, Vec::<String>::new());
+    let m = Mirror::default();
+    let p10 = page(&v, "member10");
+    let me = member("member10");
+    assert_eq!(channels(&v, &m, &p10, &me).len(), 24, "no Mixes tab");
+    let set = |id: &str| ClientMsg::SetLevel {
+        id: id.into(),
+        level_db: -6.0,
+    };
+    let leaders_only = Err(ViewError::Forbidden(
+        "the mixes a set hears are its leader's",
+    ));
+    assert_eq!(command(&v, &m, &p10, &me, &set("member4")), leaders_only);
+    let unmute = ClientMsg::SetMute {
+        id: "member3".into(),
+        muted: false,
+    };
+    assert_eq!(command(&v, &m, &p10, &me, &unmute), leaders_only);
+    let solo = ClientMsg::SetSolo {
+        soloed: vec!["mic1".into(), "member3".into()],
+    };
+    assert_eq!(command(&v, &m, &p10, &me, &solo), leaders_only);
+    assert_eq!(
+        command(&v, &m, &p10, &me, &set("member2")),
+        Err(ViewError::UnknownId("member2".into())),
+        "a set nobody wears is no channel"
+    );
+    assert!(
+        command(&v, &m, &p10, &me, &set("mic1")).is_ok(),
+        "own inputs"
+    );
+    // member3 leads youth: the youth sets their set hears, by their people.
+    let p3 = page(&v, "member3");
+    let mixes: Vec<(String, String)> = channels(&v, &m, &p3, &member("member3"))
+        .into_iter()
+        .filter(|c| c.category == "mixes")
+        .map(|c| (c.id, c.name))
+        .collect();
+    let named = |id: &str, name: &str| (id.to_string(), name.to_string());
+    assert_eq!(
+        mixes,
+        [named("member1", "Member 10"), named("member4", "Member 11")]
+    );
+    assert!(command(&v, &m, &p3, &member("member3"), &set("member4")).is_ok());
+    // The engineer on member10's page sees and moves them.
+    let on10: Vec<String> = channels(&v, &m, &p10, &engineer())
+        .into_iter()
+        .filter(|c| c.category == "mixes")
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(on10, ["member3", "member4"]);
+    assert!(command(&v, &m, &p10, &engineer(), &set("member4")).is_ok());
+    // A heard level's change reaches only who sees it.
+    let level = Level {
+        gain_db: -3.0,
+        pan: 0.0,
+        muted: false,
+    };
+    let changed = mirror_with(|s, _| {
+        s.mixes
+            .entry(mix("member1"))
+            .or_default()
+            .mixes
+            .insert(mix("member4"), level);
+    });
+    let change = [Change::Level {
+        mix: mix("member1"),
+        source: Source::Mix(mix("member4")),
+        level,
+    }];
+    assert!(updates_for(&v, &changed, &p10, &change).is_empty());
+    assert_eq!(
+        updates_seen(&v, &changed, &p10, &engineer(), &change),
+        vec![ServerMsg::ChannelUpdate {
+            id: "member4".into(),
+            level_db: -3.0,
+            muted: false,
+            pan: 0.5
+        }]
+    );
+}
+
+/// #58: without a roster the rule is today's: a member whose mix hears
+/// others leads (member1, member3), so every test above still holds.
+#[test]
+fn legacy_keeps_todays_rule() {
+    let v = test_view();
+    assert_eq!(v.leaders, ["member1", "member3"]);
+    assert!(member("member1").leads(&v) && member("member3").leads(&v));
+    assert!(!member("member2").leads(&v));
+    assert!(engineer().leads(&v));
+    let m = Mirror::default();
+    let p1 = page(&v, "member1");
+    assert_eq!(channels(&v, &m, &p1, &member("member1")).len(), 24 + 8);
+    let set = ClientMsg::SetLevel {
+        id: "member5".into(),
+        level_db: 0.0,
+    };
+    assert!(command(&v, &m, &p1, &member("member1"), &set).is_ok());
+    // The rule is the viewer's, not the page's.
+    assert_eq!(
+        command(&v, &m, &p1, &member("member2"), &set),
+        Err(ViewError::Forbidden(
+            "the mixes a set hears are its leader's"
+        ))
+    );
+    assert_eq!(Viewer::of_page(&p1), member("member1"));
+    assert_eq!(Viewer::of_page(&page(&v, "engineer")), engineer());
+    assert_eq!(
+        Viewer::of_page(&page(&v, "translator")),
+        engineer(),
+        "a page without a member is the engineer's"
+    );
+}
+
 #[test]
 fn bad_values_unknown_ids_and_foreign_targets_are_refused() {
     let v = test_view();

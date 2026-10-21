@@ -124,8 +124,30 @@ async fn with_hasher<T: Send + 'static>(
     })
 }
 
-async fn member_exists(state: &AppState, member: &str) -> bool {
-    state.site_config.member(member).is_some()
+/// Whether `member` logs in and owns a PIN: legacy, a site member; roster
+/// mode (#58), a person of the roster, whether they play in the band that
+/// plays or not, or the site's engineer. A person the roster no longer
+/// holds (archived) is nobody.
+pub(crate) fn member_exists(state: &AppState, member: &str) -> bool {
+    match state.roster() {
+        Some(r) => {
+            r.roster.person(member).is_some()
+                || (member == ENGINEER_ID && state.site_config.member(member).is_some())
+        }
+        None => state.site_config.member(member).is_some(),
+    }
+}
+
+/// Whether a token's subject is still somebody: the engineer, or a member
+/// who logs in ([`member_exists`]). The token of a person who left stops
+/// working with the roster that removed them (#58).
+pub(crate) fn subject_known(state: &AppState, claims: &AuthClaims) -> bool {
+    claims.engineer || member_exists(state, &claims.sub)
+}
+
+/// 401 for a token whose subject is nobody now ([`subject_known`]).
+pub(crate) fn subject_gone() -> (StatusCode, Json<ApiError>) {
+    (StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized()))
 }
 
 /// Checks the engineer PIN like a login (admission before hashing, the
@@ -190,7 +212,7 @@ pub async fn login(
         tracing::info!(origin = ?client.origin, member = %req.member, wait_ms = wait.as_millis() as u64, "login throttled");
         return Err(Rejection::from(too_many_attempts(wait)));
     }
-    if !req.member.is_empty() && !member_exists(&state, &req.member).await {
+    if !req.member.is_empty() && !member_exists(&state, &req.member) {
         return Err(Rejection::from(member_not_found()));
     }
     let (engineer_hash, member_hash) = {
@@ -298,6 +320,9 @@ pub async fn change_pin(
         extract_claims_from_header(&headers, &config.jwt_secret)
             .map_err(IntoResponse::into_response)?
     };
+    if !subject_known(&state, &claims) {
+        return Err(Rejection::from(subject_gone().into_response()));
+    }
     if !state.site_config.pin_changes {
         tracing::info!(by = %claims.sub, "PIN change refused: PINs change in the predecessor until the cutover");
         return Err(Rejection::from(error_response(
@@ -322,7 +347,7 @@ pub async fn change_pin(
                 "Engineer must specify target member",
             )));
         }
-        if member != ENGINEER_ID && !member_exists(&state, member).await {
+        if member != ENGINEER_ID && !member_exists(&state, member) {
             return Err(Rejection::from(member_not_found()));
         }
         member.to_string()

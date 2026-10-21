@@ -74,6 +74,40 @@ fn set_member_stores_the_member_hash() {
     );
 }
 
+/// #58: with a roster beside the site file, its people get PINs, also one
+/// the site's members do not list; a site member who is no person does not.
+#[test]
+fn set_member_accepts_a_roster_person() {
+    let dir = site_dir();
+    std::fs::write(
+        dir.path().join("roster.toml"),
+        "[[people]]\nid = \"member10\"\nname = \"Member 10\"\n\n\
+         [[lineups]]\nid = \"main\"\nname = \"Main\"\nmain = true\n\n\
+         [lineups.sets]\nmember1 = \"member10\"\n",
+    )
+    .unwrap();
+    let out = run_pin(dir.path(), &["pin", "set-member", "member10"], "1357\n");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stored(dir.path())["members"]["member10"]
+            .as_str()
+            .unwrap()
+            .starts_with("$argon2id$")
+    );
+    let out = run_pin(dir.path(), &["pin", "set-member", "member1"], "1357\n");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not in the roster"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stored(dir.path())["members"].get("member1").is_none());
+}
+
 #[test]
 fn an_invalid_pin_is_rejected_with_exit_2() {
     let dir = site_dir();

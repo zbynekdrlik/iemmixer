@@ -90,12 +90,13 @@ pub(crate) async fn apply_ramp(
     sends: &[MixSend],
     groups: &BTreeMap<GroupId, f64>,
 ) -> Result<(usize, usize), Reject> {
+    state.may_change(page).map_err(crate::routes::switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     if !state.engine.connected() {
         return Err(engine_unavailable());
     }
+    // The daily snapshot is taken by the first step (`AppState::apply`).
     let (steps, skipped) = ramp(&site, &state.engine.mirror(), page, sends, groups);
-    state.auto_snapshot(page);
     let changed = steps.first().map_or(0, Vec::len);
     let mut steps = steps.into_iter();
     if let Some(first) = steps.next() {
@@ -108,19 +109,13 @@ pub(crate) async fn apply_ramp(
     Ok((changed, skipped))
 }
 
-/// One batch of the ramp, applied (in the mirror) before the next is sent.
+/// One batch of the ramp, applied (in the mirror) before the next is sent;
+/// none once a band switch began (#58).
 async fn ramp_step(state: &AppState, page: &Page, ops: Vec<Cmd>) -> Result<(), Reject> {
     state
-        .engine
-        .request_applied(Cmd::Batch { ops }, None)
+        .apply(page, vec![Cmd::Batch { ops }], None)
         .await
-        .map_err(|e| {
-            tracing::error!(page = %page.id, error = %e, "ramp step failed");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ApiError::new("ENGINE_ERROR", e.to_string())),
-            )
-        })
+        .map_err(|e| crate::routes::change_refused(page, "ramp step", e))
 }
 
 async fn list_presets(
@@ -130,7 +125,7 @@ async fn list_presets(
 ) -> Result<Json<Vec<PresetInfo>>, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     let list = state
-        .band
+        .band()
         .presets(&m)
         .map_err(|e| store_error(e, "reading presets"))?;
     Ok(Json(list.iter().map(PresetInfo::from).collect()))
@@ -147,7 +142,7 @@ async fn save(state: &AppState, page: &Page, member: &str, name: &str) -> Result
     let site = state.site().ok_or_else(engine_unavailable)?;
     let content = capture(&site, &state.engine.mirror(), page);
     state
-        .band
+        .band()
         .save_preset(member, name, content, chrono::Utc::now().timestamp())
         .map_err(|e| store_error(e, "saving the preset"))
 }
@@ -171,7 +166,7 @@ async fn get_preset(
 ) -> Result<Json<Preset>, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     state
-        .band
+        .band()
         .preset(&m, &name)
         .map_err(|e| store_error(e, "reading presets"))?
         .map(Json)
@@ -185,7 +180,7 @@ async fn update_preset(
 ) -> Result<Json<PresetInfo>, Reject> {
     let (page, m) = member_page(&state, &headers, &member).await?;
     if state
-        .band
+        .band()
         .preset(&m, &name)
         .map_err(|e| store_error(e, "reading presets"))?
         .is_none()
@@ -204,7 +199,7 @@ async fn delete_preset(
 ) -> Result<StatusCode, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     if state
-        .band
+        .band()
         .delete_preset(&m, &name)
         .map_err(|e| store_error(e, "deleting the preset"))?
     {
@@ -222,7 +217,7 @@ async fn restore_preset(
 ) -> Result<Json<serde_json::Value>, Reject> {
     let (page, m) = member_page(&state, &headers, &member).await?;
     let preset = state
-        .band
+        .band()
         .preset(&m, &name)
         .map_err(|e| store_error(e, "reading presets"))?
         .ok_or((StatusCode::NOT_FOUND, Json(ApiError::not_found("Preset"))))?;

@@ -55,6 +55,15 @@ pub fn alarm_payload(title: &str, body: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// The push payload telling the engineer's devices that the band was
+/// switched (#58 design §7): the lineup that plays now, by name only (who
+/// switched stays in the server's log).
+pub fn lineup_payload(name: &str) -> Vec<u8> {
+    serde_json::json!({ "type": "LINEUP", "name": name })
+        .to_string()
+        .into_bytes()
+}
+
 /// Sends `payload` to every subscription; returns how many took it.
 pub async fn send_to(
     client: &reqwest::Client,
@@ -159,6 +168,15 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({"type": "ALARM", "title": "T", "body": "B", "tag": tag})
+        );
+    }
+
+    #[test]
+    fn the_lineup_payload_names_the_band_that_plays() {
+        let v: serde_json::Value = serde_json::from_slice(&lineup_payload("Youth band")).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type": "LINEUP", "name": "Youth band"})
         );
     }
 

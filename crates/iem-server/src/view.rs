@@ -4,9 +4,10 @@
 //! (the engine does no authorisation, it only caps values). Pure: no I/O.
 
 use iem_core::{Channel, ClientMsg, EqBand, ServerMsg, is_valid_ui_pan};
-use iem_engine_proto::{BandKind, Change, Cmd, DB_OFF, Eq, EqTarget, InputId, Source};
+use iem_engine_proto::{BandKind, Change, Cmd, DB_OFF, Eq, EqTarget, InputId, MixId, Source};
 
 use crate::engine::mirror::Mirror;
+use crate::pin_store::ENGINEER_ID;
 use crate::site_view::{Page, SiteView};
 
 /// The fader's bottom (−∞ on the UI, off in the engine) and top (F5, F7).
@@ -19,7 +20,9 @@ pub const OUT_NAME: &str = "IEM VOL";
 /// Title of the stems strip's EQ modal.
 pub const GROUP_NAME: &str = "STEMS";
 
-/// Who is looking: the JWT subject and whether it is the engineer.
+/// Who is looking: the JWT subject and whether it is the engineer. Whether
+/// they lead the band is the site view's to say ([`Viewer::leads`]), so it
+/// follows a switch or a roster change at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Viewer {
     pub sub: String,
@@ -38,6 +41,10 @@ pub enum ViewError {
     NoGroup,
     #[error("not an engine command")]
     NotACommand,
+    /// A band switch runs, or this page's band no longer plays (#58 design
+    /// §7): its change would land on another lineup's mix.
+    #[error("the band is being switched")]
+    Switching,
 }
 
 /// Engine dB → the fader's dB: at or below −60 (off included) is −60, capped at +12.
@@ -71,7 +78,8 @@ pub fn engine_pan(u: f32) -> Option<f64> {
 }
 
 /// The source a channel id names on `page`: an input, or a mix the page's
-/// mix hears.
+/// mix hears that is no set nobody wears (#58: such a set is silent and has
+/// no channel).
 pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
     if view.input(id).is_some() {
         return Some(Source::Input(InputId::new(id)));
@@ -79,8 +87,23 @@ pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
     view.mix(&page.mix)?
         .hears
         .iter()
-        .find(|m| m.0 == id)
+        .find(|m| m.0 == id && !view.vacant.contains(m))
         .map(|m| Source::Mix(m.clone()))
+}
+
+/// The mixes `page`'s mix hears that `viewer` sees and moves (its Mixes
+/// tab): none but to a leader of the band or the engineer (#58 design §8),
+/// and never a set nobody wears.
+pub fn heard<'a>(view: &'a SiteView, page: &Page, viewer: &Viewer) -> Vec<&'a MixId> {
+    if !viewer.leads(view) {
+        return Vec::new();
+    }
+    view.mix(&page.mix).map_or_else(Vec::new, |m| {
+        m.hears
+            .iter()
+            .filter(|h| !view.vacant.contains(h))
+            .collect()
+    })
 }
 
 /// Whether a solo on the page's mix silences `s` (X2).
@@ -99,7 +122,8 @@ fn channel(mirror: &Mirror, page: &Page, s: &Source) -> (f32, bool, f32) {
 }
 
 /// Every channel of `page` for `viewer`: the inputs in topology order, then
-/// the mixes the page's mix hears (the Mixes tab).
+/// the mixes the page's mix hears that the viewer sees ([`heard`], the
+/// Mixes tab), named by the person on that set.
 pub fn channels(view: &SiteView, mirror: &Mirror, page: &Page, viewer: &Viewer) -> Vec<Channel> {
     let own = page.member.as_deref().and_then(|m| view.own_input(m));
     let mut out: Vec<Channel> = view
@@ -119,20 +143,18 @@ pub fn channels(view: &SiteView, mirror: &Mirror, page: &Page, viewer: &Viewer) 
             }
         })
         .collect();
-    if let Some(mv) = view.mix(&page.mix) {
-        for h in &mv.hears {
-            let (level_db, muted, pan) = channel(mirror, page, &Source::Mix(h.clone()));
-            out.push(Channel {
-                id: h.0.clone(),
-                name: view.mix_name(h),
-                level_db,
-                pan,
-                muted,
-                category: "mixes".into(),
-                eq: viewer.engineer,
-                own: false,
-            });
-        }
+    for h in heard(view, page, viewer) {
+        let (level_db, muted, pan) = channel(mirror, page, &Source::Mix(h.clone()));
+        out.push(Channel {
+            id: h.0.clone(),
+            name: view.mix_name(h),
+            level_db,
+            pan,
+            muted,
+            category: "mixes".into(),
+            eq: viewer.engineer,
+            own: false,
+        });
     }
     out
 }
@@ -159,17 +181,32 @@ pub fn state_msg(
     }
 }
 
-/// The UI updates `changes` (already applied to `mirror`) produce for `page`.
+/// The UI updates `changes` (already applied to `mirror`) produce for `page`
+/// as its own member sees it ([`Viewer::of_page`]).
 pub fn updates_for(
     view: &SiteView,
     mirror: &Mirror,
     page: &Page,
     changes: &[Change],
 ) -> Vec<ServerMsg> {
+    updates_seen(view, mirror, page, &Viewer::of_page(page), changes)
+}
+
+/// The UI updates `changes` (already applied to `mirror`) produce for
+/// `page` as `viewer` sees it: a heard mix's only where it is on their
+/// Mixes tab ([`heard`]).
+pub fn updates_seen(
+    view: &SiteView,
+    mirror: &Mirror,
+    page: &Page,
+    viewer: &Viewer,
+    changes: &[Change],
+) -> Vec<ServerMsg> {
     let mut out = Vec::new();
+    let mixes = heard(view, page, viewer);
     let shown = |s: &Source| match s {
         Source::Input(id) => view.input(&id.0).is_some(),
-        Source::Mix(id) => view.mix(&page.mix).is_some_and(|m| m.hears.contains(id)),
+        Source::Mix(id) => mixes.contains(&id),
     };
     for c in changes {
         match c {
@@ -202,7 +239,7 @@ pub fn updates_for(
                 });
                 // The mask shows as each channel's mute (as the predecessor's
                 // REAPER mutes did): every channel is sent again.
-                for ch in channels(view, mirror, page, &Viewer::nobody()) {
+                for ch in channels(view, mirror, page, viewer) {
                     out.push(ServerMsg::ChannelUpdate {
                         id: ch.id,
                         level_db: ch.level_db,
@@ -218,12 +255,27 @@ pub fn updates_for(
 }
 
 impl Viewer {
-    /// A viewer without rights (for values that do not depend on the viewer).
-    pub fn nobody() -> Self {
-        Self {
-            sub: String::new(),
-            engineer: false,
+    /// The page's own member as its viewer, for what a page shows whoever
+    /// looks: the engineer on the engineer's page and on a page without a
+    /// member (those are the engineer's).
+    pub fn of_page(page: &Page) -> Self {
+        match page.member.as_deref() {
+            Some(m) => Self {
+                sub: m.to_string(),
+                engineer: m == ENGINEER_ID,
+            },
+            None => Self {
+                sub: ENGINEER_ID.to_string(),
+                engineer: true,
+            },
         }
+    }
+
+    /// Whether this viewer hears and moves the mixes a page's mix hears
+    /// (#58 design §8): the engineer, or a leader of the active lineup
+    /// (legacy: a member whose mix hears another, as before).
+    pub fn leads(&self, view: &SiteView) -> bool {
+        self.engineer || view.leaders.contains(&self.sub)
     }
 }
 
@@ -240,7 +292,15 @@ pub fn command(
     viewer: &Viewer,
     msg: &ClientMsg,
 ) -> Result<Vec<Cmd>, ViewError> {
-    let src = |id: &str| source(view, page, id).ok_or_else(|| ViewError::UnknownId(id.into()));
+    // A level of a heard mix (a whole mix or a peer) is a leader's or the
+    // engineer's to move (#58 design §8).
+    let src = |id: &str| match source(view, page, id) {
+        None => Err(ViewError::UnknownId(id.into())),
+        Some(Source::Mix(_)) if !viewer.leads(view) => Err(ViewError::Forbidden(
+            "the mixes a set hears are its leader's",
+        )),
+        Some(s) => Ok(s),
+    };
     let group = || view.group.clone().ok_or(ViewError::NoGroup);
     let engineer = |what: &'static str| {
         if viewer.engineer {

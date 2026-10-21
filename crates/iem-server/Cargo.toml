@@ -89,6 +89,11 @@ path = "tests/pin_cli.rs"
 required-features = ["standalone"]
 
 [[test]]
+name = "roster_cli"
+path = "tests/roster_cli.rs"
+required-features = ["standalone"]
+
+[[test]]
 name = "graceful_stop"
 path = "tests/graceful_stop.rs"
 required-features = ["standalone"]

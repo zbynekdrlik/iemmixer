@@ -2,7 +2,7 @@
 //! one revision plus every member's pins and hides. A backup never holds a
 //! PIN or a secret. Restores are previewed as a diff of two states first.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use iem_engine_proto::MixState;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,25 @@ pub struct MixerBackup {
     pub state: MixState,
     /// Member id → pins and hides.
     pub customizations: BTreeMap<String, CustomizationFile>,
+    /// The lineup whose state `state` is: the active one at the capture
+    /// (#58). None in legacy mode and in every backup written before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineup: Option<String>,
+    /// Every inactive lineup's stored state at the capture, by lineup id
+    /// (#58 design §6): its mixer state and its people's pins and hides.
+    /// Additive: empty in legacy mode, and then not written.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub lineups: BTreeMap<String, MixerBackup>,
+    /// A lineup's stored state (#58): the SHA-256 of the roster file it
+    /// follows, written with it so a roster change that stops half-way
+    /// never moves a person's mix twice. None in a backup's live state and
+    /// in every state written before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follows: Option<String>,
+    /// A lineup's stored state (#58): the sets its rules silenced because
+    /// nobody wore them, unmuted again once someone does.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub silenced: BTreeSet<String>,
 }
 
 /// Why a file is not a readable backup.
@@ -47,6 +66,10 @@ impl MixerBackup {
             rev,
             state,
             customizations: BTreeMap::new(),
+            lineup: None,
+            lineups: BTreeMap::new(),
+            follows: None,
+            silenced: BTreeSet::new(),
         }
     }
 
@@ -109,6 +132,10 @@ pub struct RestorePreview {
     /// topology after the capture); the restore leaves it as it is
     #[serde(default)]
     pub not_in_backup: Vec<SkippedEntry>,
+    /// The inactive lineups whose stored state the restore replaces (#58,
+    /// roster mode); not written when none
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineups: Vec<String>,
 }
 
 /// A single proposed change from a restore
@@ -186,6 +213,29 @@ mod tests {
         assert_eq!(b.level_count(), 2);
     }
 
+    /// #58: the active lineup and the inactive lineups' states are additive:
+    /// a backup without them reads as before and is written as before.
+    #[test]
+    fn lineups_are_additive() {
+        let legacy = sample();
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(
+            !json.contains("\"lineup\"") && !json.contains("\"lineups\""),
+            "{json}"
+        );
+        let parsed = MixerBackup::parse(&json).unwrap();
+        assert_eq!((parsed.lineup, parsed.lineups.len()), (None, 0));
+        let mut b = sample();
+        b.lineup = Some("youth".into());
+        b.lineups.insert("main".into(), sample());
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(
+            json.contains(r#""lineup":"youth""#) && json.contains(r#""lineups":{"main":{"#),
+            "{json}"
+        );
+        assert_eq!(MixerBackup::parse(&json).unwrap(), b);
+    }
+
     #[test]
     fn foreign_and_old_files_are_refused_with_the_reason() {
         let v1 = r#"{"version":1,"timestamp":"t","track_layout":{},"sends":[],"customizations":{"member1":{"pinned":[1,5],"hidden":[]}}}"#;
@@ -229,6 +279,7 @@ mod tests {
                 description: "KEYS".into(),
                 reason: "not in the backup; stays as it is".into(),
             }],
+            lineups: vec!["youth".into()],
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains(r#""category":"Level""#), "{json}");
@@ -236,7 +287,11 @@ mod tests {
             json.contains(r#""not_in_backup":[{"category":"Input","description":"KEYS""#),
             "{json}"
         );
+        assert!(json.ends_with(r#","lineups":["youth"]}"#), "{json}");
         assert_eq!(serde_json::from_str::<RestorePreview>(&json).unwrap(), p);
+        // #58: the lineups are additive, not written when there are none.
+        let legacy = RestorePreview::default();
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("lineups"));
         assert!(RestoreCategory::Level < RestoreCategory::Customization);
         // A preview without the list (an older server) reads as an empty one.
         let old = r#"{"changes":[],"unchanged_count":0,"skipped":[]}"#;

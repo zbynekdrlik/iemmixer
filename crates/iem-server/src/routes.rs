@@ -106,21 +106,33 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .merge(snapshot_routes::snapshot_routes())
         .merge(preset_routes::preset_routes())
         .merge(backup_routes::backup_routes())
+        .merge(crate::lineup_routes::lineup_routes())
         .merge(crate::tunnel_watch::tunnel_routes())
 }
 
-/// The site's members (the landing page's tiles).
+/// 409 `SWITCHING`: a page's change while the band is being switched, or
+/// from a page of a band that no longer plays (`AppState::may_change`).
+pub(crate) fn switching(e: crate::view::ViewError) -> Reject {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError::new("SWITCHING", e.to_string())),
+    )
+}
+
+/// The landing page's tiles: the site's members (legacy mode, all playing),
+/// or every person, those playing in the active lineup first, then the
+/// engineer (`roster_state::people`).
 async fn get_members(State(state): State<AppState>) -> impl IntoResponse {
-    let members: Vec<MemberInfo> = state
-        .site_config
-        .members
-        .iter()
-        .map(|m| MemberInfo {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            has_photo: state.photo_store.exists(&m.id),
-        })
-        .collect();
+    let members: Vec<MemberInfo> =
+        crate::roster_state::people(&state.site_config, state.roster().as_ref())
+            .into_iter()
+            .map(|p| MemberInfo {
+                has_photo: state.photo_store.exists(&p.id),
+                id: p.id,
+                name: p.name,
+                playing: p.playing,
+            })
+            .collect();
     Json(members)
 }
 
@@ -129,6 +141,8 @@ struct MemberInfo {
     id: String,
     name: String,
     has_photo: bool,
+    /// Plays in the active lineup (#58; always in legacy mode).
+    playing: bool,
 }
 
 type Reject = (StatusCode, Json<ApiError>);
@@ -143,6 +157,9 @@ pub(crate) async fn page_for(
         let config = state.config.read().await;
         auth::verify_member_access(headers, page, &config.jwt_secret)?
     };
+    if !auth::subject_known(state, &claims) {
+        return Err(auth::subject_gone());
+    }
     let page = state
         .page(page)
         .ok_or((StatusCode::NOT_FOUND, Json(ApiError::not_found("Member"))))?;
@@ -196,21 +213,39 @@ async fn batch_control(
     Json(payload): Json<iem_core::BatchControlRequest>,
 ) -> Result<StatusCode, Reject> {
     let (page, _) = page_for(&state, &headers, &page).await?;
+    state.may_change(&page).map_err(switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     match payload.operation {
         iem_core::BatchOperation::MuteAll => {
             let cmd = crate::view::mute_all(&site, &page);
-            state.apply(&page, vec![cmd], None).await.map_err(|e| {
-                tracing::error!(page = %page.id, error = %e, "Mute All failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ApiError::new("ENGINE_ERROR", e.to_string())),
-                )
-            })?;
+            state
+                .apply(&page, vec![cmd], None)
+                .await
+                .map_err(|e| change_refused(&page, "Mute All", e))?;
             tracing::info!(page = %page.id, "Mute All");
         }
     }
     Ok(StatusCode::OK)
+}
+
+/// The answer to a page change [`AppState::apply`] did not make: 409
+/// `SWITCHING` while a switch runs or from another band's page, 502
+/// `ENGINE_ERROR` when the engine did not take it.
+pub(crate) fn change_refused(
+    page: &crate::site_view::Page,
+    what: &str,
+    e: crate::ChangeError,
+) -> Reject {
+    match e {
+        crate::ChangeError::Refused(v) => switching(v),
+        crate::ChangeError::Engine(e) => {
+            tracing::error!(page = %page.id, error = %e, "{what} failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError::new("ENGINE_ERROR", e.to_string())),
+            )
+        }
+    }
 }
 
 /// Error report sent by the WASM client when a panic occurs.
@@ -345,7 +380,7 @@ async fn get_customization(
     let Some(member) = page.member else {
         return Ok(Json(iem_core::Customization::default()));
     };
-    let c = state.band.customization(&member).map_err(|e| {
+    let c = state.band().customization(&member).map_err(|e| {
         tracing::error!(%member, error = %e, "pins and hides unreadable");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -366,6 +401,7 @@ async fn put_customization(
     Json(payload): Json<iem_core::Customization>,
 ) -> Result<(StatusCode, Json<iem_core::Customization>), Reject> {
     let (page, _) = page_for(&state, &headers, &page).await?;
+    state.may_change(&page).map_err(switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     let Some(member) = page.member.clone() else {
         return Err((
@@ -381,7 +417,7 @@ async fn put_customization(
     let (pinned, pinned_src) = keep(&payload.pinned);
     let (hidden, hidden_src) = keep(&payload.hidden);
     state
-        .band
+        .band()
         .save_customization(&member, pinned_src, hidden_src)
         .map_err(|e| {
             tracing::error!(%member, error = %e, "saving pins and hides failed");
