@@ -230,6 +230,15 @@ fn a_roster_is_kept_under_its_sha256_only() {
     }
 }
 
+/// #58 fourth review: the kept rosters' folder in `lineups/` is no
+/// lineup's: no lineup id can name it, so no lineup shares it and no walk
+/// over the lineups' folders (`people_archive`) takes it for one.
+#[test]
+fn the_kept_rosters_folder_is_named_by_no_lineup_id() {
+    assert_eq!(ROSTERS_DIR, format!("{LINEUPS_DIR}/{ROSTERS_NAME}"));
+    assert!(!valid_lineup_id(ROSTERS_NAME), "{ROSTERS_NAME}");
+}
+
 /// #58: the band store is the active lineup's, one per lineup while it
 /// plays; legacy mode keeps the config directory.
 #[tokio::test]
