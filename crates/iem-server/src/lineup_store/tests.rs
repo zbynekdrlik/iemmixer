@@ -229,6 +229,18 @@ async fn the_band_store_follows_the_active_lineup() {
     let main = dir.path().join(LINEUPS_DIR).join("main");
     assert!(main.join(file_of("customizations", "member2")).exists());
     assert!(!Arc::ptr_eq(&store, &state.band()));
+    // main → youth → main: the same store again, never a second one over
+    // the same directory with a lock of its own.
+    let main_store = state.band();
+    state.roster.write().unwrap().as_mut().unwrap().active = "youth".into();
+    assert!(Arc::ptr_eq(&store, &state.band()));
+    state.roster.write().unwrap().as_mut().unwrap().active = "main".into();
+    assert!(Arc::ptr_eq(&main_store, &state.band()));
+    assert!(Arc::ptr_eq(&main_store, &state.band_of(Some("main"))));
+    // An active lineup the roster lacks: main's, as the site view shows.
+    state.roster.write().unwrap().as_mut().unwrap().active = "gone".into();
+    assert!(Arc::ptr_eq(&main_store, &state.band()));
+    assert!(!dir.path().join(LINEUPS_DIR).join("gone").exists());
     *state.roster.write().unwrap() = None;
     save(&state, "member3");
     assert!(
@@ -236,6 +248,7 @@ async fn the_band_store_follows_the_active_lineup() {
             .join(file_of("customizations", "member3"))
             .exists()
     );
+    assert!(Arc::ptr_eq(&state.band(), &state.band_of(None)));
 }
 
 #[test]
