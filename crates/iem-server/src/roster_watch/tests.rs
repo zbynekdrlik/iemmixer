@@ -1958,3 +1958,15 @@ async fn a_lost_import_alarms_once_while_the_engine_stays_away() {
     assert!(!state.frozen_now());
     assert_eq!(alarms(), 1);
 }
+
+#[test]
+fn the_absent_engine_alarm_is_due_once_the_wait_reached_its_time() {
+    let after = Duration::from_secs(60);
+    assert!(!absent_alarm_due(false, Duration::from_secs(59), after));
+    assert!(absent_alarm_due(false, after, after));
+    assert!(absent_alarm_due(false, Duration::from_secs(61), after));
+    assert!(
+        !absent_alarm_due(true, Duration::from_secs(61), after),
+        "once"
+    );
+}

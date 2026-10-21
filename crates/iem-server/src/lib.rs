@@ -160,6 +160,10 @@ pub struct AppState {
     /// How long the replay of a switch and the settle of a roster wait
     /// between two tries (`lineup_switch::REPLAY_RETRY`; tests shorten it).
     pub retry: std::time::Duration,
+    /// How long a roster's import whose answer was lost waits for an absent
+    /// engine before the engineer's devices hear of it, once
+    /// (`roster_watch::ABSENT_ALARM`; tests shorten it).
+    pub absent_alarm: std::time::Duration,
     /// The server started on the roster applied last because `roster.toml`
     /// could not be used (`roster_watch::Loaded::fallback`), until a roster
     /// file is in use again: the status says so.
@@ -286,6 +290,7 @@ impl AppState {
             switching: Arc::new(tokio::sync::Mutex::new(())),
             frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
             retry: lineup_switch::REPLAY_RETRY,
+            absent_alarm: roster_watch::ABSENT_ALARM,
             fallback: Arc::new(std::sync::atomic::AtomicBool::new(fallback)),
             change_gate: Arc::new(std::sync::RwLock::new(())),
             unsettled: Arc::new(Mutex::new(unsettled)),

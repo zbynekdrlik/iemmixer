@@ -839,16 +839,43 @@ fn follow(
 /// Whether the engine took `sent`, an import whose answer was lost (#58
 /// re-review): waits, the pages frozen and nothing put back, until the
 /// engine answers a `Ping` again (every change it made before is in the
-/// mirror then), and compares the mirror's state with `sent`.
+/// mirror then), and compares the mirror's state with `sent`. An engine
+/// still away `AppState::absent_alarm` after the wait began is told to the
+/// engineer's devices once (#58 third review); the wait goes on.
 async fn landed(state: &AppState, sent: &MixState) -> bool {
+    let began = tokio::time::Instant::now();
+    let mut alarmed = false;
     loop {
         if state.engine.wait_synced(state.retry).await
             && state.engine.request_applied(Cmd::Ping, None).await.is_ok()
         {
             return state.engine.mirror().state == *sent;
         }
+        if absent_alarm_due(alarmed, began.elapsed(), state.absent_alarm) {
+            alarmed = true;
+            let devices = crate::notify::push_alarm(state, ABSENT_TITLE, ABSENT_BODY).await;
+            tracing::warn!(
+                devices,
+                waited_s = began.elapsed().as_secs(),
+                "the engine is away while a roster's import waits: the engineer's devices heard of it"
+            );
+        }
         tokio::time::sleep(state.retry).await;
     }
+}
+
+/// How long [`landed`] waits for an absent engine before the alarm
+/// (`AppState::absent_alarm`).
+pub const ABSENT_ALARM: Duration = Duration::from_secs(60);
+const ABSENT_TITLE: &str = "Engine neodpovedá";
+const ABSENT_BODY: &str = "Server poslal enginu zmenu zostavy a engine odvtedy neodpovedá: \
+                           mixy sa nedajú meniť, kým sa engine neozve. Server naň čaká ďalej \
+                           a zmenu potom dokončí alebo vráti.";
+
+/// Whether [`landed`] alarms now: not yet `alarmed`, and `waited` reached
+/// `after`.
+fn absent_alarm_due(alarmed: bool, waited: Duration, after: Duration) -> bool {
+    !alarmed && waited >= after
 }
 
 /// Why a roster waits: its rules reach the running state only through a
