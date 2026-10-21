@@ -363,6 +363,15 @@ impl Topology {
                 .map_or(0, |n| n.mixes.len() + n.peers.len())
     }
 
+    /// How many peers the mixes hear in all, and how many mixes have a
+    /// shadow (#58): the start-up line names both.
+    pub fn peering(&self) -> (usize, usize) {
+        (
+            self.mixes.iter().map(|n| n.peers.len()).sum(),
+            self.mixes.iter().filter(|n| n.shadow).count(),
+        )
+    }
+
     /// The level slot of `source` in mix `m`; `None` when the mix does not
     /// hear it. A mix is looked for among the heard mixes, then the peers.
     pub fn slot(&self, m: usize, source: &Source) -> Option<usize> {
@@ -573,6 +582,7 @@ mod tests {
         assert!(t.mixes[m1].shadow && t.mixes[m3].shadow);
         assert_eq!(t.mixes.iter().filter(|n| !n.peers.is_empty()).count(), 2);
         assert_eq!(t.mixes.iter().filter(|n| n.shadow).count(), 2);
+        assert_eq!(t.peering(), (16, 2));
         // The render order: the seven members and the translator that hear
         // nothing, then member3, member1 and the engineer as declared.
         assert_eq!(t.order.len(), 11);
@@ -1229,6 +1239,9 @@ mixes = ["m1"]
         assert!(!t.mixes[mix(&t, "m3")].shadow, "nobody's peer");
         // No peers anywhere: no shadow.
         assert!(compiled(BASE).mixes.iter().all(|n| !n.shadow));
+        assert_eq!(compiled(BASE).peering(), (0, 0));
+        // m1 hears m3 and m4, m3 hears m1: three peers, two shadows.
+        assert_eq!(compiled(&text).peering(), (3, 2));
     }
 
     #[test]

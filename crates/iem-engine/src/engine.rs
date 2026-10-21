@@ -441,8 +441,9 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if let Some(card) = &card {
         crate::asio::prepare(card);
     }
+    let (peers, shadowed) = topo.peering();
     info!(
-        "site {}: {} inputs, {} groups, {} mixes, topology {}",
+        "site {}: {} inputs, {} groups, {} mixes, {peers} peers, {shadowed} shadowed mixes, topology {}",
         cfg.site.display(),
         topo.inputs.len(),
         topo.groups.len(),
