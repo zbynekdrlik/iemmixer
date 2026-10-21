@@ -495,17 +495,6 @@ fn closing(state: &AppState, page: &Page) -> bool {
     person && (state.frozen_now() || state.page(&page.id).as_ref() != Some(page))
 }
 
-/// What a session hears back from its own change as its page's member
-/// sees it ([`own_echo_seen`]).
-pub fn own_echo(
-    site: &crate::site_view::SiteView,
-    mirror: &crate::engine::mirror::Mirror,
-    page: &Page,
-    changes: &[Change],
-) -> Vec<ServerMsg> {
-    own_echo_seen(site, mirror, page, &Viewer::of_page(page), changes)
-}
-
 /// What a session hears back from its own change: nothing (it applied the
 /// change optimistically), except the channel mutes a solo change shows (the
 /// mask is the server's view; the page cannot know every level's own mute),

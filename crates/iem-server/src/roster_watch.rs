@@ -11,7 +11,7 @@
 //!
 //! Applying a roster: a person who moves to another set of a lineup takes
 //! their mix along ([`moves`], [`apply_moves`]), and the lineup's rules hold
-//! on every set ([`fit`]: a set worn by no leader hears no other mix, a set
+//! on every set ([`fit_recorded`]: a set worn by no leader hears no other mix, a set
 //! nobody wears is silent), in every inactive lineup's stored state and in
 //! the active lineup's running one through one `ImportState`, before the new
 //! roster is swapped in; then people it removed are archived and people it
@@ -472,16 +472,11 @@ fn roster_sets(roster: &Roster) -> BTreeSet<String> {
 /// not one of `lineup`'s leaders every mix it hears, whole or as a peer, is
 /// muted, so only a leader hears another person's mix; a set of the roster
 /// nobody wears in `lineup` is muted. Only mixes the state holds are
-/// touched. With no record of what the rules silenced ([`fit_recorded`]).
-pub fn fit(state: &mut MixState, roster: &Roster, lineup: &Lineup) {
-    fit_recorded(state, roster, lineup, &mut BTreeSet::new());
-}
-
-/// [`fit`] keeping `silenced`, the lineup's record of the sets its rules
-/// muted because nobody wore them (#58 review): such a set is recorded when
-/// the rules mute it, and unmuted and forgotten once someone wears it. A
-/// set that was muted already (its wearer's choice) is never recorded, so
-/// the rules never unmute it.
+/// touched. `silenced` is the lineup's record of the sets its rules muted
+/// because nobody wore them (#58 review): such a set is recorded when the
+/// rules mute it, and unmuted and forgotten once someone wears it. A set
+/// that was muted already (its wearer's choice) is never recorded, so the
+/// rules never unmute it.
 pub fn fit_recorded(
     state: &mut MixState,
     roster: &Roster,

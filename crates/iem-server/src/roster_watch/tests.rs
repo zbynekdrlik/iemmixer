@@ -297,7 +297,12 @@ fn fit_mutes_heard_mixes_off_a_leaders_set_and_silences_empty_sets() {
     mix_mut(&mut s, "engineer")
         .mixes
         .insert(MixId::new("member1"), level(-3.0));
-    fit(&mut s, &r.roster, r.roster.lineup("youth").unwrap());
+    fit_recorded(
+        &mut s,
+        &r.roster,
+        r.roster.lineup("youth").unwrap(),
+        &mut BTreeSet::new(),
+    );
     let mix = |id: &str| &s.mixes[&MixId::new(id)];
     let of = |id: &str, h: &str| mix(id).mixes[&MixId::new(h)].muted;
     assert!(of("member1", "member2"), "member10 leads no part of youth");
@@ -314,11 +319,21 @@ fn fit_mutes_heard_mixes_off_a_leaders_set_and_silences_empty_sets() {
     }
     // Main: both leaders keep what they hear and every set is worn.
     let mut main = running();
-    fit(&mut main, &r.roster, r.roster.lineup("main").unwrap());
+    fit_recorded(
+        &mut main,
+        &r.roster,
+        r.roster.lineup("main").unwrap(),
+        &mut BTreeSet::new(),
+    );
     assert_eq!(main, running());
     // A mix the state does not hold is not made up.
     let mut empty = MixState::default();
-    fit(&mut empty, &r.roster, r.roster.lineup("youth").unwrap());
+    fit_recorded(
+        &mut empty,
+        &r.roster,
+        r.roster.lineup("youth").unwrap(),
+        &mut BTreeSet::new(),
+    );
     assert_eq!(empty, MixState::default());
 }
 
@@ -877,7 +892,12 @@ async fn an_inactive_lineups_stored_state_follows_the_roster() {
     // Youth's running state already fits youth (only the empty sets muted).
     let mut youth = running();
     let lineup = test_roster("youth");
-    fit(&mut youth, &lineup.roster, lineup.lineup());
+    fit_recorded(
+        &mut youth,
+        &lineup.roster,
+        lineup.lineup(),
+        &mut BTreeSet::new(),
+    );
     let mut peer = synced(&mut state, youth).await;
     let text = moved();
     let applied_now = within(spawn_apply(&state, &text)).await;
@@ -1072,7 +1092,7 @@ async fn a_set_its_wearer_muted_stays_muted() {
 fn youth_running() -> MixState {
     let mut live = running();
     let r = test_roster("youth");
-    fit(&mut live, &r.roster, r.lineup());
+    fit_recorded(&mut live, &r.roster, r.lineup(), &mut BTreeSet::new());
     live
 }
 

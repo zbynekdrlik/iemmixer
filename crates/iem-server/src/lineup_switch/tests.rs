@@ -830,24 +830,31 @@ async fn nothing_to_replay_ends_at_once() {
 fn heard_mixes_go_off_on_a_non_leaders_set() {
     let r = test_roster("youth");
     let youth = r.roster.lineup("youth").unwrap();
-    let s = target_state(None, &running(), &r.roster, youth);
+    let s = target_state_recorded(None, &running(), &r.roster, youth, &mut BTreeSet::new());
     let set1 = &s.mixes[&mix_id("member1")];
     assert_eq!(set1.mixes.len(), 8);
     assert!(set1.mixes.values().all(|l| l.muted), "member10's set");
     assert!(!s.mixes[&mix_id("member3")].mixes[&mix_id("member1")].muted);
     // A stored state's open levels are no exception.
-    let s = target_state(Some(running()), &MixState::default(), &r.roster, youth);
+    let s = target_state_recorded(
+        Some(running()),
+        &MixState::default(),
+        &r.roster,
+        youth,
+        &mut BTreeSet::new(),
+    );
     assert!(s.mixes[&mix_id("member1")].mixes.values().all(|l| l.muted));
 }
 
 #[test]
 fn an_empty_set_is_muted() {
     let r = test_roster("youth");
-    let s = target_state(
+    let s = target_state_recorded(
         None,
         &running(),
         &r.roster,
         r.roster.lineup("youth").unwrap(),
+        &mut BTreeSet::new(),
     );
     for vacant in [
         "member2", "member5", "member6", "member7", "member8", "member9",
@@ -863,7 +870,10 @@ fn an_empty_set_is_muted() {
 fn a_lineup_without_state_starts_from_the_current_one() {
     let r = test_roster("main");
     let main = r.roster.lineup("main").unwrap();
-    assert_eq!(target_state(None, &running(), &r.roster, main), running());
+    assert_eq!(
+        target_state_recorded(None, &running(), &r.roster, main, &mut BTreeSet::new()),
+        running()
+    );
     // A stored state keeps its own values and takes the running ones it
     // lacks.
     let mut stored = MixState::default();
@@ -872,7 +882,13 @@ fn a_lineup_without_state_starts_from_the_current_one() {
         .entry(InputId::new("keys"))
         .or_default()
         .trim_db = 5.0;
-    let s = target_state(Some(stored), &running(), &r.roster, main);
+    let s = target_state_recorded(
+        Some(stored),
+        &running(),
+        &r.roster,
+        main,
+        &mut BTreeSet::new(),
+    );
     assert_eq!(s.inputs[&InputId::new("keys")].trim_db, 5.0);
     assert_eq!(s.mixes.len(), running().mixes.len());
     assert_eq!(

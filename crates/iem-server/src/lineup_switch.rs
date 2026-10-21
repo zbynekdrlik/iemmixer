@@ -75,19 +75,9 @@ pub fn may_switch(roster: &Roster, by: &AuthClaims) -> bool {
 /// The state the engine takes when `lineup` starts to play: its stored
 /// state completed with the running values it lacks (`keep_running`,
 /// FG-1), or the first time a copy of the running one; then the lineup's
-/// rules (`roster_watch::fit`: heard mixes only on a leader's set, a set
-/// nobody wears silent). Pure.
-pub fn target_state(
-    target: Option<MixState>,
-    current: &MixState,
-    roster: &Roster,
-    lineup: &Lineup,
-) -> MixState {
-    target_state_recorded(target, current, roster, lineup, &mut BTreeSet::new())
-}
-
-/// [`target_state`] keeping `silenced`, the record of the sets the rules
-/// silenced in the state it starts from (`roster_watch::fit_recorded`).
+/// rules (`roster_watch::fit_recorded`: heard mixes only on a leader's set,
+/// a set nobody wears silent), keeping `silenced`, the record of the sets
+/// the rules silenced in the state it starts from. Pure.
 pub fn target_state_recorded(
     target: Option<MixState>,
     current: &MixState,
@@ -320,7 +310,7 @@ async fn forward(
 }
 
 /// Imports `lineup`'s state (`stored` completed with the running values
-/// and under the lineup's rules, as [`target_state`]; no `stored`: the
+/// and under the lineup's rules, as [`target_state_recorded`]; no `stored`: the
 /// running state, which is `running`'s) and records it as the band that
 /// plays, on disk and in use.
 async fn play(

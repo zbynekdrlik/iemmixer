@@ -68,11 +68,13 @@ fn a_session_hears_back_only_the_mutes_its_solo_shows() {
         source: mic2.clone(),
         level: Default::default(),
     };
-    assert!(own_echo(&v, &m, &page, std::slice::from_ref(&level)).is_empty());
-    let echo = own_echo(
+    let own = Viewer::of_page(&page);
+    assert!(own_echo_seen(&v, &m, &page, &own, std::slice::from_ref(&level)).is_empty());
+    let echo = own_echo_seen(
         &v,
         &m,
         &page,
+        &own,
         &[
             level,
             Change::Solo {
