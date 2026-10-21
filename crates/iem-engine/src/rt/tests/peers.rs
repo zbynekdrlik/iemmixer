@@ -195,11 +195,20 @@ fn a_shadow_follows_the_mixs_eq_limiter_and_volume() {
 
 #[test]
 fn a_tripping_shadow_resets_and_counts() {
-    // +12 dB at b's level and volume with its limiter out: 9e5 passes the
-    // input (X1 at 1e6) and trips b's own output and its shadow in every
-    // block, so nothing that loud reaches a, a limiter or a safety stage.
+    // b with the +12 dB low shelf, +12 dB at its level and volume and its
+    // limiter out: 9e5 passes the input (X1 at 1e6), b's own sum (3.6e6, and
+    // more through the shelf) passes both disabled limiters, b's and its
+    // shadow's, and the sanitiser silences both in every block, before a, a
+    // safety stage or a's limiter reads them.
+    let mut eq = iem_engine_proto::Eq::default();
+    eq.bands[1].enabled = true;
+    eq.bands[1].gain_db = 12.0;
     let cmds = [
         level("b", src_in("y"), 12.0),
+        Cmd::SetEq {
+            target: EqTarget::Mix(mix("b")),
+            eq,
+        },
         limiter("b", false, -6.0),
         set_mix("b", Some(12.0), None),
         level("a", peer("b"), -6.0),
@@ -207,7 +216,7 @@ fn a_tripping_shadow_resets_and_counts() {
     let mut r = peers_rig(&cmds);
     // b's limiter, disabled at start, fades out over its first 10 ms: a
     // quiet y meanwhile.
-    r.run(&xy(0.0, 0.01, 3200), 32);
+    r.run(&xy(0.0, 0.005, 3200), 32);
     assert_eq!(r.h.status.trips.load(Ordering::Relaxed), 0);
     let out = r.run(&xy(0.0, 9e5, 3200), 32);
     let trips = r.h.status.trips.load(Ordering::Relaxed);
@@ -217,8 +226,12 @@ fn a_tripping_shadow_resets_and_counts() {
         out.channel(A_L).iter().all(|v| *v == 0.0),
         "a hears nothing of a tripping shadow"
     );
-    // Back to a quiet y: the shadow, reset, follows b again (a at −6 dB).
-    let out = r.run(&xy(0.0, 0.05, 3200), 32);
+    // Back to a quiet y with b's limiter on again: the shadow follows b only
+    // if each trip reset its EQ (else the shelf rings with the hot blocks)
+    // and its limiter's detector (else the hot peaks it held still pull the
+    // gain down).
+    r.at(6400, &limiter("b", true, -6.0));
+    let out = r.run(&xy(0.0, 0.005, 3200), 32);
     assert_eq!(
         r.h.status.trips.load(Ordering::Relaxed),
         trips,
@@ -226,7 +239,7 @@ fn a_tripping_shadow_resets_and_counts() {
     );
     let k = 10f64.powf(-0.3) * g0() * g0();
     let (ya, yb) = (out.channel(A_L), out.channel(B_L));
-    assert!(yb[3199] > 0.5, "{}", yb[3199]);
+    assert!(yb[3199] > 0.1, "{}", yb[3199]);
     for (t, (va, vb)) in ya.iter().zip(yb).enumerate() {
         assert!(close(*va, vb * k, 1e-12), "{t}: {va} vs {}", vb * k);
     }
