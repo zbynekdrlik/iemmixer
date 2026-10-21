@@ -29,6 +29,11 @@ use crate::{AppState, To};
 
 /// Close code telling a page without a (current) protocol to reload.
 pub const CLOSE_RELOAD: u16 = 4001;
+/// Close code of a person's page after the band was switched or the roster
+/// changed (#58; 4002 is `ws_alive::CLOSE_SILENT`): the page reads
+/// `/api/lineup` and connects again, or shows which band plays. Never a
+/// reload.
+pub const CLOSE_LINEUP: u16 = 4003;
 
 /// Query parameters of the page and media sockets.
 #[derive(Debug, serde::Deserialize)]
@@ -233,6 +238,37 @@ pub fn alert_catchup(
     }
 }
 
+/// What a mixer session does when the band was switched or the roster
+/// changed (#58).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnLineup {
+    /// A person's page closes with [`CLOSE_LINEUP`]: whether they play,
+    /// on which set, and under which names is the new band's.
+    Close(CloseFrame),
+    /// The engineer's page and a page without a person stay; their names
+    /// and pins and hides are the new band's, sent again.
+    Refresh(Vec<ServerMsg>),
+}
+
+/// [`OnLineup`] for a session on `page`.
+pub fn on_lineup(state: &AppState, page: &Page, viewer: &Viewer) -> OnLineup {
+    let person = page
+        .member
+        .as_deref()
+        .is_some_and(|m| m != crate::pin_store::ENGINEER_ID);
+    if person {
+        OnLineup::Close(CloseFrame {
+            code: CLOSE_LINEUP,
+            reason: "lineup".into(),
+        })
+    } else {
+        OnLineup::Refresh(vec![
+            full_state(state, page, viewer),
+            customization_msg(state, page),
+        ])
+    }
+}
+
 /// Whether an app event for `to` goes to this connection.
 pub fn addressed(to: &To, page: &str, session: u64) -> bool {
     match to {
@@ -268,6 +304,7 @@ async fn session(
     let mut engine_rx = state.engine.subscribe();
     let mut meters_rx = state.meters_tx.subscribe();
     let mut app_rx = state.event_tx.subscribe();
+    let mut lineup_rx = state.lineup_tx.subscribe();
     lock(&state.solo).connected(&page.mix.0);
 
     let mut first = vec![
@@ -355,6 +392,20 @@ async fn session(
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(page = %page.id, skipped = n, "app events lagged");
                     Vec::new()
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            ev = lineup_rx.recv() => match ev {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    match on_lineup(&state, &page, &viewer) {
+                        OnLineup::Close(frame) => {
+                            tracing::info!(page = %page.id, session, "the band changed: closing the page (4003)");
+                            let close = socket.send(Message::Close(Some(frame)));
+                            let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, close).await;
+                            break;
+                        }
+                        OnLineup::Refresh(msgs) => msgs,
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
@@ -462,7 +513,7 @@ pub fn changes_mix(cmd: &Cmd, mix: &MixId) -> bool {
 }
 
 /// One UI command.
-async fn handle(
+pub(crate) async fn handle(
     state: &AppState,
     session: u64,
     page: &Page,
@@ -486,6 +537,11 @@ async fn handle(
             };
             let (pinned_ids, pinned_src) = known(pinned);
             let (hidden_ids, hidden_src) = known(hidden);
+            // Another band's page would write into this band's files.
+            if let Err(e) = state.may_change(page) {
+                tracing::warn!(page = %page.id, error = %e, "pins and hides refused");
+                return;
+            }
             if let Err(e) = state
                 .band()
                 .save_customization(member, pinned_src, hidden_src)
@@ -556,6 +612,8 @@ async fn handle(
                 return;
             };
             let cmds = view::command(&site, &state.engine.mirror(), page, viewer, &msg);
+            // The mirror's guard is gone: `may_change` reads it again.
+            let cmds = cmds.and_then(|cmds| state.may_change(page).map(|()| cmds));
             match cmds {
                 Ok(cmds) => {
                     if cmds.iter().any(|c| changes_mix(c, &page.mix)) {

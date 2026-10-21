@@ -396,7 +396,7 @@ pub(crate) mod fake {
     //! of the code above it that must not depend on a real engine.
 
     use super::*;
-    use iem_engine_proto::{Hello, MixState, TopologyInfo, Transient};
+    use iem_engine_proto::{ErrCode, Hello, MixState, Reply, TopologyInfo, Transient};
     use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 
     /// The engine's end of one connection.
@@ -468,6 +468,55 @@ pub(crate) mod fake {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         (client, peer)
+    }
+
+    /// Answers the next request, which must be an `ImportState`, as the
+    /// engine does: the reply at `rev`, then the imported state. Returns
+    /// what was imported.
+    pub async fn imports(peer: &mut Peer, rev: u64) -> MixState {
+        let ClientMsg::Request {
+            id,
+            cmd: Cmd::ImportState { state, baseline },
+            ..
+        } = peer.recv().await
+        else {
+            panic!("an ImportState");
+        };
+        assert!(!baseline, "a lineup's state is no baseline");
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev,
+            error: None,
+        }))
+        .await;
+        peer.send(&EngineMsg::State {
+            rev,
+            state: state.clone(),
+            transient: Transient::default(),
+        })
+        .await;
+        state
+    }
+
+    /// Refuses the next request, which must be an `ImportState`.
+    pub async fn refuses(peer: &mut Peer) {
+        let ClientMsg::Request {
+            id,
+            cmd: Cmd::ImportState { .. },
+            ..
+        } = peer.recv().await
+        else {
+            panic!("an ImportState");
+        };
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev: 0,
+            error: Some(ErrorBody {
+                code: ErrCode::BadRequest,
+                msg: "refused".into(),
+            }),
+        }))
+        .await;
     }
 
     /// Sends `state` and waits (≤ 5 s) until the mirror holds it.

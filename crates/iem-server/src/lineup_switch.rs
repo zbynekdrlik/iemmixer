@@ -1,0 +1,302 @@
+//! Switching the active lineup (#58 design §7): a leader of any lineup or
+//! the engineer makes another band play, its lineup and every mix at once,
+//! in one `ImportState`, without a restart.
+//!
+//! The order of the steps keeps the engine's state and the recorded active
+//! lineup from ever belonging to two bands: under the `switching` lock and
+//! with every page's change refused (`frozen`), the live state is stored as
+//! the active lineup's, then the intent `{from, to}` is written, then the
+//! target's state goes to the engine, then the target is recorded active,
+//! then the intent goes. A failure after the intent imports the stored
+//! state again and clears the intent: the active lineup is unchanged. A
+//! restart between the intent and its clearing finishes the switch
+//! ([`replay_intent`], once the mirror has synced). After a switch every
+//! person's mixer socket closes (`mixer_ws::CLOSE_LINEUP`), and the
+//! engineer's devices hear which band plays.
+//!
+//! Pins and hides live in each lineup's own files
+//! (`lineups/<id>/customizations/`): a switch reads and writes nothing of
+//! them but the copy inside the stored state (a backup's shape), which is
+//! never read back at a switch.
+
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use iem_core::AuthClaims;
+use iem_core::roster::{Lineup, Roster};
+use iem_engine_proto::{Cmd, MixState};
+
+use crate::AppState;
+use crate::backup::{capture, keep_running};
+use crate::engine::client::EngineError;
+use crate::lineup_store::{LineupStore, SwitchIntent};
+use crate::roster_watch::fit;
+use crate::site_view::SiteView;
+
+/// How long [`replay_when_synced`] waits between two tries.
+pub const REPLAY_RETRY: Duration = Duration::from_secs(2);
+
+/// Why a switch did not happen; the active lineup is unchanged.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SwitchError {
+    #[error("this site has no roster")]
+    NotConfigured,
+    #[error("only a band leader or the engineer switches the band")]
+    Forbidden,
+    #[error("the band is being switched already")]
+    Busy,
+    /// The id asked for (never echoed: it is the request's).
+    #[error("no such lineup")]
+    Unknown(String),
+    #[error("that band plays already")]
+    Same,
+    #[error("the engine state is not synced")]
+    NotSynced,
+    #[error("{0}")]
+    Io(String),
+    #[error("the engine did not take the band's mixes: {0}")]
+    Engine(EngineError),
+}
+
+fn io(what: &str, e: std::io::Error) -> SwitchError {
+    SwitchError::Io(format!("{what}: {}", e.kind()))
+}
+
+/// Whether `by` may switch the band: the engineer, or a leader of any
+/// lineup (§7).
+pub fn may_switch(roster: &Roster, by: &AuthClaims) -> bool {
+    by.engineer || roster.leads_any(&by.sub)
+}
+
+/// The state the engine takes when `lineup` starts to play: its stored
+/// state completed with the running values it lacks (`keep_running`,
+/// FG-1), or the first time a copy of the running one; then the lineup's
+/// rules (`roster_watch::fit`: heard mixes only on a leader's set, a set
+/// nobody wears silent). Pure.
+pub fn target_state(
+    target: Option<MixState>,
+    current: &MixState,
+    roster: &Roster,
+    lineup: &Lineup,
+) -> MixState {
+    let mut state = match target {
+        Some(stored) => keep_running(&stored, current),
+        None => current.clone(),
+    };
+    fit(&mut state, roster, lineup);
+    state
+}
+
+fn import(state: MixState) -> Cmd {
+    Cmd::ImportState {
+        state,
+        baseline: false,
+    }
+}
+
+/// Records `id` as the active lineup in the running server's roster.
+fn set_active_in_use(state: &AppState, id: &str) {
+    if let Some(mut r) = state.roster() {
+        r.active = id.to_string();
+        state.set_roster(Some(r));
+    }
+}
+
+/// Makes `to` the band that plays (see the module docs).
+pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Result<(), SwitchError> {
+    let roster = state.roster().ok_or(SwitchError::NotConfigured)?;
+    if !may_switch(&roster.roster, by) {
+        return Err(SwitchError::Forbidden);
+    }
+    let Ok(_running) = state.switching.try_lock() else {
+        return Err(SwitchError::Busy);
+    };
+    // The roster as it is now that no reload runs.
+    let roster = state.roster().ok_or(SwitchError::NotConfigured)?;
+    let from = roster.lineup().id.clone();
+    let target = roster
+        .roster
+        .lineup(to)
+        .cloned()
+        .ok_or_else(|| SwitchError::Unknown(to.to_string()))?;
+    if target.id == from {
+        return Err(SwitchError::Same);
+    }
+    // Set already: a switch a restart cut short is not finished yet.
+    if state.frozen.swap(true, Ordering::SeqCst) {
+        return Err(SwitchError::Busy);
+    }
+    let result = match state.site() {
+        Some(view) => run(state, &roster.roster, &view, &from, &target).await,
+        None => Err(SwitchError::NotSynced),
+    };
+    if result.is_ok() {
+        set_active_in_use(state, &target.id);
+    }
+    state.frozen.store(false, Ordering::SeqCst);
+    match &result {
+        Ok(()) => {
+            tracing::warn!(%from, to = %target.id, by = %by.sub, "the band was switched");
+            state.announce_lineup();
+            let (s, payload) = (state.clone(), crate::notify::lineup_payload(&target.name));
+            tokio::spawn(async move {
+                let devices = crate::notify::push_engineers(&s, &payload).await;
+                tracing::info!(devices, "the engineer's devices heard of the switch");
+            });
+        }
+        Err(e) => {
+            tracing::error!(%from, to = %target.id, by = %by.sub, error = %e, "the band was not switched");
+        }
+    }
+    result
+}
+
+/// The switch's steps under the lock, the pages frozen.
+async fn run(
+    state: &AppState,
+    roster: &Roster,
+    view: &SiteView,
+    from: &str,
+    to: &Lineup,
+) -> Result<(), SwitchError> {
+    let store = LineupStore::new(&state.config_dir);
+    // The live state and the active lineup's pins and hides, as its stored
+    // state.
+    let mut live = {
+        let mirror = state.engine.mirror();
+        if !mirror.synced {
+            return Err(SwitchError::NotSynced);
+        }
+        let at = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        capture(view, &mirror, &state.band_of(Some(from)), at).map_err(SwitchError::Io)?
+    };
+    live.lineup = Some(from.to_string());
+    store
+        .save_state(from, &live)
+        .map_err(|e| io("the band's state was not stored", e))?;
+    let intent = SwitchIntent {
+        from: from.to_string(),
+        to: to.id.clone(),
+    };
+    store
+        .set_intent(&intent)
+        .map_err(|e| io("the switch's intent was not written", e))?;
+    if let Err(e) = forward(state, &store, roster, &live.state, to).await {
+        // The band that played plays on.
+        if let Err(back) = state
+            .engine
+            .request_applied(import(live.state.clone()), None)
+            .await
+        {
+            tracing::error!(error = %back, %from, "the band's state was not imported again");
+        }
+        if let Err(clear) = store.clear_intent() {
+            tracing::error!(error = %clear, "the switch's intent was not cleared");
+        }
+        return Err(e);
+    }
+    if let Err(e) = store.clear_intent() {
+        // The switch happened; the next start clears it (active is `to`).
+        tracing::warn!(error = %e, "the switch's intent was not cleared");
+    }
+    Ok(())
+}
+
+/// The target's state to the engine, then the target recorded active.
+async fn forward(
+    state: &AppState,
+    store: &LineupStore,
+    roster: &Roster,
+    live: &MixState,
+    to: &Lineup,
+) -> Result<(), SwitchError> {
+    let stored = store
+        .state(&to.id)
+        .map_err(|e| io("the band's stored state is unreadable", e))?
+        .map(|b| b.state);
+    let target = target_state(stored, live, roster, to);
+    state
+        .engine
+        .request_applied(import(target), None)
+        .await
+        .map_err(SwitchError::Engine)?;
+    store
+        .set_active(&to.id, chrono::Utc::now().timestamp())
+        .map_err(|e| io("the band that plays was not recorded", e))
+}
+
+/// Finishes a switch a restart cut short (§7 step 5), once the mirror has
+/// synced: with the intent's target recorded active it only clears the
+/// intent; otherwise it imports the target's state and records it (a
+/// target the roster no longer holds: the active lineup's stored state
+/// again), then clears it. Mix changes stay refused until it succeeds.
+pub async fn replay_intent(state: &AppState) -> Result<(), String> {
+    let _running = state.switching.lock().await;
+    let store = LineupStore::new(&state.config_dir);
+    let (Some(intent), Some(roster)) = (store.intent().map_err(|e| e.to_string())?, state.roster())
+    else {
+        state.frozen.store(false, Ordering::SeqCst);
+        return Ok(());
+    };
+    let active = store.active().map_err(|e| e.to_string())?;
+    if active.as_deref() != Some(intent.to.as_str()) {
+        let lineup = roster
+            .roster
+            .lineup(&intent.to)
+            .unwrap_or_else(|| roster.lineup())
+            .clone();
+        let current = {
+            let mirror = state.engine.mirror();
+            if !mirror.synced {
+                return Err("the engine state is not synced".into());
+            }
+            mirror.state.clone()
+        };
+        let stored = store
+            .state(&lineup.id)
+            .map_err(|e| e.to_string())?
+            .map(|b| b.state);
+        let target = target_state(stored, &current, &roster.roster, &lineup);
+        state
+            .engine
+            .request_applied(import(target), None)
+            .await
+            .map_err(|e| e.to_string())?;
+        store
+            .set_active(&lineup.id, chrono::Utc::now().timestamp())
+            .map_err(|e| e.to_string())?;
+        set_active_in_use(state, &lineup.id);
+        tracing::warn!(lineup = %lineup.id, "a switch a restart cut short is finished");
+        state.announce_lineup();
+    }
+    store.clear_intent().map_err(|e| e.to_string())?;
+    state.frozen.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// At the start: when a switch was cut short (`frozen` set), waits for the
+/// engine's state and finishes it ([`replay_intent`]), trying again every
+/// [`REPLAY_RETRY`] until it succeeds.
+pub async fn replay_when_synced(state: AppState) {
+    if !state.frozen_now() {
+        return;
+    }
+    loop {
+        let synced = state.engine.mirror().synced;
+        if synced {
+            match replay_intent(&state).await {
+                Ok(()) => return,
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "a switch a restart cut short is not finished: trying again"
+                ),
+            }
+        }
+        tokio::time::sleep(REPLAY_RETRY).await;
+    }
+}
+
+#[cfg(test)]
+mod tests;

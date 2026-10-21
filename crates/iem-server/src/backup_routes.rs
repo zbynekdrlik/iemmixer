@@ -73,6 +73,11 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
     if !state.engine.mirror().synced {
         return Err("the engine state is not synced".into());
     }
+    // Mid-switch the engine may hold the next band's state while the
+    // roster still names the last one (#58).
+    if state.frozen_now() {
+        return Err("the band is being switched".into());
+    }
     let mut b = crate::backup::capture(
         &site,
         &state.engine.mirror(),
@@ -148,6 +153,15 @@ async fn restore_backup(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<RestoreResult>, Reject> {
     engineer(&state, &headers).await?;
+    // Never beside a band switch (#58): one of them at a time, and none
+    // while a switch a restart cut short is unfinished.
+    let busy = || crate::routes::switching(crate::view::ViewError::Switching);
+    let Ok(_running) = state.switching.try_lock() else {
+        return Err(busy());
+    };
+    if state.frozen_now() {
+        return Err(busy());
+    }
     let b = load(&state, &filename)?;
     let preview = preview_of(&state, &b)?;
     // What the backup lacks (added to the topology after it) stays as it is.

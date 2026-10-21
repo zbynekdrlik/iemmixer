@@ -14,7 +14,9 @@ pub mod band_import;
 pub mod band_store;
 pub mod console;
 pub mod engine;
+pub mod lineup_routes;
 pub mod lineup_store;
+pub mod lineup_switch;
 pub mod login_guard;
 pub mod meters;
 pub mod mixer_ws;
@@ -149,6 +151,12 @@ pub struct AppState {
     /// The active lineup after a switch or a roster change (#58):
     /// [`AppState::announce_lineup`]
     pub lineup_tx: broadcast::Sender<iem_core::LineupRef>,
+    /// One lineup switch or roster reload at a time (#58 design §7).
+    pub switching: Arc<tokio::sync::Mutex<()>>,
+    /// Set while a switch runs (and, after a restart that cut one short,
+    /// until it is finished): no page's change reaches the engine
+    /// ([`AppState::may_change`]).
+    pub frozen: Arc<std::sync::atomic::AtomicBool>,
     /// Merged meters every 100 ms
     pub meters_tx: broadcast::Sender<Arc<Merged>>,
     /// Latest limiter active seconds per mix (topology order)
@@ -158,7 +166,7 @@ pub struct AppState {
     pub talk: Arc<Mutex<talk::TalkLock>>,
     /// Active SOS alerts: member id → (member id, display name)
     pub alerts: Arc<Mutex<HashMap<String, (String, String)>>>,
-    /// Members whose daily auto-snapshot is taken: member → UTC day
+    /// Members whose daily auto-snapshot is taken: [`snapshot_key`] → UTC day
     auto_snapshots: Arc<Mutex<HashMap<String, String>>>,
     /// Argon2id PIN hashes (`<config dir>/secrets/pin_hashes.json`)
     pub pin_store: Arc<RwLock<pin_store::PinStore>>,
@@ -203,6 +211,12 @@ impl AppState {
         let mut pin_store = pin_store::PinStore::load(&secrets_dir)?;
         let roster = roster_watch::load(config_dir, &config, &mut pin_store, None)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // A switch a restart cut short: no change until it is finished
+        // (`lineup_switch::replay_when_synced`).
+        let cut_short = roster.is_some()
+            && lineup_store::LineupStore::new(config_dir)
+                .intent()?
+                .is_some();
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
         // from loopback and this host's own addresses (design note §6).
         let host = login_guard::HostAddrs::read();
@@ -232,6 +246,8 @@ impl AppState {
             site_cache: Arc::new(Mutex::new(None)),
             event_tx,
             lineup_tx,
+            switching: Arc::new(tokio::sync::Mutex::new(())),
+            frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
             meters_tx,
             active_s: Arc::new(Mutex::new(Vec::new())),
             sessions: Arc::new(AtomicU64::new(1)),
@@ -317,6 +333,23 @@ impl AppState {
         }
     }
 
+    /// Whether a switch runs (or one a restart cut short is not finished).
+    pub fn frozen_now(&self) -> bool {
+        self.frozen.load(Ordering::SeqCst)
+    }
+
+    /// Whether a change from `page` may reach the engine (or the page's
+    /// pins and hides) now (#58 design §7): not while a switch runs, and
+    /// not from a page the active lineup no longer gives as it is (another
+    /// band plays: the page's socket is closing, its change would land on
+    /// another person's mix).
+    pub fn may_change(&self, page: &Page) -> Result<(), view::ViewError> {
+        if self.frozen_now() || self.page(&page.id).as_ref() != Some(page) {
+            return Err(view::ViewError::Switching);
+        }
+        Ok(())
+    }
+
     /// The site view over the engine's current topology (`None` until the
     /// engine announced one). Rebuilt when the topology hash, the roster or
     /// its active lineup changes.
@@ -379,17 +412,22 @@ impl AppState {
     }
 
     /// Takes the member's daily auto-snapshot (F14) if today has none: the
-    /// mix as it is before the first change of the day.
+    /// mix as it is before the first change of the day. In roster mode
+    /// each lineup's history is its own, so a person who plays in two
+    /// bands the same day gets one in each (#58).
     pub fn auto_snapshot(&self, page: &Page) {
         let Some(member) = page.member.as_deref() else {
             return;
         };
+        let lineup = self.roster().map(|r| r.lineup().id.clone());
+        let band = self.band_of(lineup.as_deref());
+        let key = snapshot_key(lineup.as_deref(), member);
         let now = chrono::Utc::now().timestamp();
         let today = band_store::utc_day(now);
-        if lock(&self.auto_snapshots).get(member) == Some(&today) {
+        if lock(&self.auto_snapshots).get(&key) == Some(&today) {
             return;
         }
-        match self.band().has_auto_snapshot_on(member, &today) {
+        match band.has_auto_snapshot_on(member, &today) {
             Ok(true) => {}
             Ok(false) => {
                 let Some(view) = self.site() else {
@@ -406,7 +444,7 @@ impl AppState {
                     archived: false,
                     legacy_member: None,
                 };
-                if let Err(e) = self.band().add_snapshot(member, snap) {
+                if let Err(e) = band.add_snapshot(member, snap) {
                     tracing::error!(%member, error = %e, "daily auto-snapshot failed");
                     return;
                 }
@@ -417,7 +455,7 @@ impl AppState {
                 return;
             }
         }
-        lock(&self.auto_snapshots).insert(member.to_string(), today);
+        lock(&self.auto_snapshots).insert(key, today);
     }
 
     /// Sends commands that change `page`'s mix, after its daily snapshot.
@@ -432,6 +470,15 @@ impl AppState {
             self.engine.request_applied(cmd, origin).await?;
         }
         Ok(())
+    }
+}
+
+/// What [`AppState::auto_snapshot`] records a day's snapshot under: the
+/// member in legacy mode, `<lineup>/<member>` in roster mode.
+fn snapshot_key(lineup: Option<&str>, member: &str) -> String {
+    match lineup {
+        Some(l) => format!("{l}/{member}"),
+        None => member.to_string(),
     }
 }
 
@@ -551,6 +598,7 @@ where
     backup_daemon::spawn(state.clone());
     tunnel_watch::spawn_tunnel_watch(state.clone());
     tokio::spawn(roster_watch::watch(state.clone()));
+    tokio::spawn(lineup_switch::replay_when_synced(state.clone()));
 
     let app = app_router(state.clone());
 

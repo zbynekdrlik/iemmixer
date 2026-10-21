@@ -106,7 +106,17 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .merge(snapshot_routes::snapshot_routes())
         .merge(preset_routes::preset_routes())
         .merge(backup_routes::backup_routes())
+        .merge(crate::lineup_routes::lineup_routes())
         .merge(crate::tunnel_watch::tunnel_routes())
+}
+
+/// 409 `SWITCHING`: a page's change while the band is being switched, or
+/// from a page of a band that no longer plays (`AppState::may_change`).
+pub(crate) fn switching(e: crate::view::ViewError) -> Reject {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError::new("SWITCHING", e.to_string())),
+    )
 }
 
 /// The landing page's tiles: the site's members (legacy mode, all playing),
@@ -200,6 +210,7 @@ async fn batch_control(
     Json(payload): Json<iem_core::BatchControlRequest>,
 ) -> Result<StatusCode, Reject> {
     let (page, _) = page_for(&state, &headers, &page).await?;
+    state.may_change(&page).map_err(switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     match payload.operation {
         iem_core::BatchOperation::MuteAll => {

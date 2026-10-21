@@ -142,6 +142,7 @@ async fn a_roster_starts_on_the_recorded_lineup_after_the_migration() {
     std::fs::write(d.join(iem_core::roster::ROSTER_FILE), TEST_ROSTER).unwrap();
     let state = AppState::try_new(crate::site_view::tests::test_config(), d).unwrap();
     let r = state.roster().expect("roster mode");
+    assert!(!state.frozen_now(), "no switch to finish");
     assert_eq!(r.active, "main");
     assert_eq!(r.sha256, roster_watch::sha256_hex(TEST_ROSTER.as_bytes()));
     let moved = d

@@ -90,6 +90,7 @@ pub(crate) async fn apply_ramp(
     sends: &[MixSend],
     groups: &BTreeMap<GroupId, f64>,
 ) -> Result<(usize, usize), Reject> {
+    state.may_change(page).map_err(crate::routes::switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     if !state.engine.connected() {
         return Err(engine_unavailable());
@@ -108,8 +109,10 @@ pub(crate) async fn apply_ramp(
     Ok((changed, skipped))
 }
 
-/// One batch of the ramp, applied (in the mirror) before the next is sent.
+/// One batch of the ramp, applied (in the mirror) before the next is sent;
+/// none once a band switch began (#58).
 async fn ramp_step(state: &AppState, page: &Page, ops: Vec<Cmd>) -> Result<(), Reject> {
+    state.may_change(page).map_err(crate::routes::switching)?;
     state
         .engine
         .request_applied(Cmd::Batch { ops }, None)

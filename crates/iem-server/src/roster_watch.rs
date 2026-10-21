@@ -21,6 +21,7 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use iem_core::backup::MixerBackup;
@@ -387,8 +388,11 @@ fn engine_facts(state: &AppState) -> Option<TopologyFacts> {
 /// the active lineup; when a stored state cannot be read or written; when a
 /// person's mix moves but the engine is not synced, or the engine does not
 /// take the active lineup's new mixes. A legacy server adopts it (the
-/// migration runs).
+/// migration runs). Never beside a band switch: it waits for one that runs
+/// (`AppState::switching`), and pages' changes are refused while its import
+/// runs.
 pub async fn apply_text(state: &AppState, text: &str, sha256: &str) -> Applied {
+    let _running = state.switching.lock().await;
     let current = state.roster();
     if current.as_ref().is_some_and(|r| r.sha256 == sha256) {
         return Applied::Unchanged;
@@ -493,7 +497,13 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
                 state: next,
                 baseline: false,
             };
-            if let Err(e) = state.engine.request_applied(import, None).await {
+            // No page's change lands between this state and the import;
+            // the flag is put back as it was (a switch a restart cut short
+            // keeps it).
+            let was = state.frozen.swap(true, Ordering::SeqCst);
+            let imported = state.engine.request_applied(import, None).await;
+            state.frozen.store(was, Ordering::SeqCst);
+            if let Err(e) = imported {
                 undo(&store, &written);
                 return Applied::Refused(vec![format!(
                     "the engine did not take lineup {active}'s new mixes: {e}"

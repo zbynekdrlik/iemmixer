@@ -38,6 +38,10 @@ pub enum ViewError {
     NoGroup,
     #[error("not an engine command")]
     NotACommand,
+    /// A band switch runs, or this page's band no longer plays (#58 design
+    /// §7): its change would land on another lineup's mix.
+    #[error("the band is being switched")]
+    Switching,
 }
 
 /// Engine dB → the fader's dB: at or below −60 (off included) is −60, capped at +12.
