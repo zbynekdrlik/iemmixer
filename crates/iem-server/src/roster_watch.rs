@@ -773,6 +773,9 @@ async fn landed(state: &AppState, sent: &MixState) -> bool {
 /// Why a roster waits: its rules reach the running state only through a
 /// synced engine.
 const NOT_SYNCED: &str = "the engine state is not synced: the roster waits for it";
+/// Why a roster waits: a switch a restart cut short is not finished, so
+/// which band's state the engine holds is not known.
+const UNFINISHED_SWITCH: &str = "a band switch is not finished: the roster waits for it";
 
 /// What [`transition`] did.
 struct Transition {
@@ -812,6 +815,10 @@ async fn transition(
     let Some(lineup) = new.lineup(active).cloned() else {
         return Err(Applied::Refused(vec![missing_active(active)]));
     };
+    if state.frozen_now() {
+        // A switch a restart cut short, between its replay's tries.
+        return Err(Applied::Deferred(vec![UNFINISHED_SWITCH.to_string()]));
+    }
     if !state.engine.mirror().synced {
         return Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]));
     }
