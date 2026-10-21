@@ -470,19 +470,41 @@ pub(crate) mod fake {
         (client, peer)
     }
 
-    /// Answers the next request, which must be an `ImportState`, as the
-    /// engine does: the reply at `rev`, then the imported state. Returns
-    /// what was imported.
-    pub async fn imports(peer: &mut Peer, rev: u64) -> MixState {
-        let ClientMsg::Request {
-            id,
-            cmd: Cmd::ImportState { state, baseline },
-            ..
-        } = peer.recv().await
-        else {
-            panic!("an ImportState");
-        };
-        assert!(!baseline, "a lineup's state is no baseline");
+    /// The next request that is no `Ping` (a freeze's barrier: every
+    /// `Ping` before it is answered at once, at revision 0, which every
+    /// mirror has reached): its id and command.
+    pub async fn next_request(peer: &mut Peer) -> (u64, Cmd) {
+        loop {
+            let ClientMsg::Request { id, cmd, .. } = peer.recv().await else {
+                panic!("a request");
+            };
+            if cmd != Cmd::Ping {
+                return (id, cmd);
+            }
+            peer.send(&EngineMsg::Reply(Reply {
+                id,
+                rev: 0,
+                error: None,
+            }))
+            .await;
+        }
+    }
+
+    /// [`next_request`], which must be an `ImportState`: its id and the
+    /// state, not answered yet.
+    pub async fn next_import(peer: &mut Peer) -> (u64, MixState) {
+        match next_request(peer).await {
+            (id, Cmd::ImportState { state, baseline }) => {
+                assert!(!baseline, "a lineup's state is no baseline");
+                (id, state)
+            }
+            (_, other) => panic!("an ImportState, got {other:?}"),
+        }
+    }
+
+    /// Answers request `id`, an import of `state`, as the engine does: the
+    /// reply at `rev`, then the state.
+    pub async fn answer_import(peer: &mut Peer, id: u64, rev: u64, state: MixState) {
         peer.send(&EngineMsg::Reply(Reply {
             id,
             rev,
@@ -491,23 +513,25 @@ pub(crate) mod fake {
         .await;
         peer.send(&EngineMsg::State {
             rev,
-            state: state.clone(),
+            state,
             transient: Transient::default(),
         })
         .await;
+    }
+
+    /// Answers the next request but `Ping`s, which must be an
+    /// `ImportState`, as the engine does: the reply at `rev`, then the
+    /// imported state. Returns what was imported.
+    pub async fn imports(peer: &mut Peer, rev: u64) -> MixState {
+        let (id, state) = next_import(peer).await;
+        answer_import(peer, id, rev, state.clone()).await;
         state
     }
 
-    /// Refuses the next request, which must be an `ImportState`.
+    /// Refuses the next request but `Ping`s, which must be an
+    /// `ImportState`.
     pub async fn refuses(peer: &mut Peer) {
-        let ClientMsg::Request {
-            id,
-            cmd: Cmd::ImportState { .. },
-            ..
-        } = peer.recv().await
-        else {
-            panic!("an ImportState");
-        };
+        let (id, _) = next_import(peer).await;
         peer.send(&EngineMsg::Reply(Reply {
             id,
             rev: 0,

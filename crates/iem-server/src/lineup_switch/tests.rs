@@ -10,7 +10,7 @@ use axum::http::{Method, StatusCode};
 use iem_core::backup::MixerBackup;
 use iem_core::band::CustomizationFile;
 use iem_core::{ClientMsg, LineupRef};
-use iem_engine_proto::{EngineMsg, InputId, Level, Mix, MixId, Reply, Source, Transient};
+use iem_engine_proto::{InputId, Level, Mix, MixId, Source};
 use tokio::sync::mpsc;
 
 use crate::engine::client::fake;
@@ -293,16 +293,7 @@ async fn a_second_switch_is_busy() {
     let mut peer = synced(&mut state, running()).await;
     let first = spawn_switch(&state, "youth", claims("engineer", true));
     // The first switch's import is at the engine: it holds the switch.
-    let iem_engine_proto::ClientMsg::Request {
-        id,
-        cmd: Cmd::ImportState {
-            state: imported, ..
-        },
-        ..
-    } = peer.recv().await
-    else {
-        panic!("an ImportState");
-    };
+    let (id, imported) = fake::next_import(&mut peer).await;
     assert_eq!(
         switch_lineup(&state, "youth", &claims("member3", false)).await,
         Err(SwitchError::Busy)
@@ -313,18 +304,7 @@ async fn a_second_switch_is_busy() {
         Err(ViewError::Switching),
         "frozen meanwhile"
     );
-    peer.send(&EngineMsg::Reply(Reply {
-        id,
-        rev: 2,
-        error: None,
-    }))
-    .await;
-    peer.send(&EngineMsg::State {
-        rev: 2,
-        state: imported,
-        transient: Transient::default(),
-    })
-    .await;
+    fake::answer_import(&mut peer, id, 2, imported).await;
     assert_eq!(within(first).await, Ok(()), "the first one went through");
     // While a reload or a restore holds the switch, a switch waits for none.
     let _held = state.switching.lock().await;

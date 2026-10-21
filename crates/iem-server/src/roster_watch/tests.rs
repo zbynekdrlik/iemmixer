@@ -3,9 +3,7 @@
 use super::*;
 
 use iem_core::LineupRef;
-use iem_engine_proto::{
-    ClientMsg, EngineMsg, ErrCode, ErrorBody, InputId, Level, Mix, Reply, Transient,
-};
+use iem_engine_proto::{InputId, Level, Mix};
 
 use crate::engine::client::fake;
 use crate::roster_state::tests::test_roster;
@@ -135,52 +133,16 @@ async fn synced(state: &mut AppState, running: MixState) -> fake::Peer {
     peer
 }
 
-/// Answers the next request, an `ImportState`, as the engine does (the
-/// reply at revision 2, then the state); what it imported.
+/// Answers the next request but the freeze's barrier `Ping`s, an
+/// `ImportState`, as the engine does (the reply at revision 2, then the
+/// state); what it imported.
 async fn imports(peer: &mut fake::Peer) -> MixState {
-    let ClientMsg::Request {
-        id,
-        cmd: Cmd::ImportState { state, baseline },
-        ..
-    } = peer.recv().await
-    else {
-        panic!("an ImportState");
-    };
-    assert!(!baseline);
-    peer.send(&EngineMsg::Reply(Reply {
-        id,
-        rev: 2,
-        error: None,
-    }))
-    .await;
-    peer.send(&EngineMsg::State {
-        rev: 2,
-        state: state.clone(),
-        transient: Transient::default(),
-    })
-    .await;
-    state
+    fake::imports(peer, 2).await
 }
 
-/// Refuses the next request, an `ImportState`.
+/// Refuses the next request but `Ping`s, an `ImportState`.
 async fn refuses(peer: &mut fake::Peer) {
-    let ClientMsg::Request {
-        id,
-        cmd: Cmd::ImportState { .. },
-        ..
-    } = peer.recv().await
-    else {
-        panic!("an ImportState");
-    };
-    peer.send(&EngineMsg::Reply(Reply {
-        id,
-        rev: 1,
-        error: Some(ErrorBody {
-            code: ErrCode::BadRequest,
-            msg: "refused".into(),
-        }),
-    }))
-    .await;
+    fake::refuses(peer).await;
 }
 
 /// [`apply_text`] of `text` on its own task.
@@ -745,13 +707,7 @@ async fn a_reload_the_engine_does_not_answer_waits() {
         let s = state.clone();
         tokio::spawn(async move { check_file(&s).await })
     };
-    let ClientMsg::Request {
-        cmd: Cmd::ImportState { .. },
-        ..
-    } = peer.recv().await
-    else {
-        panic!("an ImportState");
-    };
+    fake::next_import(&mut peer).await;
     // No answer: the request times out.
     let result = within(task).await;
     assert!(
