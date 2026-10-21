@@ -449,6 +449,11 @@ const FELL_BACK: &str = "Prepnutie kapely sa nedalo dokončiť: hrá znova kapel
 const GAVE_UP: &str = "Prepnutie kapely sa nedalo dokončiť a kapela pred ním sa nevrátila: \
                        server nevie, čie mixy engine drží. Mixy sa dajú znova meniť; \
                        skontroluj ich a prepni kapelu znova.";
+/// [`GAVE_UP`] when the switch's intent could not be cleared.
+const GAVE_UP_KEPT: &str = "Prepnutie kapely sa nedalo dokončiť a kapela pred ním sa nevrátila: \
+                            server nevie, čie mixy engine drží. Mixy sa dajú znova meniť; \
+                            skontroluj ich a prepni kapelu znova. Server nevedel zmazať \
+                            rozpracované prepnutie: pri ďalšom štarte sa ho pokúsi dokončiť.";
 
 /// How [`replay_when_synced`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,7 +466,8 @@ pub enum Replayed {
     /// again.
     FellBack { tries: u32 },
     /// It could neither be finished nor go back: the pages are free again
-    /// with the state the engine holds, the intent kept for the next start.
+    /// with the state the engine holds and the band recorded active, the
+    /// intent gone.
     GaveUp,
 }
 
@@ -509,8 +515,22 @@ pub async fn replay_when_synced(state: AppState) -> Replayed {
         }
     }
     tracing::error!("an unfinished switch can neither be finished nor go back: the pages are free");
+    // The band recorded active is what the pages run on from now: the
+    // intent goes, else the next start would finish a switch nobody wants.
+    let cleared = LineupStore::new(&state.config_dir).clear_intent();
+    if let Err(e) = &cleared {
+        tracing::error!(error = %e, "the given-up switch's intent was not cleared");
+    }
     state.thaw();
-    alarm(&state, GAVE_UP).await;
+    alarm(
+        &state,
+        if cleared.is_ok() {
+            GAVE_UP
+        } else {
+            GAVE_UP_KEPT
+        },
+    )
+    .await;
     Replayed::GaveUp
 }
 
