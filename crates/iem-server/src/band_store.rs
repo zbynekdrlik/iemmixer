@@ -1,9 +1,10 @@
 //! Presets, history and pins/hides in the band schema-3 files (F8, F13, F14;
 //! S4 design note §3.4, S5 design note §6): `presets/<member>.json`,
-//! `snapshots/<member>.json`, `customizations/<member>.json` in the config
-//! directory. A file of another format or schema is an error and is never
-//! overwritten. Archived entries (a renamed member's history, D8) are
-//! loadable but never changed.
+//! `snapshots/<member>.json`, `customizations/<member>.json` in a data
+//! directory: the config directory in legacy mode, the active lineup's
+//! `lineups/<id>/` in roster mode (#58). A file of another format or schema
+//! is an error and is never overwritten. Archived entries (a renamed
+//! member's history, D8) are loadable but never changed.
 //!
 //! Also the two pure halves of presets and snapshots: `capture` (the page
 //! mix from the mirror) and `ramp` (applying one as a 50 ms ramp).
@@ -88,9 +89,10 @@ pub fn utc_day(ts: i64) -> String {
 }
 
 impl BandStore {
-    pub fn new(config_dir: &Path) -> Self {
+    /// A store over `data_dir` (see the module docs).
+    pub fn new(data_dir: &Path) -> Self {
         Self {
-            dir: config_dir.to_path_buf(),
+            dir: data_dir.to_path_buf(),
             lock: Mutex::new(()),
         }
     }

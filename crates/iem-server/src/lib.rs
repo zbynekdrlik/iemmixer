@@ -14,11 +14,13 @@ pub mod band_import;
 pub mod band_store;
 pub mod console;
 pub mod engine;
+pub mod lineup_store;
 pub mod login_guard;
 pub mod meters;
 pub mod mixer_ws;
 pub mod notify;
 pub mod peer_route;
+pub mod people_archive;
 pub mod pepper;
 pub mod photo_store;
 pub mod pin_hash;
@@ -95,6 +97,9 @@ type SiteCacheKey = (String, Option<(String, String)>);
 /// The site view built for one key.
 type SiteCacheEntry = (SiteCacheKey, Arc<SiteView>);
 
+/// The band store and the lineup it is for (`None`: legacy mode).
+type BandSlot = (Option<String>, Arc<band_store::BandStore>);
+
 /// Talkback runtime metrics (`GET /api/talkback/diagnostics`, F28).
 #[cfg(feature = "audio")]
 #[derive(Debug, Default)]
@@ -159,8 +164,9 @@ pub struct AppState {
     pub login_guard: Arc<login_guard::LoginGuard>,
     /// Bounded concurrency for argon2id work
     pub hash_gate: Arc<login_guard::HashGate>,
-    /// Presets, history, pins and hides (band schema 3): [`AppState::band`]
-    band: Arc<band_store::BandStore>,
+    /// Presets, history, pins and hides (band schema 3) of the active
+    /// lineup (`None`: legacy mode) and its store: [`AppState::band`]
+    band: Arc<Mutex<BandSlot>>,
     /// Backup files
     pub backup_store: Arc<backup_store::BackupStore>,
     /// Profile photo storage (per-member JPEG files)
@@ -230,7 +236,10 @@ impl AppState {
                 login_guard::HASH_CONCURRENCY,
                 login_guard::HASH_QUEUE,
             )),
-            band: Arc::new(band_store::BandStore::new(config_dir)),
+            band: Arc::new(Mutex::new((
+                None,
+                Arc::new(band_store::BandStore::new(config_dir)),
+            ))),
             backup_store: Arc::new(backup_store::BackupStore::new(config_dir)),
             photo_store: Arc::new(photo_store::PhotoStore::new(config_dir)),
             push_store: Arc::new(RwLock::new(push_store::PushStore::load(config_dir))),
@@ -252,9 +261,20 @@ impl AppState {
         Self::try_new(config, config_dir).expect("test AppState: pepper and PIN store")
     }
 
-    /// The presets, history and pins/hides store.
+    /// The presets, history and pins/hides store of the active lineup
+    /// (`lineups/<id>/`; legacy mode: the config directory). One store per
+    /// lineup while it plays, so its writes stay serialised.
     pub fn band(&self) -> Arc<band_store::BandStore> {
-        Arc::clone(&self.band)
+        let active = self.roster().map(|r| r.active);
+        let mut slot = lock(&self.band);
+        if slot.0 != active {
+            let dir = match &active {
+                Some(id) => lineup_store::LineupStore::new(&self.config_dir).data_dir(id),
+                None => self.config_dir.to_path_buf(),
+            };
+            *slot = (active, Arc::new(band_store::BandStore::new(&dir)));
+        }
+        Arc::clone(&slot.1)
     }
 
     /// The roster in use (a copy; its roster is shared), `None` in legacy

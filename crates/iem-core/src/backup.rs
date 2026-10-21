@@ -25,6 +25,15 @@ pub struct MixerBackup {
     pub state: MixState,
     /// Member id → pins and hides.
     pub customizations: BTreeMap<String, CustomizationFile>,
+    /// The lineup whose state `state` is: the active one at the capture
+    /// (#58). None in legacy mode and in every backup written before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineup: Option<String>,
+    /// Every inactive lineup's stored state at the capture, by lineup id
+    /// (#58 design §6): its mixer state and its people's pins and hides.
+    /// Additive: empty in legacy mode, and then not written.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub lineups: BTreeMap<String, MixerBackup>,
 }
 
 /// Why a file is not a readable backup.
@@ -47,6 +56,8 @@ impl MixerBackup {
             rev,
             state,
             customizations: BTreeMap::new(),
+            lineup: None,
+            lineups: BTreeMap::new(),
         }
     }
 
@@ -184,6 +195,29 @@ mod tests {
         );
         assert_eq!(MixerBackup::parse(&json).unwrap(), b);
         assert_eq!(b.level_count(), 2);
+    }
+
+    /// #58: the active lineup and the inactive lineups' states are additive:
+    /// a backup without them reads as before and is written as before.
+    #[test]
+    fn lineups_are_additive() {
+        let legacy = sample();
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(
+            !json.contains("\"lineup\"") && !json.contains("\"lineups\""),
+            "{json}"
+        );
+        let parsed = MixerBackup::parse(&json).unwrap();
+        assert_eq!((parsed.lineup, parsed.lineups.len()), (None, 0));
+        let mut b = sample();
+        b.lineup = Some("youth".into());
+        b.lineups.insert("main".into(), sample());
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(
+            json.contains(r#""lineup":"youth""#) && json.contains(r#""lineups":{"main":{"#),
+            "{json}"
+        );
+        assert_eq!(MixerBackup::parse(&json).unwrap(), b);
     }
 
     #[test]

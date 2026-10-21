@@ -13,6 +13,7 @@ use iem_core::{
 use iem_engine_proto::{Cmd, Source};
 
 use crate::AppState;
+use crate::lineup_store::LineupStore;
 
 type Reject = (StatusCode, Json<ApiError>);
 
@@ -72,7 +73,7 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
     if !state.engine.mirror().synced {
         return Err("the engine state is not synced".into());
     }
-    let b = crate::backup::capture(
+    let mut b = crate::backup::capture(
         &site,
         &state.engine.mirror(),
         &state.band(),
@@ -80,6 +81,12 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string(),
     )?;
+    // Roster mode (#58 design §6): whose live state it is, and every other
+    // lineup's stored state.
+    if let Some(roster) = state.roster() {
+        b.lineup = Some(roster.active.clone());
+        b.lineups = crate::backup::inactive_lineups(&LineupStore::new(&state.config_dir), &roster)?;
+    }
     let name = state.backup_store.save(&b).map_err(|e| e.to_string())?;
     Ok((name, b))
 }
@@ -102,6 +109,13 @@ async fn get_backup(
 }
 
 fn preview_of(state: &AppState, b: &MixerBackup) -> Result<RestorePreview, Reject> {
+    let active = state.roster().map(|r| r.active);
+    crate::backup::live_lineup_fits(b, active.as_deref()).map_err(|e| {
+        (
+            StatusCode::CONFLICT,
+            Json(ApiError::new("LINEUP_MISMATCH", e)),
+        )
+    })?;
     let site = state.site().ok_or_else(unavailable)?;
     let current = state.engine.mirror().state.clone();
     let band = state.band();
@@ -169,6 +183,15 @@ async fn restore_backup(
             .save_customization(member, keep(&c.pinned), keep(&c.hidden))
         {
             tracing::error!(%member, error = %e, "restoring pins and hides failed");
+        }
+    }
+    if let Some(roster) = state.roster() {
+        match crate::backup::restore_lineups(&LineupStore::new(&state.config_dir), &roster, &b) {
+            Ok(ids) if ids.is_empty() => {}
+            Ok(ids) => tracing::warn!(%filename, lineups = ?ids, "stored lineup states restored"),
+            Err(e) => {
+                tracing::error!(%filename, error = %e, "restoring the stored lineup states failed")
+            }
         }
     }
     tracing::warn!(%filename, changes = preview.changes.len(), "backup restored");
@@ -300,6 +323,61 @@ mod tests {
             .load(info["filename"].as_str().unwrap())
             .unwrap();
         assert_eq!((saved.rev, saved.state), (7, running));
+    }
+
+    /// #58: in roster mode a backup names the lineup whose live state it
+    /// holds and carries every other lineup's stored state; a backup of
+    /// another lineup's live state is neither previewed nor restored.
+    #[tokio::test]
+    async fn roster_mode_backups_name_their_lineup_and_carry_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = app(dir.path());
+        *state.roster.write().unwrap() = Some(crate::roster_state::tests::test_roster("main"));
+        let (engine, mut peer) = fake::announced(crate::site_view::tests::test_topology()).await;
+        state.engine = engine;
+        fake::sync(&state.engine, &mut peer, 5, MixState::default()).await;
+        let app = router(state.clone());
+        let eng = token("engineer", true);
+        let mut youth = MixState::default();
+        youth
+            .inputs
+            .entry(InputId::new("keys"))
+            .or_default()
+            .trim_db = 3.0;
+        let youth = iem_core::backup::MixerBackup::new("t".into(), 1, youth);
+        crate::lineup_store::LineupStore::new(dir.path())
+            .save_state("youth", &youth)
+            .unwrap();
+        let (status, info) =
+            call(&app, Method::POST, "/api/backups/capture", Some(&eng), None).await;
+        assert_eq!(status, StatusCode::OK, "{info}");
+        let saved = state
+            .backup_store
+            .load(info["filename"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(saved.lineup.as_deref(), Some("main"));
+        assert_eq!(saved.lineups.keys().collect::<Vec<_>>(), ["youth"]);
+        assert_eq!(saved.lineups["youth"], youth);
+        // Its own lineup plays: it previews.
+        let preview = format!(
+            "/api/backups/{}/preview",
+            info["filename"].as_str().unwrap()
+        );
+        let (status, json) = call(&app, Method::POST, &preview, Some(&eng), None).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        // A backup taken while youth played is not put on main's sets.
+        let mut other = saved.clone();
+        other.lineup = Some("youth".into());
+        let name = state.backup_store.save(&other).unwrap();
+        for action in ["preview", "restore"] {
+            let uri = format!("/api/backups/{name}/{action}");
+            let (status, json) = call(&app, Method::POST, &uri, Some(&eng), None).await;
+            assert_eq!(
+                (status, json["code"].as_str()),
+                (StatusCode::CONFLICT, Some("LINEUP_MISMATCH")),
+                "{action}: {json}"
+            );
+        }
     }
 
     #[tokio::test]
