@@ -1133,3 +1133,85 @@ async fn a_replay_ends_the_solos_of_the_sets_that_change_wearer() {
         "member3's solo stays"
     );
 }
+
+/// #58 re-review: the change gate's own race. A change between its check
+/// and its queueing (it holds the gate's read side) holds the switch's
+/// freeze back until it is queued, so it is in the band's stored state:
+/// the freeze's barrier waits until the mirror holds it (the engine
+/// answers the Ping at its own revision, ahead of the mirror until the
+/// change's delta arrives). A change after the freeze is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_racing_the_freeze_is_the_bands_or_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    let mut peer = synced(&mut state, running()).await;
+    let page = state.page("member3").unwrap();
+    let keys = Source::Input(InputId::new("keys"));
+    let set = Cmd::SetLevel {
+        mix: mix_id("member3"),
+        source: keys.clone(),
+        gain_db: Some(-6.0),
+        pan: None,
+        muted: None,
+    };
+    // The change, on a thread of its own: checked, then held at the gate.
+    let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let change = {
+        let (s, page, gate) = (state.clone(), page.clone(), Arc::clone(&state.change_gate));
+        std::thread::spawn(move || {
+            let _read = gate.read().unwrap();
+            assert_eq!(s.may_change(&page), Ok(()));
+            checked_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            drop(s.engine.send(set, Some(7)).unwrap());
+        })
+    };
+    checked_rx.recv().unwrap();
+    let switch = spawn_switch(&state, "youth", claims("engineer", true));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!state.frozen_now(), "the freeze waits for the change");
+    go_tx.send(()).unwrap();
+    change.join().unwrap();
+    // The engine takes the change, then the freeze's Ping, both answered
+    // at revision 2; the change's delta comes after.
+    let (id, cmd) = fake::next_request(&mut peer).await;
+    assert!(matches!(cmd, Cmd::SetLevel { .. }), "{cmd:?}");
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    fake::answer_ping(&mut peer).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        state.may_change(&page),
+        Err(ViewError::Switching),
+        "refused once frozen"
+    );
+    let level = Level {
+        gain_db: -6.0,
+        pan: 0.0,
+        muted: false,
+    };
+    peer.send(&EngineMsg::Delta {
+        rev: 2,
+        origin: Some(7),
+        changes: vec![Change::Level {
+            mix: mix_id("member3"),
+            source: keys.clone(),
+            level,
+        }],
+    })
+    .await;
+    fake::imports(&mut peer, 3).await;
+    assert_eq!(within(switch).await, Ok(()));
+    let main = store.state("main").unwrap().unwrap();
+    assert_eq!(
+        main.state.mixes[&mix_id("member3")].inputs[&InputId::new("keys")].gain_db,
+        -6.0,
+        "the change is main's"
+    );
+}

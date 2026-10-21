@@ -1668,3 +1668,19 @@ async fn a_fallback_start_alarms_the_engineer() {
     let state = AppState::new(test_config(), dir.path());
     assert_eq!(fallback_alarm(&state).await, 0, "roster.toml is in use");
 }
+
+/// #58 re-review: a settle records the roster in use as the one the states
+/// follow only while `roster.toml` still is that roster: a file changed
+/// since the start is the watcher's to apply and record.
+#[tokio::test]
+async fn a_settle_records_no_roster_file_changed_since_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    std::fs::write(d.join(ROSTER_FILE), moved()).unwrap();
+    let _peer = synced(&mut state, running()).await;
+    within(tokio::spawn(settle_when_synced(state.clone()))).await;
+    assert!(!state.settling());
+    assert_eq!(LineupStore::new(d).applied_roster().unwrap(), None);
+}
