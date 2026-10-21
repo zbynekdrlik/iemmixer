@@ -1,6 +1,6 @@
 # Band lineups and band switching — design (epic #58)
 
-Status: draft for the owner's review, 2026-10-21. Decisions are quoted from the epic's `ROZHODNUTÉ` comments; everything marked *(my call)* is the designer's and open to the owner's correction.
+Status: approved by the owner on #58, 2026-10-21. Decisions are quoted from the epic's `ROZHODNUTÉ` comments; everything marked *(my call)* is the designer's and open to the owner's correction.
 
 ## 0. Zhrnutie pre vlastníka
 
