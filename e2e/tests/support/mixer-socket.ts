@@ -31,6 +31,8 @@ export type PageState = {
   /** The page mix's volume (IEM VOL); absent on a page without a mix. */
   global_level_db?: number;
   global_muted?: boolean;
+  /** The page's mix: the set a person wears in the band that plays (#58). */
+  mix?: string;
 };
 
 /** One input on the engineer's console (`iem_core::ws::ConsoleInput`). */

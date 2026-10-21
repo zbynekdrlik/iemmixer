@@ -141,6 +141,8 @@ test.describe("Engineer", () => {
     await expect(strip(page, "click")).toHaveClass(/muted/);
   });
 
+  // The e2e job runs in roster mode (#58): the elevated member is a leader of
+  // the band that plays (member1 leads main).
   test("the Mixes tab is the engineer's and the elevated member's (F16)", async ({ page, browser }) => {
     await openMixer(page, "engineer", { engineer: true });
     await expect(page.locator(".category-tab.mixes")).not.toHaveClass(/tab-hidden/);
@@ -172,7 +174,8 @@ test.describe("Engineer", () => {
     await expect(sos).toHaveText("SOS Active");
 
     const toast = page.locator(".alert-toast");
-    await expect(toast).toContainText("Member2 needs help!", { timeout: 5_000 });
+    // The person's name in the roster (the e2e job runs in roster mode, #58).
+    await expect(toast).toContainText("Member 2 needs help!", { timeout: 5_000 });
     await toast.locator(".alert-toast-dismiss").click();
     await expect(toast).toHaveCount(0);
     await expect(sos).toHaveText("SOS", { timeout: 5_000 });
@@ -256,11 +259,11 @@ test.describe("Engineer", () => {
     await expect(sos).toHaveText("SOS Active");
 
     const toast = page.locator(".alert-toast");
-    await expect(toast).toContainText("Member7 needs help!", { timeout: 5_000 });
+    await expect(toast).toContainText("Member 7 needs help!", { timeout: 5_000 });
     // No auto-dismiss: still there after 6 s.
     await page.waitForTimeout(6_000);
     await expect(toast).toBeVisible();
-    await expect(toast).toContainText("Member7 needs help!");
+    await expect(toast).toContainText("Member 7 needs help!");
     await expect(sos).toHaveText("SOS Active");
 
     await toast.locator(".alert-toast-dismiss").click();
@@ -295,7 +298,7 @@ test.describe("Engineer", () => {
     await sos.click();
 
     const toast = page.locator(".alert-toast");
-    await expect(toast).toContainText("Member7 needs help!", { timeout: 5_000 });
+    await expect(toast).toContainText("Member 7 needs help!", { timeout: 5_000 });
     const calls = () => page.evaluate(() => (window as unknown as { __vibrateCalls: unknown[] }).__vibrateCalls);
     await expect.poll(async () => (await calls()).filter(Array.isArray).length).toBeGreaterThanOrEqual(1);
     const all = await calls();

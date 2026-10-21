@@ -14,10 +14,11 @@ export async function login(page: Page, member: string, engineer = false): Promi
 }
 
 /**
- * Signs in as `member` and opens the mixer page `path` (default: the member's
- * own page); returns once the page's state has arrived (IEM VOL is shown).
+ * Signs in as `member` and opens the page `path` (default: the member's own
+ * page), whatever it then shows (a person who does not play in the band that
+ * plays gets the notice, #58).
  */
-export async function openMixer(
+export async function openPage(
   page: Page,
   member: string,
   opts: { engineer?: boolean; path?: string } = {},
@@ -29,6 +30,19 @@ export async function openMixer(
     sessionStorage.setItem("iem_redirected", "1");
   }, auth);
   await page.goto(`/${opts.path ?? member}`);
+  return auth;
+}
+
+/**
+ * Signs in as `member` and opens the mixer page `path` (default: the member's
+ * own page); returns once the page's state has arrived (IEM VOL is shown).
+ */
+export async function openMixer(
+  page: Page,
+  member: string,
+  opts: { engineer?: boolean; path?: string } = {},
+): Promise<Auth> {
+  const auth = await openPage(page, member, opts);
   await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
   return auth;
 }
