@@ -845,11 +845,20 @@ async fn an_adopted_roster_reaches_the_running_state() {
     let d = dir.path();
     let mut state = AppState::new(test_config(), d);
     let mut peer = synced(&mut state, running()).await;
-    // The roster where member5 wears set member9: nobody wears set member5.
-    std::fs::write(d.join(ROSTER_FILE), moved()).unwrap();
+    // The roster where member3 leads nothing in main: set member3, which
+    // hears its peers, is worn by no leader.
+    let text = edit(
+        TEXT,
+        "leaders = [\"member1\", \"member3\"]\n",
+        "leaders = [\"member1\"]\n",
+    );
+    std::fs::write(d.join(ROSTER_FILE), text).unwrap();
     assert_eq!(check_file(&state).await, Some(applied(&[], &[])));
     let imported = imports(&mut peer).await;
-    assert!(imported.mixes[&MixId::new("member5")].out.muted);
+    assert!(
+        imported.mixes[&MixId::new("member3")].mixes[&MixId::new("member1")].muted,
+        "a set no leader wears hears no other mix"
+    );
     assert!(
         !imported.mixes[&MixId::new("member1")].mixes[&MixId::new("member2")].muted,
         "a leader keeps what they hear"
