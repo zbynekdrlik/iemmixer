@@ -1915,3 +1915,46 @@ async fn a_second_reload_moves_people_from_the_roster_the_first_applied() {
     );
     assert_eq!(store.state("youth").unwrap().unwrap().follows, Some(c_sha));
 }
+
+/// #58 third review: while a reload's import whose answer was lost waits
+/// for an engine that stays away, the engineer's devices hear of it once,
+/// `AppState::absent_alarm` after the wait began; the wait goes on, and the
+/// reload finishes once the engine is back with the import in.
+#[tokio::test]
+async fn a_lost_import_alarms_once_while_the_engine_stays_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let (mut peer, mut peers) = reconnecting(&mut state, running()).await;
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    state.absent_alarm = Duration::from_millis(600);
+    let alarms = || seen.lock().unwrap().len();
+    let text = swapped();
+    let task = spawn_apply(&state, &text);
+    let (_, sent) = fake::next_import(&mut peer).await;
+    drop(peer);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(alarms(), 0, "not before absent_alarm");
+    let t0 = std::time::Instant::now();
+    while alarms() == 0 {
+        assert!(t0.elapsed() < Duration::from_secs(4), "no alarm");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(alarms(), 1, "one alarm");
+    assert!(state.frozen_now(), "still waiting");
+    assert!(!task.is_finished());
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 2, sent.clone()).await;
+    fake::answer_ping(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    assert_eq!(state.roster().unwrap().sha256, sha256_hex(text.as_bytes()));
+    assert!(!state.frozen_now());
+    assert_eq!(alarms(), 1);
+}
