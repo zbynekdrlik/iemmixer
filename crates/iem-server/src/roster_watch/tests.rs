@@ -1684,3 +1684,46 @@ async fn a_settle_records_no_roster_file_changed_since_the_start() {
     assert!(!state.settling());
     assert_eq!(LineupStore::new(d).applied_roster().unwrap(), None);
 }
+
+/// #58 third review: the engine holds an imported state shaped by its
+/// topology (`iem_engine_proto::shape::reconcile`), so the server sends it
+/// so shaped: a move from a set that hears peers to one that hears none
+/// (member10 from set member1 to set member2 in youth) compares equal once
+/// the import went in before the engine went away; the reload finishes and
+/// nobody moves twice.
+#[tokio::test]
+async fn a_lost_import_from_a_peer_set_to_a_plain_set_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "youth");
+    let (mut peer, mut peers) = reconnecting(&mut state, youth_running()).await;
+    let text = swapped();
+    let task = spawn_apply(&state, &text);
+    let (_, sent) = fake::next_import(&mut peer).await;
+    // The engine holds the import as its topology shapes it.
+    let held = iem_engine_proto::shape::reconcile(&test_topology(), &sent).0;
+    peer.send(&iem_engine_proto::EngineMsg::State {
+        rev: 2,
+        state: held.clone(),
+        transient: iem_engine_proto::Transient::default(),
+    })
+    .await;
+    drop(peer);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 2, held.clone()).await;
+    fake::answer_ping(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    assert_eq!(state.roster().unwrap().sha256, sha256_hex(text.as_bytes()));
+    assert!(!state.frozen_now());
+    assert_eq!(sent, held, "sent as the engine holds it");
+    assert!(
+        held.mixes[&MixId::new("member2")].mixes.is_empty(),
+        "set member2 hears no peers"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "no import again"
+    );
+}
