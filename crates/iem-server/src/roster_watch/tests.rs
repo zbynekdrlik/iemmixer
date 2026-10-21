@@ -2014,3 +2014,45 @@ async fn a_start_after_an_import_that_went_in_unanswered_moves_nobody_twice() {
     assert_eq!(running.follows, Some(sha256_hex(new.as_bytes())));
     assert_eq!(running.pending, None, "resolved");
 }
+
+/// #58 third review: a pending import counts once the engine holds the
+/// state it sent (its digest), else the record before it stays; either way
+/// the pending entry is gone.
+#[test]
+fn a_pending_import_counts_once_the_engine_holds_its_state() {
+    let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+    let sent = running();
+    let before = Running {
+        lineup: "main".into(),
+        follows: Some("old".into()),
+        silenced: set(&["member9"]),
+        pending: Some(crate::lineup_store::Pending {
+            follows: "new".into(),
+            silenced: set(&["member5"]),
+            digest: state_digest(&sent),
+        }),
+    };
+    assert_eq!(
+        resolved(before.clone(), &state_digest(&sent)),
+        Running {
+            lineup: "main".into(),
+            follows: Some("new".into()),
+            silenced: set(&["member5"]),
+            pending: None,
+        }
+    );
+    let other = state_digest(&MixState::default());
+    assert_ne!(other, state_digest(&sent));
+    assert_eq!(
+        resolved(before.clone(), &other),
+        Running {
+            pending: None,
+            ..before.clone()
+        }
+    );
+    let plain = Running {
+        pending: None,
+        ..before
+    };
+    assert_eq!(resolved(plain.clone(), &other), plain);
+}

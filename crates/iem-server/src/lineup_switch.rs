@@ -35,7 +35,7 @@ use crate::backup::{capture, keep_running};
 use crate::engine::client::EngineError;
 use crate::lineup_store::{LineupStore, Running, SwitchIntent};
 use crate::roster_watch::{
-    end_solos, fit_recorded, note_running, running_for, running_of, soloed_changing,
+    end_solos, fit_recorded, note_running, running_for, running_of, soloed_changing, state_digest,
 };
 use crate::site_view::SiteView;
 
@@ -231,7 +231,7 @@ async fn steps(
     let store = LineupStore::new(&state.config_dir);
     // The live state and the active lineup's pins and hides, as its stored
     // state.
-    let mut live = {
+    let (mut live, held) = {
         let mirror = state.engine.mirror();
         if !mirror.synced {
             return Err(Failed::Back(SwitchError::NotSynced));
@@ -239,12 +239,13 @@ async fn steps(
         let at = chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string();
-        capture(view, &mirror, &state.band_of(Some(from)), at)
-            .map_err(|e| Failed::Back(SwitchError::Io(e)))?
+        let live = capture(view, &mirror, &state.band_of(Some(from)), at)
+            .map_err(|e| Failed::Back(SwitchError::Io(e)))?;
+        (live, state_digest(&mirror.state))
     };
     live.lineup = Some(from.to_string());
     // With what the running state follows, in the same file.
-    (live.follows, live.silenced) = running_for(&store, from);
+    (live.follows, live.silenced) = running_for(&store, from, &held);
     store
         .save_state(from, &live)
         .map_err(|e| Failed::Back(io("the band's state was not stored", e)))?;
@@ -299,6 +300,7 @@ fn target_of(
         lineup: lineup.id.clone(),
         follows,
         silenced,
+        pending: None,
     };
     (target, running)
 }
@@ -359,7 +361,8 @@ async fn play(
         let soloed = other.map_or_else(Vec::new, |o| soloed_changing(&mirror.transient, o, lineup));
         (mirror.state.clone(), soloed)
     };
-    let running = running_of(store).map_or_else(Default::default, |r| (r.follows, r.silenced));
+    let running = running_of(store, &state_digest(&current))
+        .map_or_else(Default::default, |r| (r.follows, r.silenced));
     let (target, running) = target_of(stored, &current, running, roster, lineup);
     state
         .engine

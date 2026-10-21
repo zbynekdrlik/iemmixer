@@ -47,7 +47,7 @@ use sha2::{Digest, Sha256};
 use crate::AppState;
 use crate::engine::client::EngineError;
 use crate::lineup_store::{
-    ACTIVE_FILE, LineupStore, Running, SWITCH_FILE, migrate_legacy, migration_problems,
+    ACTIVE_FILE, LineupStore, Pending, Running, SWITCH_FILE, migrate_legacy, migration_problems,
 };
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
@@ -631,21 +631,58 @@ pub(crate) async fn end_solos(state: &AppState, mixes: &[MixId]) {
 }
 
 /// What the running state follows (one that cannot be read is logged: not
-/// known).
-pub(crate) fn running_of(store: &LineupStore) -> Option<Running> {
-    store.running().unwrap_or_else(|e| {
+/// known); `held` is the [`state_digest`] of the engine's state, which
+/// resolves an import whose answer was never known ([`resolved`]).
+pub(crate) fn running_of(store: &LineupStore, held: &str) -> Option<Running> {
+    let running = store.running().unwrap_or_else(|e| {
         tracing::error!(error = %e, "what the running state follows is unknown");
         None
-    })
+    })?;
+    Some(resolved(running, held))
 }
 
 /// What the running state follows when it is `lineup`'s: its marker and
-/// the record of the sets the rules silenced (none and none otherwise).
-pub(crate) fn running_for(store: &LineupStore, lineup: &str) -> (Option<String>, BTreeSet<String>) {
-    match running_of(store) {
+/// the record of the sets the rules silenced (none and none otherwise);
+/// `held` as for [`running_of`].
+pub(crate) fn running_for(
+    store: &LineupStore,
+    lineup: &str,
+    held: &str,
+) -> (Option<String>, BTreeSet<String>) {
+    match running_of(store, held) {
         Some(r) if r.lineup == lineup => (r.follows, r.silenced),
         _ => (None, BTreeSet::new()),
     }
+}
+
+/// `running` with its pending import (`Running::pending`, #58 third review)
+/// settled: it went in when the engine holds the state sent (`held` is its
+/// digest, the comparison [`landed`] makes), else the record before stays.
+fn resolved(mut running: Running, held: &str) -> Running {
+    match running.pending.take() {
+        Some(p) if p.digest == held => {
+            tracing::info!(lineup = %running.lineup, "an import whose answer was lost had gone in");
+            Running {
+                lineup: running.lineup,
+                follows: Some(p.follows),
+                silenced: p.silenced,
+                pending: None,
+            }
+        }
+        Some(_) => {
+            tracing::info!(lineup = %running.lineup, "an import whose answer was lost had not gone in");
+            running
+        }
+        None => running,
+    }
+}
+
+/// The SHA-256 of `state`'s JSON, how [`Running::pending`] names the state
+/// an import sent.
+pub(crate) fn state_digest(state: &MixState) -> String {
+    serde_json::to_vec(state)
+        .map(|json| sha256_hex(&json))
+        .unwrap_or_default()
 }
 
 /// Records what the running state follows (a failure is logged: a later
@@ -955,7 +992,8 @@ async fn transition(
             }
         }
     }
-    let (marker, recorded) = running_for(&store, active);
+    let held = state_digest(&state.engine.mirror().state);
+    let (marker, recorded) = running_for(&store, active, &held);
     follows.learn(&store, marker.as_deref());
     let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
     // The stored states, worked out first.
@@ -999,6 +1037,7 @@ async fn transition(
             lineup: active.to_string(),
             follows: Some(new_sha.to_string()),
             silenced,
+            pending: None,
         };
         (next, running)
     };
@@ -1056,7 +1095,28 @@ async fn transition(
         if next == shaped(&current) {
             Ok(running)
         } else {
-            match state
+            // What the running state follows once the import is in, written
+            // before it: its answer may be lost with the server (#58 third
+            // review); a failed import puts the record before back.
+            let before = Running {
+                lineup: active.to_string(),
+                follows: marker.clone(),
+                silenced: recorded.clone(),
+                pending: None,
+            };
+            let pending = Pending {
+                follows: new_sha.to_string(),
+                silenced: running.silenced.clone(),
+                digest: state_digest(&next),
+            };
+            note_running(
+                &store,
+                &Running {
+                    pending: Some(pending),
+                    ..before.clone()
+                },
+            );
+            let sent = match state
                 .engine
                 .request_applied(import(next.clone()), None)
                 .await
@@ -1072,7 +1132,11 @@ async fn transition(
                         Err(failed(&e))
                     }
                 }
+            };
+            if sent.is_err() {
+                note_running(&store, &before);
             }
+            sent
         }
     } else {
         Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]))

@@ -183,18 +183,25 @@ async fn restore(state: AppState, filename: String) -> Result<Json<RestoreResult
     let b = load(&state, &filename)?;
     let preview = preview_of(&state, &b)?;
     // What the backup lacks (added to the topology after it) stays as it is.
-    let mut import = crate::backup::keep_running(&b.state, &state.engine.mirror().state);
+    let (mut import, held) = {
+        let mirror = state.engine.mirror();
+        (
+            crate::backup::keep_running(&b.state, &mirror.state),
+            crate::roster_watch::state_digest(&mirror.state),
+        )
+    };
     // The active lineup's rules hold, as after a switch (#58 review); what
     // the restored state follows is not known (a backup's).
     let store = LineupStore::new(&state.config_dir);
     let running = state.roster().map(|r| {
         let id = r.lineup().id.clone();
-        let (_, mut silenced) = crate::roster_watch::running_for(&store, &id);
+        let (_, mut silenced) = crate::roster_watch::running_for(&store, &id, &held);
         crate::roster_watch::fit_recorded(&mut import, &r.roster, r.lineup(), &mut silenced);
         crate::lineup_store::Running {
             lineup: id,
             follows: None,
             silenced,
+            pending: None,
         }
     });
     state

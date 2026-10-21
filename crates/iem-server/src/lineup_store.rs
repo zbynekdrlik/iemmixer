@@ -90,6 +90,22 @@ pub struct Running {
     pub follows: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub silenced: BTreeSet<String>,
+    /// A roster's import sent and not answered yet (#58 third review),
+    /// written before it: what the running state follows once the engine
+    /// holds the state sent (`roster_watch::running_of` resolves it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Pending>,
+}
+
+/// What the running state follows once an import went in
+/// ([`Running::pending`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    pub follows: String,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub silenced: BTreeSet<String>,
+    /// The SHA-256 of the state sent (`roster_watch::state_digest`).
+    pub digest: String,
 }
 
 #[derive(Serialize, Deserialize)]
