@@ -78,9 +78,11 @@ pub fn synthetic_site() -> Topology {
 }
 
 /// The predecessor's routing for a topology of the §3.1 shape: a stereo mix
-/// receives every ungrouped input and the mixes it hears and has an instance
-/// of every group, which receives the group's inputs; a mono mix (the
-/// translator) receives only `hand1`.
+/// receives every ungrouped input and the mixes it hears whole and has an
+/// instance of every group, which receives the group's inputs; a mono mix
+/// (the translator) receives only `hand1`. A site's peers (#58) get no
+/// receive here: give it the predecessor's topology (`synthetic_site`),
+/// where member1 receives the other members' tracks.
 pub fn synthetic_routing(topo: &Topology) -> Routing {
     let mut r = Routing::default();
     for m in &topo.mixes {
@@ -184,11 +186,18 @@ pub fn sample_state(topo: &Topology, routing: &Routing, seed: u64) -> MixState {
                 );
             }
         }
+        // Every source the mix hears (its peers too, #58) that the project
+        // routes.
         let sources = topo
             .inputs
             .iter()
             .map(|i| Source::Input(i.id.clone()))
-            .chain(m.mixes.iter().map(|h| Source::Mix(h.clone())));
+            .chain(
+                m.mixes
+                    .iter()
+                    .chain(&m.peers)
+                    .map(|h| Source::Mix(h.clone())),
+            );
         for src in sources {
             if !routing.has_level(&m.id, &src) {
                 continue;
@@ -457,7 +466,9 @@ pub fn project(
                 ));
             }
         }
-        for h in &m.mixes {
+        // A receive for each mix it hears, whole or as a peer (#58), that the
+        // routing holds.
+        for h in m.mixes.iter().chain(&m.peers) {
             if routing.has_level(&m.id, &Source::Mix(h.clone())) {
                 let l = s.mixes.get(h).copied().unwrap_or_default();
                 c.line(receive(find(&h.0)?, 0, &l)?);
