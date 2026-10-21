@@ -511,10 +511,8 @@ pub(crate) mod tests {
     #[test]
     fn legacy_mode_is_unchanged() {
         let (config, topo) = (test_config(), test_topology());
-        let (built, problems) = SiteView::build(&config, &topo);
-        let (with, problems_with) = SiteView::build_with(&config, None, &topo);
-        assert_eq!(with, built);
-        assert_eq!(problems_with, problems);
+        let (with, problems) = SiteView::build_with(&config, None, &topo);
+        assert_eq!(problems, Vec::<String>::new());
         assert_eq!(with.members, config.members);
         assert_eq!(
             with.leaders,
