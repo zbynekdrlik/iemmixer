@@ -40,10 +40,12 @@ async fn the_lineup_tells_the_bearer_what_they_may_do() {
     let dir = tempfile::tempdir().unwrap();
     let (state, api) = app(dir.path());
     assert_eq!(get(&api, None).await.0, StatusCode::UNAUTHORIZED);
+    // Legacy mode: no band to tell of, and no error status (a browser
+    // logs every 4xx answer in its console, on every page load).
     let (status, json) = get(&api, Some(&token("member1", false))).await;
     assert_eq!(
-        (status, json["code"].as_str()),
-        (StatusCode::NOT_FOUND, Some("NOT_CONFIGURED")),
+        (status, json),
+        (StatusCode::NO_CONTENT, serde_json::Value::Null),
         "legacy mode"
     );
     state.set_roster(Some(test_roster("youth")));

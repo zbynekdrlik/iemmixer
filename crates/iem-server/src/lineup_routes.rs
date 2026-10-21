@@ -1,12 +1,15 @@
 //! `/api/lineup` (#58 design §7, Part C's page reads it): which band plays,
 //! every band, and what the bearer may do; `POST /api/lineup/switch` makes
-//! another band play (`lineup_switch`). Any valid token; 404
-//! `NOT_CONFIGURED` in legacy mode.
+//! another band play (`lineup_switch`). Any valid token. In legacy mode
+//! the page learns there is no band from 204 No Content (no error status:
+//! a browser logs every 4xx answer in its console, on every page load),
+//! and a switch answers 404 `NOT_CONFIGURED`.
 
 use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use iem_core::roster::Lineup;
@@ -39,13 +42,6 @@ async fn bearer(state: &AppState, headers: &HeaderMap) -> Result<AuthClaims, Rej
         return Err(crate::auth::subject_gone());
     }
     Ok(claims)
-}
-
-fn not_configured() -> Reject {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ApiError::new("NOT_CONFIGURED", "this site has no roster")),
-    )
 }
 
 fn reference(l: &Lineup) -> LineupRef {
@@ -85,14 +81,14 @@ pub fn reject(e: &SwitchError) -> Reject {
     (status, Json(ApiError::new(code, e.to_string())))
 }
 
-/// `GET /api/lineup` → [`LineupInfo`].
-async fn get_lineup(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<LineupInfo>, Reject> {
+/// `GET /api/lineup` → [`LineupInfo`], or 204 No Content on a site
+/// without a roster (legacy mode: the page stays as it was before #58).
+async fn get_lineup(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, Reject> {
     let claims = bearer(&state, &headers).await?;
-    let roster = state.roster().ok_or_else(not_configured)?;
-    Ok(Json(lineup_info(&roster, &claims)))
+    Ok(match state.roster() {
+        Some(roster) => Json(lineup_info(&roster, &claims)).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
 }
 
 /// `POST /api/lineup/switch {"to": id}` → 204, or [`reject`]'s answer.
