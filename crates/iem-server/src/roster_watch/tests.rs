@@ -1770,3 +1770,67 @@ async fn a_settle_from_an_unknown_roster_ends_every_solo() {
     within(settle).await;
     assert!(!state.frozen_now() && !state.settling());
 }
+
+/// #58 third review: after a switch a restart cut short, the start still
+/// moves the mixes of the people a roster moved while the server was down:
+/// the running state follows the roster applied last, as after any start.
+#[tokio::test]
+async fn a_start_after_a_cut_switch_still_moves_people() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    // A switch youth → main a restart cut short after main was recorded.
+    store
+        .set_intent(&crate::lineup_store::SwitchIntent {
+            from: "youth".into(),
+            to: "main".into(),
+        })
+        .unwrap();
+    std::fs::write(d.join(ROSTER_FILE), moved()).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    assert!(state.frozen_now());
+    let mut peer = synced(&mut state, running()).await;
+    let start = {
+        let s = state.clone();
+        tokio::spawn(async move {
+            crate::lineup_switch::replay_when_synced(s.clone()).await;
+            settle_when_synced(s).await;
+        })
+    };
+    let imported = imports(&mut peer).await;
+    within(start).await;
+    let set9 = &imported.mixes[&MixId::new("member9")];
+    assert_eq!(
+        set9.inputs[&InputId::new("keys")].gain_db,
+        -6.0,
+        "member5's mix"
+    );
+}
+
+/// #58 third review: every roster a state may follow is kept
+/// (`lineups/rosters/<sha>.toml`), so a stored state whose marker names a
+/// roster this server applied before (here as a backup restored it) moves
+/// from that roster: member10 to set member2 in youth.
+#[tokio::test]
+async fn a_state_on_a_kept_roster_moves_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    let kept = sha256_hex(TEXT.as_bytes());
+    store.keep_roster(&kept, TEXT).unwrap();
+    let mut youth = MixerBackup::new("t".into(), 1, running());
+    youth.follows = Some(kept);
+    store.save_state("youth", &youth).unwrap();
+    let _peer = synced(&mut state, running()).await;
+    let text = edit(TEXT, "member1 = \"member10\"\n", "member2 = \"member10\"\n");
+    assert_eq!(within(spawn_apply(&state, &text)).await, applied(&[], &[]));
+    let youth = store.state("youth").unwrap().unwrap();
+    let set2 = &youth.state.mixes[&MixId::new("member2")];
+    assert!(
+        set2.mixes[&MixId::new("member1")].muted,
+        "member10's mix, moved from set member1"
+    );
+    assert_eq!(youth.follows, Some(sha256_hex(text.as_bytes())));
+}
