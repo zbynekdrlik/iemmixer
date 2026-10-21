@@ -24,14 +24,21 @@ pub fn lineup_routes() -> Router<AppState> {
         .route("/api/lineup/switch", post(post_switch))
 }
 
-/// The bearer's claims: any valid token.
+/// The bearer's claims: any valid token of somebody (a person who left the
+/// roster is nobody, `auth::subject_known`).
 async fn bearer(state: &AppState, headers: &HeaderMap) -> Result<AuthClaims, Reject> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "));
-    let config = state.config.read().await;
-    crate::mixer_ws::claims_of(token, &config.jwt_secret)
+    let claims = {
+        let config = state.config.read().await;
+        crate::mixer_ws::claims_of(token, &config.jwt_secret)?
+    };
+    if !crate::auth::subject_known(state, &claims) {
+        return Err(crate::auth::subject_gone());
+    }
+    Ok(claims)
 }
 
 fn not_configured() -> Reject {

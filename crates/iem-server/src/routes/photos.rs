@@ -40,8 +40,11 @@ pub(super) async fn post_photo(
     Json(payload): Json<PhotoUpload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<iem_core::ApiError>)> {
     let config = state.config.read().await;
-    crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
+    let claims = crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
     drop(config);
+    if !crate::auth::subject_known(&state, &claims) {
+        return Err(crate::auth::subject_gone());
+    }
 
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD
@@ -78,8 +81,11 @@ pub(super) async fn delete_photo(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<iem_core::ApiError>)> {
     let config = state.config.read().await;
-    crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
+    let claims = crate::auth::verify_member_access(&headers, &member_id, &config.jwt_secret)?;
     drop(config);
+    if !crate::auth::subject_known(&state, &claims) {
+        return Err(crate::auth::subject_gone());
+    }
 
     state.photo_store.delete(&member_id).map_err(|e| {
         tracing::error!("Failed to delete photo: {}", e);

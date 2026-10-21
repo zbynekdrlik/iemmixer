@@ -153,6 +153,42 @@ async fn members_lists_playing_people_first() {
     );
 }
 
+/// #58: a person the roster no longer holds is nobody: their old token
+/// opens no page, changes no photo or pins, and reads no lineup.
+#[tokio::test]
+async fn a_removed_persons_token_opens_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = app(dir.path());
+    let m9 = token("member9", false);
+    let (status, _) = call(&app, Method::GET, "/api/mixer/member9", Some(&m9), None).await;
+    assert_eq!(status, StatusCode::OK, "legacy: a site member");
+    let mut r = crate::roster_state::tests::test_roster("main");
+    let roster = std::sync::Arc::make_mut(&mut r.roster);
+    roster.people.retain(|p| p.id != "member9");
+    roster.lineups[0].sets.remove("member9");
+    state.set_roster(Some(r));
+    let photo = r#"{"photo":"anBlZw=="}"#;
+    for (method, uri, body) in [
+        (Method::GET, "/api/mixer/member9", None),
+        (Method::GET, "/api/mixer/member9/customization", None),
+        (Method::GET, "/api/lineup", None),
+        (Method::POST, "/api/members/member9/photo", Some(photo)),
+        (Method::DELETE, "/api/members/member9/photo", None),
+    ] {
+        let (status, json) = call(&app, method, uri, Some(&m9), body).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::UNAUTHORIZED, Some("UNAUTHORIZED")),
+            "{uri}"
+        );
+    }
+    assert!(!state.photo_store.exists("member9"));
+    // A person who plays in no band right now is still somebody.
+    let m10 = token("member10", false);
+    let (status, _) = call(&app, Method::GET, "/api/lineup", Some(&m10), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn the_mixer_state_is_guarded_per_page() {
     let dir = tempfile::tempdir().unwrap();

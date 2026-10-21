@@ -421,6 +421,52 @@ fn ramp_interpolates_amplitudes_and_lands_on_the_target() {
     );
 }
 
+/// #58: a non-leader's old entry never opens a heard mix; a leader's does
+/// (legacy: a member whose mix hears another leads, as before).
+#[test]
+fn a_ramp_moves_heard_mixes_only_on_a_leaders_page() {
+    let roster = crate::roster_state::tests::test_roster("youth");
+    let (v, _) = SiteView::build_with(
+        &crate::site_view::tests::test_config(),
+        Some(&roster),
+        &crate::site_view::tests::test_topology(),
+    );
+    let m = mirror(|_| {});
+    let send = |of: &str| MixSend {
+        src: Source::Mix(MixId::new(of)),
+        gain_db: 0.0,
+        pan: 0.0,
+        muted: false,
+    };
+    // member10 on member1's set: member4's set and an empty one, skipped.
+    let p10 = v.page("member10").unwrap();
+    let (steps, skipped) = ramp(
+        &v,
+        &m,
+        &p10,
+        &[send("member4"), send("member2")],
+        &BTreeMap::new(),
+    );
+    assert_eq!(skipped, 2);
+    assert!(steps.iter().all(Vec::is_empty), "{steps:?}");
+    // member3 leads youth: member1's set (member10) moves, the empty one not.
+    let p3 = v.page("member3").unwrap();
+    let (steps, skipped) = ramp(
+        &v,
+        &m,
+        &p3,
+        &[send("member1"), send("member2")],
+        &BTreeMap::new(),
+    );
+    assert_eq!(skipped, 1);
+    assert_eq!(steps[0].len(), 1);
+    // Legacy: member1 hears and leads.
+    let legacy = test_view();
+    let p1 = legacy.page("member1").unwrap();
+    let (steps, skipped) = ramp(&legacy, &m, &p1, &[send("member2")], &BTreeMap::new());
+    assert_eq!((skipped, steps[0].len()), (0, 1));
+}
+
 #[test]
 fn ramp_orders_mutes_so_nothing_jumps() {
     let v = test_view();

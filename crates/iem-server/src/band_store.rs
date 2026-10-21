@@ -398,7 +398,9 @@ fn same(a: f64, b: f64) -> bool {
 /// silence and is muted at the last step, one being unmuted is unmuted at
 /// the first step and fades in; unchanged levels are not sent. A last
 /// batch sets the stored gain of levels that ended muted. Sources and groups
-/// the page mix does not have are skipped and counted.
+/// the page mix does not have are skipped and counted, and so are the
+/// heard mixes of a page whose member leads no part of the band (#58: an old
+/// entry never opens another person's mix in a non-leader's ears).
 pub fn ramp(
     view: &SiteView,
     mirror: &Mirror,
@@ -407,6 +409,7 @@ pub fn ramp(
     groups: &BTreeMap<GroupId, f64>,
 ) -> (Vec<Vec<Cmd>>, usize) {
     let mix = &page.mix;
+    let heard = crate::view::heard(view, page, &crate::view::Viewer::of_page(page));
     let mut steps: Vec<Vec<Cmd>> = vec![Vec::new(); RAMP_STEPS];
     let mut settle = Vec::new();
     let mut skipped = 0;
@@ -414,7 +417,7 @@ pub fn ramp(
     for s in sends {
         let known = match &s.src {
             Source::Input(i) => view.input(&i.0).is_some(),
-            Source::Mix(m) => view.mix(mix).is_some_and(|v| v.hears.contains(m)),
+            Source::Mix(m) => heard.contains(&m),
         };
         if !known {
             skipped += 1;

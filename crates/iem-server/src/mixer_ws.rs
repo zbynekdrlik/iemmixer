@@ -103,6 +103,10 @@ pub async fn ws_mixer(
             crate::routes::detect_network_mode(&headers, &config.local_public_ip),
         )
     };
+    if !crate::auth::subject_known(&state, &claims) {
+        tracing::warn!(page = %page_id, "WS denied: the token's person is no longer in the roster");
+        return Err(crate::auth::subject_gone());
+    }
     if !claims.engineer && claims.sub != page_id {
         tracing::warn!(page = %page_id, sub = %claims.sub, "WS denied: cross-member access");
         return Err((
@@ -464,7 +468,7 @@ fn engine_event(
             let mut out = if origin == Some(session) {
                 own_echo(&site, &state.engine.mirror(), page, &changes)
             } else {
-                view::updates_for(&site, &state.engine.mirror(), page, &changes)
+                view::updates_seen(&site, &state.engine.mirror(), page, viewer, &changes)
             };
             if viewer.engineer {
                 out.extend(crate::console::input_updates(&site, &changes));

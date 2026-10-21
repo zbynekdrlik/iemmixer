@@ -157,6 +157,9 @@ pub(crate) async fn page_for(
         let config = state.config.read().await;
         auth::verify_member_access(headers, page, &config.jwt_secret)?
     };
+    if !auth::subject_known(state, &claims) {
+        return Err(auth::subject_gone());
+    }
     let page = state
         .page(page)
         .ok_or((StatusCode::NOT_FOUND, Json(ApiError::not_found("Member"))))?;
