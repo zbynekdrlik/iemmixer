@@ -744,8 +744,9 @@ async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
 
 /// #58 re-review: a cut switch that can neither be finished nor go back
 /// (the engine refuses the old band's state too) frees the pages after
-/// three tries of each, tells the pages and the engineer's devices, and
-/// keeps the intent for the next start.
+/// three tries of each and tells the pages and the engineer's devices;
+/// #58 third review: its intent goes, so the next start does not finish a
+/// switch nobody wants (the pages ran on the band recorded active since).
 #[tokio::test]
 async fn a_replay_that_cannot_go_back_either_frees_the_pages() {
     let dir = tempfile::tempdir().unwrap();
@@ -764,7 +765,7 @@ async fn a_replay_that_cannot_go_back_either_frees_the_pages() {
     );
     assert!(!state.frozen_now());
     assert_eq!(rx.try_recv().unwrap().id, "main");
-    assert!(LineupStore::new(dir.path()).intent().unwrap().is_some());
+    assert_eq!(LineupStore::new(dir.path()).intent().unwrap(), None);
     until("the alarm", || seen.lock().unwrap().len() == 1).await;
 }
 
@@ -1057,7 +1058,7 @@ async fn a_replay_waits_for_the_engines_state() {
         Err("the engine state is not synced".to_string())
     );
     assert!(state.frozen_now());
-    assert!(LineupStore::new(dir.path()).intent().unwrap().is_some());
+    assert_eq!(LineupStore::new(dir.path()).intent().unwrap(), None);
     let replay = tokio::spawn(replay_when_synced(state.clone()));
     tokio::time::sleep(Duration::from_millis(100)).await;
     fake::sync(&state.engine, &mut peer, 1, running()).await;
