@@ -743,6 +743,76 @@ async fn a_lineup_without_state_unmutes_the_sets_its_people_wear() {
     );
 }
 
+/// #58 review: a solo ends with the switch on every set whose wearer
+/// changes (the engine keeps solos across an import), while the pages are
+/// still frozen; a set its wearer keeps keeps its solo.
+#[tokio::test]
+async fn a_switch_ends_the_solos_of_the_sets_that_change_wearer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    // member1 solos mic1 on set member1 (member10's in youth); member3
+    // solos mic3 on their own set, theirs in youth too.
+    let transient = iem_engine_proto::Transient {
+        solo: vec![
+            iem_engine_proto::Solo {
+                mix: mix_id("member1"),
+                sources: pinned("mic1"),
+            },
+            iem_engine_proto::Solo {
+                mix: mix_id("member3"),
+                sources: pinned("mic3"),
+            },
+        ],
+        ..Default::default()
+    };
+    peer.send(&EngineMsg::State {
+        rev: 1,
+        state: running(),
+        transient: transient.clone(),
+    })
+    .await;
+    until("synced", || state.engine.mirror().synced).await;
+    let switch = spawn_switch(&state, "youth", claims("engineer", true));
+    let (id, imported) = fake::next_import(&mut peer).await;
+    // The engine keeps the solos across the import.
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    peer.send(&EngineMsg::State {
+        rev: 2,
+        state: imported,
+        transient,
+    })
+    .await;
+    let (id, cmd) = fake::next_request(&mut peer).await;
+    assert_eq!(
+        cmd,
+        Cmd::SetSolo {
+            mix: mix_id("member1"),
+            sources: vec![],
+        }
+    );
+    assert!(state.frozen_now(), "before the pages are free");
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    assert_eq!(within(switch).await, Ok(()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "member3's solo stays"
+    );
+}
+
 /// Without a switch to finish, the start's replay ends at once.
 #[tokio::test]
 async fn nothing_to_replay_ends_at_once() {

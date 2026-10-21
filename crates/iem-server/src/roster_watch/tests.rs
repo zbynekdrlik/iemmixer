@@ -958,6 +958,70 @@ async fn a_set_the_rules_silenced_sounds_again_once_worn() {
     assert!(!back.mixes[&MixId::new("member4")].out.muted);
 }
 
+/// #58 review: a roster change ends the solo on a set whose wearer it
+/// changes (the engine keeps solos across an import), before the pages are
+/// free; a set its wearer keeps keeps its solo.
+#[tokio::test]
+async fn a_reload_ends_the_solos_of_the_sets_that_change_wearer() {
+    use iem_engine_proto::{EngineMsg, Reply, Solo, Source, Transient};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    let solo = |mix: &str, input: &str| Solo {
+        mix: MixId::new(mix),
+        sources: vec![Source::Input(InputId::new(input))],
+    };
+    let transient = Transient {
+        solo: vec![solo("member5", "mic6"), solo("member1", "mic1")],
+        ..Default::default()
+    };
+    peer.send(&EngineMsg::State {
+        rev: 1,
+        state: running(),
+        transient: transient.clone(),
+    })
+    .await;
+    until("synced", || state.engine.mirror().synced).await;
+    // member5 and member6 swap sets.
+    let task = spawn_apply(&state, &swapped());
+    let (id, imported) = fake::next_import(&mut peer).await;
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    peer.send(&EngineMsg::State {
+        rev: 2,
+        state: imported,
+        transient,
+    })
+    .await;
+    let (id, cmd) = fake::next_request(&mut peer).await;
+    assert_eq!(
+        cmd,
+        Cmd::SetSolo {
+            mix: MixId::new("member5"),
+            sources: vec![],
+        }
+    );
+    assert!(state.frozen_now(), "before the pages are free");
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "member1's solo stays"
+    );
+}
+
 /// The record of what the rules silenced is the lineup's file: it
 /// outlives the server.
 #[tokio::test]
