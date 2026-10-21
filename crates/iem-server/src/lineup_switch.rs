@@ -8,9 +8,12 @@
 //! the active lineup's, then the intent `{from, to}` is written, then the
 //! target's state goes to the engine, then the target is recorded active,
 //! then the intent goes. A failure after the intent imports the stored
-//! state again and clears the intent: the active lineup is unchanged. A
-//! restart between the intent and its clearing finishes the switch
-//! ([`replay_intent`], once the mirror has synced). After a switch every
+//! state again and, once it is back in, clears the intent: the active
+//! lineup is unchanged. When it does not go back in either, which band's
+//! state the engine holds is not known: the intent stays, the pages stay
+//! frozen and the switch finishes once the engine answers
+//! ([`replay_when_synced`]), as after a restart between the intent and its
+//! clearing ([`replay_intent`], once the mirror has synced). After a switch every
 //! person's mixer socket closes (`mixer_ws::CLOSE_LINEUP`), and the
 //! engineer's devices hear which band plays.
 //!
@@ -170,11 +173,30 @@ async fn run(
         // Frozen meanwhile by a switch a restart cut short: it is that one's.
         return Err(SwitchError::Busy);
     }
-    let done = steps(state, roster, view, from, to).await;
-    if done.is_err() {
-        state.frozen.store(false, Ordering::SeqCst);
+    match steps(state, roster, view, from, to).await {
+        Ok(()) => Ok(()),
+        Err(Failed::Back(e)) => {
+            state.frozen.store(false, Ordering::SeqCst);
+            Err(e)
+        }
+        Err(Failed::Pending(e)) => {
+            // The intent stays and the pages stay frozen: the switch
+            // finishes once the engine answers (after this one's lock).
+            tracing::error!(error = %e, "the switch finishes once the engine answers again");
+            tokio::spawn(replay_when_synced(state.clone()));
+            Err(e)
+        }
     }
-    done
+}
+
+/// How a switch's steps failed.
+enum Failed {
+    /// The band that played plays on, recorded as before.
+    Back(SwitchError),
+    /// The old band's state did not go back in either: which band's state
+    /// the engine holds is not known, so the intent stays for
+    /// [`replay_when_synced`] to finish the switch.
+    Pending(SwitchError),
 }
 
 /// The switch's steps, the pages frozen.
@@ -184,44 +206,47 @@ async fn steps(
     view: &SiteView,
     from: &str,
     to: &Lineup,
-) -> Result<(), SwitchError> {
+) -> Result<(), Failed> {
     let store = LineupStore::new(&state.config_dir);
     // The live state and the active lineup's pins and hides, as its stored
     // state.
     let mut live = {
         let mirror = state.engine.mirror();
         if !mirror.synced {
-            return Err(SwitchError::NotSynced);
+            return Err(Failed::Back(SwitchError::NotSynced));
         }
         let at = chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string();
-        capture(view, &mirror, &state.band_of(Some(from)), at).map_err(SwitchError::Io)?
+        capture(view, &mirror, &state.band_of(Some(from)), at)
+            .map_err(|e| Failed::Back(SwitchError::Io(e)))?
     };
     live.lineup = Some(from.to_string());
     store
         .save_state(from, &live)
-        .map_err(|e| io("the band's state was not stored", e))?;
+        .map_err(|e| Failed::Back(io("the band's state was not stored", e)))?;
     let intent = SwitchIntent {
         from: from.to_string(),
         to: to.id.clone(),
     };
     store
         .set_intent(&intent)
-        .map_err(|e| io("the switch's intent was not written", e))?;
+        .map_err(|e| Failed::Back(io("the switch's intent was not written", e)))?;
     if let Err(e) = forward(state, &store, roster, &live.state, to).await {
-        // The band that played plays on.
+        // The band that played plays on, once its state is back in for
+        // sure; else the intent stays.
         if let Err(back) = state
             .engine
             .request_applied(import(live.state.clone()), None)
             .await
         {
             tracing::error!(error = %back, %from, "the band's state was not imported again");
+            return Err(Failed::Pending(e));
         }
         if let Err(clear) = store.clear_intent() {
             tracing::error!(error = %clear, "the switch's intent was not cleared");
         }
-        return Err(e);
+        return Err(Failed::Back(e));
     }
     if let Err(e) = store.clear_intent() {
         // The switch happened; the next start clears it (active is `to`).
