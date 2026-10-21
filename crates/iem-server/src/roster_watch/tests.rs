@@ -1970,3 +1970,47 @@ fn the_absent_engine_alarm_is_due_once_the_wait_reached_its_time() {
         "once"
     );
 }
+
+/// #58 third review: the engine took a reload's import, but its answer was
+/// lost with the server (it stopped, or the engine stayed away until a
+/// reboot). `running.json` names the import pending with the digest of the
+/// state sent, so the next start finds the engine holding that state and
+/// moves nobody a second time (a swap made twice would undo itself).
+#[tokio::test]
+async fn a_start_after_an_import_that_went_in_unanswered_moves_nobody_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut first = AppState::new(test_config(), d);
+    let mut peer = synced(&mut first, running()).await;
+    let new = swapped();
+    let task = spawn_apply(&first, &new);
+    let (_, sent) = fake::next_import(&mut peer).await;
+    // The engine takes it; the server stops before the answer.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop((first, peer));
+    assert_eq!(
+        sent.mixes[&MixId::new("member6")].inputs[&InputId::new("keys")].gain_db,
+        -6.0,
+        "member5's mix on set member6"
+    );
+    std::fs::write(d.join(ROSTER_FILE), &new).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let mut peer = synced(&mut state, sent.clone()).await;
+    within(tokio::spawn(settle_when_synced(state.clone()))).await;
+    assert!(!state.settling());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), peer.recv())
+            .await
+            .is_err(),
+        "no freeze and no import: nobody moves twice"
+    );
+    assert_eq!(state.engine.mirror().state, sent);
+    let running = store.running().unwrap().unwrap();
+    assert_eq!(running.follows, Some(sha256_hex(new.as_bytes())));
+    assert_eq!(running.pending, None, "resolved");
+}
