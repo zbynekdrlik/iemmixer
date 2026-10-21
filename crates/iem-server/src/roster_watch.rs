@@ -396,12 +396,12 @@ fn engine_facts(state: &AppState) -> Option<TopologyFacts> {
 /// Applies the roster `text` (SHA-256 `sha256`) to the running server: see
 /// the module docs. Refused (the roster in use stays) when it does not
 /// validate, against the engine's topology once announced; when it drops
-/// the active lineup; when a stored state cannot be read or written; when a
-/// person's mix moves but the engine is not synced, or the engine does not
-/// take the active lineup's new mixes. A legacy server adopts it (the
-/// migration runs). Never beside a band switch: it waits for one that runs
-/// (`AppState::switching`), and pages' changes are refused while its import
-/// runs.
+/// the active lineup; when a stored state cannot be read or written; when
+/// the engine refuses the active lineup's new mixes. Deferred (tried again
+/// at the next poll) while the engine is not synced, gone or silent. A
+/// legacy server adopts it (the migration runs). Never beside a band
+/// switch: it waits for one that runs (`AppState::switching`), and pages'
+/// changes are refused from its import until the new roster is in use.
 pub async fn apply_text(state: &AppState, text: &str, sha256: &str) -> Applied {
     let _running = state.switching.lock().await;
     let current = state.roster();
@@ -454,21 +454,52 @@ fn undo(store: &LineupStore, written: &[(String, MixerBackup)]) {
     }
 }
 
-/// A new roster in place of `old` (see [`apply_text`]).
-async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) -> Applied {
-    let active = old.lineup().id.clone();
-    let Some(lineup) = new.lineup(&active).cloned() else {
-        return Applied::Refused(vec![missing_active(&active)]);
+/// Why a roster waits: its rules reach the running state only through a
+/// synced engine.
+const NOT_SYNCED: &str = "the engine state is not synced: the roster waits for it";
+
+/// What [`transition`] did.
+struct Transition {
+    /// People who moved to another set of the active lineup.
+    moved: usize,
+    /// `Some(was)`: the pages are frozen; the caller puts `frozen` back to
+    /// `was` once the roster in use is the one the states follow.
+    frozen: Option<bool>,
+}
+
+/// The states go from following `base` to following `new`, whose lineup
+/// `active` plays: every other lineup's stored state, then the running
+/// state through one import. A person who wears another set of a lineup
+/// in `new` than in `base` takes their mix along ([`moves`]; no `base`:
+/// nobody moves), and `new`'s rules hold on every set `base` or `new` lists
+/// ([`fit_sets`]: a set only `base` lists is worn by nobody now). Waits
+/// (`Deferred`) for a synced engine before it touches anything; the running
+/// state is read again once the pages are frozen ([`AppState::freeze`],
+/// only when something changes), and they stay frozen for the caller. On a
+/// failure every stored state it wrote is put back and the pages are free
+/// as before.
+async fn transition(
+    state: &AppState,
+    base: Option<&Roster>,
+    new: &Roster,
+    active: &str,
+) -> Result<Transition, Applied> {
+    let Some(lineup) = new.lineup(active).cloned() else {
+        return Err(Applied::Refused(vec![missing_active(active)]));
     };
+    if !state.engine.mirror().synced {
+        return Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]));
+    }
     let store = LineupStore::new(&state.config_dir);
-    // The rules hold on every set either roster knows: one the new roster
-    // drops entirely is worn by nobody now.
-    let sets: BTreeSet<String> = roster_sets(&old.roster)
+    let sets: BTreeSet<String> = base
+        .map(roster_sets)
+        .unwrap_or_default()
         .into_iter()
-        .chain(roster_sets(&new))
+        .chain(roster_sets(new))
         .collect();
-    // The inactive lineups' stored states first, each original kept so a
-    // refusal below can put it back.
+    let shift_of = |id: &str| base.map(|b| moves(b, new, id)).unwrap_or_default();
+    // The other lineups' stored states first, each original kept so a
+    // failure below can put it back.
     let mut written: Vec<(String, MixerBackup)> = Vec::new();
     for l in new.lineups.iter().filter(|l| l.id != active) {
         let stored = match store.state(&l.id) {
@@ -476,78 +507,105 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
             Ok(None) => continue,
             Err(e) => {
                 undo(&store, &written);
-                return Applied::Refused(vec![format!(
+                return Err(Applied::Refused(vec![format!(
                     "the stored state of lineup {} is unreadable: {}",
                     l.id,
                     e.kind()
-                )]);
+                )]));
             }
         };
         let mut next = stored.clone();
-        apply_moves(&mut next.state, &moves(&old.roster, &new, &l.id));
+        apply_moves(&mut next.state, &shift_of(&l.id));
         fit_sets(&mut next.state, &sets, l);
         if next.state == stored.state {
             continue;
         }
         if let Err(e) = store.save_state(&l.id, &next) {
             undo(&store, &written);
-            return Applied::Refused(vec![format!(
+            return Err(Applied::Refused(vec![format!(
                 "the stored state of lineup {} was not written: {}",
                 l.id,
                 e.kind()
-            )]);
+            )]));
         }
         written.push((l.id.clone(), stored));
     }
     // The active lineup's running state, through one import.
-    let shift = moves(&old.roster, &new, &active);
+    let shift = shift_of(active);
+    let next_of = |current: &MixState| {
+        let mut next = current.clone();
+        apply_moves(&mut next, &shift);
+        fit_sets(&mut next, &sets, &lineup);
+        next
+    };
+    let current = state.engine.mirror().state.clone();
+    if next_of(&current) == current {
+        return Ok(Transition {
+            moved: shift.len(),
+            frozen: None,
+        });
+    }
+    let failed = |e: EngineError| {
+        let why = vec![format!(
+            "the engine did not take lineup {active}'s new mixes: {e}"
+        )];
+        // A refusal is the roster's; no engine or no answer is the
+        // moment's, and the watcher tries again.
+        match e {
+            EngineError::Refused(_) => Applied::Refused(why),
+            EngineError::Disconnected | EngineError::Timeout => Applied::Deferred(why),
+        }
+    };
+    // No page's change lands between the state read here and the import.
+    let was = match state.freeze().await {
+        Ok(was) => was,
+        Err(e) => {
+            undo(&store, &written);
+            return Err(failed(e));
+        }
+    };
     let (synced, current) = {
         let m = state.engine.mirror();
         (m.synced, m.state.clone())
     };
-    if synced {
-        let mut next = current.clone();
-        apply_moves(&mut next, &shift);
-        fit_sets(&mut next, &sets, &lineup);
-        if next != current {
-            let import = Cmd::ImportState {
-                state: next,
-                baseline: false,
-            };
-            // No page's change lands between this state and the import;
-            // the flag is put back as it was (a switch a restart cut short
-            // keeps it).
-            let was = match state.freeze().await {
-                Ok(was) => was,
-                Err(e) => {
-                    undo(&store, &written);
-                    return Applied::Deferred(vec![format!(
-                        "the engine did not take lineup {active}'s new mixes: {e}"
-                    )]);
-                }
-            };
-            let imported = state.engine.request_applied(import, None).await;
-            state.frozen.store(was, Ordering::SeqCst);
-            if let Err(e) = imported {
-                undo(&store, &written);
-                let why = vec![format!(
-                    "the engine did not take lineup {active}'s new mixes: {e}"
-                )];
-                // A refusal is the roster's; no engine or no answer is the
-                // moment's, and the watcher tries again.
-                return match e {
-                    EngineError::Refused(_) => Applied::Refused(why),
-                    EngineError::Disconnected | EngineError::Timeout => Applied::Deferred(why),
-                };
-            }
+    let imported = if synced {
+        let next = next_of(&current);
+        if next == current {
+            Ok(())
+        } else {
+            state
+                .engine
+                .request_applied(
+                    Cmd::ImportState {
+                        state: next,
+                        baseline: false,
+                    },
+                    None,
+                )
+                .await
+                .map_err(failed)
         }
-    } else if !shift.is_empty() {
+    } else {
+        Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]))
+    };
+    if let Err(not) = imported {
+        state.frozen.store(was, Ordering::SeqCst);
         undo(&store, &written);
-        return Applied::Deferred(vec![
-            "the engine state is not synced: a person's mix cannot move to their new set now"
-                .to_string(),
-        ]);
+        return Err(not);
     }
+    Ok(Transition {
+        moved: shift.len(),
+        frozen: Some(was),
+    })
+}
+
+/// A new roster in place of `old` (see [`apply_text`]).
+async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) -> Applied {
+    let active = old.lineup().id.clone();
+    let done = match transition(state, Some(&old.roster), &new, &active).await {
+        Ok(done) => done,
+        Err(not) => return not,
+    };
     let (added, removed) = people_diff(&old.roster, &new);
     let roster = Arc::new(new);
     state.set_roster(Some(RosterState {
@@ -555,6 +613,11 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
         sha256: sha256.to_string(),
         active,
     }));
+    // Free again only now: a page of the roster before must not change a
+    // mix that moved.
+    if let Some(was) = done.frozen {
+        state.frozen.store(was, Ordering::SeqCst);
+    }
     state.announce_lineup();
     let people = {
         let mut pins = state.pin_store.write().await;
@@ -563,7 +626,7 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
     tracing::info!(
         added = added.len(),
         removed = removed.len(),
-        moved = shift.len(),
+        moved = done.moved,
         restored = people.restored.len(),
         archived = people.archived.len(),
         "roster reloaded"
