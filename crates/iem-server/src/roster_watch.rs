@@ -1361,9 +1361,14 @@ async fn give_up(state: &AppState) {
 }
 
 /// Whether a roster that did not reach the states waits for the engine
-/// (gone, silent, not synced: tried again) rather than being refused.
+/// (gone, silent, not synced: tried again) rather than being refused. A
+/// pending record that could not be written ([`NOT_RECORDED`]) counts as
+/// refused (#58 fifth review): waiting does not make the file writable.
 fn waits(not: &Applied) -> bool {
-    matches!(not, Applied::Deferred(_))
+    match not {
+        Applied::Deferred(why) => !why.iter().any(|w| w == NOT_RECORDED),
+        _ => false,
+    }
 }
 
 /// After a start on the roster applied last (`AppState::fallback`), the
