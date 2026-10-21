@@ -460,13 +460,16 @@ fn engine_event(
             full_state(state, page, viewer),
         ],
         EngineEvent::Disconnected => vec![ServerMsg::ConnectionChanged { connected: false }],
+        // A person's page about to close (#58 review): never the next band's
+        // values.
+        EngineEvent::Reset | EngineEvent::Changed { .. } if closing(state, page) => Vec::new(),
         EngineEvent::Reset => vec![full_state(state, page, viewer), solo_msg(state, page)],
         EngineEvent::Changed { origin, changes } => {
             let Some(site) = state.site() else {
                 return Vec::new();
             };
             let mut out = if origin == Some(session) {
-                own_echo(&site, &state.engine.mirror(), page, &changes)
+                own_echo_seen(&site, &state.engine.mirror(), page, viewer, &changes)
             } else {
                 view::updates_seen(&site, &state.engine.mirror(), page, viewer, &changes)
             };
@@ -479,13 +482,39 @@ fn engine_event(
     }
 }
 
-/// What a session hears back from its own change: nothing (it applied the
-/// change optimistically), except the channel mutes a solo change shows (the
-/// mask is the server's view; the page cannot know every level's own mute).
+/// Whether `page` is a person's page that hears nothing of the engine now
+/// (#58 review): a switch runs (its import may already be in), or the
+/// active lineup no longer gives the page as it is (its socket closes with
+/// [`CLOSE_LINEUP`]). The engineer's and the other mixes' pages stay: they
+/// get their state again after a switch ([`on_lineup`]).
+fn closing(state: &AppState, page: &Page) -> bool {
+    let person = page
+        .member
+        .as_deref()
+        .is_some_and(|m| m != crate::pin_store::ENGINEER_ID);
+    person && (state.frozen_now() || state.page(&page.id).as_ref() != Some(page))
+}
+
+/// What a session hears back from its own change as its page's member
+/// sees it ([`own_echo_seen`]).
 pub fn own_echo(
     site: &crate::site_view::SiteView,
     mirror: &crate::engine::mirror::Mirror,
     page: &Page,
+    changes: &[Change],
+) -> Vec<ServerMsg> {
+    own_echo_seen(site, mirror, page, &Viewer::of_page(page), changes)
+}
+
+/// What a session hears back from its own change: nothing (it applied the
+/// change optimistically), except the channel mutes a solo change shows (the
+/// mask is the server's view; the page cannot know every level's own mute),
+/// on the channels the session's `viewer` sees.
+pub fn own_echo_seen(
+    site: &crate::site_view::SiteView,
+    mirror: &crate::engine::mirror::Mirror,
+    page: &Page,
+    viewer: &Viewer,
     changes: &[Change],
 ) -> Vec<ServerMsg> {
     let solo: Vec<Change> = changes
@@ -493,7 +522,7 @@ pub fn own_echo(
         .filter(|c| matches!(c, Change::Solo { .. }))
         .cloned()
         .collect();
-    view::updates_for(site, mirror, page, &solo)
+    view::updates_seen(site, mirror, page, viewer, &solo)
         .into_iter()
         .filter(|m| matches!(m, ServerMsg::ChannelUpdate { .. }))
         .collect()
