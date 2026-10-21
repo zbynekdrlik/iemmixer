@@ -375,7 +375,8 @@ async fn play(
     Ok(())
 }
 
-/// Finishes a switch a restart cut short (§7 step 5), once the mirror has
+/// Finishes a switch the engine dropped or a restart cut short (§7 step
+/// 5), once the mirror has
 /// synced: with the intent's target recorded active it only clears the
 /// intent; otherwise it imports the target's state and records it (a
 /// target the roster no longer holds: the active lineup's stored state
@@ -407,7 +408,7 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Gives up a switch a restart cut short: the band it came from plays again
+/// Gives up an unfinished switch: the band it came from plays again
 /// from its stored state (the running one where that cannot be read),
 /// recorded, the intent cleared, the pages free.
 pub async fn fall_back(state: &AppState) -> Result<(), String> {
@@ -433,61 +434,90 @@ pub async fn fall_back(state: &AppState) -> Result<(), String> {
     let other = roster.roster.lineup(&intent.to);
     play(state, &store, &roster.roster, &lineup, stored, other).await?;
     store.clear_intent().map_err(|e| e.to_string())?;
-    tracing::warn!(lineup = %lineup.id, "a switch a restart cut short was given up: the band before it plays");
+    tracing::warn!(lineup = %lineup.id, "an unfinished switch was given up: the band before it plays");
     state.thaw();
     Ok(())
 }
 
-/// Tries [`replay_when_synced`] makes before it gives a switch up.
+/// Tries [`replay_when_synced`] makes to finish a switch, and then to go
+/// back to the band before it.
 pub const MAX_REPLAYS: u32 = 3;
 
+/// The alarms' title, and what they say once the outcome is known.
+const NOT_SWITCHED: &str = "Kapela neprepnutá";
+const FELL_BACK: &str = "Prepnutie kapely sa nedalo dokončiť: hrá znova kapela pred ním.";
+const GAVE_UP: &str = "Prepnutie kapely sa nedalo dokončiť ani vrátiť: server nevie, ktorej \
+                       kapely mixy engine drží. Mixy sa dajú znova meniť; skontroluj ich a \
+                       prepni kapelu znova.";
+
+/// How [`replay_when_synced`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replayed {
+    /// No switch was left to finish.
+    Nothing,
+    /// The switch was finished at try `tries`.
+    Finished { tries: u32 },
+    /// It could not be finished in `tries` tries: the band before plays
+    /// again.
+    FellBack { tries: u32 },
+    /// It could neither be finished nor go back: the pages are free again
+    /// with the state the engine holds, the intent kept for the next start.
+    GaveUp,
+}
+
 /// At the start, and after a switch the engine dropped in: when a switch
-/// was cut short (`frozen` set), waits for the engine's state and finishes
-/// it ([`replay_intent`]), trying again every `AppState::retry`. After
-/// [`MAX_REPLAYS`] failed tries the engineer's devices hear of it (once)
-/// and the band before the switch plays again ([`fall_back`], tried until
-/// it succeeds).
-pub async fn replay_when_synced(state: AppState) {
+/// was not finished (`frozen` set), waits for the engine's state (woken by
+/// it, [`EngineClient::wait_synced`](crate::engine::EngineClient::wait_synced))
+/// and finishes it ([`replay_intent`]), up to [`MAX_REPLAYS`] tries
+/// `AppState::retry` apart; then the band before plays again
+/// ([`fall_back`], as many tries), and the engineer's devices hear of it
+/// once that is done. When that fails too the pages are freed with the
+/// state the engine holds, and the devices hear that.
+pub async fn replay_when_synced(state: AppState) -> Replayed {
     if !state.frozen_now() {
-        return;
+        return Replayed::Nothing;
     }
-    let mut failures = 0;
-    loop {
-        let synced = state.engine.mirror().synced;
-        if synced {
-            let done = if failures < MAX_REPLAYS {
-                replay_intent(&state).await
-            } else {
-                fall_back(&state).await
-            };
-            match done {
-                Ok(()) => return,
-                Err(e) => {
-                    failures += 1;
-                    tracing::error!(
-                        error = %e,
-                        failures,
-                        "a switch a restart cut short is not finished: trying again"
-                    );
-                    if failures == MAX_REPLAYS {
-                        let devices = crate::notify::push_alarm(
-                            &state,
-                            "Kapela neprepnutá",
-                            "Prepnutie kapely, ktoré prerušil reštart servera, sa nedá dokončiť: \
-                             hrá znova kapela pred ním.",
-                        )
-                        .await;
-                        tracing::warn!(
-                            devices,
-                            "the engineer's devices heard the switch is given up"
-                        );
-                        continue;
-                    }
-                }
+    let mut tries = 0;
+    while tries < MAX_REPLAYS {
+        if !state.engine.wait_synced(state.retry).await {
+            continue;
+        }
+        tries += 1;
+        match replay_intent(&state).await {
+            Ok(()) => return Replayed::Finished { tries },
+            Err(e) => {
+                tracing::error!(error = %e, tries, "an unfinished switch is not finished: trying again");
+                tokio::time::sleep(state.retry).await;
             }
         }
-        tokio::time::sleep(state.retry).await;
     }
+    let mut back = 0;
+    while back < MAX_REPLAYS {
+        if !state.engine.wait_synced(state.retry).await {
+            continue;
+        }
+        back += 1;
+        match fall_back(&state).await {
+            Ok(()) => {
+                alarm(&state, FELL_BACK).await;
+                return Replayed::FellBack { tries };
+            }
+            Err(e) => {
+                tracing::error!(error = %e, tries = back, "the band before an unfinished switch does not play again: trying again");
+                tokio::time::sleep(state.retry).await;
+            }
+        }
+    }
+    tracing::error!("an unfinished switch can neither be finished nor go back: the pages are free");
+    state.thaw();
+    alarm(&state, GAVE_UP).await;
+    Replayed::GaveUp
+}
+
+/// The engineer's devices hear how an unfinished switch ended.
+async fn alarm(state: &AppState, body: &str) {
+    let devices = crate::notify::push_alarm(state, NOT_SWITCHED, body).await;
+    tracing::warn!(devices, "the engineer's devices heard how the switch ended");
 }
 
 #[cfg(test)]
