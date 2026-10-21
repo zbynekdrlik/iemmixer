@@ -1,14 +1,16 @@
 //! IEM Mixer Core Library
 //!
 //! Shared types, configuration, and constants for the IEM mixing system: the
-//! site file, the UI protocol, band data and backups; the predecessor's
-//! formats only in [`legacy`] (the importer's).
+//! site file and the roster, the UI protocol, band data and backups; the
+//! predecessor's formats only in [`legacy`] (the importer's).
 
 pub mod backup;
 pub mod band;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod legacy;
+#[cfg(feature = "config")]
+pub mod roster;
 pub mod tunnel;
 pub mod types;
 pub mod ws;

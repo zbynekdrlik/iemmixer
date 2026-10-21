@@ -1,0 +1,96 @@
+# Synthetic roster for CI, E2E and tests (#58 design §5, §6): the people and
+# the two lineups ("bands") of the test site. The real roster lives only in
+# the private ops repo, beside the PC's site file (program spec P6).
+#
+# People: member1 ... member11. Lineup `main` (the main band) places
+# member1 ... member9 on their own sets, led by member1 and member3; lineup
+# `youth` places member10 on member1's set, member3 on their own and member11
+# on member4's, led by member3. Inputs a lineup lists get its name and owner;
+# the others keep the site's label and have no owner.
+
+[[people]]
+id = "member1"
+name = "Member 1"
+
+[[people]]
+id = "member2"
+name = "Member 2"
+
+[[people]]
+id = "member3"
+name = "Member 3"
+
+[[people]]
+id = "member4"
+name = "Member 4"
+
+[[people]]
+id = "member5"
+name = "Member 5"
+
+[[people]]
+id = "member6"
+name = "Member 6"
+
+[[people]]
+id = "member7"
+name = "Member 7"
+
+[[people]]
+id = "member8"
+name = "Member 8"
+
+[[people]]
+id = "member9"
+name = "Member 9"
+
+[[people]]
+id = "member10"
+name = "Member 10"
+
+[[people]]
+id = "member11"
+name = "Member 11"
+
+[[lineups]]
+id = "main"
+name = "Main band"
+main = true
+leaders = ["member1", "member3"]
+
+[lineups.sets]
+member1 = "member1"
+member2 = "member2"
+member3 = "member3"
+member4 = "member4"
+member5 = "member5"
+member6 = "member6"
+member7 = "member7"
+member8 = "member8"
+member9 = "member9"
+
+[lineups.inputs]
+mic1 = { name = "MEMBER1 mic", owner = "member1" }
+mic2 = { name = "MEMBER2 mic", owner = "member2" }
+mic3 = { name = "MEMBER3 mic", owner = "member3" }
+mic4 = { name = "MEMBER4 mic", owner = "member4" }
+mic5 = { name = "MEMBER4 gtr", owner = "member4" }
+mic6 = { name = "MEMBER5 mic", owner = "member5" }
+mic7 = { name = "MEMBER6 mic", owner = "member6" }
+mic8 = { name = "MEMBER7 mic", owner = "member7" }
+mic9 = { name = "MEMBER8 mic", owner = "member8" }
+mic10 = { name = "MEMBER9 mic", owner = "member9" }
+
+[[lineups]]
+id = "youth"
+name = "Youth band"
+leaders = ["member3"]
+
+[lineups.sets]
+member1 = "member10"
+member3 = "member3"
+member4 = "member11"
+
+[lineups.inputs]
+mic1 = { name = "MEMBER10 mic", owner = "member10" }
+mic4 = { name = "MEMBER11 mic", owner = "member11" }
