@@ -537,3 +537,21 @@ fn problems_never_echo_a_value_that_is_no_id() {
         assert!(has(&against, want), "{want}: {against:?}");
     }
 }
+
+/// P6: a leader's own set that is no valid id is named by its position
+/// among the lineup's sets (keys in order), here the third.
+#[test]
+fn a_leaders_set_that_is_no_id_is_named_by_its_position() {
+    let mut r = roster();
+    let main = &mut r.lineups[0];
+    main.sets.remove("member3");
+    // Sorts after member1 and member2: the third set.
+    main.sets.insert("member3 x".into(), "member3".into());
+    let against = r.problems_against(&facts());
+    let want = "leader member3 in main: set #3 does not hear member1; the site needs peers (F30)";
+    assert!(against.iter().any(|x| x == want), "{against:?}");
+    assert!(
+        !against.iter().any(|x| x.contains("member3 x")),
+        "{against:?}"
+    );
+}
