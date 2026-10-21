@@ -682,22 +682,19 @@ async fn a_restart_mid_switch_replays_the_intent() {
     assert_eq!(LineupStore::new(dir.path()).intent().unwrap(), None);
 }
 
-/// #58 review: a switch a restart cut short that cannot be finished (the
-/// new band's stored state is unreadable) does not freeze the pages for
-/// good: after a few tries the engineer's devices hear of it and the old
-/// band plays again from its stored state, recorded, the intent gone.
-#[tokio::test]
-async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = LineupStore::new(dir.path());
+/// A cut switch main → youth whose youth cannot be played (its stored
+/// state unreadable: a folder in its place), main's stored state with keys
+/// trimmed 2 dB, the engineer's device subscribed, the engine synced,
+/// retries 50 ms apart.
+async fn unfinishable(dir: &std::path::Path) -> (AppState, fake::Peer, crate::push::tests::Seen) {
+    let store = LineupStore::new(dir);
     let mut main = MixState::default();
     main.inputs.entry(InputId::new("keys")).or_default().trim_db = 2.0;
     store
         .save_state("main", &MixerBackup::new("t".into(), 1, main))
         .unwrap();
-    // youth's stored state cannot be read: a folder in its place.
     std::fs::create_dir_all(store.data_dir("youth").join("state.json")).unwrap();
-    let mut state = cut_short(dir.path(), "main", "youth");
+    let mut state = cut_short(dir, "main", "youth");
     let (base, seen) = crate::push::tests::fake_push_service().await;
     state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
     state
@@ -706,30 +703,69 @@ async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
         .await
         .add(crate::push::tests::subscription(format!("{base}/201")))
         .unwrap();
-    let mut peer = synced(&mut state, running()).await;
-    state.retry = Duration::from_millis(100);
+    let peer = synced(&mut state, running()).await;
+    state.retry = Duration::from_millis(50);
+    (state, peer, seen)
+}
+
+/// #58 review: a switch a restart cut short that cannot be finished (the
+/// new band's stored state is unreadable) does not freeze the pages for
+/// good: after three tries the old band plays again from its stored state,
+/// recorded, the intent gone; #58 re-review: the engineer's devices hear
+/// of it once that is done, not before.
+#[tokio::test]
+async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LineupStore::new(dir.path());
+    let (state, mut peer, seen) = unfinishable(dir.path()).await;
     let replay = tokio::spawn(replay_when_synced(state.clone()));
-    // A few tries apart, then the alarm.
-    let t0 = std::time::Instant::now();
-    while seen.lock().unwrap().is_empty() {
-        assert!(
-            t0.elapsed() < Duration::from_secs(15),
-            "an alarm within 15 s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let imported = fake::imports(&mut peer, 2).await;
+    let (id, imported) = fake::next_import(&mut peer).await;
     assert_eq!(
         imported.inputs[&InputId::new("keys")].trim_db,
         2.0,
         "main's"
     );
-    within(replay).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "no alarm before it is done"
+    );
+    fake::answer_import(&mut peer, id, 2, imported).await;
+    assert_eq!(
+        within(replay).await,
+        Replayed::FellBack { tries: MAX_REPLAYS }
+    );
     assert_eq!(store.active().unwrap().as_deref(), Some("main"));
     assert_eq!(store.intent().unwrap(), None);
     assert_eq!(state.roster().unwrap().active, "main");
     assert!(!state.frozen_now());
+    until("the alarm", || !seen.lock().unwrap().is_empty()).await;
     assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
+}
+
+/// #58 re-review: a cut switch that can neither be finished nor go back
+/// (the engine refuses the old band's state too) frees the pages after
+/// three tries of each, tells the pages and the engineer's devices, and
+/// keeps the intent for the next start.
+#[tokio::test]
+async fn a_replay_that_cannot_go_back_either_frees_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, mut peer, seen) = unfinishable(dir.path()).await;
+    let mut rx = state.lineup_tx.subscribe();
+    let replay = tokio::spawn(replay_when_synced(state.clone()));
+    for _ in 0..MAX_REPLAYS {
+        fake::refuses(&mut peer).await;
+    }
+    assert_eq!(within(replay).await, Replayed::GaveUp);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "no more tries"
+    );
+    assert!(!state.frozen_now());
+    assert_eq!(rx.try_recv().unwrap().id, "main");
+    assert!(LineupStore::new(dir.path()).intent().unwrap().is_some());
+    until("the alarm", || seen.lock().unwrap().len() == 1).await;
 }
 
 /// #58 review: a lineup that never played starts from the running state;
