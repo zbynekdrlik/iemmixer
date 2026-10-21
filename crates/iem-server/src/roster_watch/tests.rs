@@ -1543,3 +1543,37 @@ async fn a_settle_that_gave_up_still_moves_people_at_the_next_reload() {
         "member5's mix, moved now"
     );
 }
+
+/// #58 re-review: a roster change waits while a switch a restart cut short
+/// is not finished: until its replay has run, which band's state the
+/// engine holds is not known.
+#[tokio::test]
+async fn a_reload_waits_for_an_unfinished_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store
+        .set_intent(&crate::lineup_store::SwitchIntent {
+            from: "main".into(),
+            to: "youth".into(),
+        })
+        .unwrap();
+    let mut state = AppState::new(test_config(), d);
+    assert!(state.frozen_now());
+    let mut peer = synced(&mut state, running()).await;
+    assert_eq!(
+        within(spawn_apply(&state, &swapped())).await,
+        Applied::Deferred(vec![
+            "a band switch is not finished: the roster waits for it".to_string()
+        ])
+    );
+    assert!(state.frozen_now(), "still the switch's");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "nothing sent"
+    );
+}
