@@ -156,6 +156,46 @@ fn a_peer_hears_the_other_mixs_own_output_without_what_that_mix_hears() {
     assert_eq!(odd.run(&xy(x, y, 512), 97), out);
 }
 
+/// #58: the meter frame carries what each mix's peers hear of it: a
+/// shadow's peak for a shadowed mix, its output's for any other; a site
+/// without a shadow sends none.
+#[test]
+fn a_shadow_is_metered_as_its_peers_hear_it() {
+    let mut r = peers_rig(&[
+        level("a", src_in("x"), 0.0),
+        level("b", src_in("y"), 0.0),
+        level("a", peer("b"), 0.0),
+        level("b", peer("a"), 0.0),
+        level("eng", src_in("x"), 0.0),
+    ]);
+    let topo = Arc::clone(&r.p.topo);
+    let at = |id: &str| topo.mix_index(&mix(id)).unwrap();
+    let (x, y) = (0.2, 0.1);
+    r.run(&xy(x, y, 3200), 32);
+    assert!(r.h.meters.updated());
+    let f = r.h.meters.read().clone();
+    let g = g0();
+    assert_eq!(f.own.len(), 3);
+    // b's own output (y) differs from what b's TX carries (y and a's own).
+    assert!(close(f.own[at("b")][0], y * g * g, 1e-12), "{:?}", f.own);
+    assert!(close(f.own[at("a")][1], x * g * g, 1e-12), "{:?}", f.own);
+    assert!(close(
+        f.mixes[at("b")][0],
+        (y * g + g * (x * g * g)) * g,
+        1e-12
+    ));
+    // The engineer is nobody's peer: its own output is its output.
+    assert!(close(f.own[at("eng")][0], x * g * g, 1e-12), "{:?}", f.own);
+    assert_eq!(f.own[at("eng")], f.mixes[at("eng")]);
+    // Peaks start again with each frame.
+    r.run(&xy(0.0, 0.0, 3200), 32);
+    assert_eq!(r.h.meters.read().own[at("b")], [0.0, 0.0]);
+    // Without a shadow the frame has no own peaks.
+    let mut plain = rig(&[level("m1", src_in("mono"), 0.0)]);
+    plain.run(&rx(&[0.25], 3200), 32);
+    assert!(plain.h.meters.read().own.is_empty());
+}
+
 #[test]
 fn a_shadow_follows_the_mixs_eq_limiter_and_volume() {
     // b carries y and hears a only at an off level, so its TX is its own

@@ -173,7 +173,8 @@ fn own_sum(
 
 /// A shadow's own output (#58): the own sum → EQ → limiter → volume/mute,
 /// sanitised like the mix (a trip silences it and resets its EQ and
-/// limiter). Returns whether it tripped.
+/// limiter) and metered (what its peers' strips show). Returns whether it
+/// tripped.
 fn render_shadow(shadow: &mut ShadowRt, own: &Stereo, n: usize) -> bool {
     let ShadowRt {
         out,
@@ -181,6 +182,7 @@ fn render_shadow(shadow: &mut ShadowRt, own: &Stereo, n: usize) -> bool {
         limiter,
         fader,
         trips,
+        peak,
     } = shadow;
     let (l, r) = out.get_mut(n);
     let (ol, or) = own.get(n);
@@ -196,6 +198,7 @@ fn render_shadow(shadow: &mut ShadowRt, own: &Stereo, n: usize) -> bool {
         eq.reset();
         limiter.lim.reset();
     }
+    peak.observe([&*l, &*r]);
     tripped
 }
 

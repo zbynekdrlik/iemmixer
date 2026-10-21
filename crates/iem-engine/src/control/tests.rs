@@ -44,6 +44,7 @@ fn meter_frames_convert_to_the_protocol() {
         active: vec![96_000, 48_000],
         trips: 2,
         hil: vec![0.25],
+        own: vec![[0.5, 0.0], [0.25, 4.0]],
     };
     let m = meters_msg(&f);
     assert_eq!(m.seq, 3);
@@ -53,6 +54,7 @@ fn meter_frames_convert_to_the_protocol() {
     assert_eq!(m.gr_db, vec![-3.0f32, 0.0]);
     assert_eq!(m.limiter_active_s, vec![1.0, 0.5]);
     assert_eq!(m.trips, 2);
+    assert_eq!(m.own, vec![[0.5f32, 0.0], [0.25, 4.0]]);
 }
 
 #[test]

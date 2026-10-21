@@ -85,6 +85,10 @@ pub struct MeterFrame {
     /// HIL's spare outputs (S6), in the order the engine opened them: what
     /// HIL v1 reads to prove the signal reached them, and left them.
     pub hil: Vec<f64>,
+    /// Each mix's own output (#58), what its peers hear, per mix in topology
+    /// order: its shadow's peak for a shadowed mix, its output's (as in
+    /// `mixes`) for any other; empty when no mix is shadowed.
+    pub own: Vec<[f64; 2]>,
 }
 
 /// Counters the control loop reads.
@@ -251,6 +255,7 @@ struct ShadowRt {
     limiter: MixLimiter,
     fader: StereoGain,
     trips: Trips,
+    peak: PeakMeter<2>,
 }
 
 struct MixRt {
@@ -420,6 +425,7 @@ impl Processor {
                     ),
                     fader: StereoGain::new(sr, db_to_lin(rec.out.volume_db), rec.out.muted, 0.0),
                     trips: Trips::default(),
+                    peak: PeakMeter::new(),
                 })
         };
         let mixes = r
@@ -468,6 +474,11 @@ impl Processor {
             active: vec![0; topo.mixes.len()],
             trips: 0,
             hil: vec![0.0; hil],
+            own: if topo.mixes.iter().any(|n| n.shadow) {
+                vec![[0.0; 2]; topo.mixes.len()]
+            } else {
+                Vec::new()
+            },
         };
         let (meter_in, meters) = triple_buffer::triple_buffer(&frame);
         let (cmd_tx, cmds) = RingBuffer::new(CMD_RING);
@@ -876,6 +887,18 @@ impl Processor {
             .zip(self.mixes.iter_mut().flat_map(|mix| mix.groups.iter_mut()))
         {
             *d = strip.peak.take();
+        }
+        // #58: what each mix's peers hear of it.
+        for ((o, d), mix) in f
+            .own
+            .iter_mut()
+            .zip(f.mixes.iter())
+            .zip(self.mixes.iter_mut())
+        {
+            *o = match mix.shadow.as_mut() {
+                Some(s) => s.peak.take(),
+                None => *d,
+            };
         }
         for (d, peak) in f.hil.iter_mut().zip(self.hil_peaks.iter_mut()) {
             let [p] = peak.take();

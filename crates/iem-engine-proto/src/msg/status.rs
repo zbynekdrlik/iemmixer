@@ -16,6 +16,12 @@ pub struct Meters {
     pub gr_db: Vec<f32>,
     pub limiter_active_s: Vec<f64>,
     pub trips: u64,
+    /// Each mix's own output (#58), what its peers hear: its shadow's peak
+    /// for a mix that hears others and is a peer, its output's (as in
+    /// `mixes`) for any other. Written only when some mix is shadowed (an
+    /// older engine never writes it): a peer's strip then meters this.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub own: Vec<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

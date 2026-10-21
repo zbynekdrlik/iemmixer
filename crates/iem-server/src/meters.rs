@@ -1,7 +1,8 @@
 //! Meters for the UI (F9; S5 design note §5): the engine publishes peaks at
 //! 30 Hz; the server max-merges them and sends every page a map by id every
-//! 100 ms — inputs (post-mute), mixes (post volume and mute) and the page's
-//! own stems strip under the group id.
+//! 100 ms — inputs (post-mute), mixes (post volume and mute; a mix the page
+//! hears as a peer: its own output, #58) and the page's own stems strip
+//! under the group id.
 
 use std::collections::HashMap;
 
@@ -21,6 +22,9 @@ pub struct Merged {
     pub groups: Vec<[f32; 2]>,
     /// Limiter active seconds per mix (X14), in topology order.
     pub active_s: Vec<f64>,
+    /// Each mix's own output, what its peers hear (#58), in topology order;
+    /// empty when the engine sends none (no mix is shadowed).
+    pub own: Vec<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +47,7 @@ impl MeterMerge {
         merge(&mut self.cur.inputs, &m.inputs);
         merge(&mut self.cur.mixes, &m.mixes);
         merge(&mut self.cur.groups, &m.groups);
+        merge(&mut self.cur.own, &m.own);
         self.active_s.clone_from(&m.limiter_active_s);
         self.fresh = true;
     }
@@ -77,6 +82,23 @@ pub fn page_meters(
     }
     for (info, v) in topo.mixes.iter().zip(&m.mixes) {
         out.insert(info.id.0.clone(), *v);
+    }
+    // #58: the page hears its peers' own output, not what they hear: their
+    // strips meter that (the shadow's peaks, when the engine sends them).
+    let peers = topo
+        .mixes
+        .iter()
+        .find(|x| x.id == page.mix)
+        .map_or(&[][..], |x| x.peers.as_slice());
+    for p in peers {
+        if let Some(v) = topo
+            .mixes
+            .iter()
+            .position(|x| &x.id == p)
+            .and_then(|i| m.own.get(i))
+        {
+            out.insert(p.0.clone(), *v);
+        }
     }
     let groups = topo.groups.len();
     let mix = topo.mixes.iter().position(|x| x.id == page.mix);
@@ -113,6 +135,7 @@ mod tests {
             gr_db: vec![0.0; 11],
             limiter_active_s: active,
             trips: 0,
+            own: Vec::new(),
         }
     }
 
@@ -145,6 +168,7 @@ mod tests {
             mixes: vec![[0.3, 0.3]; 11],
             groups,
             active_s: vec![],
+            own: vec![],
         };
         let p = v.page("member1").unwrap();
         let map = page_meters(&merged, &topo, &p, v.group.as_ref());
@@ -158,6 +182,48 @@ mod tests {
             [0.0, 0.0]
         );
         assert!(!page_meters(&merged, &topo, &p2, None).contains_key("stems"));
+    }
+
+    /// #58: on member3's page, which hears member1 as a peer, member1's strip
+    /// meters member1's own output; the engineer, who hears member1 whole,
+    /// meters its whole output; without own peaks (no shadow, an older
+    /// engine) every mix strip meters the whole output.
+    #[test]
+    fn a_peers_strip_meters_its_own_output() {
+        let topo = test_topology();
+        let v = test_view();
+        let m1 = topo.mixes.iter().position(|m| m.id.0 == "member1").unwrap();
+        let m2 = topo.mixes.iter().position(|m| m.id.0 == "member2").unwrap();
+        let mut own = vec![[0.3, 0.3]; 11];
+        own[m1] = [0.1, 0.2];
+        let mut merged = Merged {
+            mixes: vec![[0.3, 0.3]; 11],
+            own,
+            ..Merged::default()
+        };
+        let on = |page: &str, m: &Merged| page_meters(m, &topo, &v.page(page).unwrap(), None);
+        assert_eq!(on("member3", &merged)["member1"], [0.1, 0.2]);
+        assert_eq!(on("member3", &merged)["member2"], [0.3, 0.3]);
+        assert_eq!(
+            on("member3", &merged)["member3"],
+            [0.3, 0.3],
+            "its own IEM mix"
+        );
+        assert_eq!(on("engineer", &merged)["member1"], [0.3, 0.3]);
+        assert_eq!(on("member2", &merged)["member1"], [0.3, 0.3], "no peers");
+        merged.own[m2] = [0.0, 0.05];
+        assert_eq!(on("member1", &merged)["member2"], [0.0, 0.05]);
+        merged.own.clear();
+        assert_eq!(on("member3", &merged)["member1"], [0.3, 0.3]);
+        // The merge keeps the loudest own peak too.
+        let mut mm = MeterMerge::default();
+        for own in [vec![[0.5, 0.1]], vec![[0.2, 0.4]]] {
+            mm.push(&Meters {
+                own,
+                ..Meters::default()
+            });
+        }
+        assert_eq!(mm.take().unwrap().own, vec![[0.5, 0.4]]);
     }
 
     #[test]
