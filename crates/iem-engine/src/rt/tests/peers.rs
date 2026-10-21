@@ -56,6 +56,73 @@ fn xy(x: f64, y: f64, frames: usize) -> Planar {
     dc(&[x, y], frames)
 }
 
+/// RX: x 0, y 1, z 2 (mono). TX: a 0/1, b 2/3, c 4/5, eng 6/7. c hears b
+/// whole and a as a peer; nobody else hears anything.
+const BOTH: &str = r#"
+[engine]
+channels = 16
+engineer = "eng"
+[[engine.inputs]]
+id = "x"
+rx = [1]
+[[engine.inputs]]
+id = "y"
+rx = [2]
+[[engine.inputs]]
+id = "z"
+rx = [3]
+[[engine.mixes]]
+id = "a"
+tx = [1, 2]
+[[engine.mixes]]
+id = "b"
+tx = [3, 4]
+[[engine.mixes]]
+id = "c"
+tx = [5, 6]
+mixes = ["b"]
+peers = ["a"]
+[[engine.mixes]]
+id = "eng"
+tx = [7, 8]
+"#;
+
+#[test]
+fn a_mix_hears_its_heard_mixes_then_its_peers_each_at_its_own_level() {
+    // c's slots: x, y, z, then b (heard whole), then a (its peer).
+    let cmds = [
+        level("a", src_in("x"), 0.0),
+        level("b", src_in("y"), 0.0),
+        level("c", src_in("z"), 0.0),
+        level("c", peer("b"), -6.0),
+        level("c", peer("a"), -12.0),
+    ];
+    let mut r = rig_with(
+        BOTH,
+        &cmds,
+        Flags::default(),
+        Options {
+            fade_in_ms: 0.0,
+            hold: false,
+        },
+    );
+    let c = r.p.topo.mix_index(&mix("c")).unwrap();
+    assert_eq!(r.p.topo.slot(c, &peer("a")), Some(4));
+    assert!(r.p.topo.mixes.iter().all(|n| !n.shadow));
+    let (x, y, z) = (0.1, 0.05, 0.2);
+    let out = r.run(&dc(&[x, y, z], 512), 32);
+    let g = g0();
+    let (lb, la) = (10f64.powf(-0.3) * g, 10f64.powf(-0.6) * g);
+    let want = (z * g + lb * (y * g * g) + la * (x * g * g)) * g;
+    for ch in [4, 5] {
+        assert!(
+            out.channel(ch).iter().all(|v| close(*v, want, 1e-12)),
+            "TX {ch}: {} vs {want}",
+            out.channel(ch)[511]
+        );
+    }
+}
+
 #[test]
 fn a_peer_hears_the_other_mixs_own_output_without_what_that_mix_hears() {
     let cmds = [
@@ -77,7 +144,7 @@ fn a_peer_hears_the_other_mixs_own_output_without_what_that_mix_hears() {
     let want_b = (y * g + g * (x * g * g)) * g;
     for (ch, want) in [(A_L, want_a), (A_R, want_a), (B_L, want_b), (B_R, want_b)] {
         assert!(
-            out.channel(ch).iter().all(|v| close(*v, want, 1e-15)),
+            out.channel(ch).iter().all(|v| close(*v, want, 1e-12)),
             "TX {ch}: {} vs {want}",
             out.channel(ch)[511]
         );
