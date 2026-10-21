@@ -918,8 +918,9 @@ async fn an_inactive_lineups_stored_state_follows_the_roster() {
     let store = LineupStore::new(dir.path());
     let stored = MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, running());
     store.save_state("main", &stored).unwrap();
-    // Youth's running state already fits youth (only the empty sets muted).
-    let mut youth = running();
+    // Youth's running state already fits youth (only the empty sets muted),
+    // shaped as the engine holds it.
+    let mut youth = shape::reconcile(&test_topology(), &running()).0;
     let lineup = test_roster("youth");
     fit_recorded(
         &mut youth,
@@ -1118,9 +1119,10 @@ async fn a_set_its_wearer_muted_stays_muted() {
     );
 }
 
-/// Youth's running state as a switch leaves it: youth's rules hold.
+/// Youth's running state as a switch leaves it: shaped by the topology, as
+/// the engine holds every state, and youth's rules hold.
 fn youth_running() -> MixState {
-    let mut live = running();
+    let mut live = shape::reconcile(&test_topology(), &running()).0;
     let r = test_roster("youth");
     fit_recorded(&mut live, &r.roster, r.lineup(), &mut BTreeSet::new());
     live
