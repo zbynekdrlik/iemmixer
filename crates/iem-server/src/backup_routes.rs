@@ -66,15 +66,20 @@ fn unavailable() -> Reject {
 }
 
 /// A backup of the running state, saved; `None` when the engine never spoke.
-pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
+/// Never beside a switch, a roster reload or a restore (#58): it waits for
+/// the one that runs (`AppState::switching`), so it backs up the band that
+/// plays after it.
+pub async fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
+    let _running = state.switching.lock().await;
     let site = state
         .site()
         .ok_or("the engine has not announced its topology")?;
     if !state.engine.mirror().synced {
         return Err("the engine state is not synced".into());
     }
-    // Mid-switch the engine may hold the next band's state while the
-    // roster still names the last one (#58).
+    // After a switch a restart cut short, until it is finished, the engine
+    // may hold the next band's state while the roster still names the
+    // last one.
     if state.frozen_now() {
         return Err("the band is being switched".into());
     }
@@ -260,7 +265,7 @@ async fn trigger_capture(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<BackupInfo>, Reject> {
     engineer(&state, &headers).await?;
-    let (filename, b) = capture_now(&state).map_err(|e| {
+    let (filename, b) = capture_now(&state).await.map_err(|e| {
         tracing::error!(error = %e, "backup capture failed");
         (
             StatusCode::SERVICE_UNAVAILABLE,

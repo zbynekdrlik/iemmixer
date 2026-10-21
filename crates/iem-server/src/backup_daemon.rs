@@ -110,7 +110,9 @@ async fn run(state: AppState) {
         let Some(key) = due(&schedule, &today, &hhmm, &done) else {
             continue;
         };
-        let outcome = crate::backup_routes::capture_now(&state).map(|(filename, _)| filename);
+        let outcome = crate::backup_routes::capture_now(&state)
+            .await
+            .map(|(filename, _)| filename);
         if settle(&state, &hhmm, outcome, &mut alarms).await {
             let pruned = state.backup_store.prune(retention_days);
             if pruned > 0 {
