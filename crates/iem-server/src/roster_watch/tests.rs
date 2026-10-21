@@ -906,6 +906,55 @@ async fn a_legacy_server_adopts_its_first_roster() {
     assert_eq!(legacy.roster(), None);
 }
 
+/// #58 review: a set the rules silenced because nobody wore it sounds
+/// again once someone wears it.
+#[tokio::test]
+async fn a_set_the_rules_silenced_sounds_again_once_worn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "youth");
+    let mut peer = synced(&mut state, youth_running()).await;
+    // member11 leaves: set member4 is silenced.
+    let task = spawn_apply(&state, &without_member11());
+    let gone = imports(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &["member11"]));
+    assert!(gone.mixes[&MixId::new("member4")].out.muted);
+    // member11 comes back: their set sounds again.
+    let task = spawn_apply(&state, TEXT);
+    let back = fake::imports(&mut peer, 3).await;
+    assert_eq!(within(task).await, applied(&["member11"], &[]));
+    assert!(!back.mixes[&MixId::new("member4")].out.muted);
+}
+
+/// #58 review: a set its wearer muted stays muted when it is left empty
+/// and worn again: the rules unmute only what they silenced.
+#[tokio::test]
+async fn a_set_its_wearer_muted_stays_muted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "youth");
+    let mut live = youth_running();
+    mix_mut(&mut live, "member4").out.muted = true;
+    let mut peer = synced(&mut state, live).await;
+    // Nothing changes in the running state: no import either time.
+    assert_eq!(
+        within(spawn_apply(&state, &without_member11())).await,
+        applied(&[], &["member11"])
+    );
+    assert_eq!(
+        within(spawn_apply(&state, TEXT)).await,
+        applied(&["member11"], &[])
+    );
+    assert!(
+        state.engine.mirror().state.mixes[&MixId::new("member4")]
+            .out
+            .muted
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err()
+    );
+}
+
 /// Youth's running state as a switch leaves it: youth's rules hold.
 fn youth_running() -> MixState {
     let mut live = running();

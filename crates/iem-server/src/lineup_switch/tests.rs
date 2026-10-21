@@ -705,6 +705,44 @@ async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
     assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
 }
 
+/// #58 review: a lineup that never played starts from the running state;
+/// the sets the band before left empty, silenced by its rules, sound again
+/// where the new band's people wear them, and a set its wearer muted stays
+/// muted.
+#[tokio::test]
+async fn a_lineup_without_state_unmutes_the_sets_its_people_wear() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "youth");
+    let mut live = running();
+    // member10 muted their own mix (set member1) in youth.
+    mix_mut(&mut live, "member1").out.muted = true;
+    let mut peer = synced(&mut state, live).await;
+    // Youth's rules reach the running state (the same roster, a new file).
+    let reload = {
+        let s = state.clone();
+        tokio::spawn(async move { crate::roster_watch::apply_text(&s, TEXT, "edited").await })
+    };
+    let fitted = fake::imports(&mut peer, 2).await;
+    assert!(matches!(
+        within(reload).await,
+        crate::roster_watch::Applied::Applied { .. }
+    ));
+    assert!(fitted.mixes[&mix_id("member2")].out.muted);
+    // Main never played: it starts from youth's running state.
+    let switch = spawn_switch(&state, "main", claims("engineer", true));
+    let to_main = fake::imports(&mut peer, 3).await;
+    assert_eq!(within(switch).await, Ok(()));
+    for set in [
+        "member2", "member5", "member6", "member7", "member8", "member9",
+    ] {
+        assert!(!to_main.mixes[&mix_id(set)].out.muted, "{set}");
+    }
+    assert!(
+        to_main.mixes[&mix_id("member1")].out.muted,
+        "member10 muted it themselves"
+    );
+}
+
 /// Without a switch to finish, the start's replay ends at once.
 #[tokio::test]
 async fn nothing_to_replay_ends_at_once() {
