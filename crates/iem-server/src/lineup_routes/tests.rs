@@ -182,3 +182,34 @@ async fn the_switch_answers_by_its_outcome() {
         (StatusCode::CONFLICT, Some("BUSY".into()))
     );
 }
+
+/// #58 review: a switch whose request is dropped (the phone went away)
+/// after the engine got the band's state still finishes: the new band is
+/// recorded, the intent is gone and the pages are free again.
+#[tokio::test]
+async fn a_switch_finishes_when_its_request_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, _) = app(dir.path());
+    state.set_roster(Some(test_roster("main")));
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    fake::sync(&state.engine, &mut peer, 1, MixState::default()).await;
+    let api = router(state.clone());
+    let leader = token("member3", false);
+    let request = tokio::spawn(async move { switch(&api, &leader, "youth").await });
+    let (id, imported) = fake::next_import(&mut peer).await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    fake::answer_import(&mut peer, id, 2, imported).await;
+    let store = crate::lineup_store::LineupStore::new(dir.path());
+    let t0 = std::time::Instant::now();
+    while state.roster().unwrap().active != "youth" || state.frozen_now() {
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "the switch finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(store.active().unwrap().as_deref(), Some("youth"));
+    assert_eq!(store.intent().unwrap(), None);
+}

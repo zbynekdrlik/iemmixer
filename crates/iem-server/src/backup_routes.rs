@@ -457,4 +457,53 @@ mod tests {
         let (status, info) = call(&app, Method::POST, capture, Some(&eng), None).await;
         assert_eq!(status, StatusCode::OK, "{info}");
     }
+
+    /// Waits (≤ 5 s) until `done` holds.
+    async fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let t0 = std::time::Instant::now();
+        while !done() {
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(5),
+                "{what} within 5 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// #58 review: a restore whose request is dropped after the engine got
+    /// the backup's state still finishes: the pins and hides are written and
+    /// the switch is free again.
+    #[tokio::test]
+    async fn a_restore_finishes_when_its_request_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = app(dir.path());
+        let (engine, mut peer) = fake::announced(crate::site_view::tests::test_topology()).await;
+        state.engine = engine;
+        fake::sync(&state.engine, &mut peer, 1, MixState::default()).await;
+        let mut b = iem_core::backup::MixerBackup::new(
+            "2026-10-21T12:00:00Z".into(),
+            1,
+            MixState::default(),
+        );
+        let mic1 = iem_engine_proto::Source::Input(InputId::new("mic1"));
+        b.customizations.insert(
+            "member2".into(),
+            iem_core::band::CustomizationFile::new("member2", vec![mic1.clone()], vec![]),
+        );
+        let name = state.backup_store.save(&b).unwrap();
+        let api = router(state.clone());
+        let eng = token("engineer", true);
+        let uri = format!("/api/backups/{name}/restore");
+        let request =
+            tokio::spawn(async move { call(&api, Method::POST, &uri, Some(&eng), None).await });
+        let (id, imported) = fake::next_import(&mut peer).await;
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        fake::answer_import(&mut peer, id, 2, imported).await;
+        until("the pins and hides", || {
+            state.band().customization("member2").unwrap().pinned == vec![mic1.clone()]
+        })
+        .await;
+        until("the switch free", || state.switching.try_lock().is_ok()).await;
+    }
 }
