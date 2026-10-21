@@ -10,7 +10,7 @@ use axum::http::{Method, StatusCode};
 use iem_core::backup::MixerBackup;
 use iem_core::band::CustomizationFile;
 use iem_core::{ClientMsg, LineupRef};
-use iem_engine_proto::{InputId, Level, Mix, MixId, Source};
+use iem_engine_proto::{Change, EngineMsg, InputId, Level, Mix, MixId, Reply, Source};
 use tokio::sync::mpsc;
 
 use crate::engine::client::fake;
@@ -284,6 +284,67 @@ async fn a_youth_leader_can_switch_back_to_main_without_playing_in_it() {
     // Main had no stored state: the running one, under main's rules.
     assert_eq!(imported, running());
     assert_eq!(state.roster().unwrap().active, "main");
+}
+
+/// #58 review: a page change on its way to the engine when a switch begins
+/// is in the band's stored state: the switch waits for every change queued
+/// before its freeze before it takes the live state.
+#[tokio::test]
+async fn a_change_on_its_way_is_in_the_bands_stored_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    let mut peer = synced(&mut state, running()).await;
+    let page = state.page("member3").unwrap();
+    let change = {
+        let s = state.clone();
+        tokio::spawn(async move {
+            let viewer = Viewer {
+                sub: "member3".into(),
+                engineer: false,
+            };
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let set = ClientMsg::SetLevel {
+                id: "keys".into(),
+                level_db: -6.0,
+            };
+            crate::mixer_ws::handle(&s, 7, &page, &viewer, set, &tx).await;
+        })
+    };
+    let (change_id, cmd) = fake::next_request(&mut peer).await;
+    assert!(matches!(cmd, Cmd::SetLevel { .. }), "{cmd:?}");
+    // The switch begins while the engine holds the change.
+    let switch = spawn_switch(&state, "youth", claims("engineer", true));
+    let level = Level {
+        gain_db: -6.0,
+        pan: 0.0,
+        muted: false,
+    };
+    peer.send(&EngineMsg::Reply(Reply {
+        id: change_id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    peer.send(&EngineMsg::Delta {
+        rev: 2,
+        origin: Some(7),
+        changes: vec![Change::Level {
+            mix: mix_id("member3"),
+            source: Source::Input(InputId::new("keys")),
+            level,
+        }],
+    })
+    .await;
+    within(change).await;
+    fake::imports(&mut peer, 3).await;
+    assert_eq!(within(switch).await, Ok(()));
+    let main = store.state("main").unwrap().unwrap();
+    assert_eq!(
+        main.state.mixes[&mix_id("member3")].inputs[&InputId::new("keys")].gain_db,
+        -6.0,
+        "the change is main's"
+    );
 }
 
 #[tokio::test]
