@@ -1058,7 +1058,7 @@ async fn a_replay_waits_for_the_engines_state() {
         Err("the engine state is not synced".to_string())
     );
     assert!(state.frozen_now());
-    assert_eq!(LineupStore::new(dir.path()).intent().unwrap(), None);
+    assert!(LineupStore::new(dir.path()).intent().unwrap().is_some());
     let replay = tokio::spawn(replay_when_synced(state.clone()));
     tokio::time::sleep(Duration::from_millis(100)).await;
     fake::sync(&state.engine, &mut peer, 1, running()).await;
