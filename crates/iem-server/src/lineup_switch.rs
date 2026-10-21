@@ -335,13 +335,18 @@ async fn play(
     roster: &Roster,
     lineup: &Lineup,
     stored: Option<MixerBackup>,
+    other: Option<&Lineup>,
 ) -> Result<(), String> {
-    let current = {
+    let (current, soloed) = {
         let mirror = state.engine.mirror();
         if !mirror.synced {
             return Err("the engine state is not synced".into());
         }
-        mirror.state.clone()
+        // The engine keeps solos across the import: a set whose wearer is
+        // another in `other`, the band the switch was between, loses its
+        // solo (the pages are frozen still).
+        let soloed = other.map_or_else(Vec::new, |o| soloed_changing(&mirror.transient, o, lineup));
+        (mirror.state.clone(), soloed)
     };
     let running = running_of(store).map_or_else(Default::default, |r| (r.follows, r.silenced));
     let (target, running) = target_of(stored, &current, running, roster, lineup);
@@ -354,6 +359,7 @@ async fn play(
         .set_active(&lineup.id, chrono::Utc::now().timestamp())
         .map_err(|e| e.to_string())?;
     note_running(store, &running);
+    end_solos(state, &soloed).await;
     set_active_in_use(state, &lineup.id);
     Ok(())
 }
@@ -380,7 +386,8 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
             .unwrap_or_else(|| roster.lineup())
             .clone();
         let stored = store.state(&lineup.id).map_err(|e| e.to_string())?;
-        play(state, &store, &roster.roster, &lineup, stored).await?;
+        let other = roster.roster.lineup(&intent.from);
+        play(state, &store, &roster.roster, &lineup, stored, other).await?;
         tracing::warn!(lineup = %lineup.id, "a switch a restart cut short is finished");
     }
     store.clear_intent().map_err(|e| e.to_string())?;
@@ -411,7 +418,8 @@ pub async fn fall_back(state: &AppState) -> Result<(), String> {
             None
         }
     };
-    play(state, &store, &roster.roster, &lineup, stored).await?;
+    let other = roster.roster.lineup(&intent.to);
+    play(state, &store, &roster.roster, &lineup, stored, other).await?;
     store.clear_intent().map_err(|e| e.to_string())?;
     tracing::warn!(lineup = %lineup.id, "a switch a restart cut short was given up: the band before it plays");
     state.thaw();
