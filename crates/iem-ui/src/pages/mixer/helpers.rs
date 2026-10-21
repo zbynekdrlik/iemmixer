@@ -287,7 +287,8 @@ impl LineupView {
     /// The band switch in the settings on `page`, for the bearer `bearer`
     /// (`engineer`: the engineer's token): a bearer who may switch and
     /// plays (one who does not has it on the notice), on their own page; the
-    /// engineer on `/engineer` only.
+    /// engineer on `/engineer` only. It stays while the band is read again
+    /// after the switch it made (the 4003 close), so it keeps its answer.
     pub(super) fn switch_here(
         &self,
         page: &str,
@@ -300,7 +301,11 @@ impl LineupView {
             page == bearer
         };
         match self {
-            Self::Roster(info) if info.can_switch && info.playing && own => Some(info),
+            Self::Roster(info) | Self::Rereading(info)
+                if info.can_switch && info.playing && own =>
+            {
+                Some(info)
+            }
             _ => None,
         }
     }
