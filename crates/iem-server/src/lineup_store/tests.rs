@@ -230,6 +230,19 @@ fn a_roster_is_kept_under_its_sha256_only() {
     }
 }
 
+/// #58 fourth review: a roster kept already is not written again (the
+/// start and every deferred poll keep the roster in use; a file of that
+/// name is the same roster, its name being its SHA-256).
+#[test]
+fn a_kept_roster_is_not_written_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = LineupStore::new(dir.path());
+    let sha = "a".repeat(64);
+    s.keep_roster(&sha, "first").unwrap();
+    s.keep_roster(&sha, "second").unwrap();
+    assert_eq!(s.kept_roster(&sha).unwrap().as_deref(), Some("first"));
+}
+
 /// #58 fourth review: the kept rosters' folder in `lineups/` is no
 /// lineup's: no lineup id can name it, so no lineup shares it and no walk
 /// over the lineups' folders (`people_archive`) takes it for one.
