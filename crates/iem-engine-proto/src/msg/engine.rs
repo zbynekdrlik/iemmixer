@@ -70,14 +70,21 @@ pub struct MixInfo {
     pub id: MixId,
     /// TX channels: 2 (stereo) or 1 (the mono downmix, A10).
     pub channels: u8,
-    /// The mixes this mix hears (the Mixes tab, F16), all declared before it.
+    /// The mixes this mix hears whole (the Mixes tab, F16), all declared
+    /// before it.
     #[serde(default)]
     pub mixes: Vec<MixId>,
+    /// The sets this mix hears as their own mix, without what they hear
+    /// (#58). Written only when it has some, so the topology hash of a site
+    /// without peers is the one it had before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<MixId>,
 }
 
 /// The compiled topology. Every mix has a level for every input, a strip for
-/// every group and a level for each mix it hears. Meter frames list inputs,
-/// then mixes, then every mix's group strips (mix-major), in this order.
+/// every group and a level for each mix it hears, then for each peer. Meter
+/// frames list inputs, then mixes, then every mix's group strips
+/// (mix-major), in this order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyInfo {
     pub hash: String,

@@ -2,10 +2,13 @@
 //! design note §3, §4, §6): validated, inputs with their group, groups with
 //! their inputs, the ungrouped inputs every mix sums directly, and mixes in
 //! declaration order with the earlier mixes each one hears. There is no graph
-//! to sort: a mix may hear only mixes declared before it.
+//! to sort: a mix may hear whole only mixes declared before it. Its peers
+//! (#58 design §8) may be declared anywhere: a peer is heard as its own mix,
+//! without what it hears, so two sets can hear each other.
 //!
-//! Every mix has one level per input and one per heard mix; a mix's level
-//! slots are the inputs in site order, then its heard mixes in its order.
+//! Every mix has one level per input, one per heard mix and one per peer; a
+//! mix's level slots are the inputs in site order, then its heard mixes in
+//! its order, then its peers in its order.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -43,16 +46,37 @@ pub struct MixNode {
     /// Indices into [`Topology::tx`]; a mono mix has only the first.
     pub tx: [Option<usize>; 2],
     pub mono: bool,
-    /// The mixes it hears (indices below its own), in its order.
+    /// The mixes it hears whole (indices below its own), in its order.
     pub mixes: Vec<usize>,
+    /// The sets it hears as peers (#58): their own output, without what
+    /// they hear; other stereo mixes but the engineer's, in its order.
+    pub peers: Vec<usize>,
+    /// It hears a mix or a peer and is some mix's peer: the processor
+    /// renders its own output a second time (its shadow) for the mixes that
+    /// hear it as a peer.
+    pub shadow: bool,
+}
+
+impl MixNode {
+    /// Whether it hears no other mix, whole or as a peer: its output is its
+    /// own, so a peer reads it directly.
+    pub fn hears_nothing(&self) -> bool {
+        self.mixes.is_empty() && self.peers.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Topology {
     pub inputs: Vec<InputNode>,
     pub groups: Vec<GroupNode>,
-    /// In declaration order, which is the processing order.
+    /// In declaration order.
     pub mixes: Vec<MixNode>,
+    /// The render order (#58): every mix that hears nothing, then every
+    /// other, each group in declaration order. A mix's heard mixes come
+    /// before it (declared before it), and so do its peers that hear
+    /// nothing; a peer that hears something is read from its shadow, which
+    /// the processor renders before any mix of this order.
+    pub order: Vec<usize>,
     /// The inputs in no group, in site order: every mix sums them directly.
     pub direct: Vec<usize>,
     /// Card RX channels in the order the backend delivers them.
@@ -212,12 +236,47 @@ pub fn compile(site: &Site) -> Result<Topology, SiteError> {
             tx: [Some(first), (!mono).then_some(first + 1)],
             mono,
             mixes: heard,
+            peers: Vec::new(),
+            shadow: false,
         });
     }
     let engineer = match declared.get(site.engineer.as_str()) {
         Some(&m) if mixes.get(m).is_some_and(|n| !n.mono) => m,
         _ => return Err(SiteError::Engineer(site.engineer.clone())),
     };
+    // Peers (#58) may be declared anywhere: resolved once every mix is.
+    for (m, mix) in site.mixes.iter().enumerate() {
+        let mut peers = Vec::with_capacity(mix.peers.len());
+        for name in &mix.peers {
+            let peer = declared.get(name.as_str()).copied().filter(|&s| {
+                s != m
+                    && s != engineer
+                    && mixes.get(s).is_some_and(|n| !n.mono)
+                    && mixes.get(m).is_some_and(|n| !n.mixes.contains(&s))
+                    && !peers.contains(&s)
+            });
+            let Some(s) = peer else {
+                return Err(SiteError::Peer {
+                    mix: mix.id.clone(),
+                    peer: name.clone(),
+                });
+            };
+            peers.push(s);
+        }
+        if let Some(node) = mixes.get_mut(m) {
+            node.peers = peers;
+        }
+    }
+    let heard_as_peer: Vec<bool> = (0..mixes.len())
+        .map(|m| mixes.iter().any(|n| n.peers.contains(&m)))
+        .collect();
+    for (node, peer) in mixes.iter_mut().zip(heard_as_peer) {
+        node.shadow = peer && !node.hears_nothing();
+    }
+    let order = (0..mixes.len())
+        .filter(|&m| mixes.get(m).is_some_and(MixNode::hears_nothing))
+        .chain((0..mixes.len()).filter(|&m| mixes.get(m).is_some_and(|n| !n.hears_nothing())))
+        .collect();
 
     let mut topo = Topology {
         input_index: inputs
@@ -238,6 +297,7 @@ pub fn compile(site: &Site) -> Result<Topology, SiteError> {
         inputs,
         groups,
         mixes,
+        order,
         direct,
         rx,
         tx,
@@ -265,20 +325,28 @@ impl Topology {
         self.mix_index.get(id).copied()
     }
 
-    /// Level slots of mix `m`: every input, then the mixes it hears.
+    /// Level slots of mix `m`: every input, then the mixes it hears, then
+    /// its peers.
     pub fn levels(&self, m: usize) -> usize {
-        self.inputs.len() + self.mixes.get(m).map_or(0, |n| n.mixes.len())
+        self.inputs.len()
+            + self
+                .mixes
+                .get(m)
+                .map_or(0, |n| n.mixes.len() + n.peers.len())
     }
 
     /// The level slot of `source` in mix `m`; `None` when the mix does not
-    /// hear it.
+    /// hear it. A mix is looked for among the heard mixes, then the peers.
     pub fn slot(&self, m: usize, source: &Source) -> Option<usize> {
         let node = self.mixes.get(m)?;
         match source {
             Source::Input(id) => self.input_index(id),
             Source::Mix(id) => {
                 let s = self.mix_index(id)?;
-                let k = node.mixes.iter().position(|&h| h == s)?;
+                let k = match node.mixes.iter().position(|&h| h == s) {
+                    Some(k) => k,
+                    None => node.mixes.len() + node.peers.iter().position(|&p| p == s)?,
+                };
                 Some(self.inputs.len() + k)
             }
         }
@@ -350,13 +418,18 @@ impl Topology {
         Ok(outputs)
     }
 
-    /// The source of level slot `k` in mix `m`.
+    /// The source of level slot `k` in mix `m`: an input, a heard mix or a
+    /// peer.
     pub fn source(&self, m: usize, k: usize) -> Option<Source> {
         let node = self.mixes.get(m)?;
         if let Some(n) = self.inputs.get(k) {
             return Some(Source::Input(n.id.clone()));
         }
-        let s = *node.mixes.get(k.checked_sub(self.inputs.len())?)?;
+        let j = k.checked_sub(self.inputs.len())?;
+        let s = match node.mixes.get(j) {
+            Some(&s) => s,
+            None => *node.peers.get(j.checked_sub(node.mixes.len())?)?,
+        };
         self.mixes.get(s).map(|n| Source::Mix(n.id.clone()))
     }
 
@@ -400,6 +473,7 @@ impl Topology {
                     id: n.id.clone(),
                     channels: if n.mono { 1 } else { 2 },
                     mixes: n.mixes.iter().filter_map(mix_id).collect(),
+                    peers: n.peers.iter().filter_map(mix_id).collect(),
                 })
                 .collect(),
         }
@@ -880,5 +954,200 @@ mixes = ["m1"]
             .to_string(),
             "mix \"a\" can hear only mixes declared before it, each once: \"b\""
         );
+        assert_eq!(
+            SiteError::Peer {
+                mix: "m1".into(),
+                peer: "m1".into()
+            }
+            .to_string(),
+            "mix \"m1\" can hear as a peer only another stereo set mix, each once and not also in mixes: \"m1\""
+        );
+    }
+
+    /// `BASE` with `m1` hearing `peers` and the stereo mixes `extra` after
+    /// the engineer (`m2` on TX 6/7, `m3` on 8/9, `m4` on 10/11).
+    fn with_peers(peers: &str, extra: &[&str]) -> String {
+        let mut text = BASE.replacen(
+            "id = \"m1\"\ntx = [3, 4]\n",
+            &format!("id = \"m1\"\ntx = [3, 4]\npeers = [{peers}]\n"),
+            1,
+        );
+        for (id, tx) in [("m2", "[6, 7]"), ("m3", "[8, 9]"), ("m4", "[10, 11]")] {
+            if let Some(more) = extra.iter().find(|e| e.starts_with(id)) {
+                let lines = more.strip_prefix(id).unwrap_or_default();
+                text.push_str(&format!(
+                    "[[engine.mixes]]\nid = \"{id}\"\ntx = {tx}\n{lines}"
+                ));
+            }
+        }
+        text
+    }
+
+    fn compiled(text: &str) -> Topology {
+        compile(&parse(text).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_peer_may_be_declared_after_the_mix_that_hears_it() {
+        let t = compiled(&with_peers("\"m2\"", &["m2"]));
+        let m1 = mix(&t, "m1");
+        assert_eq!(t.mixes[m1].peers, vec![mix(&t, "m2")]);
+        assert!(mix(&t, "m2") > m1, "declared after m1");
+        assert!(t.mixes[m1].mixes.is_empty());
+        assert!(t.mixes[mix(&t, "m2")].peers.is_empty());
+    }
+
+    #[test]
+    fn a_peer_must_be_another_stereo_mix_once_and_not_also_heard_as_a_mix() {
+        let e = |peer: &str| SiteError::Peer {
+            mix: "m1".into(),
+            peer: peer.into(),
+        };
+        // Itself, unknown, an input, a group, the mono translator, the
+        // engineer's mix, twice.
+        for (peers, wrong) in [
+            ("\"m1\"", "m1"),
+            ("\"ghost\"", "ghost"),
+            ("\"mic\"", "mic"),
+            ("\"stems\"", "stems"),
+            ("\"tr\"", "tr"),
+            ("\"eng\"", "eng"),
+            ("\"m2\", \"m2\"", "m2"),
+        ] {
+            let text = with_peers(peers, &["m2"]);
+            assert_eq!(
+                compile(&parse(&text).unwrap()).unwrap_err(),
+                e(wrong),
+                "{peers}"
+            );
+        }
+        // A mix heard whole may not also be a peer.
+        let both = with_peers("\"m2\"", &["m2", "m3mixes = [\"m2\"]\npeers = [\"m2\"]\n"]);
+        assert_eq!(
+            compile(&parse(&both).unwrap()).unwrap_err(),
+            SiteError::Peer {
+                mix: "m3".into(),
+                peer: "m2".into()
+            }
+        );
+        // One mix heard whole and another as a peer.
+        let fine = with_peers("\"m2\"", &["m2", "m3mixes = [\"m1\"]\npeers = [\"m2\"]\n"]);
+        let t = compiled(&fine);
+        let m3 = mix(&t, "m3");
+        assert_eq!(
+            (t.mixes[m3].mixes.clone(), t.mixes[m3].peers.clone()),
+            (vec![mix(&t, "m1")], vec![mix(&t, "m2")])
+        );
+    }
+
+    #[test]
+    fn peers_extend_the_slot_space_after_heard_mixes() {
+        let text = with_peers(
+            "",
+            &["m2mixes = [\"m1\"]\npeers = [\"m3\", \"m4\"]\n", "m3", "m4"],
+        );
+        let t = compiled(&text);
+        let inputs = t.inputs.len();
+        let m2 = mix(&t, "m2");
+        let (m1, m3, m4) = (
+            Source::Mix(MixId::new("m1")),
+            Source::Mix(MixId::new("m3")),
+            Source::Mix(MixId::new("m4")),
+        );
+        assert_eq!(t.levels(m2), inputs + 3);
+        assert_eq!(t.slot(m2, &m1), Some(inputs));
+        assert_eq!(t.slot(m2, &m3), Some(inputs + 1));
+        assert_eq!(t.slot(m2, &m4), Some(inputs + 2));
+        assert_eq!(t.source(m2, inputs), Some(m1));
+        assert_eq!(t.source(m2, inputs + 1), Some(m3.clone()));
+        assert_eq!(t.source(m2, inputs + 2), Some(m4.clone()));
+        assert_eq!(t.source(m2, inputs + 3), None);
+        // Neither the engineer nor itself is heard; m3 hears no peer.
+        assert_eq!(t.slot(m2, &Source::Mix(MixId::new("eng"))), None);
+        assert_eq!(t.slot(m2, &Source::Mix(MixId::new("m2"))), None);
+        assert_eq!(t.slot(mix(&t, "m3"), &m4), None);
+        assert_eq!(t.levels(mix(&t, "m3")), inputs);
+        // A mix with peers but no heard mix: its peers follow the inputs.
+        let only = compiled(&with_peers("\"m3\", \"m2\"", &["m2", "m3"]));
+        let m1 = mix(&only, "m1");
+        assert_eq!(only.levels(m1), inputs + 2);
+        assert_eq!(only.slot(m1, &m3), Some(inputs));
+        assert_eq!(
+            only.source(m1, inputs + 1),
+            Some(Source::Mix(MixId::new("m2")))
+        );
+        assert_eq!(only.source(m1, inputs + 2), None);
+    }
+
+    #[test]
+    fn a_mix_that_hears_and_is_a_peer_has_a_shadow() {
+        // m1 and m3 hear each other; m1 also hears m4, which hears nothing;
+        // the engineer hears m1 whole and is nobody's peer.
+        let text = with_peers("\"m3\", \"m4\"", &["m3peers = [\"m1\"]\n", "m4"]);
+        let t = compiled(&text);
+        let (m1, m3, m4) = (mix(&t, "m1"), mix(&t, "m3"), mix(&t, "m4"));
+        assert_eq!(t.mixes[m1].peers, vec![m3, m4]);
+        assert_eq!(t.mixes[m3].peers, vec![m1]);
+        assert!(t.mixes[m1].shadow && t.mixes[m3].shadow, "mutual");
+        assert!(!t.mixes[m4].shadow, "a peer that hears nothing");
+        assert!(!t.mixes[t.engineer].shadow, "a mix nobody hears as a peer");
+        assert!(!t.mixes[mix(&t, "tr")].shadow);
+        // A peer of two mixes that hears one whole has its shadow too.
+        let whole = with_peers("\"m2\"", &["m2mixes = [\"m1\"]\n", "m3peers = [\"m2\"]\n"]);
+        let t = compiled(&whole);
+        assert!(t.mixes[mix(&t, "m2")].shadow);
+        assert!(!t.mixes[mix(&t, "m2")].hears_nothing());
+        assert!(!t.mixes[mix(&t, "m3")].shadow, "nobody's peer");
+        // No peers anywhere: no shadow.
+        assert!(compiled(BASE).mixes.iter().all(|n| !n.shadow));
+    }
+
+    #[test]
+    fn the_render_order_puts_mixes_that_hear_nothing_first() {
+        // m1 (peers m3, m4), tr, eng (hears m1), m3 (peer m1), m4.
+        let text = with_peers("\"m3\", \"m4\"", &["m3peers = [\"m1\"]\n", "m4"]);
+        let t = compiled(&text);
+        let at = |id: &str| mix(&t, id);
+        assert_eq!(
+            t.order,
+            vec![at("tr"), at("m4"), at("m1"), at("eng"), at("m3")]
+        );
+        // Without peers: mixes that hear nothing, then the engineer.
+        assert_eq!(compiled(BASE).order, vec![0, 1, 2]);
+        // A mix that hears only peers is not one that hears nothing.
+        let peers_only = compiled(&with_peers("\"m2\"", &["m2"]));
+        assert_eq!(
+            peers_only.order,
+            vec![1, 3, 0, 2],
+            "tr, m2, then m1 and eng"
+        );
+        // Every mix once.
+        let mut sorted = t.order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..t.mixes.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_site_without_peers_keeps_its_hash() {
+        let t = compiled(BASE);
+        let json = serde_json::to_string(&t.info()).unwrap();
+        assert!(!json.contains("\"peers\""), "{json}");
+        // The hash is over that same text, so it is the one it had before.
+        let again = Topology {
+            hash: String::new(),
+            ..t.clone()
+        };
+        let digest: String = Sha256::digest(serde_json::to_vec(&again.info()).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(t.hash, digest);
+        // With peers they are written and hashed.
+        let p = compiled(&with_peers("\"m2\"", &["m2"]));
+        let json = serde_json::to_string(&p.info()).unwrap();
+        assert!(json.contains(r#""peers":["m2"]"#), "{json}");
+        assert_eq!(p.info().mixes[mix(&p, "m1")].peers, vec![MixId::new("m2")]);
+        let without = compiled(&with_peers("", &["m2"]));
+        assert_ne!(p.hash, without.hash);
     }
 }
