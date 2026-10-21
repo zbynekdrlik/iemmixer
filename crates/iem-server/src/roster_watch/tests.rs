@@ -1052,9 +1052,10 @@ async fn the_record_of_what_the_rules_silenced_is_kept() {
     let task = spawn_apply(&state, &without_member11());
     imports(&mut peer).await;
     assert_eq!(within(task).await, applied(&[], &["member11"]));
+    let running = LineupStore::new(dir.path()).running().unwrap().unwrap();
     assert_eq!(
-        LineupStore::new(dir.path()).silenced("youth").unwrap(),
-        BTreeSet::from(["member4".to_string()])
+        (running.lineup.as_str(), running.silenced),
+        ("youth", BTreeSet::from(["member4".to_string()]))
     );
 }
 
