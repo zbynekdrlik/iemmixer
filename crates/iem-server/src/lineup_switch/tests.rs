@@ -524,6 +524,61 @@ async fn an_engine_refusal_keeps_the_old_lineup() {
     assert!(rx.try_recv().is_err(), "nothing announced");
 }
 
+/// Waits (≤ 5 s) until `done` holds.
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !done() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "{what} within 5 s");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// #58 review: the engine goes away while it takes the new band's state,
+/// so the old band's cannot go back in either. Neither band is sure to be
+/// in the engine: the intent stays and the pages stay frozen, and once the
+/// engine is back the switch finishes (the new band plays and is recorded).
+#[tokio::test]
+async fn an_engine_gone_during_the_import_finishes_the_switch_once_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    let (connector, mut peers) = fake::connector();
+    state.engine = crate::engine::EngineClient::spawn_with(connector, "test".into());
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 1, running()).await;
+    let task = spawn_switch(&state, "youth", claims("engineer", true));
+    fake::next_import(&mut peer).await;
+    drop(peer);
+    let result = within(task).await;
+    assert!(
+        matches!(result, Err(SwitchError::Engine(EngineError::Disconnected))),
+        "{result:?}"
+    );
+    assert!(state.frozen_now(), "no change until the switch is finished");
+    assert_eq!(
+        store.intent().unwrap(),
+        Some(SwitchIntent {
+            from: "main".into(),
+            to: "youth".into(),
+        })
+    );
+    assert_eq!(state.roster().unwrap().active, "main");
+    // The engine is back: the switch finishes.
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 2, running()).await;
+    let imported = fake::imports(&mut peer, 3).await;
+    assert!(
+        imported.mixes[&mix_id("member2")].out.muted,
+        "youth's rules"
+    );
+    until("the switch finished", || {
+        !state.frozen_now() && state.roster().unwrap().active == "youth"
+    })
+    .await;
+    assert_eq!(store.active().unwrap().as_deref(), Some("youth"));
+    assert_eq!(store.intent().unwrap(), None);
+}
+
 /// A site whose switch main → youth a restart cut short: the roster file,
 /// main recorded active (or `active`), the intent written.
 fn cut_short(dir: &std::path::Path, active: &str, to: &str) -> AppState {

@@ -469,12 +469,10 @@ pub(crate) mod fake {
         (connector, rx)
     }
 
-    /// A client connected to a fake engine that said hello and announced
-    /// `topology` but sent no state yet (the mirror is not synced); the
-    /// engine's end of the connection, the client's hello already read.
-    pub async fn announced(topology: TopologyInfo) -> (EngineClient, Peer) {
-        let (c, mut peers) = connector();
-        let client = EngineClient::spawn_with(c, "test".into());
+    /// The engine's end of a client's next connection on `peers` (≤ 5 s):
+    /// the client's hello read, the engine's hello and `topology` sent, no
+    /// state yet.
+    pub async fn accept(peers: &mut mpsc::UnboundedReceiver<Peer>, topology: TopologyInfo) -> Peer {
         let mut peer = tokio::time::timeout(Duration::from_secs(5), peers.recv())
             .await
             .expect("a connection within 5 s")
@@ -491,6 +489,16 @@ pub(crate) mod fake {
         }))
         .await;
         peer.send(&EngineMsg::Topology(topology)).await;
+        peer
+    }
+
+    /// A client connected to a fake engine that said hello and announced
+    /// `topology` but sent no state yet (the mirror is not synced); the
+    /// engine's end of the connection, the client's hello already read.
+    pub async fn announced(topology: TopologyInfo) -> (EngineClient, Peer) {
+        let (c, mut peers) = connector();
+        let client = EngineClient::spawn_with(c, "test".into());
+        let peer = accept(&mut peers, topology).await;
         let t0 = std::time::Instant::now();
         while client.mirror().topology.is_none() {
             assert!(
