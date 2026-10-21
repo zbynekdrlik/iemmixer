@@ -110,7 +110,11 @@ fn check_prints_one_json_line_and_exits_by_result() {
         serde_json::json!(["person #10: takes_over names a person, whose files are their own"])
     );
     std::fs::create_dir_all(dir.path().join("lineups")).unwrap();
-    std::fs::write(dir.path().join("lineups").join("active.json"), "{}").unwrap();
+    std::fs::write(
+        dir.path().join("lineups").join("active.json"),
+        r#"{"format":"iemmixer-active-lineup","lineup":"main","since":1}"#,
+    )
+    .unwrap();
     let (code, json, _) = check(&taker);
     assert_eq!(code, Some(0), "migrated: takes_over means nothing: {json}");
 }
