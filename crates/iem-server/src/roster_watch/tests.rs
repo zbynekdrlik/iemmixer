@@ -504,9 +504,11 @@ fn load_migrates_starts_on_main_and_refuses_what_it_cannot_use() {
     });
     pins.set_member_hash("former", PHC.into()).unwrap();
     let facts = TopologyFacts::from(&test_topology());
-    let r = load(d, &cfg, &mut pins, Some(&facts))
+    let loaded = load(d, &cfg, &mut pins, Some(&facts))
         .unwrap()
         .expect("roster mode");
+    assert!(!loaded.fallback, "roster.toml itself");
+    let r = loaded.roster;
     assert_eq!(
         (r.active.as_str(), r.sha256.as_str()),
         ("main", sha256_hex(TEXT.as_bytes()).as_str())
