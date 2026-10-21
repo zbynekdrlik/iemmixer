@@ -7,9 +7,12 @@
 //! intent, replayed after a crash). Every write is a synced temporary file
 //! renamed over the old one.
 //!
-//! Also the one-time migration of the legacy layout (no `lineups/`): today's
-//! per-member files become the main lineup's, and the members who are no
-//! person go to the people archive.
+//! Also the one-time migration of the legacy layout (no
+//! `lineups/active.json`): today's per-member files and the engineer's
+//! become the main lineup's, and the members who are no person go to the
+//! people archive; the work left after its commit is kept in
+//! `lineups/migration.json` until done, so a crash anywhere is finished by
+//! the next start.
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -31,14 +34,27 @@ pub const ACTIVE_FILE: &str = "lineups/active.json";
 pub const SWITCH_FILE: &str = "lineups/switch.json";
 /// The active file's format.
 pub const ACTIVE_FORMAT: &str = "iemmixer-active-lineup";
-/// The migration builds `lineups/` here and renames it as its last step.
+/// The migration builds `lineups/` here and renames it as its commit.
 pub const STAGING_DIR: &str = "lineups.migrating";
+/// The work a committed migration still has to do (deletes, archives);
+/// gone once done.
+pub const PENDING_FILE: &str = "lineups/migration.json";
+/// The pending file's format.
+pub const PENDING_FORMAT: &str = "iemmixer-migration";
 /// The band store's per-person files, one directory each.
 pub const KINDS: [&str; 3] = ["presets", "snapshots", "customizations"];
 
 const ACTIVE_NAME: &str = "active.json";
 const SWITCH_NAME: &str = "switch.json";
 const STATE_NAME: &str = "state.json";
+const PENDING_NAME: &str = "migration.json";
+
+/// How often a rename a transient Windows error fails is tried, and the
+/// pause between tries (the engine's lesson of #32: a scanner or the indexer
+/// holds a file for a moment). Never a silent fallback: the last error is
+/// returned.
+const RENAME_TRIES: u32 = 5;
+const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A running switch: from the active lineup to another (#58 design §7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +100,45 @@ fn read_optional(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
+/// Whether a failed rename is tried again: on Windows only, after access
+/// denied (5), a sharing violation (32) or a lock violation (33), what a
+/// scanner or the indexer holding a file for a moment gives.
+fn transient(e: &io::Error, windows: bool) -> bool {
+    windows && matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// Runs `op` until it succeeds, fails with an error `again` refuses, or ran
+/// `tries` times; `pause` runs between two tries. The last error is
+/// returned.
+fn retry<T>(
+    tries: u32,
+    mut op: impl FnMut() -> io::Result<T>,
+    again: impl Fn(&io::Error) -> bool,
+    mut pause: impl FnMut(),
+) -> io::Result<T> {
+    let mut n = 1;
+    loop {
+        match op() {
+            Err(e) if n < tries && again(&e) => {
+                tracing::warn!(error = %e, attempt = n, "a rename failed for a moment: trying again");
+                pause();
+                n += 1;
+            }
+            done => return done,
+        }
+    }
+}
+
+/// `fs::rename`, tried again on a transient Windows error ([`transient`]).
+fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+    retry(
+        RENAME_TRIES,
+        || fs::rename(from, to),
+        |e| transient(e, cfg!(windows)),
+        || std::thread::sleep(RENAME_PAUSE),
+    )
+}
+
 /// Writes `data` to `path` through a synced temporary file renamed over it:
 /// a crash leaves the old file or the new one, never a torn one.
 fn write_durable(path: &Path, data: &str) -> io::Result<()> {
@@ -95,7 +150,7 @@ fn write_durable(path: &Path, data: &str) -> io::Result<()> {
     file.write_all(data.as_bytes())?;
     file.sync_all()?;
     drop(file);
-    fs::rename(tmp, path)
+    rename_retrying(&tmp, path)
 }
 
 impl LineupStore {
@@ -189,6 +244,10 @@ impl LineupStore {
     /// The lineup's directory: its stored state and its people's files (the
     /// band store's data directory). `id` is a roster's lineup id.
     pub fn data_dir(&self, id: &str) -> PathBuf {
+        debug_assert!(
+            valid_lineup_id(id),
+            "a lineup's directory needs a lineup id"
+        );
         self.dir.join(id)
     }
 }
@@ -196,7 +255,7 @@ impl LineupStore {
 /// What the migration did, in ids only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MigrationReport {
-    /// People whose own files moved into the main lineup.
+    /// People (and the engineer) whose own files moved into the main lineup.
     pub moved: Vec<String>,
     /// `(person, former member)`: whose files the person took over.
     pub taken_over: Vec<(String, String)>,
@@ -209,6 +268,19 @@ pub struct MigrationReport {
 pub(crate) enum Step {
     /// The rename of the staged `lineups/` into place.
     Commit,
+    /// The pending work after the commit (deletes, archives).
+    Finish,
+}
+
+/// The work a committed migration still has to do, kept in
+/// [`PENDING_FILE`] until it is done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Pending {
+    format: String,
+    /// Ids whose legacy files (`<kind>/<id>.json`) are copies now: deleted.
+    delete: Vec<String>,
+    /// Former members who are no person: archived.
+    archive: Vec<String>,
 }
 
 fn file_of(kind: &str, id: &str) -> PathBuf {
@@ -230,22 +302,41 @@ fn copy_durable(from: &Path, to: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Why `roster` cannot migrate the legacy files: its problems, and a
+/// `takes_over` that names a person (a person's files are their own). Read
+/// only for the migration: once it is done, `takes_over` means nothing.
+pub fn migration_problems(roster: &Roster) -> Vec<String> {
+    let mut out = roster.problems();
+    for (i, p) in roster.people.iter().enumerate() {
+        if let Some(t) = &p.takes_over
+            && roster.person(t).is_some()
+        {
+            out.push(format!(
+                "person #{}: takes_over names a person, whose files are their own",
+                i + 1
+            ));
+        }
+    }
+    out
+}
+
 /// Moves the legacy layout (`<config>/{presets,snapshots,customizations}/
-/// <member>.json`) into the main lineup, once, when `lineups/` is absent
-/// (#58 design §11): each legacy member's files become the main lineup's
-/// under their id; a person with `takes_over = X` gets X's files (never X's
-/// PIN or photo; their own files, if any, stay theirs); every former member
-/// who is no person (and every `takes_over` one) then goes to the archive;
-/// `active.json` names the main lineup.
+/// <member>.json`) into the main lineup, once (#58 design §11): each legacy
+/// member's files and the engineer's become the main lineup's under their
+/// id; a person with `takes_over = X` gets X's files (never X's PIN or
+/// photo; their own files, if any, stay theirs); every former member who is
+/// no person (and every `takes_over` one) then goes to the archive;
+/// `active.json` names the main lineup. A roster with
+/// [`migration_problems`] is refused before anything is written.
 ///
 /// The new layout is staged in `lineups.migrating/` (copies only, the legacy
-/// files untouched) and renamed to `lineups/` as the commit, so a crash
-/// leaves the legacy layout or the migrated one; a leftover staging
-/// directory is removed and the migration runs again. Only after the commit
-/// are the legacy copies removed and the former members archived. With
-/// `lineups/` present it does nothing: a crash after the commit leaves only
-/// stale legacy copies, and former members who are no person (no login, no
-/// tile) still unarchived.
+/// files untouched), with the work left after the commit in
+/// `migration.json`, and renamed to `lineups/` as the commit: a crash before
+/// it leaves the legacy layout (the staging directory is removed and the
+/// migration runs again), a crash after it is finished by the next call.
+/// "Migrated" is `lineups/active.json`; a `lineups/` without it is refused
+/// (nothing commits over it). Once migrated, a call only finishes pending
+/// work: call it at every start.
 pub fn migrate_legacy(
     config_dir: &Path,
     roster: &Roster,
@@ -264,14 +355,38 @@ pub(crate) fn migrate_with(
 ) -> io::Result<MigrationReport> {
     let mut report = MigrationReport::default();
     let live = config_dir.join(LINEUPS_DIR);
-    if live.try_exists()? {
+    if live.join(ACTIVE_NAME).try_exists()? {
+        if roster.people.iter().any(|p| p.takes_over.is_some()) {
+            tracing::info!(
+                "the roster's takes_over is read only by the one-time migration, done: it can go"
+            );
+        }
+        report.archived = finish(config_dir, roster, pins)?;
         return Ok(report);
     }
+    let problems = migration_problems(roster);
+    if !problems.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the roster cannot migrate the legacy band files: {}",
+                problems.join("; ")
+            ),
+        ));
+    }
+    if live.try_exists()? {
+        return Err(invalid(format!(
+            "{} exists without {ACTIVE_NAME}: no migration commits over it (move it aside)",
+            live.display()
+        )));
+    }
+    // The legacy members, and the engineer: their files are per lineup too.
     let legacy: Vec<&str> = cfg
         .members
         .iter()
         .map(|m| m.id.as_str())
         .filter(|id| *id != ENGINEER_ID)
+        .chain([ENGINEER_ID])
         .collect();
     let takers: Vec<(&str, &str)> = roster
         .people
@@ -285,11 +400,12 @@ pub(crate) fn migrate_with(
     }
     let store = LineupStore::at(staging.clone());
     let main = store.data_dir(&roster.main().id);
-    // Each member's own files under their own id: a person's, and a former
-    // member's whom nobody takes over (for the archive).
+    let stays = |id: &str| id == ENGINEER_ID || roster.person(id).is_some();
+    // Each member's own files under their own id: a person's, the
+    // engineer's, and a former member's whom nobody takes over (for the
+    // archive).
     for &id in &legacy {
-        let person = roster.person(id).is_some();
-        if !person && takers.iter().any(|&(_, x)| x == id) {
+        if !stays(id) && takers.iter().any(|&(_, x)| x == id) {
             continue;
         }
         let mut copied = false;
@@ -297,7 +413,7 @@ pub(crate) fn migrate_with(
             let file = file_of(kind, id);
             copied |= copy_durable(&config_dir.join(&file), &main.join(file))?;
         }
-        if copied && person {
+        if copied && stays(id) {
             report.moved.push(id.to_string());
         }
     }
@@ -319,17 +435,60 @@ pub(crate) fn migrate_with(
                 .push((person.to_string(), from.to_string()));
         }
     }
+    let former: Vec<&str> = legacy
+        .iter()
+        .copied()
+        .chain(takers.iter().map(|&(_, x)| x))
+        .collect();
+    let pending = Pending {
+        format: PENDING_FORMAT.into(),
+        delete: former.iter().copied().map(str::to_string).collect(),
+        archive: former
+            .iter()
+            .copied()
+            .filter(|&id| !stays(id))
+            .map(str::to_string)
+            .collect(),
+    };
+    let json = serde_json::to_string_pretty(&pending).map_err(io::Error::other)?;
+    write_durable(&staging.join(PENDING_NAME), &json)?;
     store.set_active(&roster.main().id, chrono::Utc::now().timestamp())?;
     fault(Step::Commit)?;
-    fs::rename(staging, live)?;
+    rename_retrying(&staging, &live)?;
     tracing::info!(
         moved = report.moved.len(),
         taken_over = report.taken_over.len(),
         main = %roster.main().id,
         "legacy band files migrated into the main lineup"
     );
-    let former = legacy.iter().copied().chain(takers.iter().map(|&(_, x)| x));
-    for id in former {
+    fault(Step::Finish)?;
+    report.archived = finish(config_dir, roster, pins)?;
+    Ok(report)
+}
+
+/// Finishes a committed migration's pending work, if any: deletes the
+/// legacy copies, archives the former members who are (still) no person,
+/// then removes [`PENDING_FILE`]. Each step may run again, so a crash in it
+/// is finished by the next call. The ids archived.
+fn finish(config_dir: &Path, roster: &Roster, pins: &mut PinStore) -> io::Result<Vec<String>> {
+    let path = config_dir.join(PENDING_FILE);
+    let Some(text) = read_optional(&path)? else {
+        return Ok(Vec::new());
+    };
+    let pending: Pending =
+        serde_json::from_str(&text).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+    if pending.format != PENDING_FORMAT {
+        return Err(invalid(format!(
+            "{}: format {:?} is not {PENDING_FORMAT:?}",
+            path.display(),
+            pending.format
+        )));
+    }
+    for id in pending.delete.iter().chain(&pending.archive) {
+        iem_core::config::validate_member_id(id)
+            .map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+    }
+    for id in &pending.delete {
         for kind in KINDS {
             if let Err(e) = fs::remove_file(config_dir.join(file_of(kind, id)))
                 && e.kind() != io::ErrorKind::NotFound
@@ -337,12 +496,16 @@ pub(crate) fn migrate_with(
                 return Err(e);
             }
         }
+    }
+    let mut archived = Vec::new();
+    for id in &pending.archive {
         if roster.person(id).is_none() && archive_person(config_dir, pins, id)? {
             tracing::info!(member = %id, "former member archived");
-            report.archived.push(id.to_string());
+            archived.push(id.clone());
         }
     }
-    Ok(report)
+    fs::remove_file(&path)?;
+    Ok(archived)
 }
 
 #[cfg(test)]

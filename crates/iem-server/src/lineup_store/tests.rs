@@ -31,6 +31,13 @@ fn put(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
 }
 
+/// Writes `text` at `rel` under `dir`, its directories made.
+fn put_in(dir: &Path, rel: &str, text: &str) {
+    let path = dir.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    put(&path, text);
+}
+
 /// Writes `id`'s legacy files, each holding its kind and the id.
 fn legacy_files(dir: &Path, id: &str, kinds: &[&str]) {
     for kind in kinds {
@@ -429,4 +436,240 @@ fn a_crash_mid_migration_leaves_the_legacy_layout_and_runs_again() {
         "presets of member1"
     );
     assert_eq!(pins.archived_hash("member9"), Some(PHC));
+}
+
+/// #58: the engineer's presets, history and pins/hides are per lineup like
+/// everyone's: they move into the main lineup and are never archived.
+#[test]
+fn the_engineers_files_move_into_the_main_lineup() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    legacy_files(d, "member1", &KINDS);
+    legacy_files(d, ENGINEER_ID, &KINDS);
+    let mut pins = pins(d, &[]);
+    let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
+    assert_eq!(report.moved, ["member1", ENGINEER_ID]);
+    assert_eq!(report.archived, Vec::<String>::new());
+    let main = d.join(LINEUPS_DIR).join("main");
+    for kind in KINDS {
+        assert_eq!(
+            read(&main.join(file_of(kind, ENGINEER_ID))),
+            format!("{kind} of engineer")
+        );
+        assert!(!d.join(file_of(kind, ENGINEER_ID)).exists());
+    }
+    assert!(!d.join("archive").exists());
+    // A site without the engineer's [[members]] entry moves them too.
+    let dir = tempfile::tempdir().unwrap();
+    legacy_files(dir.path(), ENGINEER_ID, &["presets"]);
+    let report = migrate_legacy(
+        dir.path(),
+        &roster_without("member9"),
+        &Config::default(),
+        &mut pins,
+    )
+    .unwrap();
+    assert_eq!(report.moved, [ENGINEER_ID]);
+}
+
+/// A crash after the commit: the next call finishes the deletes and the
+/// archives from `migration.json`, then removes it.
+#[test]
+fn a_crash_after_the_commit_is_finished_by_the_next_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for id in ["member1", "member9"] {
+        legacy_files(d, id, &KINDS);
+    }
+    photo(d, "member9");
+    let mut pins = pins(d, &["member9"]);
+    let roster = roster_without("member9");
+    let crash = |step: Step| {
+        if step == Step::Finish {
+            Err(io::Error::other("power cut after the rename"))
+        } else {
+            Ok(())
+        }
+    };
+    let err = migrate_with(d, &roster, &test_config(), &mut pins, &crash).unwrap_err();
+    assert!(err.to_string().contains("power cut"), "{err}");
+    // Committed: the main lineup plays; nothing deleted or archived yet.
+    assert_eq!(
+        LineupStore::new(d).active().unwrap().as_deref(),
+        Some("main")
+    );
+    let pending: serde_json::Value = serde_json::from_str(&read(&d.join(PENDING_FILE))).unwrap();
+    assert_eq!(pending["format"], PENDING_FORMAT);
+    assert_eq!(pending["archive"], serde_json::json!(["member9"]));
+    assert!(d.join(file_of("presets", "member1")).exists());
+    assert_eq!(pins.member_hash("member9"), Some(PHC));
+    // The next start finishes it.
+    let report = migrate_legacy(d, &roster, &test_config(), &mut pins).unwrap();
+    assert_eq!(
+        report,
+        MigrationReport {
+            moved: vec![],
+            taken_over: vec![],
+            archived: vec!["member9".into()],
+        }
+    );
+    for id in ["member1", "member9"] {
+        for kind in KINDS {
+            assert!(!d.join(file_of(kind, id)).exists(), "{kind}/{id}");
+        }
+    }
+    assert_eq!(pins.archived_hash("member9"), Some(PHC));
+    assert!(d.join("archive").join("member9").join("photo.jpg").exists());
+    assert!(!d.join(PENDING_FILE).exists());
+    let main = d.join(LINEUPS_DIR).join("main");
+    assert_eq!(
+        read(&main.join(file_of("presets", "member1"))),
+        "presets of member1"
+    );
+    // And nothing more.
+    assert_eq!(
+        migrate_legacy(d, &roster, &test_config(), &mut pins).unwrap(),
+        MigrationReport::default()
+    );
+}
+
+/// Someone who is a person again by the time the pending work runs keeps
+/// their files and PIN.
+#[test]
+fn a_former_member_who_is_back_is_not_archived_when_the_work_is_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    legacy_files(d, "member9", &KINDS);
+    let mut pins = pins(d, &["member9"]);
+    let crash = |step: Step| {
+        if step == Step::Finish {
+            Err(io::Error::other("power cut after the rename"))
+        } else {
+            Ok(())
+        }
+    };
+    let gone = roster_without("member9");
+    migrate_with(d, &gone, &test_config(), &mut pins, &crash).unwrap_err();
+    let back = (*test_roster("main").roster).clone();
+    let report = migrate_legacy(d, &back, &test_config(), &mut pins).unwrap();
+    assert_eq!(report.archived, Vec::<String>::new());
+    assert_eq!(pins.member_hash("member9"), Some(PHC));
+    let main = d.join(LINEUPS_DIR).join("main");
+    assert_eq!(
+        read(&main.join(file_of("presets", "member9"))),
+        "presets of member9"
+    );
+    assert!(!d.join(file_of("presets", "member9")).exists());
+    assert!(!d.join(PENDING_FILE).exists());
+}
+
+#[test]
+fn a_roster_with_problems_or_a_takeover_of_a_person_migrates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    legacy_files(d, "member1", &KINDS);
+    let mut pins = pins(d, &[]);
+    let mut two_mains = (*test_roster("main").roster).clone();
+    two_mains.lineups[1].main = true;
+    let mut takes_a_person = (*test_roster("main").roster).clone();
+    takes_a_person.people[9].takes_over = Some("member2".into());
+    assert_eq!(takes_a_person.problems(), Vec::<String>::new());
+    assert_eq!(
+        migration_problems(&takes_a_person),
+        ["person #10: takes_over names a person, whose files are their own"]
+    );
+    for roster in [two_mains, takes_a_person] {
+        let err = migrate_legacy(d, &roster, &test_config(), &mut pins).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(!d.join(LINEUPS_DIR).exists() && !d.join(STAGING_DIR).exists());
+        assert!(d.join(file_of("presets", "member1")).exists());
+    }
+    assert_eq!(
+        migration_problems(&test_roster("main").roster),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_lineups_directory_without_its_active_file_is_never_committed_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    legacy_files(d, "member1", &KINDS);
+    put_in(d, "lineups/youth/presets/member10.json", "someone's");
+    let mut pins = pins(d, &[]);
+    let err = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+    assert!(err.to_string().contains("active.json"), "{err}");
+    assert!(d.join(file_of("presets", "member1")).exists());
+    assert!(!d.join(STAGING_DIR).exists());
+    assert_eq!(
+        read(&d.join("lineups/youth/presets/member10.json")),
+        "someone's"
+    );
+}
+
+#[test]
+fn a_damaged_pending_file_is_an_error_and_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    LineupStore::new(d).set_active("main", 1).unwrap();
+    legacy_files(d, "member1", &["presets"]);
+    let mut pins = pins(d, &[]);
+    let roster = roster_without("member9");
+    for text in [
+        r#"{"format":"other","delete":["member1"],"archive":[]}"#,
+        r#"{"format":"iemmixer-migration","delete":["../x"],"archive":[]}"#,
+        r#"{"format":"iemmixer-migration","delete":[],"archive":["a b"]}"#,
+        "{",
+    ] {
+        put_in(d, PENDING_FILE, text);
+        let err = migrate_legacy(d, &roster, &test_config(), &mut pins).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{text}");
+        assert!(d.join(file_of("presets", "member1")).exists(), "{text}");
+    }
+}
+
+#[test]
+fn only_a_transient_windows_error_is_tried_again() {
+    let code = io::Error::from_raw_os_error;
+    for c in [5, 32, 33] {
+        assert!(transient(&code(c), true), "{c}");
+        assert!(!transient(&code(c), false), "{c} off Windows");
+    }
+    for c in [2, 3, 17, 183] {
+        assert!(!transient(&code(c), true), "{c}");
+    }
+    assert!(!transient(&io::Error::other("no code"), true));
+}
+
+#[test]
+fn a_rename_is_tried_again_a_bounded_number_of_times() {
+    use std::cell::Cell;
+    let busy = || Err::<(), _>(io::Error::from_raw_os_error(32));
+    let again = |e: &io::Error| e.raw_os_error() == Some(32);
+    // Busy twice, then done.
+    let (calls, pauses) = (Cell::new(0), Cell::new(0));
+    let op = || {
+        calls.set(calls.get() + 1);
+        if calls.get() < 3 { busy() } else { Ok(()) }
+    };
+    retry(5, op, again, || pauses.set(pauses.get() + 1)).unwrap();
+    assert_eq!((calls.get(), pauses.get()), (3, 2));
+    // Busy for good: the last error after five tries.
+    let (calls, pauses) = (Cell::new(0), Cell::new(0));
+    let op = || {
+        calls.set(calls.get() + 1);
+        busy()
+    };
+    let err = retry(5, op, again, || pauses.set(pauses.get() + 1)).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(32));
+    assert_eq!((calls.get(), pauses.get()), (5, 4));
+    // Any other error: at once.
+    let calls = Cell::new(0);
+    let op = || {
+        calls.set(calls.get() + 1);
+        Err::<(), _>(io::Error::from_raw_os_error(2))
+    };
+    assert!(retry(5, op, again, || {}).is_err());
+    assert_eq!(calls.get(), 1);
 }
