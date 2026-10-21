@@ -9,7 +9,7 @@ use crate::params::{cap_group, cap_input, cap_level, cap_out};
 use crate::topology::Topology;
 
 /// One mix in topology order: its output, its level slots (every input, then
-/// the mixes it hears) and its group strips.
+/// the mixes it hears, then its peers) and its group strips.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MixRec {
     pub out: MixOut,
@@ -46,7 +46,8 @@ pub fn reconcile(topo: &Topology, state: &MixState) -> (Reconciled, Vec<String>)
             let level = given.and_then(|x| x.inputs.get(&i.id));
             levels.push(level.map(cap_level).unwrap_or_default());
         }
-        for &s in &node.mixes {
+        // The mixes it hears, then its peers (#58): both are `Mix::mixes`.
+        for &s in node.mixes.iter().chain(&node.peers) {
             let heard = topo.mixes.get(s).and_then(|h| given?.mixes.get(&h.id));
             levels.push(heard.map(cap_level).unwrap_or_default());
         }

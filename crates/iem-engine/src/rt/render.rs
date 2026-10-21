@@ -1,8 +1,8 @@
 //! The processor's pipeline, one segment at a time (I7: nothing here
-//! allocates, locks, logs or makes a syscall): the inputs, every mix in
-//! declaration order, HIL's spare outputs and the D5(b) loopback probe,
-//! with the per-sample gain helpers they share. `Processor::render` in
-//! rt.rs calls them in that order.
+//! allocates, locks, logs or makes a syscall): the inputs, every mix's own
+//! sum and shadow, every mix in the topology's render order, HIL's spare
+//! outputs and the D5(b) loopback probe, with the per-sample gain helpers
+//! they share. `Processor::render` in rt.rs calls them in that order.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,10 +12,11 @@ use iem_dsp::pan::StereoGain;
 use iem_dsp::ramp::Ramp;
 use rtrb::Producer;
 
-use super::{MixRt, Processor};
+use super::{InputRt, MixRt, Processor, ShadowRt, Stereo};
 use crate::TEST_CAP;
 use crate::latency;
 use crate::probe;
+use crate::topology::Topology;
 
 fn scale(x: &mut [f64], g: f64) {
     if g == 0.0 {
@@ -115,6 +116,121 @@ fn push_tap(
     if !rest.is_empty() {
         overruns.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// A mix's own sum (#58) into its `own`: its ungrouped inputs at their
+/// levels and each group's strip (its inputs at their levels → EQ → fader →
+/// mute). Returns how many strips tripped.
+fn own_sum(
+    topo: &Topology,
+    inputs: &[InputRt],
+    mix: &mut MixRt,
+    group_buf: &mut Stereo,
+    n: usize,
+) -> u64 {
+    let MixRt {
+        own,
+        levels,
+        groups,
+        ..
+    } = mix;
+    let (l, r) = own.get_mut(n);
+    l.fill(0.0);
+    r.fill(0.0);
+    // The inputs in no group, at their levels.
+    for &i in &topo.direct {
+        if let (Some(input), Some(g)) = (inputs.get(i), levels.get_mut(i)) {
+            accumulate(g, input.p.get(n), (&mut *l, &mut *r));
+        }
+    }
+    let mut trips = 0;
+    // Each group's strip: its inputs at their levels → EQ → fader → mute.
+    for (group, strip) in topo.groups.iter().zip(groups.iter_mut()) {
+        let (gl, gr) = group_buf.get_mut(n);
+        gl.fill(0.0);
+        gr.fill(0.0);
+        for &i in &group.inputs {
+            if let (Some(input), Some(g)) = (inputs.get(i), levels.get_mut(i)) {
+                accumulate(g, input.p.get(n), (&mut *gl, &mut *gr));
+            }
+        }
+        if !strip.eq.is_identity() {
+            strip.eq.process([&mut *gl, &mut *gr]);
+        }
+        stereo_gain(&mut strip.fader, gl, gr);
+        if strip.trips.check([&mut *gl, &mut *gr]) {
+            strip.eq.reset();
+            trips += 1;
+        }
+        strip.peak.observe([&*gl, &*gr]);
+        for ((a, c), (x, y)) in l.iter_mut().zip(r.iter_mut()).zip(gl.iter().zip(gr.iter())) {
+            *a += x;
+            *c += y;
+        }
+    }
+    trips
+}
+
+/// A shadow's own output (#58): the own sum → EQ → limiter → volume/mute,
+/// sanitised like the mix (a trip silences it and resets its EQ and
+/// limiter). Returns whether it tripped.
+fn render_shadow(shadow: &mut ShadowRt, own: &Stereo, n: usize) -> bool {
+    let ShadowRt {
+        out,
+        eq,
+        limiter,
+        fader,
+        trips,
+    } = shadow;
+    let (l, r) = out.get_mut(n);
+    let (ol, or) = own.get(n);
+    copy(l, ol);
+    copy(r, or);
+    if !eq.is_identity() {
+        eq.process([&mut *l, &mut *r]);
+    }
+    limiter.process(l, r);
+    stereo_gain(fader, l, r);
+    let tripped = trips.check([&mut *l, &mut *r]);
+    if tripped {
+        eq.reset();
+        limiter.lim.reset();
+    }
+    tripped
+}
+
+/// The other mixes beside the one being rendered (#58): it reads the mixes
+/// it hears and its peers through them while it writes its own.
+struct Others<'a> {
+    before: &'a [MixRt],
+    after: &'a [MixRt],
+    /// The index of the mix being rendered.
+    at: usize,
+}
+
+impl Others<'_> {
+    /// Mix `i`; `None` for the mix being rendered and past the end.
+    fn get(&self, i: usize) -> Option<&MixRt> {
+        match i.checked_sub(self.at) {
+            None => self.before.get(i),
+            Some(0) => None,
+            Some(k) => self.after.get(k - 1),
+        }
+    }
+}
+
+/// Mix `m` to write and the others to read; `None` past the end.
+fn split_one(mixes: &mut [MixRt], m: usize) -> Option<(&mut MixRt, Others<'_>)> {
+    let (before, rest) = mixes.split_at_mut_checked(m)?;
+    let (mix, after) = rest.split_first_mut()?;
+    Some((
+        mix,
+        Others {
+            before,
+            after,
+            at: m,
+        },
+    ))
 }
 
 impl Processor {
@@ -222,15 +338,28 @@ impl Processor {
         let fade = fade_buf.get(..n).unwrap_or_default();
         let heard_from = topo.inputs.len();
         let mut trips = 0;
-        for (m, spec) in topo.mixes.iter().enumerate() {
-            let (done, rest) = mixes.split_at_mut(m);
-            let Some((mix, _)) = rest.split_first_mut() else {
+        // Every mix's own sum, and a shadowed mix's own output (#58), before
+        // any mix reads a peer: the render order cannot put every shadow
+        // before its readers (two sets may hear each other).
+        for mix in mixes.iter_mut() {
+            trips += own_sum(&topo, inputs.as_slice(), mix, group_buf, n);
+            let MixRt { own, shadow, .. } = mix;
+            if let Some(s) = shadow.as_mut()
+                && render_shadow(s, own, n)
+            {
+                trips += 1;
+            }
+        }
+        // Then every mix in the render order: the mixes and peers it reads
+        // are ready before it (`Topology::order`).
+        for &m in &topo.order {
+            let (Some(spec), Some((mix, others))) = (topo.mixes.get(m), split_one(mixes, m)) else {
                 continue;
             };
             let MixRt {
                 sum,
+                own,
                 levels,
-                groups,
                 eq,
                 limiter,
                 fader,
@@ -238,45 +367,25 @@ impl Processor {
                 cap,
                 trips: mix_trips,
                 peak,
+                ..
             } = mix;
             let (l, r) = sum.get_mut(n);
-            l.fill(0.0);
-            r.fill(0.0);
-            // The inputs in no group, at their levels.
-            for &i in &topo.direct {
-                if let (Some(input), Some(g)) = (inputs.get(i), levels.get_mut(i)) {
-                    accumulate(g, input.p.get(n), (&mut *l, &mut *r));
-                }
-            }
-            // Each group's strip: its inputs at their levels → EQ → fader → mute.
-            for (group, strip) in topo.groups.iter().zip(groups.iter_mut()) {
-                let (gl, gr) = group_buf.get_mut(n);
-                gl.fill(0.0);
-                gr.fill(0.0);
-                for &i in &group.inputs {
-                    if let (Some(input), Some(g)) = (inputs.get(i), levels.get_mut(i)) {
-                        accumulate(g, input.p.get(n), (&mut *gl, &mut *gr));
-                    }
-                }
-                if !strip.eq.is_identity() {
-                    strip.eq.process([&mut *gl, &mut *gr]);
-                }
-                stereo_gain(&mut strip.fader, gl, gr);
-                if strip.trips.check([&mut *gl, &mut *gr]) {
-                    strip.eq.reset();
-                    trips += 1;
-                }
-                strip.peak.observe([&*gl, &*gr]);
-                for ((a, c), (x, y)) in l.iter_mut().zip(r.iter_mut()).zip(gl.iter().zip(gr.iter()))
-                {
-                    *a += x;
-                    *c += y;
-                }
-            }
+            let (ol, or) = own.get(n);
+            copy(l, ol);
+            copy(r, or);
             // The mixes it hears, after their mute and unclipped (A9).
             for (k, &s) in spec.mixes.iter().enumerate() {
-                if let (Some(src), Some(g)) = (done.get(s), levels.get_mut(heard_from + k)) {
+                if let (Some(src), Some(g)) = (others.get(s), levels.get_mut(heard_from + k)) {
                     accumulate(g, src.sum.get(n), (&mut *l, &mut *r));
+                }
+            }
+            // Its peers' own output (#58): a shadow's, or the output of a mix
+            // that hears nothing, which is its own.
+            let peers_from = heard_from + spec.mixes.len();
+            for (k, &s) in spec.peers.iter().enumerate() {
+                if let (Some(src), Some(g)) = (others.get(s), levels.get_mut(peers_from + k)) {
+                    let own_out = src.shadow.as_ref().map_or(&src.sum, |sh| &sh.out);
+                    accumulate(g, own_out.get(n), (&mut *l, &mut *r));
                 }
             }
             if !eq.is_identity() {

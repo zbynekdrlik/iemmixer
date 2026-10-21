@@ -2,9 +2,11 @@
 //! under `assert_no_alloc`, `rtsan.rs` under RealtimeSanitizer): the program
 //! site with every level open, hot inputs driving the limiters, a command
 //! group every block (volume, input/mix/group EQ, processing, levels of an
-//! input and a heard mix, a group strip, solo, listen, limiter raise and
-//! lower, test signal, the HIL test signal on both spare outputs with its
-//! listen probe while both listen slots are listened (S7), an Arm, a full
+//! input, a heard mix and a peer, a group strip, solo, listen, limiter raise
+//! and lower, the EQ, limiter and volume of a shadowed mix (#58: member1,
+//! which member3 hears as a peer), test signal, the HIL test signal on both
+//! spare outputs with its listen probe while both listen slots are listened
+//! (S7), an Arm, a full
 //! import), the D5(b) loopback returns (a one-block synthetic loopback of the
 //! spare outputs, so the round-trip probe measures and later signals find the
 //! return busy), talkback, both taps, meter reads, a sanitiser trip
@@ -48,7 +50,8 @@ pub fn topology() -> Arc<Topology> {
     Arc::new(compile(&load(&site_path()).unwrap()).unwrap())
 }
 
-/// Every level at −12 dB, every group strip at 0 dB.
+/// Every level at −12 dB (inputs, heard mixes and peers), every group strip
+/// at 0 dB.
 pub fn open_state(topo: &Topology) -> MixState {
     let open = Level {
         gain_db: -12.0,
@@ -69,6 +72,7 @@ pub fn open_state(topo: &Topology) -> MixState {
                     mixes: m
                         .mixes
                         .iter()
+                        .chain(&m.peers)
                         .map(|&s| (topo.mixes[s].id.clone(), open))
                         .collect(),
                     ..Mix::default()
@@ -137,6 +141,8 @@ pub fn scenario() -> Scenario {
         group: GroupId::new("stems"),
     };
     let heard = Source::Mix(mix("member2"));
+    // #58: member3 hears member1 as a peer; member1 is shadowed.
+    let peer = Source::Mix(mix("member1"));
     let cmds = vec![
         Cmd::SetMix {
             mix: mix("member1"),
@@ -188,6 +194,16 @@ pub fn scenario() -> Scenario {
         Cmd::Arm,
         level("member1", Source::Input(input("mic1")), -6.0, 0.3),
         level("member1", heard.clone(), -6.0, -0.3),
+        level("member3", peer.clone(), -6.0, 0.2),
+        Cmd::SetEq {
+            target: EqTarget::Mix(mix("member1")),
+            eq,
+        },
+        Cmd::SetLimiter {
+            mix: mix("member1"),
+            enabled: None,
+            limit_db: Some(-3.0),
+        },
         Cmd::SetGroup {
             mix: mix("member1"),
             group: GroupId::new("stems"),
@@ -225,6 +241,16 @@ pub fn scenario() -> Scenario {
         },
         level("member1", Source::Input(input("mic1")), -12.0, 0.0),
         level("member1", heard, -12.0, 0.0),
+        level("member3", peer, -12.0, 0.0),
+        Cmd::SetEq {
+            target: EqTarget::Mix(mix("member1")),
+            eq: Eq::default(),
+        },
+        Cmd::SetLimiter {
+            mix: mix("member1"),
+            enabled: None,
+            limit_db: Some(-6.0),
+        },
         Cmd::SetGroup {
             mix: mix("member1"),
             group: GroupId::new("stems"),

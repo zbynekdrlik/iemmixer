@@ -1,10 +1,13 @@
 //! The RT processor (program spec §3.3 A1–A13, §3.4 X1–X4, X13–X15, Q1, I5,
 //! I7; S3 design note §3.2, §3.4; #20 design note §3, §6): one callback runs
-//! the fixed pipeline — the inputs, then every mix in declaration order (its
-//! inputs directly or through their group's strip, the mixes it hears, then
-//! EQ → limiter → volume/mute → Q1 safety → clamp → TX), then HIL's spare
-//! outputs after the topology's TX (S6: the HIL test signal's sine while one
-//! runs, zero otherwise).
+//! the fixed pipeline — the inputs, then every mix's own sum (its inputs
+//! directly or through their group's strip) and, for a mix its peers hear
+//! while it hears others, its shadow (#58: the own sum → EQ → limiter →
+//! volume/mute), then every mix in the topology's render order (its own sum,
+//! the mixes it hears, its peers' own output, then EQ → limiter →
+//! volume/mute → Q1 safety → clamp → TX), then HIL's spare outputs after the
+//! topology's TX (S6: the HIL test signal's sine while one runs, zero
+//! otherwise).
 //!
 //! A block is cut into segments of at most [`SEG`] samples at every command
 //! timestamp and test-signal end, and every ramp steps per sample, so the
@@ -27,7 +30,7 @@ use iem_limiter_mga::{DISABLE_MS, Limiter, Mga, Sliders};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::cmd::{HilMask, MAX_HIL, RtCmd, RtOp};
-use crate::core::reconcile;
+use crate::core::{MixRec, reconcile};
 use crate::latency::LatencyProbe;
 use crate::params::{eq_params, input_params};
 use crate::topology::Topology;
@@ -236,11 +239,32 @@ struct GroupRt {
     peak: PeakMeter<2>,
 }
 
+/// A shadowed mix's own output (#58 design §8), what the mixes that hear it
+/// as a peer read: a second instance of its output chain fed only its own
+/// sum, without the mixes and peers it hears. Its EQ, limiter and volume
+/// follow the mix's; its limiter's active samples are never counted.
+struct ShadowRt {
+    /// The own sum, then the own output in place: own → EQ → limiter →
+    /// volume/mute (unclipped, like a heard mix, A9).
+    out: Stereo,
+    eq: Equalizer<2>,
+    limiter: MixLimiter,
+    fader: StereoGain,
+    trips: Trips,
+}
+
 struct MixRt {
     /// The sum, then the mix's output in place: O (post-volume, post-mute),
-    /// which later mixes that hear this one read (A9: unclipped).
+    /// which later mixes that hear this one read (A9: unclipped), and its
+    /// peers when it hears nothing (then it is its own output).
     sum: Stereo,
-    /// Level slots: every input, then the mixes it hears.
+    /// Its own sum (#58): its ungrouped inputs and group strips at their
+    /// levels, before its EQ; the sum starts from it.
+    own: Stereo,
+    /// Its own output for its peers when it hears a mix or a peer itself
+    /// (`MixNode::shadow`).
+    shadow: Option<ShadowRt>,
+    /// Level slots: every input, then the mixes it hears, then its peers.
     levels: Vec<StereoGain>,
     groups: Vec<GroupRt>,
     eq: Equalizer<2>,
@@ -380,12 +404,32 @@ impl Processor {
                 }
             })
             .collect();
+        // A shadow follows its mix's EQ, limiter and volume (#58).
+        let shadow = |m: usize, rec: &MixRec| {
+            topo.mixes
+                .get(m)
+                .is_some_and(|n| n.shadow)
+                .then(|| ShadowRt {
+                    out: Stereo::new(),
+                    eq: Equalizer::new(&eq_params(&rec.out.eq), sr),
+                    limiter: MixLimiter::new(
+                        sr,
+                        rec.out.limiter.enabled,
+                        rec.out.limiter.limit_db,
+                        0,
+                    ),
+                    fader: StereoGain::new(sr, db_to_lin(rec.out.volume_db), rec.out.muted, 0.0),
+                    trips: Trips::default(),
+                })
+        };
         let mixes = r
             .mixes
             .iter()
             .enumerate()
             .map(|(m, rec)| MixRt {
                 sum: Stereo::new(),
+                own: Stereo::new(),
+                shadow: shadow(m, rec),
                 levels: rec
                     .levels
                     .iter()
@@ -572,14 +616,21 @@ impl Processor {
                     n.eq.set(&eq);
                 }
             }
+            // A shadow follows its mix's volume, EQ and limiter (#58).
             RtOp::MixOut { m, volume, muted } => {
                 if let Some(n) = self.mixes.get_mut(usize::from(m)) {
                     n.fader.set(volume, muted, 0.0);
+                    if let Some(s) = n.shadow.as_mut() {
+                        s.fader.set(volume, muted, 0.0);
+                    }
                 }
             }
             RtOp::MixEq { m, eq } => {
                 if let Some(n) = self.mixes.get_mut(usize::from(m)) {
                     n.eq.set(&eq);
+                    if let Some(s) = n.shadow.as_mut() {
+                        s.eq.set(&eq);
+                    }
                 }
             }
             RtOp::Limiter {
@@ -589,8 +640,12 @@ impl Processor {
             } => {
                 if let Some(n) = self.mixes.get_mut(usize::from(m)) {
                     n.limiter.set(enabled, limit_db);
+                    if let Some(s) = n.shadow.as_mut() {
+                        s.limiter.set(enabled, limit_db);
+                    }
                 }
             }
+            // The mix's own counter only: a shadow's is never counted.
             RtOp::ResetLimiter { m } => {
                 if let Some(n) = self.mixes.get_mut(usize::from(m)) {
                     n.limiter.lim.reset_active();

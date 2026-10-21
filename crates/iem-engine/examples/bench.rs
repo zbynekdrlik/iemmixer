@@ -1,9 +1,11 @@
 //! CPU benchmark of `process()` at B = 32, 96 kHz (period 333.3 µs; program
 //! spec I2, §3.5; design note §3.8). Two cases on `config/test-site.toml`:
 //!
-//! - `typical`: every level open, sine inputs, EQs flat, the site at rest;
+//! - `typical`: every level open (member3's peers included, #58), sine
+//!   inputs, EQs flat, the site at rest;
 //! - `worst`: all 230 EQ bands (inputs, mixes, group strips) enabled and
-//!   moving, every level and strip ramping, the limiters in gain reduction,
+//!   moving, and those of member1's shadow (#58: member3 hears it as a
+//!   peer), every level and strip ramping, the limiters in gain reduction,
 //!   both listen taps, talkback, the HIL test signal on all eight spare
 //!   outputs with its listen probe on both slots (S7) and their D5(b)
 //!   loopback returns open (busy returns: the round-trip probe scans every
@@ -42,7 +44,7 @@ fn topology() -> Arc<Topology> {
     Arc::new(compile(&load(&path).expect("site")).expect("topology"))
 }
 
-/// Every level at −12 dB.
+/// Every level at −12 dB: inputs, heard mixes and peers (#58).
 fn open(topo: &Topology) -> MixState {
     let level = Level {
         gain_db: -12.0,
@@ -63,6 +65,7 @@ fn open(topo: &Topology) -> MixState {
                     mixes: m
                         .mixes
                         .iter()
+                        .chain(&m.peers)
                         .filter_map(|&s| topo.mixes.get(s).map(|h| (h.id.clone(), level)))
                         .collect(),
                     ..Mix::default()

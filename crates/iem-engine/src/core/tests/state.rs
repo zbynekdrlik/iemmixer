@@ -294,3 +294,43 @@ fn state_round_trips_through_the_topology_order() {
     assert!(dropped.is_empty());
     assert_eq!(to_state(&t, &r), st);
 }
+
+/// #58: a peer's level is kept with the heard mixes' (`Mix::mixes`), in the
+/// slot after them (member3 hears no mix whole, so right after its inputs),
+/// and round-trips through the topology order; a level for a mix it neither
+/// hears nor has as a peer is dropped.
+#[test]
+fn a_peer_level_is_kept_with_the_heard_levels_and_round_trips() {
+    let t = Arc::new(test_site());
+    let mut c = Core::new(Arc::clone(&t), &MixState::default(), 0, Flags::default());
+    let out = c
+        .apply(&set_level("member3", Source::Mix(mix("member1")), -4.0))
+        .unwrap();
+    let m3 = t.mix_index(&mix("member3")).unwrap();
+    let k = t.slot(m3, &Source::Mix(mix("member1"))).unwrap();
+    assert_eq!(k, 24);
+    assert!(
+        matches!(out.rt.as_slice(), [RtOp::Level { m, k: 24, .. }] if usize::from(*m) == m3),
+        "{:?}",
+        out.rt
+    );
+    let st = c.state();
+    assert_eq!(
+        st.mixes[&mix("member3")].mixes[&mix("member1")].gain_db,
+        -4.0
+    );
+    assert_eq!(st.mixes[&mix("member3")].mixes.len(), 8);
+    let (r, dropped) = reconcile(&t, &st);
+    assert!(dropped.is_empty());
+    assert_eq!(r.mixes[m3].levels.len(), 32);
+    assert_eq!(r.mixes[m3].levels[k].gain_db, -4.0);
+    assert_eq!(to_state(&t, &r), st);
+    let mut more = st.clone();
+    more.mixes
+        .get_mut(&mix("member3"))
+        .unwrap()
+        .mixes
+        .insert(mix("member3"), Level::default());
+    let (_, dropped) = reconcile(&t, &more);
+    assert_eq!(dropped, vec!["mix member3 hearing member3"]);
+}
