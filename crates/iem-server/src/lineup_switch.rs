@@ -62,6 +62,11 @@ pub enum SwitchError {
     Io(String),
     #[error("the engine did not take the band's mixes: {0}")]
     Engine(EngineError),
+    /// The engine dropped the switch and the band before could not go back
+    /// in either: it finishes once the engine answers again
+    /// ([`replay_when_synced`]); why, as text.
+    #[error("the band switch finishes once the engine answers again: {0}")]
+    Pending(String),
 }
 
 fn io(what: &str, e: std::io::Error) -> SwitchError {
@@ -152,17 +157,23 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
     match &result {
         Ok(()) => {
             tracing::warn!(%from, to = %target.id, by = %by.sub, "the band was switched");
-            let (s, payload) = (state.clone(), crate::notify::lineup_payload(&target.name));
-            tokio::spawn(async move {
-                let devices = crate::notify::push_engineers(&s, &payload).await;
-                tracing::info!(devices, "the engineer's devices heard of the switch");
-            });
+            tell_engineers(state, &target);
         }
         Err(e) => {
             tracing::error!(%from, to = %target.id, by = %by.sub, error = %e, "the band was not switched");
         }
     }
     result
+}
+
+/// The engineer's devices hear which band plays now (a switch done, by a
+/// leader or by the replay that finished it), on a task of its own.
+fn tell_engineers(state: &AppState, lineup: &Lineup) {
+    let (s, payload) = (state.clone(), crate::notify::lineup_payload(&lineup.name));
+    tokio::spawn(async move {
+        let devices = crate::notify::push_engineers(&s, &payload).await;
+        tracing::info!(devices, "the engineer's devices heard of the switch");
+    });
 }
 
 /// The switch under the lock: the pages frozen ([`AppState::freeze`]: no
@@ -194,7 +205,7 @@ async fn run(
             // finishes once the engine answers (after this one's lock).
             tracing::error!(error = %e, "the switch finishes once the engine answers again");
             tokio::spawn(replay_when_synced(state.clone()));
-            Err(e)
+            Err(SwitchError::Pending(e.to_string()))
         }
     }
 }
@@ -378,20 +389,21 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
         return Ok(());
     };
     let active = store.active().map_err(|e| e.to_string())?;
-    let played = active.as_deref() != Some(intent.to.as_str());
-    if played {
-        let lineup = roster
-            .roster
-            .lineup(&intent.to)
-            .unwrap_or_else(|| roster.lineup())
-            .clone();
+    let lineup = roster
+        .roster
+        .lineup(&intent.to)
+        .unwrap_or_else(|| roster.lineup())
+        .clone();
+    if active.as_deref() != Some(intent.to.as_str()) {
         let stored = store.state(&lineup.id).map_err(|e| e.to_string())?;
         let other = roster.roster.lineup(&intent.from);
         play(state, &store, &roster.roster, &lineup, stored, other).await?;
-        tracing::warn!(lineup = %lineup.id, "a switch a restart cut short is finished");
     }
     store.clear_intent().map_err(|e| e.to_string())?;
+    tracing::warn!(lineup = %lineup.id, "a switch the engine dropped or a restart cut short is finished");
+    // As after any switch: the pages and the engineer's devices hear of it.
     state.thaw();
+    tell_engineers(state, &lineup);
     Ok(())
 }
 

@@ -67,7 +67,8 @@ pub fn lineup_info(roster: &RosterState, by: &AuthClaims) -> LineupInfo {
     }
 }
 
-/// The answer to a refused switch.
+/// The answer to a switch that did not happen (yet): a refusal, or 202
+/// `SWITCH_PENDING` for one that finishes once the engine answers.
 pub fn reject(e: &SwitchError) -> Reject {
     let (status, code) = match e {
         SwitchError::NotConfigured => (StatusCode::NOT_FOUND, "NOT_CONFIGURED"),
@@ -78,6 +79,8 @@ pub fn reject(e: &SwitchError) -> Reject {
         SwitchError::NotSynced => (StatusCode::SERVICE_UNAVAILABLE, "ENGINE_UNAVAILABLE"),
         SwitchError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "IO_ERROR"),
         SwitchError::Engine(_) => (StatusCode::BAD_GATEWAY, "SWITCH_FAILED"),
+        // Not refused: it finishes once the engine answers (#58 decision).
+        SwitchError::Pending(_) => (StatusCode::ACCEPTED, "SWITCH_PENDING"),
     };
     (status, Json(ApiError::new(code, e.to_string())))
 }
