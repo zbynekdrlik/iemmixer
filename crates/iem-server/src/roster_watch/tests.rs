@@ -2154,3 +2154,50 @@ async fn a_reload_whose_pending_record_cannot_be_written_imports_nothing() {
         "no import"
     );
 }
+
+/// #58 fourth review: a settle whose running state follows the roster in
+/// use already changes nobody's set, so a solo stays: no freeze, no
+/// `SetSolo`, no import (a restart never ends the solos it finds).
+#[tokio::test]
+async fn a_settle_on_the_roster_the_running_state_follows_keeps_its_solos() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    store
+        .set_running(&Running {
+            lineup: "main".into(),
+            follows: Some(sha256_hex(TEXT.as_bytes())),
+            silenced: BTreeSet::new(),
+            pending: None,
+        })
+        .unwrap();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    let solo = iem_engine_proto::Solo {
+        mix: MixId::new("member5"),
+        sources: vec![iem_engine_proto::Source::Input(InputId::new("mic6"))],
+    };
+    peer.send(&iem_engine_proto::EngineMsg::State {
+        rev: 1,
+        state: running(),
+        transient: iem_engine_proto::Transient {
+            solo: vec![solo],
+            ..Default::default()
+        },
+    })
+    .await;
+    until("synced", || state.engine.mirror().synced).await;
+    within(tokio::spawn(settle_when_synced(state.clone()))).await;
+    assert!(!state.settling());
+    assert!(!state.frozen_now());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), peer.recv())
+            .await
+            .is_err(),
+        "no freeze, no SetSolo, no import"
+    );
+}
