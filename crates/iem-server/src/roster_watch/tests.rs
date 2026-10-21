@@ -2310,3 +2310,41 @@ async fn a_settle_that_cannot_record_its_import_gives_up_with_one_alarm() {
     let page = state.page("member2").unwrap();
     assert_eq!(state.may_change(&page), Ok(()));
 }
+
+/// #58 fifth review: a reload that keeps waiting because its pending record
+/// cannot be written tells the engineer's devices once, after
+/// [`MAX_SETTLES`] tries in a row, never at every poll.
+#[tokio::test]
+async fn a_reload_that_cannot_record_its_import_alarms_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "main");
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    std::fs::create_dir_all(d.join(crate::lineup_store::RUNNING_FILE)).unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    // The engine answers every freeze's barrier; no import comes.
+    let barriers = tokio::spawn(async move {
+        loop {
+            fake::answer_ping(&mut peer).await;
+        }
+    });
+    let alarms = || seen.lock().unwrap().len();
+    let text = swapped();
+    let unrecorded = Applied::Deferred(vec![NOT_RECORDED.to_string()]);
+    for _ in 1..MAX_SETTLES {
+        assert_eq!(within(spawn_apply(&state, &text)).await, unrecorded);
+    }
+    assert_eq!(alarms(), 0, "not before the last try");
+    for _ in 0..2 {
+        assert_eq!(within(spawn_apply(&state, &text)).await, unrecorded);
+    }
+    assert_eq!(alarms(), 1, "one alarm");
+    barriers.abort();
+}
