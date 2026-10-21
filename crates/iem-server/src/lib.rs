@@ -177,6 +177,10 @@ pub struct AppState {
     /// is set under the write side ([`AppState::apply`],
     /// [`AppState::freeze`]). A std lock: never held across an `.await`.
     change_gate: Arc<std::sync::RwLock<()>>,
+    /// A person's page dropped an engine event while frozen
+    /// ([`AppState::frozen_for_page`]): the next thaw announces the band
+    /// even when nothing changed ([`AppState::thaw_unchanged`]).
+    missed: Arc<std::sync::atomic::AtomicBool>,
     /// The roster in use has not reached the engine's state yet
     /// (`roster_watch::settle`): no page's change, switch or restore runs.
     unsettled: Arc<Mutex<Option<roster_watch::Unsettled>>>,
@@ -299,6 +303,7 @@ impl AppState {
             unrecorded: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             fallback: Arc::new(std::sync::atomic::AtomicBool::new(fallback)),
             change_gate: Arc::new(std::sync::RwLock::new(())),
+            missed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unsettled: Arc::new(Mutex::new(unsettled)),
             meters_tx,
             active_s: Arc::new(Mutex::new(Vec::new())),
@@ -575,21 +580,60 @@ impl AppState {
         };
         if let Err(e) = self.engine.request_applied(Cmd::Ping, None).await {
             if !was {
-                self.thaw();
+                self.thaw_unchanged();
             }
             return Err(e);
         }
         Ok(was)
     }
 
-    /// Frees the pages' changes again (#58 re-review): a person's page
-    /// heard nothing of the engine while they were frozen
-    /// (`mixer_ws::closing`), so every page hears which band plays
-    /// ([`AppState::announce_lineup`]).
+    /// Frees the pages' changes again after a change for them (an import,
+    /// another band or roster; #58 re-review): a person's page heard nothing
+    /// of the engine while they were frozen (`mixer_ws::closing`), so every
+    /// page hears which band plays ([`AppState::announce_lineup`]).
     pub fn thaw(&self) {
-        if self.frozen.swap(false, Ordering::SeqCst) {
+        self.thaw_after(true);
+    }
+
+    /// Frees the pages' changes again after a try that changed nothing for
+    /// them (no import went in): the band is announced, closing the people's
+    /// sockets, only when a person's page dropped an engine event while
+    /// frozen (#58 fifth review), so a try repeated every poll does not
+    /// reconnect every phone.
+    pub fn thaw_unchanged(&self) {
+        self.thaw_after(false);
+    }
+
+    fn thaw_after(&self, changed: bool) {
+        let (was, missed) = {
+            let _gate = self
+                .change_gate
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            (
+                self.frozen.swap(false, Ordering::SeqCst),
+                self.missed.swap(false, Ordering::SeqCst),
+            )
+        };
+        if was && (changed || missed) {
             self.announce_lineup();
         }
+    }
+
+    /// Whether the pages are frozen, for a person's page about to drop an
+    /// engine event (`mixer_ws::closing`): one dropped while frozen is noted
+    /// for the thaw, under the change gate's read side, so no thaw falls
+    /// between the look and the note.
+    pub fn frozen_for_page(&self) -> bool {
+        let _gate = self
+            .change_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let frozen = self.frozen_now();
+        if frozen {
+            self.missed.store(true, Ordering::SeqCst);
+        }
+        frozen
     }
 }
 

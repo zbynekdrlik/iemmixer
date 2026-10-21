@@ -1099,8 +1099,10 @@ async fn transition(
         Err(e) => return Err(failed(&e)),
     };
     if let Err(not) = write_planned(&store, &planned) {
+        // Nothing went in: the pages hear of it only when one missed an
+        // engine event (#58 fifth review).
         if !was {
-            state.thaw();
+            state.thaw_unchanged();
         }
         return Err(not);
     }
@@ -1170,7 +1172,7 @@ async fn transition(
         Err(not) => {
             undo(&store, &planned);
             if !was {
-                state.thaw();
+                state.thaw_unchanged();
             }
             return Err(not);
         }

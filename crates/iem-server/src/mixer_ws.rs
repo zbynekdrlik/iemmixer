@@ -486,13 +486,15 @@ fn engine_event(
 /// (#58 review): a switch runs (its import may already be in), or the
 /// active lineup no longer gives the page as it is (its socket closes with
 /// [`CLOSE_LINEUP`]). The engineer's and the other mixes' pages stay: they
-/// get their state again after a switch ([`on_lineup`]).
+/// get their state again after a switch ([`on_lineup`]). Asked only for an
+/// event the page then drops: one dropped while frozen makes the thaw
+/// announce the band (`AppState::frozen_for_page`, #58 fifth review).
 fn closing(state: &AppState, page: &Page) -> bool {
     let person = page
         .member
         .as_deref()
         .is_some_and(|m| m != crate::pin_store::ENGINEER_ID);
-    person && (state.frozen_now() || state.page(&page.id).as_ref() != Some(page))
+    person && (state.frozen_for_page() || state.page(&page.id).as_ref() != Some(page))
 }
 
 /// What a session hears back from its own change: nothing (it applied the
