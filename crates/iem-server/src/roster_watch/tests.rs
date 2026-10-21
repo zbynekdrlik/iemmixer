@@ -501,7 +501,9 @@ async fn a_person_who_moves_sets_takes_their_mix() {
 async fn a_valid_change_applies_archives_the_removed_and_announces_it() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    let state = with_roster(d, "main");
+    let mut state = with_roster(d, "main");
+    // A reload needs the engine synced (nothing of main changes here).
+    let _peer = synced(&mut state, MixState::default()).await;
     let mut rx = state.lineup_tx.subscribe();
     state
         .pin_store
@@ -686,8 +688,7 @@ async fn a_move_needs_a_synced_engine() {
     assert_eq!(
         apply_text(&state, &text, &sha256_hex(text.as_bytes())).await,
         Applied::Deferred(vec![
-            "the engine state is not synced: a person's mix cannot move to their new set now"
-                .to_string()
+            "the engine state is not synced: the roster waits for it".to_string()
         ])
     );
     assert_eq!(store.state("youth").unwrap(), Some(stored), "put back");
