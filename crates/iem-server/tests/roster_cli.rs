@@ -119,6 +119,68 @@ fn check_prints_one_json_line_and_exits_by_result() {
     assert_eq!(code, Some(0), "migrated: takes_over means nothing: {json}");
 }
 
+/// #58 review: the check reads the site's lineup files as the start does: a
+/// roster without the lineup that plays would not start the server, and a
+/// switch a restart cut short must find the lineup it goes to.
+#[test]
+fn the_check_reads_the_lineup_that_plays_and_a_pending_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let site = dir.path().join("iemmixer.toml");
+    std::fs::write(&site, SITE).unwrap();
+    let lineups = dir.path().join("lineups");
+    std::fs::create_dir_all(&lineups).unwrap();
+    let active = |id: &str| {
+        let json = format!(r#"{{"format":"iemmixer-active-lineup","lineup":"{id}","since":1}}"#);
+        std::fs::write(lineups.join("active.json"), json).unwrap();
+    };
+    let roster = dir.path().join("roster.new.toml");
+    let main_only = ROSTER.split("[[lineups]]\nid = \"youth\"").next().unwrap();
+    std::fs::write(&roster, main_only).unwrap();
+    let check = || {
+        let out = run(&site, &["roster", "check", roster.to_str().unwrap()]);
+        (out.status.code(), line(&out)["problems"].clone())
+    };
+    active("youth");
+    assert_eq!(
+        check(),
+        (
+            Some(1),
+            serde_json::json!([
+                "the roster has no lineup 'youth', which plays: switch to a lineup it keeps first"
+            ])
+        )
+    );
+    // Main plays; a switch to youth a restart cut short is pending.
+    active("main");
+    std::fs::write(
+        lineups.join("switch.json"),
+        r#"{"from":"main","to":"youth"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        check(),
+        (
+            Some(1),
+            serde_json::json!([
+                "the roster has no lineup 'youth', which a switch a restart cut short goes to"
+            ])
+        )
+    );
+    std::fs::write(&roster, ROSTER).unwrap();
+    assert_eq!(check(), (Some(0), serde_json::json!([])));
+    // A lineup file the start cannot read is the check's problem too.
+    std::fs::write(lineups.join("active.json"), "{}").unwrap();
+    let (code, problems) = check();
+    assert_eq!(code, Some(1));
+    assert!(
+        problems[0]
+            .as_str()
+            .unwrap()
+            .starts_with("lineups/active.json: "),
+        "{problems}"
+    );
+}
+
 #[test]
 fn a_file_that_cannot_be_read_is_a_problem_and_bad_arguments_are_usage() {
     let dir = tempfile::tempdir().unwrap();

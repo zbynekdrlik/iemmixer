@@ -170,6 +170,87 @@ async fn a_roster_starts_on_the_recorded_lineup_after_the_migration() {
     assert!(err.to_string().contains("no lineup 'gone'"), "{err}");
 }
 
+/// #58 review: the start checks the roster against the site's own
+/// `[engine]` table, as `iem-server roster check` does: a roster the site's
+/// topology cannot carry does not start, and nothing is migrated.
+#[tokio::test]
+async fn a_roster_the_sites_topology_cannot_carry_refuses_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(iem_core::roster::ROSTER_FILE), TEST_ROSTER).unwrap();
+    let site = include_str!("../../../config/test-site.toml").replacen(
+        "peers = [\"member2\", \"member3\", \"member4\"",
+        "peers = [\"member2\", \"member4\"",
+        1,
+    );
+    let config: Config = toml::from_str(&site).unwrap();
+    let err = AppState::try_new(config, d).err().expect("refused");
+    assert!(
+        err.to_string()
+            .contains("leader member1 in main: set member1 does not hear member3"),
+        "{err}"
+    );
+    assert!(
+        !d.join(lineup_store::LINEUPS_DIR).exists(),
+        "nothing migrated"
+    );
+    // The site as it is carries it.
+    let config: Config = toml::from_str(include_str!("../../../config/test-site.toml")).unwrap();
+    assert!(AppState::try_new(config, d).unwrap().roster().is_some());
+}
+
+/// #58 review: a `roster.toml` the start cannot use (or none) does not stop
+/// a server that ran a roster before: it starts with the roster the states
+/// follow, and the status file says why.
+#[tokio::test]
+async fn a_refused_roster_falls_back_to_the_one_applied_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = lineup_store::LineupStore::new(d);
+    store.set_active("youth", 1).unwrap();
+    store.set_applied_roster(TEST_ROSTER).unwrap();
+    let two_mains = TEST_ROSTER.replacen(
+        "name = \"Youth band\"\n",
+        "name = \"Youth band\"\nmain = true\n",
+        1,
+    );
+    std::fs::write(d.join(iem_core::roster::ROSTER_FILE), &two_mains).unwrap();
+    let state = AppState::try_new(crate::site_view::tests::test_config(), d).unwrap();
+    let r = state.roster().expect("roster mode");
+    assert_eq!(
+        (r.active.as_str(), r.sha256.as_str()),
+        (
+            "youth",
+            roster_watch::sha256_hex(TEST_ROSTER.as_bytes()).as_str()
+        )
+    );
+    let s = status(d);
+    assert_eq!((s.ok, s.applied), (false, false));
+    assert_eq!(s.sha256, roster_watch::sha256_hex(two_mains.as_bytes()));
+    assert_eq!(
+        s.problems,
+        [
+            "exactly one lineup must be main, not 2",
+            "in use instead: the roster applied last"
+        ]
+    );
+    drop(state);
+    // No roster.toml at all: the same.
+    std::fs::remove_file(d.join(iem_core::roster::ROSTER_FILE)).unwrap();
+    let state = AppState::try_new(crate::site_view::tests::test_config(), d).unwrap();
+    assert_eq!(
+        state.roster().expect("roster mode").sha256,
+        roster_watch::sha256_hex(TEST_ROSTER.as_bytes())
+    );
+    assert_eq!(
+        status(d).problems,
+        [
+            "roster file: not found",
+            "in use instead: the roster applied last"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn public_ip_detection_gives_up_when_no_service_answers() {
     // Every request goes through a proxy on a closed local port.
