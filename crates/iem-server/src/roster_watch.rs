@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime};
 use iem_core::backup::MixerBackup;
 use iem_core::config::Config;
 use iem_core::roster::{Lineup, ROSTER_FILE, Roster, TopologyFacts, site_facts};
-use iem_engine_proto::{Cmd, MixId, MixState};
+use iem_engine_proto::{Cmd, MixId, MixState, Transient};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -537,6 +537,38 @@ pub fn move_silenced(silenced: &mut BTreeSet<String>, moves: &[(String, String)]
     }
 }
 
+/// The mixes someone solos in `transient` whose set has another wearer in
+/// `after` than in `before` (#58 review): the engine keeps a solo across
+/// an import, the new wearer must not hear the old one's.
+pub(crate) fn soloed_changing(
+    transient: &Transient,
+    before: &Lineup,
+    after: &Lineup,
+) -> Vec<MixId> {
+    transient
+        .solo
+        .iter()
+        .filter(|s| {
+            !s.sources.is_empty() && before.person_on(&s.mix.0) != after.person_on(&s.mix.0)
+        })
+        .map(|s| s.mix.clone())
+        .collect()
+}
+
+/// Ends the solo of each of `mixes` (a failure is logged: the solo then
+/// ends when its mix's last page has gone).
+pub(crate) async fn end_solos(state: &AppState, mixes: &[MixId]) {
+    for mix in mixes {
+        let end = Cmd::SetSolo {
+            mix: mix.clone(),
+            sources: Vec::new(),
+        };
+        if let Err(e) = state.engine.request_applied(end, None).await {
+            tracing::error!(mix = %mix.0, error = %e, "a solo did not end with its set's wearer");
+        }
+    }
+}
+
 /// Lineup `id`'s record of the sets its rules silenced (one that cannot be
 /// read is logged: none).
 pub(crate) fn silenced_of(store: &LineupStore, id: &str) -> BTreeSet<String> {
@@ -729,9 +761,18 @@ async fn transition(
             keep_silenced(&store, active, &active_silenced);
         }
     };
-    let current = state.engine.mirror().state.clone();
+    // A solo ends on every set of the active lineup whose wearer changes
+    // (no `base`: who wore which set is not known, every solo stays).
+    let before = base.and_then(|b| b.lineup(active));
+    let soloed_now = |m: &crate::engine::mirror::Mirror| {
+        before.map_or_else(Vec::new, |b| soloed_changing(&m.transient, b, &lineup))
+    };
+    let (current, soloed) = {
+        let m = state.engine.mirror();
+        (m.state.clone(), soloed_now(&*m))
+    };
     let (next, silenced) = next_of(&current);
-    if next == current {
+    if next == current && soloed.is_empty() {
         keep_records(silenced);
         return Ok(Transition {
             moved: shift.len(),
@@ -757,9 +798,9 @@ async fn transition(
             return Err(failed(e));
         }
     };
-    let (synced, current) = {
+    let (synced, current, soloed) = {
         let m = state.engine.mirror();
-        (m.synced, m.state.clone())
+        (m.synced, m.state.clone(), soloed_now(&*m))
     };
     let imported = if synced {
         let (next, silenced) = next_of(&current);
@@ -783,7 +824,10 @@ async fn transition(
         Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]))
     };
     match imported {
-        Ok(silenced) => keep_records(silenced),
+        Ok(silenced) => {
+            keep_records(silenced);
+            end_solos(state, &soloed).await;
+        }
         Err(not) => {
             state.frozen.store(was, Ordering::SeqCst);
             undo(&store, &written);

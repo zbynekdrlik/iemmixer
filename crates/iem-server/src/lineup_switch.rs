@@ -34,7 +34,7 @@ use crate::AppState;
 use crate::backup::{capture, keep_running};
 use crate::engine::client::EngineError;
 use crate::lineup_store::{LineupStore, SwitchIntent};
-use crate::roster_watch::{fit_recorded, keep_silenced, silenced_of};
+use crate::roster_watch::{end_solos, fit_recorded, keep_silenced, silenced_of, soloed_changing};
 use crate::site_view::SiteView;
 
 /// How long [`replay_when_synced`] waits between two tries.
@@ -296,6 +296,12 @@ async fn forward(
         .map(|b| b.state);
     let mut silenced = silenced_from(store, &to.id, stored.is_some(), from);
     let target = target_state_recorded(stored, live, roster, to, &mut silenced);
+    // The engine keeps solos across the import: each set whose wearer
+    // changes loses its solo (the pages are frozen still).
+    let soloed = match roster.lineup(from) {
+        Some(before) => soloed_changing(&state.engine.mirror().transient, before, to),
+        None => Vec::new(),
+    };
     state
         .engine
         .request_applied(import(target), None)
@@ -305,6 +311,7 @@ async fn forward(
         .set_active(&to.id, chrono::Utc::now().timestamp())
         .map_err(|e| io("the band that plays was not recorded", e))?;
     keep_silenced(store, &to.id, &silenced);
+    end_solos(state, &soloed).await;
     Ok(())
 }
 
