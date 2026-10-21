@@ -656,6 +656,55 @@ async fn a_restart_mid_switch_replays_the_intent() {
     assert_eq!(LineupStore::new(dir.path()).intent().unwrap(), None);
 }
 
+/// #58 review: a switch a restart cut short that cannot be finished (the
+/// new band's stored state is unreadable) does not freeze the pages for
+/// good: after a few tries the engineer's devices hear of it and the old
+/// band plays again from its stored state, recorded, the intent gone.
+#[tokio::test]
+async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LineupStore::new(dir.path());
+    let mut main = MixState::default();
+    main.inputs.entry(InputId::new("keys")).or_default().trim_db = 2.0;
+    store
+        .save_state("main", &MixerBackup::new("t".into(), 1, main))
+        .unwrap();
+    // youth's stored state cannot be read: a folder in its place.
+    std::fs::create_dir_all(store.data_dir("youth").join("state.json")).unwrap();
+    let mut state = cut_short(dir.path(), "main", "youth");
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    let replay = tokio::spawn(replay_when_synced(state.clone()));
+    // A few tries 2 s apart, then the alarm.
+    let t0 = std::time::Instant::now();
+    while seen.lock().unwrap().is_empty() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(15),
+            "an alarm within 15 s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let imported = fake::imports(&mut peer, 2).await;
+    assert_eq!(
+        imported.inputs[&InputId::new("keys")].trim_db,
+        2.0,
+        "main's"
+    );
+    within(replay).await;
+    assert_eq!(store.active().unwrap().as_deref(), Some("main"));
+    assert_eq!(store.intent().unwrap(), None);
+    assert_eq!(state.roster().unwrap().active, "main");
+    assert!(!state.frozen_now());
+    assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
+}
+
 /// Without a switch to finish, the start's replay ends at once.
 #[tokio::test]
 async fn nothing_to_replay_ends_at_once() {
