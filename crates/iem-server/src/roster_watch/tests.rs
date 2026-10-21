@@ -2384,3 +2384,25 @@ fn a_roster_path_that_cannot_be_read_is_an_error_never_none() {
     let err = read_roster(dir.path()).unwrap_err();
     assert!(err.starts_with(&path.display().to_string()), "{err}");
 }
+
+/// What the running state follows is its own lineup's: asked for another
+/// lineup, running_for answers no marker and no record.
+#[test]
+fn what_the_running_state_follows_is_only_its_own_lineups() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LineupStore::new(dir.path());
+    let silenced = BTreeSet::from(["member4".to_string()]);
+    store
+        .set_running(&Running {
+            lineup: "youth".into(),
+            follows: Some("x".into()),
+            silenced: silenced.clone(),
+            pending: None,
+        })
+        .unwrap();
+    assert_eq!(
+        running_for(&store, "youth", ""),
+        (Some("x".to_string()), silenced)
+    );
+    assert_eq!(running_for(&store, "main", ""), (None, BTreeSet::new()));
+}
