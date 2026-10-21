@@ -1844,3 +1844,50 @@ fn a_band_run_interrupted_between_the_renames_is_recovered() {
     assert!(report.contains("recovered: restored"), "{report}");
     assert!(!tree(&out).contains_key("half.txt"));
 }
+
+/// #58: a band directory in the server's roster layout (lineups/active.json)
+/// is never written by a band import: refused, exit 1, nothing written, a
+/// dry run too.
+#[test]
+fn a_band_import_refuses_the_roster_layout() {
+    let w = World::new(11);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    iem_server::lineup_store::LineupStore::new(&out)
+        .set_active("main", 1)
+        .unwrap();
+    let before = tree(&out);
+    let runs: [&[&str]; 2] = [&[], &["--dry-run"]];
+    for extra in runs {
+        let err = run(&band_args(&w, &l, &eras, &out, extra)).unwrap_err();
+        assert_eq!(err.code, EXIT_IO, "{extra:?}: {}", err.msg);
+        assert!(
+            err.msg.contains("lineups/active.json") && err.msg.contains("nothing is written"),
+            "{}",
+            err.msg
+        );
+    }
+    assert_eq!(tree(&out), before, "nothing written");
+}
+
+/// #58: an archived member's PIN stays in the archive: a later band import
+/// gives them no login.
+#[test]
+fn a_band_import_leaves_an_archived_pin_archived() {
+    let w = World::new(12);
+    let (l, eras) = legacy(&w);
+    let out = w.path("band");
+    run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    let (_, mut store) = hasher(&out);
+    assert!(store.archive_member("member2").unwrap());
+    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
+    assert!(
+        report.contains("pin member2: skipped (archived)"),
+        "{report}"
+    );
+    assert!(report.contains("pin member1: unchanged"), "{report}");
+    let (h, store) = hasher(&out);
+    assert!(store.member_hash("member2").is_none(), "no login");
+    assert!(h.verify("2468", store.archived_hash("member2").unwrap()));
+}
