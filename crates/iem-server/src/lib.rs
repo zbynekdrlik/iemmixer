@@ -157,6 +157,9 @@ pub struct AppState {
     /// until it is finished): no page's change reaches the engine
     /// ([`AppState::may_change`]).
     pub frozen: Arc<std::sync::atomic::AtomicBool>,
+    /// How long the replay of a switch and the settle of a roster wait
+    /// between two tries (`lineup_switch::REPLAY_RETRY`; tests shorten it).
+    pub retry: std::time::Duration,
     /// A page's change is checked and queued under the read side, `frozen`
     /// is set under the write side ([`AppState::apply`],
     /// [`AppState::freeze`]). A std lock: never held across an `.await`.
@@ -280,6 +283,7 @@ impl AppState {
             lineup_tx,
             switching: Arc::new(tokio::sync::Mutex::new(())),
             frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
+            retry: lineup_switch::REPLAY_RETRY,
             change_gate: Arc::new(std::sync::RwLock::new(())),
             unsettled: Arc::new(Mutex::new(unsettled)),
             meters_tx,

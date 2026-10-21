@@ -415,7 +415,7 @@ pub const MAX_REPLAYS: u32 = 3;
 
 /// At the start, and after a switch the engine dropped in: when a switch
 /// was cut short (`frozen` set), waits for the engine's state and finishes
-/// it ([`replay_intent`]), trying again every [`REPLAY_RETRY`]. After
+/// it ([`replay_intent`]), trying again every `AppState::retry`. After
 /// [`MAX_REPLAYS`] failed tries the engineer's devices hear of it (once)
 /// and the band before the switch plays again ([`fall_back`], tried until
 /// it succeeds).
@@ -458,7 +458,7 @@ pub async fn replay_when_synced(state: AppState) {
                 }
             }
         }
-        tokio::time::sleep(REPLAY_RETRY).await;
+        tokio::time::sleep(state.retry).await;
     }
 }
 

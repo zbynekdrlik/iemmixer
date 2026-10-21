@@ -681,8 +681,9 @@ async fn a_replay_that_keeps_failing_alarms_and_goes_back() {
         .add(crate::push::tests::subscription(format!("{base}/201")))
         .unwrap();
     let mut peer = synced(&mut state, running()).await;
+    state.retry = Duration::from_millis(100);
     let replay = tokio::spawn(replay_when_synced(state.clone()));
-    // A few tries 2 s apart, then the alarm.
+    // A few tries apart, then the alarm.
     let t0 = std::time::Instant::now();
     while seen.lock().unwrap().is_empty() {
         assert!(

@@ -44,7 +44,6 @@ use crate::engine::client::EngineError;
 use crate::lineup_store::{
     ACTIVE_FILE, LineupStore, SWITCH_FILE, migrate_legacy, migration_problems,
 };
-use crate::lineup_switch::REPLAY_RETRY;
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
 use crate::roster_state::RosterState;
@@ -933,7 +932,7 @@ fn record_in_use(config_dir: &Path, sha256: &str) {
 
 /// At the start, after the replay of a switch a restart cut short, and
 /// after a legacy server adopted its roster: [`settle`] once the engine has
-/// synced, tried again every [`REPLAY_RETRY`] while the engine is not there.
+/// synced, tried again every `AppState::retry` while the engine is not there.
 /// After [`MAX_SETTLES`] refused tries (the engine refuses the import, a
 /// stored state cannot be read or written) the pages are freed without it
 /// and the engineer's devices hear of it (once): the next roster change
@@ -971,7 +970,7 @@ pub async fn settle_when_synced(state: AppState) {
                 }
             }
         }
-        tokio::time::sleep(REPLAY_RETRY).await;
+        tokio::time::sleep(state.retry).await;
     }
 }
 

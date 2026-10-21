@@ -1180,13 +1180,15 @@ async fn a_settle_that_keeps_failing_alarms_and_frees_the_pages() {
         .add(crate::push::tests::subscription(format!("{base}/201")))
         .unwrap();
     let _peer = synced(&mut state, running()).await;
+    state.retry = Duration::from_millis(100);
     let t0 = std::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(15), settle_when_synced(state.clone()))
+    tokio::time::timeout(Duration::from_secs(5), settle_when_synced(state.clone()))
         .await
-        .expect("given up within 15 s");
+        .expect("given up within 5 s");
     assert!(
-        t0.elapsed() >= REPLAY_RETRY * (MAX_SETTLES - 1),
-        "{MAX_SETTLES} tries, {REPLAY_RETRY:?} apart"
+        t0.elapsed() >= state.retry * (MAX_SETTLES - 1),
+        "{MAX_SETTLES} tries, {:?} apart",
+        state.retry
     );
     assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
     let page = state.page("member2").unwrap();
