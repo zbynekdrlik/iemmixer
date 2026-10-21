@@ -880,3 +880,110 @@ fn a_lineup_without_state_starts_from_the_current_one() {
         running().mixes[&mix_id("member1")]
     );
 }
+
+/// #58 review: an engine that does not answer the new band's import: the
+/// old band's state goes back in, the switch fails, nothing else changed.
+#[tokio::test]
+async fn an_import_the_engine_does_not_answer_keeps_the_old_lineup() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    let mut peer = synced(&mut state, running()).await;
+    let task = spawn_switch(&state, "youth", claims("engineer", true));
+    // Never answered: the request times out.
+    fake::next_import(&mut peer).await;
+    assert_eq!(
+        fake::imports(&mut peer, 2).await,
+        running(),
+        "main's state again"
+    );
+    let result = within(task).await;
+    assert!(
+        matches!(result, Err(SwitchError::Engine(EngineError::Timeout))),
+        "{result:?}"
+    );
+    assert_eq!(store.active().unwrap().as_deref(), Some("main"));
+    assert_eq!(store.intent().unwrap(), None);
+    assert_eq!(state.roster().unwrap().active, "main");
+    assert!(!state.frozen_now());
+}
+
+/// #58 review: the new band's state went in but cannot be recorded as the
+/// band that plays: the old band's state goes back in, the old band stays
+/// the one in use, the intent goes.
+#[tokio::test]
+async fn a_switch_that_cannot_record_the_new_band_goes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    // active.json cannot be replaced: a folder in its place.
+    let active = dir.path().join("lineups").join("active.json");
+    std::fs::remove_file(&active).unwrap();
+    std::fs::create_dir_all(active.join("x")).unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    let task = spawn_switch(&state, "youth", claims("engineer", true));
+    let to_youth = fake::imports(&mut peer, 2).await;
+    assert!(
+        to_youth.mixes[&mix_id("member2")].out.muted,
+        "youth's went in"
+    );
+    assert_eq!(
+        fake::imports(&mut peer, 3).await,
+        running(),
+        "main's state again"
+    );
+    let result = within(task).await;
+    assert!(
+        matches!(&result, Err(SwitchError::Io(e)) if e.starts_with("the band that plays was not recorded")),
+        "{result:?}"
+    );
+    assert_eq!(state.roster().unwrap().active, "main");
+    assert_eq!(store.intent().unwrap(), None);
+    assert!(!state.frozen_now());
+}
+
+/// #58 review: with the engine's topology announced but its state not
+/// synced yet, a switch is refused at once and sends nothing.
+#[tokio::test]
+async fn a_switch_needs_the_engines_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    assert!(state.site().is_some(), "the topology is there");
+    assert_eq!(
+        switch_lineup(&state, "youth", &claims("engineer", true)).await,
+        Err(SwitchError::NotSynced)
+    );
+    assert!(!state.frozen_now());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "nothing sent"
+    );
+}
+
+/// #58 review: a switch a restart cut short is not finished before the
+/// engine's state is synced (the intent stays, the pages frozen);
+/// replay_when_synced tries again until it is.
+#[tokio::test]
+async fn a_replay_waits_for_the_engines_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = cut_short(dir.path(), "main", "youth");
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    assert_eq!(
+        replay_intent(&state).await,
+        Err("the engine state is not synced".to_string())
+    );
+    assert!(state.frozen_now());
+    assert!(LineupStore::new(dir.path()).intent().unwrap().is_some());
+    let replay = tokio::spawn(replay_when_synced(state.clone()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake::sync(&state.engine, &mut peer, 1, running()).await;
+    fake::imports(&mut peer, 2).await;
+    within(replay).await;
+    assert!(!state.frozen_now());
+    assert_eq!(state.roster().unwrap().active, "youth");
+}
