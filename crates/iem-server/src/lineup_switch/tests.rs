@@ -1216,3 +1216,52 @@ async fn a_change_racing_the_freeze_is_the_bands_or_refused() {
         "the change is main's"
     );
 }
+
+/// #58 third review: a replay that only clears the intent (the target was
+/// recorded, so the engine holds its state) ends the solos of the sets
+/// whose wearer differs between the two bands, as the switch would have:
+/// member1's set is member10's in youth; member3 keeps theirs.
+#[tokio::test]
+async fn a_replay_that_only_clears_the_intent_ends_the_changed_sets_solos() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = cut_short(dir.path(), "youth", "youth");
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    peer.send(&EngineMsg::State {
+        rev: 1,
+        state: running(),
+        transient: iem_engine_proto::Transient {
+            solo: vec![solo("member1", "mic1"), solo("member3", "mic3")],
+            ..Default::default()
+        },
+    })
+    .await;
+    until("synced", || state.engine.mirror().synced).await;
+    let replay = {
+        let s = state.clone();
+        tokio::spawn(async move { replay_intent(&s).await })
+    };
+    let (id, cmd) = fake::next_request(&mut peer).await;
+    assert_eq!(
+        cmd,
+        Cmd::SetSolo {
+            mix: mix_id("member1"),
+            sources: vec![],
+        }
+    );
+    assert!(state.frozen_now(), "before the pages are free");
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 1,
+        error: None,
+    }))
+    .await;
+    assert_eq!(within(replay).await, Ok(()));
+    assert!(!state.frozen_now());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "member3's solo stays"
+    );
+}

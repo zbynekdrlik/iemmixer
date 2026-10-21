@@ -1723,3 +1723,50 @@ async fn a_lost_import_from_a_peer_set_to_a_plain_set_finishes() {
         "no import again"
     );
 }
+
+/// #58 third review: when who wore the sets before is not known (no roster
+/// the running state follows: a first roster, a legacy server's), a settle
+/// ends every solo, the pages frozen.
+#[tokio::test]
+async fn a_settle_from_an_unknown_roster_ends_every_solo() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    let solo = iem_engine_proto::Solo {
+        mix: MixId::new("member3"),
+        sources: vec![iem_engine_proto::Source::Input(InputId::new("mic3"))],
+    };
+    peer.send(&iem_engine_proto::EngineMsg::State {
+        rev: 1,
+        state: running(),
+        transient: iem_engine_proto::Transient {
+            solo: vec![solo],
+            ..Default::default()
+        },
+    })
+    .await;
+    until("synced", || state.engine.mirror().synced).await;
+    let settle = tokio::spawn(settle_when_synced(state.clone()));
+    let (id, cmd) = fake::next_request(&mut peer).await;
+    assert_eq!(
+        cmd,
+        Cmd::SetSolo {
+            mix: MixId::new("member3"),
+            sources: vec![],
+        }
+    );
+    assert!(state.frozen_now());
+    peer.send(&iem_engine_proto::EngineMsg::Reply(
+        iem_engine_proto::Reply {
+            id,
+            rev: 1,
+            error: None,
+        },
+    ))
+    .await;
+    within(settle).await;
+    assert!(!state.frozen_now() && !state.settling());
+}
