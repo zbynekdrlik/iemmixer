@@ -1544,6 +1544,27 @@ async fn a_settle_that_gave_up_still_moves_people_at_the_next_reload() {
     );
 }
 
+/// #58 re-review: the settle at the start goes as soon as the engine's
+/// state arrives, not at its next retry: the pages wait no longer.
+#[tokio::test]
+async fn the_settle_goes_once_the_engine_syncs() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    LineupStore::new(d).set_active("youth", 1).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    state.retry = Duration::from_secs(10);
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    let settle = tokio::spawn(settle_when_synced(state.clone()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake::sync(&state.engine, &mut peer, 1, running()).await;
+    let t0 = std::time::Instant::now();
+    imports(&mut peer).await;
+    within(settle).await;
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+}
+
 /// #58 re-review: a roster change waits while a switch a restart cut short
 /// is not finished: until its replay has run, which band's state the
 /// engine holds is not known.
