@@ -164,6 +164,11 @@ pub struct AppState {
     /// engine before the engineer's devices hear of it, once
     /// (`roster_watch::ABSENT_ALARM`; tests shorten it).
     pub absent_alarm: std::time::Duration,
+    /// Reloads in a row whose pending record could not be written
+    /// (`roster_watch::NOT_RECORDED`): the engineer's devices hear of it once
+    /// the count reaches `roster_watch::MAX_SETTLES`; a reload that applies
+    /// starts it again.
+    pub(crate) unrecorded: Arc<std::sync::atomic::AtomicU32>,
     /// The server started on the roster applied last because `roster.toml`
     /// could not be used (`roster_watch::Loaded::fallback`), until a roster
     /// file is in use again: the status says so.
@@ -291,6 +296,7 @@ impl AppState {
             frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
             retry: lineup_switch::REPLAY_RETRY,
             absent_alarm: roster_watch::ABSENT_ALARM,
+            unrecorded: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             fallback: Arc::new(std::sync::atomic::AtomicBool::new(fallback)),
             change_gate: Arc::new(std::sync::RwLock::new(())),
             unsettled: Arc::new(Mutex::new(unsettled)),

@@ -1220,8 +1220,12 @@ async fn reload(
     };
     let done = match transition(state, follows, &new, sha256, &active).await {
         Ok(done) => done,
-        Err(not) => return not,
+        Err(not) => {
+            count_unrecorded(state, &not).await;
+            return not;
+        }
     };
+    state.unrecorded.store(0, Ordering::SeqCst);
     let (added, removed) = people_diff(&old.roster, &new);
     let roster = Arc::new(new);
     state.set_roster(Some(RosterState {
@@ -1362,12 +1366,40 @@ async fn give_up(state: &AppState) {
 
 /// Whether a roster that did not reach the states waits for the engine
 /// (gone, silent, not synced: tried again) rather than being refused. A
-/// pending record that could not be written ([`NOT_RECORDED`]) counts as
+/// pending record that could not be written ([`unrecorded`]) counts as
 /// refused (#58 fifth review): waiting does not make the file writable.
 fn waits(not: &Applied) -> bool {
-    match not {
-        Applied::Deferred(why) => !why.iter().any(|w| w == NOT_RECORDED),
-        _ => false,
+    matches!(not, Applied::Deferred(_)) && !unrecorded(not)
+}
+
+/// Whether `not` is a transition that imported nothing because its pending
+/// record could not be written ([`NOT_RECORDED`]).
+fn unrecorded(not: &Applied) -> bool {
+    matches!(not, Applied::Deferred(why) if why.iter().any(|w| w == NOT_RECORDED))
+}
+
+/// Counts a reload that imported nothing because its pending record could
+/// not be written; at [`MAX_SETTLES`] in a row the engineer's devices hear
+/// of it, once (#58 fifth review): the watcher tries it again every poll.
+async fn count_unrecorded(state: &AppState, not: &Applied) {
+    if !unrecorded(not) {
+        return;
+    }
+    let tries = state.unrecorded.fetch_add(1, Ordering::SeqCst) + 1;
+    if tries == MAX_SETTLES {
+        let devices = crate::notify::push_alarm(
+            state,
+            "Zmena zostavy čaká",
+            "Server nevie zapísať súbor lineups/running.json, preto zmenu zostavy \
+             nepreniesol do mixov a skúša to znova. Skontroluj miesto na disku a \
+             práva k priečinku lineups.",
+        )
+        .await;
+        tracing::warn!(
+            devices,
+            tries,
+            "the engineer's devices heard a reload cannot record its import"
+        );
     }
 }
 
