@@ -131,6 +131,12 @@ impl PinStore {
         self.file.members.get(member_id).map(String::as_str)
     }
 
+    /// Every member with a live PIN hash (not the engineer, not an
+    /// archived one), in id order.
+    pub fn member_ids(&self) -> Vec<String> {
+        self.file.members.keys().cloned().collect()
+    }
+
     /// Whether any PIN hash (engineer, member or archived) is stored: a new
     /// pepper would void each of them.
     pub fn has_hashes(&self) -> bool {
@@ -390,6 +396,22 @@ mod tests {
         let mut store = store;
         assert!(store.archive_member(ENGINEER_ID).is_err());
         assert!(store.restore_member("../x").is_err());
+    }
+
+    /// #58: the roster's watcher archives whoever holds a live PIN and is
+    /// no person any more.
+    #[test]
+    fn member_ids_are_the_live_member_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        assert!(store.member_ids().is_empty());
+        store.set_engineer_hash(h.hash("2468")).unwrap();
+        for id in ["member2", "member1", "member3"] {
+            store.set_member_hash(id, h.hash("1357")).unwrap();
+        }
+        store.archive_member("member3").unwrap();
+        assert_eq!(store.member_ids(), ["member1", "member2"]);
     }
 
     #[test]

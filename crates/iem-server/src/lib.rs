@@ -30,6 +30,7 @@ pub mod provision;
 pub mod push;
 pub mod push_store;
 pub mod roster_state;
+pub mod roster_watch;
 pub mod routes;
 pub mod secrets;
 pub mod site_view;
@@ -145,6 +146,9 @@ pub struct AppState {
     site_cache: Arc<Mutex<Option<SiteCacheEntry>>>,
     /// UI events that do not come from the engine (SOS, pins, talk, tunnel)
     pub event_tx: broadcast::Sender<(To, ServerMsg)>,
+    /// The active lineup after a switch or a roster change (#58):
+    /// [`AppState::announce_lineup`]
+    pub lineup_tx: broadcast::Sender<iem_core::LineupRef>,
     /// Merged meters every 100 ms
     pub meters_tx: broadcast::Sender<Arc<Merged>>,
     /// Latest limiter active seconds per mix (topology order)
@@ -189,12 +193,16 @@ impl AppState {
     /// Production constructor. Loads the PIN pepper and the PIN hashes from
     /// `<config dir>/secrets/`; an unreadable pepper or a corrupt or plaintext
     /// PIN store is an error — never regenerated, never ignored — so the server
-    /// refuses to start. The engine and media links start detached;
-    /// `start_server` connects them.
+    /// refuses to start. So is a roster (`roster.toml`) that cannot be used
+    /// (`roster_watch::load`, which migrates the legacy layout first); without
+    /// one the server runs in legacy mode. The engine and media links start
+    /// detached; `start_server` connects them.
     pub fn try_new(config: Config, config_dir: &std::path::Path) -> std::io::Result<Self> {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
-        let pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        let mut pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        let roster = roster_watch::load(config_dir, &config, &mut pin_store, None)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
         // from loopback and this host's own addresses (design note §6).
         let host = login_guard::HostAddrs::read();
@@ -209,9 +217,10 @@ impl AppState {
         }
         let (event_tx, _) = broadcast::channel(256);
         let (meters_tx, _) = broadcast::channel(16);
+        let (lineup_tx, _) = broadcast::channel(16);
         Ok(Self {
             site_config: Arc::new(config.clone()),
-            roster: Arc::new(std::sync::RwLock::new(None)),
+            roster: Arc::new(std::sync::RwLock::new(roster)),
             config_dir: Arc::new(config_dir.to_path_buf()),
             config: Arc::new(RwLock::new(config)),
             http_client: reqwest::Client::builder()
@@ -222,6 +231,7 @@ impl AppState {
             engine: EngineClient::detached(),
             site_cache: Arc::new(Mutex::new(None)),
             event_tx,
+            lineup_tx,
             meters_tx,
             active_s: Arc::new(Mutex::new(Vec::new())),
             sessions: Arc::new(AtomicU64::new(1)),
@@ -288,6 +298,23 @@ impl AppState {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Puts `roster` into use (`None`: legacy mode).
+    pub fn set_roster(&self, roster: Option<roster_state::RosterState>) {
+        *self.roster.write().unwrap_or_else(PoisonError::into_inner) = roster;
+    }
+
+    /// Tells every mixer page that the lineup or the roster changed (#58):
+    /// the active lineup on [`AppState::lineup_tx`]. Nothing in legacy mode.
+    pub fn announce_lineup(&self) {
+        if let Some(r) = self.roster() {
+            let l = r.lineup();
+            let _ = self.lineup_tx.send(iem_core::LineupRef {
+                id: l.id.clone(),
+                name: l.name.clone(),
+            });
+        }
     }
 
     /// The site view over the engine's current topology (`None` until the
@@ -494,7 +521,7 @@ where
     config.vapid_private_key = secrets.vapid_private_key;
     let pipe = config.engine_pipe.clone();
     let mut state = AppState::try_new(config, &server_config.config_dir)
-        .context("loading the PIN pepper and PIN hashes")?;
+        .context("loading the PIN pepper, the PIN hashes and the roster")?;
     state.engine = EngineClient::spawn(pipe.clone(), iem_core::VERSION.to_string());
     #[cfg(feature = "audio")]
     {
@@ -523,6 +550,7 @@ where
     console::spawn_tasks(state.clone());
     backup_daemon::spawn(state.clone());
     tunnel_watch::spawn_tunnel_watch(state.clone());
+    tokio::spawn(roster_watch::watch(state.clone()));
 
     let app = app_router(state.clone());
 
