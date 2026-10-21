@@ -109,18 +109,20 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         .merge(crate::tunnel_watch::tunnel_routes())
 }
 
-/// The site's members (the landing page's tiles).
+/// The landing page's tiles: the site's members (legacy mode, all playing),
+/// or every person, those playing in the active lineup first, then the
+/// engineer (`roster_state::people`).
 async fn get_members(State(state): State<AppState>) -> impl IntoResponse {
-    let members: Vec<MemberInfo> = state
-        .site_config
-        .members
-        .iter()
-        .map(|m| MemberInfo {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            has_photo: state.photo_store.exists(&m.id),
-        })
-        .collect();
+    let members: Vec<MemberInfo> =
+        crate::roster_state::people(&state.site_config, state.roster().as_ref())
+            .into_iter()
+            .map(|p| MemberInfo {
+                has_photo: state.photo_store.exists(&p.id),
+                id: p.id,
+                name: p.name,
+                playing: p.playing,
+            })
+            .collect();
     Json(members)
 }
 
@@ -129,6 +131,8 @@ struct MemberInfo {
     id: String,
     name: String,
     has_photo: bool,
+    /// Plays in the active lineup (#58; always in legacy mode).
+    playing: bool,
 }
 
 type Reject = (StatusCode, Json<ApiError>);

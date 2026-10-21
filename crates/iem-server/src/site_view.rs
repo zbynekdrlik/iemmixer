@@ -1,10 +1,15 @@
 //! The site as the UI sees it (S5 design note §3, §6): the configured members
 //! and input labels joined with the engine's topology. Built again whenever
-//! the engine announces a topology; ids the topology does not have are
-//! reported and left out, never guessed.
+//! the engine announces a topology or the roster or its active lineup
+//! changes; ids the topology does not have are reported and left out, never
+//! guessed. In roster mode (#58) the members are the active lineup's people
+//! on their sets and the lineup names its inputs (`roster_state`).
 
 use iem_core::config::{Config, SiteMember};
 use iem_engine_proto::{GroupId, InputId, MixId, TopologyInfo};
+
+use crate::pin_store::ENGINEER_ID;
+use crate::roster_state::{self, PersonView, RosterState};
 
 /// One engine input with its label, tab and owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +52,15 @@ pub struct SiteView {
     /// The group shown as the STEMS strip (the site's first group).
     pub group: Option<GroupId>,
     pub engineer_mix: Option<MixId>,
+    /// Who hears the other members' mixes: the active lineup's leaders;
+    /// legacy, every member (not the engineer) whose mix hears another.
+    pub leaders: Vec<String>,
+    /// Every login tile, each with whether they play (legacy: the members,
+    /// all playing; `roster_state::people`).
+    pub people: Vec<PersonView>,
+    /// Sets of the roster that nobody wears in the active lineup: no page
+    /// (legacy: none).
+    pub vacant: Vec<MixId>,
 }
 
 /// "translator" → "Translator".
@@ -59,13 +73,26 @@ fn title(id: &str) -> String {
 }
 
 impl SiteView {
-    /// The view of `config` over `topo`, and every mismatch between them.
+    /// The view of `config` over `topo`, and every mismatch between them
+    /// (legacy mode).
     pub fn build(config: &Config, topo: &TopologyInfo) -> (Self, Vec<String>) {
+        Self::build_with(config, None, topo)
+    }
+
+    /// The view of `config` and, in roster mode, the roster's active lineup
+    /// over `topo`, and every mismatch between them. An input the lineup
+    /// lists takes its name and owner; any other keeps the site's label and
+    /// has no owner but the engineer's own channel (#58 design §5).
+    pub fn build_with(
+        config: &Config,
+        roster: Option<&RosterState>,
+        topo: &TopologyInfo,
+    ) -> (Self, Vec<String>) {
         let mut problems = Vec::new();
+        let lineup = roster.map(RosterState::lineup);
         let mix_ids: Vec<&MixId> = topo.mixes.iter().map(|m| &m.id).collect();
-        let members: Vec<SiteMember> = config
-            .members
-            .iter()
+        let members: Vec<SiteMember> = roster_state::site_members(config, roster)
+            .into_iter()
             .filter(|m| {
                 let known = mix_ids.iter().any(|id| id.0 == m.mix);
                 if !known {
@@ -76,7 +103,6 @@ impl SiteView {
                 }
                 known
             })
-            .cloned()
             .collect();
         let inputs = topo
             .inputs
@@ -92,11 +118,22 @@ impl SiteView {
                     meta.and_then(|m| m.category.clone())
                         .unwrap_or_else(|| "mics".to_string())
                 };
+                let listed = lineup.and_then(|l| l.inputs.get(&i.id.0));
+                let site_owner = meta.and_then(|m| m.owner.clone());
+                let owner = match (lineup, listed) {
+                    (None, _) => site_owner,
+                    (Some(_), Some(l)) => l.owner.clone(),
+                    (Some(_), None) => site_owner.filter(|o| o == ENGINEER_ID),
+                };
                 InputView {
                     id: i.id.clone(),
-                    name: meta.map_or_else(|| i.id.0.to_uppercase(), |m| m.name.clone()),
+                    name: match (listed, meta) {
+                        (Some(l), _) => l.name.clone(),
+                        (None, Some(m)) => m.name.clone(),
+                        (None, None) => i.id.0.to_uppercase(),
+                    },
                     category,
-                    owner: meta.and_then(|m| m.owner.clone()),
+                    owner,
                     group: i.group.clone(),
                 }
             })
@@ -104,6 +141,16 @@ impl SiteView {
         for m in &config.inputs {
             if !topo.inputs.iter().any(|i| i.id.0 == m.id) {
                 problems.push(format!("[[inputs]] '{}' is not an engine input", m.id));
+            }
+        }
+        if let Some(l) = lineup {
+            for id in l.inputs.keys() {
+                if !topo.inputs.iter().any(|i| i.id.0 == *id) {
+                    problems.push(format!(
+                        "lineup '{}': input '{id}' is not an engine input",
+                        l.id
+                    ));
+                }
             }
         }
         let mixes = topo
@@ -120,12 +167,43 @@ impl SiteView {
                 }
             })
             .collect();
+        let leaders = match lineup {
+            Some(l) => l.leaders.clone(),
+            None => members
+                .iter()
+                .filter(|m| {
+                    m.id != ENGINEER_ID
+                        && topo.mixes.iter().any(|x| {
+                            x.id.0 == m.mix && (!x.mixes.is_empty() || !x.peers.is_empty())
+                        })
+                })
+                .map(|m| m.id.clone())
+                .collect(),
+        };
+        let vacant = match (roster, lineup) {
+            (Some(r), Some(l)) => topo
+                .mixes
+                .iter()
+                .filter(|m| {
+                    l.person_on(&m.id.0).is_none()
+                        && r.roster
+                            .lineups
+                            .iter()
+                            .any(|x| x.sets.contains_key(&m.id.0))
+                })
+                .map(|m| m.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
         let view = Self {
             members,
             inputs,
             mixes,
             group: topo.groups.first().map(|g| g.id.clone()),
             engineer_mix: Some(topo.engineer.clone()),
+            leaders,
+            people: roster_state::people(config, roster),
+            vacant,
         };
         (view, problems)
     }
@@ -142,7 +220,8 @@ impl SiteView {
         self.inputs.iter().find(|i| i.id.0 == id)
     }
 
-    /// The page `id`: a member, or a mix without a member.
+    /// The page `id`: a member, or a mix without a member that is no vacant
+    /// set.
     pub fn page(&self, id: &str) -> Option<Page> {
         if let Some(m) = self.member(id) {
             return Some(Page {
@@ -154,7 +233,7 @@ impl SiteView {
         }
         self.mixes
             .iter()
-            .find(|m| m.id.0 == id && m.member.is_none())
+            .find(|m| m.id.0 == id && m.member.is_none() && !self.vacant.contains(&m.id))
             .map(|m| Page {
                 id: m.id.0.clone(),
                 name: m.name.clone(),
@@ -292,6 +371,182 @@ pub(crate) mod tests {
                 MixId::new("member1")
             ]
         );
+    }
+
+    fn roster_view(active: &str) -> SiteView {
+        let roster = crate::roster_state::tests::test_roster(active);
+        let (view, problems) =
+            SiteView::build_with(&test_config(), Some(&roster), &test_topology());
+        assert_eq!(problems, Vec::<String>::new());
+        view
+    }
+
+    /// #58: in roster mode the active lineup's people are the members, each
+    /// on their set; a set nobody wears is no page.
+    #[test]
+    fn roster_mode_maps_people_to_sets_of_the_active_lineup() {
+        let v = roster_view("youth");
+        let members: Vec<(&str, &str, &str)> = v
+            .members
+            .iter()
+            .map(|m| (m.id.as_str(), m.name.as_str(), m.mix.as_str()))
+            .collect();
+        assert_eq!(
+            members,
+            [
+                ("member10", "Member 10", "member1"),
+                ("member3", "Member 3", "member3"),
+                ("member11", "Member 11", "member4"),
+                ("engineer", "Engineer", "engineer"),
+            ]
+        );
+        let p = v.page("member10").unwrap();
+        assert_eq!(
+            (p.name.as_str(), p.mix.0.as_str(), p.member.as_deref()),
+            ("Member 10", "member1", Some("member10"))
+        );
+        assert!(
+            v.page("member2").is_none(),
+            "member2 plays in no set of youth"
+        );
+        assert!(v.page("member1").is_none(), "member1's set is member10's");
+        assert!(v.page("member4").is_none(), "member4's set is member11's");
+        assert_eq!(v.page("translator").unwrap().member, None);
+        let pages: Vec<String> = v.mix_pages().into_iter().map(|p| p.id).collect();
+        assert_eq!(pages, ["translator"], "vacant sets are no pages");
+        let vacant: Vec<&str> = v.vacant.iter().map(|m| m.0.as_str()).collect();
+        assert_eq!(
+            vacant,
+            [
+                "member2", "member5", "member6", "member7", "member8", "member9"
+            ]
+        );
+        let set = v.mix(&MixId::new("member1")).unwrap();
+        assert_eq!(
+            (set.name.as_str(), set.member.as_deref()),
+            ("Member 10", Some("member10"))
+        );
+        assert_eq!(v.mix_name(&MixId::new("member2")), "Member2");
+        assert_eq!(
+            v.member_of_mix(&MixId::new("member4"))
+                .map(|m| m.id.as_str()),
+            Some("member11")
+        );
+        assert_eq!(v.leaders, ["member3"]);
+        assert_eq!(v.people.len(), 12);
+        assert!(v.people[0].playing && !v.people[3].playing);
+        // Main: everyone on their own set, both leaders, no vacant set.
+        let m = roster_view("main");
+        assert_eq!(m.members.len(), 10);
+        assert_eq!(m.member("member2").unwrap().name, "Member 2");
+        assert_eq!(m.page("member2").unwrap().mix, MixId::new("member2"));
+        assert_eq!(m.leaders, ["member1", "member3"]);
+        assert!(m.vacant.is_empty());
+    }
+
+    /// #58: an input the lineup lists takes its name and owner; any other
+    /// keeps the site's label, and only the engineer keeps an owner there.
+    #[test]
+    fn input_names_follow_the_lineup() {
+        let v = roster_view("youth");
+        let input = |id: &str| {
+            let i = v.input(id).unwrap();
+            (i.name.clone(), i.owner.clone(), i.category.clone())
+        };
+        let owned = |name: &str, owner: Option<&str>, category: &str| {
+            (
+                name.to_string(),
+                owner.map(String::from),
+                category.to_string(),
+            )
+        };
+        assert_eq!(
+            input("mic1"),
+            owned("MEMBER10 mic", Some("member10"), "mics")
+        );
+        assert_eq!(
+            input("mic4"),
+            owned("MEMBER11 mic", Some("member11"), "mics")
+        );
+        assert_eq!(input("mic2"), owned("MEMBER2 mic", None, "mics"));
+        assert_eq!(
+            input("eng_mic"),
+            owned("ENGINEER mic", Some("engineer"), "tech")
+        );
+        assert_eq!(input("drums"), owned("DRUMS", None, "stems"));
+        assert_eq!(v.own_input("member10"), Some(&InputId::new("mic1")));
+        assert_eq!(v.own_input("member2"), None);
+        assert_eq!(v.own_input("engineer"), Some(&InputId::new("eng_mic")));
+        // Main names and owns them as the site does.
+        let m = roster_view("main");
+        let gtr = m.input("mic5").unwrap();
+        assert_eq!(
+            (gtr.name.as_str(), gtr.owner.as_deref()),
+            ("MEMBER4 gtr", Some("member4"))
+        );
+        // A lineup's input the engine lacks is reported and left out.
+        let mut roster = crate::roster_state::tests::test_roster("youth");
+        let youth = std::sync::Arc::make_mut(&mut roster.roster)
+            .lineups
+            .iter_mut()
+            .find(|l| l.id == "youth")
+            .unwrap();
+        youth.inputs.insert(
+            "ghost".into(),
+            iem_core::roster::LineupInput {
+                name: "GHOST".into(),
+                owner: None,
+            },
+        );
+        let (v, problems) = SiteView::build_with(&test_config(), Some(&roster), &test_topology());
+        assert_eq!(
+            problems,
+            ["lineup 'youth': input 'ghost' is not an engine input"]
+        );
+        assert!(v.input("ghost").is_none());
+        assert_eq!(v.inputs.len(), 24);
+    }
+
+    /// #58: without a roster the view is the one the site always gave.
+    #[test]
+    fn legacy_mode_is_unchanged() {
+        let (config, topo) = (test_config(), test_topology());
+        let (built, problems) = SiteView::build(&config, &topo);
+        let (with, problems_with) = SiteView::build_with(&config, None, &topo);
+        assert_eq!(with, built);
+        assert_eq!(problems_with, problems);
+        assert_eq!(with.members, config.members);
+        assert_eq!(
+            with.leaders,
+            ["member1", "member3"],
+            "members whose mix hears another; the engineer is no leader"
+        );
+        assert_eq!(with.people.len(), 10);
+        assert!(with.people.iter().all(|p| p.playing));
+        assert_eq!(
+            with.people[2],
+            PersonView {
+                id: "member3".into(),
+                name: "Member3".into(),
+                playing: true,
+            }
+        );
+        assert!(with.vacant.is_empty());
+        let mic2 = with.input("mic2").unwrap();
+        assert_eq!(
+            (mic2.name.as_str(), mic2.owner.as_deref()),
+            ("MEMBER2 mic", Some("member2"))
+        );
+        // A member whose mix hears only whole mixes leads too.
+        let mut topo = test_topology();
+        let m2 = topo
+            .mixes
+            .iter_mut()
+            .find(|m| m.id == MixId::new("member2"))
+            .unwrap();
+        m2.mixes = vec![MixId::new("member4")];
+        let (v, _) = SiteView::build(&config, &topo);
+        assert_eq!(v.leaders, ["member1", "member2", "member3"]);
     }
 
     #[test]

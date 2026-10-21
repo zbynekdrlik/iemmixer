@@ -84,6 +84,75 @@ async fn members_are_the_sites() {
     assert_eq!(list[9]["id"], "engineer");
 }
 
+/// The tiles as `(id, playing)`.
+async fn tiles(app: &Router) -> Vec<(String, bool)> {
+    let (status, json) = call(app, Method::GET, "/api/members", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    json.as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["id"].as_str().unwrap().to_string(),
+                m["playing"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn legacy_members_are_all_playing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_s, app) = app(dir.path());
+    let list = tiles(&app).await;
+    let ids: Vec<&str> = list.iter().map(|(id, _)| id.as_str()).collect();
+    let site: Vec<String> = crate::site_view::tests::test_config()
+        .members
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids, site);
+    assert!(list.iter().all(|(_, playing)| *playing), "{list:?}");
+}
+
+/// #58: every person is a tile, those playing in the active lineup first,
+/// then the others, then the engineer.
+#[tokio::test]
+async fn members_lists_playing_people_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = app(dir.path());
+    *state.roster.write().unwrap() = Some(crate::roster_state::tests::test_roster("youth"));
+    let want: Vec<(String, bool)> = [
+        ("member10", true),
+        ("member3", true),
+        ("member11", true),
+        ("member1", false),
+        ("member2", false),
+        ("member4", false),
+        ("member5", false),
+        ("member6", false),
+        ("member7", false),
+        ("member8", false),
+        ("member9", false),
+        ("engineer", true),
+    ]
+    .into_iter()
+    .map(|(id, playing)| (id.to_string(), playing))
+    .collect();
+    assert_eq!(tiles(&app).await, want);
+    let (_, json) = call(&app, Method::GET, "/api/members", None, None).await;
+    assert_eq!(
+        json[0],
+        serde_json::json!({"id": "member10", "name": "Member 10", "has_photo": false, "playing": true})
+    );
+    state.photo_store.save("member2", b"jpeg").unwrap();
+    let (_, json) = call(&app, Method::GET, "/api/members", None, None).await;
+    assert_eq!(
+        json[4],
+        serde_json::json!({"id": "member2", "name": "Member 2", "has_photo": true, "playing": false})
+    );
+}
+
 #[tokio::test]
 async fn the_mixer_state_is_guarded_per_page() {
     let dir = tempfile::tempdir().unwrap();

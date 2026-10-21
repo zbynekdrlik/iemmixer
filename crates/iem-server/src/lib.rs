@@ -27,6 +27,7 @@ pub mod preset_routes;
 pub mod provision;
 pub mod push;
 pub mod push_store;
+pub mod roster_state;
 pub mod routes;
 pub mod secrets;
 pub mod site_view;
@@ -87,8 +88,12 @@ pub enum To {
     Session(u64),
 }
 
-/// The site view built for one topology (keyed by its hash).
-type SiteCacheEntry = (String, Arc<SiteView>);
+/// What a site view is built from: the topology's hash and, in roster mode,
+/// the roster's SHA-256 and the active lineup.
+type SiteCacheKey = (String, Option<(String, String)>);
+
+/// The site view built for one key.
+type SiteCacheEntry = (SiteCacheKey, Arc<SiteView>);
 
 /// Talkback runtime metrics (`GET /api/talkback/diagnostics`, F28).
 #[cfg(feature = "audio")]
@@ -123,6 +128,9 @@ pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     /// The site as loaded at start (members and inputs never change at runtime)
     pub site_config: Arc<Config>,
+    /// The roster and its active lineup (#58); `None` is legacy mode, the
+    /// site's `[[members]]` as before. A std lock: read without awaiting.
+    pub roster: Arc<std::sync::RwLock<Option<roster_state::RosterState>>>,
     /// The directory of the site file (stores, secrets, push subscriptions)
     pub config_dir: Arc<std::path::PathBuf>,
     /// HTTP client (Web Push, public-IP detection)
@@ -197,6 +205,7 @@ impl AppState {
         let (meters_tx, _) = broadcast::channel(16);
         Ok(Self {
             site_config: Arc::new(config.clone()),
+            roster: Arc::new(std::sync::RwLock::new(None)),
             config_dir: Arc::new(config_dir.to_path_buf()),
             config: Arc::new(RwLock::new(config)),
             http_client: reqwest::Client::builder()
@@ -243,37 +252,57 @@ impl AppState {
         Self::try_new(config, config_dir).expect("test AppState: pepper and PIN store")
     }
 
+    /// The roster in use (a copy; its roster is shared), `None` in legacy
+    /// mode.
+    pub fn roster(&self) -> Option<roster_state::RosterState> {
+        self.roster
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// The site view over the engine's current topology (`None` until the
-    /// engine announced one). Rebuilt when the topology hash changes.
+    /// engine announced one). Rebuilt when the topology hash, the roster or
+    /// its active lineup changes.
     pub fn site(&self) -> Option<Arc<SiteView>> {
         let topo = self.engine.mirror().topology.clone()?;
+        let roster = self.roster();
+        let key: SiteCacheKey = (
+            topo.hash.clone(),
+            roster
+                .as_ref()
+                .map(|r| (r.sha256.clone(), r.active.clone())),
+        );
         let mut cache = lock(&self.site_cache);
-        if let Some((hash, view)) = cache.as_ref()
-            && *hash == topo.hash
+        if let Some((built_for, view)) = cache.as_ref()
+            && *built_for == key
         {
             return Some(Arc::clone(view));
         }
-        let (view, problems) = SiteView::build(&self.site_config, &topo);
+        let (view, problems) = SiteView::build_with(&self.site_config, roster.as_ref(), &topo);
         for p in &problems {
             tracing::error!(problem = %p, "site config and engine topology differ");
         }
         let view = Arc::new(view);
-        *cache = Some((topo.hash.clone(), Arc::clone(&view)));
+        *cache = Some((key, Arc::clone(&view)));
         Some(view)
     }
 
-    /// The page `id`: from the site view, or (engine not seen yet) a
-    /// configured member.
+    /// The page `id`: from the site view, or (engine not seen yet) a member
+    /// as the site, or the roster's active lineup, places them.
     pub fn page(&self, id: &str) -> Option<Page> {
         if let Some(view) = self.site() {
             return view.page(id);
         }
-        self.site_config.member(id).map(|m| Page {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            mix: iem_engine_proto::MixId::new(m.mix.clone()),
-            member: Some(m.id.clone()),
-        })
+        roster_state::site_members(&self.site_config, self.roster().as_ref())
+            .into_iter()
+            .find(|m| m.id == id)
+            .map(|m| Page {
+                id: m.id.clone(),
+                name: m.name,
+                mix: iem_engine_proto::MixId::new(m.mix),
+                member: Some(m.id),
+            })
     }
 
     /// A new WebSocket session id (the engine's `origin`).
