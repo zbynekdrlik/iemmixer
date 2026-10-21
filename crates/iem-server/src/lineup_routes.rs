@@ -93,14 +93,24 @@ async fn get_lineup(
 }
 
 /// `POST /api/lineup/switch {"to": id}` → 204, or [`reject`]'s answer.
+/// The switch runs on a task of its own: a client that goes away drops
+/// this handler, never a switch half-way (#58 review).
 async fn post_switch(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<SwitchRequest>,
 ) -> Result<StatusCode, Reject> {
     let claims = bearer(&state, &headers).await?;
-    switch_lineup(&state, &req.to, &claims)
+    let switch = tokio::spawn(async move { switch_lineup(&state, &req.to, &claims).await });
+    switch
         .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "the switch's task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new("SWITCH_FAILED", "the switch's task failed")),
+            )
+        })?
         .map_err(|e| reject(&e))?;
     Ok(StatusCode::NO_CONTENT)
 }

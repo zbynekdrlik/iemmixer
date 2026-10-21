@@ -153,6 +153,19 @@ async fn restore_backup(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<RestoreResult>, Reject> {
     engineer(&state, &headers).await?;
+    // On a task of its own: a client that goes away drops this handler,
+    // never a restore half-way (#58 review).
+    tokio::spawn(restore(state, filename)).await.map_err(|e| {
+        tracing::error!(error = %e, "the restore's task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError::new("RESTORE_FAILED", "the restore's task failed")),
+        )
+    })?
+}
+
+/// The restore of [`restore_backup`], on a task of its own.
+async fn restore(state: AppState, filename: String) -> Result<Json<RestoreResult>, Reject> {
     // Never beside a band switch (#58): one of them at a time, and none
     // while a switch a restart cut short is unfinished.
     let busy = || crate::routes::switching(crate::view::ViewError::Switching);
