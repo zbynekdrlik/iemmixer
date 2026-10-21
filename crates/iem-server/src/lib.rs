@@ -248,16 +248,12 @@ impl AppState {
                 .intent()?
                 .is_some();
         // The roster reaches the states once the engine has synced
-        // (`roster_watch::settle_when_synced`), from the one they follow;
-        // after a switch a restart cut short which band's state the engine
-        // holds is not known, so nobody's mix moves then.
-        let unsettled = roster.as_ref().map(|_| {
-            roster_watch::Unsettled::new(if cut_short {
-                None
-            } else {
-                roster_watch::applied_base(config_dir)
-            })
-        });
+        // (`roster_watch::settle_when_synced`): each state from the roster
+        // its marker names (a kept one), one without a marker from the roster
+        // applied last, also after a switch a restart cut short.
+        let unsettled = roster
+            .as_ref()
+            .map(|_| roster_watch::Unsettled::new(roster_watch::applied_base(config_dir)));
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
         // from loopback and this host's own addresses (design note §6).
         let host = login_guard::HostAddrs::read();

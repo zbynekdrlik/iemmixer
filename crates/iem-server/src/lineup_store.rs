@@ -42,6 +42,9 @@ pub const SWITCH_FILE: &str = "lineups/switch.json";
 pub const APPLIED_FILE: &str = "lineups/applied-roster.toml";
 /// What the engine's running state follows ([`Running`]).
 pub const RUNNING_FILE: &str = "lineups/running.json";
+/// Every roster a state may follow, `<sha256>.toml` (#58 third review):
+/// written when a roster comes into use, never deleted here.
+pub const ROSTERS_DIR: &str = "lineups/rosters";
 /// The active file's format.
 pub const ACTIVE_FORMAT: &str = "iemmixer-active-lineup";
 /// The migration builds `lineups/` here and renames it as its commit.
@@ -59,6 +62,7 @@ const SWITCH_NAME: &str = "switch.json";
 const STATE_NAME: &str = "state.json";
 const APPLIED_NAME: &str = "applied-roster.toml";
 const RUNNING_NAME: &str = "running.json";
+const ROSTERS_NAME: &str = "rosters";
 const PENDING_NAME: &str = "migration.json";
 
 /// How often a rename a transient Windows error fails is tried, and the
@@ -253,6 +257,32 @@ impl LineupStore {
         check_id(&running.lineup)?;
         let json = serde_json::to_string(running).map_err(io::Error::other)?;
         write_durable(&self.dir.join(RUNNING_NAME), &json)
+    }
+
+    /// Keeps `text`, whose SHA-256 is `sha256`, as a roster a state may
+    /// follow ([`ROSTERS_DIR`]); never deleted here.
+    pub fn keep_roster(&self, sha256: &str, text: &str) -> io::Result<()> {
+        let path = self
+            .kept(sha256)
+            .ok_or_else(|| invalid(format!("'{sha256}' is no SHA-256")))?;
+        write_durable(&path, text)
+    }
+
+    /// The kept roster whose SHA-256 is `sha256`; `None` when none is kept
+    /// (or `sha256` is no SHA-256, as a marker read back may be).
+    pub fn kept_roster(&self, sha256: &str) -> io::Result<Option<String>> {
+        match self.kept(sha256) {
+            Some(path) => read_optional(&path),
+            None => Ok(None),
+        }
+    }
+
+    fn kept(&self, sha256: &str) -> Option<PathBuf> {
+        let hex = sha256.len() == 64
+            && sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        hex.then(|| self.dir.join(ROSTERS_NAME).join(format!("{sha256}.toml")))
     }
 
     /// The roster the states follow ([`APPLIED_FILE`]); `None` before one

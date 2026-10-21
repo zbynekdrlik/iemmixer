@@ -547,6 +547,35 @@ async fn a_person_who_moves_sets_takes_their_mix() {
     assert_eq!(r.lineup().person_on("member9"), Some("member5"));
 }
 
+/// #58 third review: every roster that comes into use is kept, by the
+/// start's load and by a reload, and a reload deletes none kept before.
+#[tokio::test]
+async fn every_roster_in_use_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let facts = TopologyFacts::from(&test_topology());
+    load(d, &test_config(), &mut pins, Some(&facts))
+        .unwrap()
+        .expect("roster mode");
+    let first = sha256_hex(TEXT.as_bytes());
+    assert_eq!(store.kept_roster(&first).unwrap().as_deref(), Some(TEXT));
+    let mut state = with_roster(d, "main");
+    let mut peer = synced(&mut state, running()).await;
+    let text = moved();
+    let task = spawn_apply(&state, &text);
+    imports(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    let second = sha256_hex(text.as_bytes());
+    assert_eq!(
+        store.kept_roster(&second).unwrap().as_deref(),
+        Some(text.as_str())
+    );
+    assert_eq!(store.kept_roster(&first).unwrap().as_deref(), Some(TEXT));
+}
+
 #[tokio::test]
 async fn a_valid_change_applies_archives_the_removed_and_announces_it() {
     let dir = tempfile::tempdir().unwrap();

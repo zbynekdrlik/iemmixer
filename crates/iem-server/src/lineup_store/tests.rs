@@ -199,6 +199,37 @@ fn a_missing_state_reads_as_none() {
     assert!(s.state("youth").is_err());
 }
 
+/// #58 third review: a roster is kept under its SHA-256 in
+/// `lineups/rosters/`, and only a SHA-256 (64 lowercase hex digits) names
+/// one: anything else is refused when kept and none when read.
+#[test]
+fn a_roster_is_kept_under_its_sha256_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = LineupStore::new(dir.path());
+    let sha = format!("0123456789abcdef{}", "a".repeat(48));
+    assert_eq!(s.kept_roster(&sha).unwrap(), None, "none kept yet");
+    s.keep_roster(&sha, "roster text").unwrap();
+    assert_eq!(s.kept_roster(&sha).unwrap().as_deref(), Some("roster text"));
+    assert_eq!(
+        read(&dir.path().join(ROSTERS_DIR).join(format!("{sha}.toml"))),
+        "roster text"
+    );
+    let upper = sha.to_uppercase();
+    let short = &sha[..63];
+    let long = format!("{sha}0");
+    let other = format!("{}g", &sha[..63]);
+    for bad in [
+        upper.as_str(),
+        short,
+        long.as_str(),
+        other.as_str(),
+        "../active",
+    ] {
+        assert!(s.keep_roster(bad, "x").is_err(), "{bad} is kept");
+        assert_eq!(s.kept_roster(bad).unwrap(), None, "{bad} is read");
+    }
+}
+
 /// #58: the band store is the active lineup's, one per lineup while it
 /// plays; legacy mode keeps the config directory.
 #[tokio::test]

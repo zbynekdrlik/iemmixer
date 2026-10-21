@@ -22,10 +22,12 @@
 //! A roster that comes into use without a synced engine (the start, a
 //! legacy server's adoption) is `AppState::unsettled` until [`settle`] has
 //! put it into the states, under the switching lock, once the engine has
-//! synced: no page changes a mix and no switch or restore runs before. The
-//! roster the states follow is recorded (`LineupStore::applied_roster`), so
-//! the start moves the mixes of people a roster changed while the server
-//! was down.
+//! synced: no page changes a mix and no switch or restore runs before. Every
+//! roster a state may follow is kept (`LineupStore::keep_roster`,
+//! `lineups/rosters/<sha256>.toml`) and each state names its own, so the
+//! start moves the mixes of people a roster changed while the server was
+//! down from the roster each state follows; one without a marker follows
+//! the roster applied last (`LineupStore::applied_roster`).
 
 use std::collections::BTreeSet;
 use std::io;
@@ -113,6 +115,15 @@ pub fn applied_base(config_dir: &Path) -> Option<Base> {
             tracing::error!(error = %e, "the roster applied last is unreadable: nobody's mix moves");
             None
         }
+    }
+}
+
+/// Keeps `text` (SHA-256 `sha256`) among the rosters a state may follow
+/// (`LineupStore::keep_roster`; a failure is logged: a state marked with it
+/// then moves nobody's mix).
+fn keep(config_dir: &Path, sha256: &str, text: &str) {
+    if let Err(e) = LineupStore::new(config_dir).keep_roster(sha256, text) {
+        tracing::error!(error = %e, "a roster in use was not kept");
     }
 }
 
@@ -388,6 +399,9 @@ pub fn load(
             let sha256 = sha256_hex(bytes);
             match take(config_dir, cfg, pins, bytes, &sha256, facts) {
                 Ok((state, people)) => {
+                    if let Ok(text) = std::str::from_utf8(bytes) {
+                        keep(config_dir, &sha256, text);
+                    }
                     tracing::info!(
                         lineup = %state.active,
                         people = state.roster.people.len(),
@@ -425,6 +439,7 @@ pub fn load(
         let copy = sha256_hex(text.as_bytes());
         match take(config_dir, cfg, pins, text.as_bytes(), &copy, facts) {
             Ok((state, _)) => {
+                keep(config_dir, &copy, &text);
                 tracing::error!(
                     lineup = %state.active,
                     problems = problems.len(),
@@ -668,14 +683,14 @@ pub async fn apply_text(state: &AppState, text: &str, sha256: &str) -> Applied {
         Err(problems) => return Applied::Refused(problems),
     };
     match current {
-        None => adopt_live(state, roster, sha256).await,
+        None => adopt_live(state, roster, text, sha256).await,
         Some(old) => reload(state, &old, roster, text, sha256).await,
     }
 }
 
 /// A running legacy server takes its first roster; its rules reach the
 /// states once the engine has synced ([`settle_when_synced`], spawned).
-async fn adopt_live(state: &AppState, roster: Roster, sha256: &str) -> Applied {
+async fn adopt_live(state: &AppState, roster: Roster, text: &str, sha256: &str) -> Applied {
     let adopted = {
         let mut pins = state.pin_store.write().await;
         adopt(
@@ -689,6 +704,7 @@ async fn adopt_live(state: &AppState, roster: Roster, sha256: &str) -> Applied {
     match adopted {
         Ok((r, people)) => {
             tracing::warn!(lineup = %r.active, "roster mode: a roster is in use from now on");
+            keep(&state.config_dir, sha256, text);
             // Before the roster: no page changes a mix until it is settled.
             state.set_unsettled(Some(Unsettled::new(None)));
             state.set_roster(Some(r));
@@ -735,12 +751,43 @@ fn write_planned(store: &LineupStore, planned: &[Planned]) -> Result<(), Applied
 /// The rosters the states may follow, for a [`transition`] (#58
 /// re-review): a state's marker names one by its SHA-256; a state without
 /// one (written before markers, or a backup's) follows `unmarked`.
-struct Follows<'a> {
-    known: Vec<&'a Base>,
-    unmarked: Option<&'a Base>,
+struct Follows {
+    known: Vec<Base>,
+    unmarked: Option<Base>,
 }
 
-impl Follows<'_> {
+impl Follows {
+    /// Learns the roster `marker` names from the kept ones
+    /// (`LineupStore::kept_roster`, #58 third review) when it is not known
+    /// yet; one that is not kept, or not readable, stays unknown (logged).
+    fn learn(&mut self, store: &LineupStore, marker: Option<&str>) {
+        let Some(sha) = marker else {
+            return;
+        };
+        if self.known.iter().any(|b| b.sha256 == sha) {
+            return;
+        }
+        match store.kept_roster(sha) {
+            Ok(Some(text)) => match Roster::parse(&text) {
+                Ok(roster) => self.known.push(Base {
+                    roster: Arc::new(roster),
+                    sha256: sha.to_string(),
+                }),
+                Err(e) => {
+                    tracing::error!(error = %e, "a kept roster does not parse: nobody's mix moves from it");
+                }
+            },
+            Ok(None) => {
+                tracing::warn!(
+                    "a state follows a roster not kept here: nobody's mix moves from it"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "a kept roster is unreadable: nobody's mix moves from it");
+            }
+        }
+    }
+
     /// The roster a state marked `marker` moves people's mixes from on its
     /// way to the roster `new_sha`: none when it follows that one already,
     /// or one not known (nobody's mix moves then).
@@ -752,7 +799,7 @@ impl Follows<'_> {
                 .iter()
                 .find(|b| b.sha256 == sha)
                 .map(|b| &*b.roster),
-            None => self.unmarked.map(|b| &*b.roster),
+            None => self.unmarked.as_ref().map(|b| &*b.roster),
         }
     }
 
@@ -841,7 +888,7 @@ struct Transition {
 /// as before.
 async fn transition(
     state: &AppState,
-    follows: &Follows<'_>,
+    mut follows: Follows,
     new: &Roster,
     new_sha: &str,
     active: &str,
@@ -862,13 +909,16 @@ async fn transition(
     };
     let topology: &TopologyInfo = &topology;
     let store = LineupStore::new(&state.config_dir);
-    let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
-    // Every other lineup's stored state, worked out first.
-    let mut planned: Vec<Planned> = Vec::new();
+    // Every other lineup's stored state and what the running state follows,
+    // each marker's roster learned from the kept ones.
+    let mut stored_states = Vec::new();
     for l in new.lineups.iter().filter(|l| l.id != active) {
-        let stored = match store.state(&l.id) {
-            Ok(Some(b)) => b,
-            Ok(None) => continue,
+        match store.state(&l.id) {
+            Ok(Some(b)) => {
+                follows.learn(&store, b.follows.as_deref());
+                stored_states.push((l, b));
+            }
+            Ok(None) => {}
             Err(e) => {
                 return Err(Applied::Refused(vec![format!(
                     "the stored state of lineup {} is unreadable: {}",
@@ -876,7 +926,14 @@ async fn transition(
                     e.kind()
                 )]));
             }
-        };
+        }
+    }
+    let (marker, recorded) = running_for(&store, active);
+    follows.learn(&store, marker.as_deref());
+    let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
+    // The stored states, worked out first.
+    let mut planned: Vec<Planned> = Vec::new();
+    for (l, stored) in stored_states {
         let mut next = stored.clone();
         let from = follows.base_of(stored.follows.as_deref(), new_sha);
         follow(
@@ -894,7 +951,6 @@ async fn transition(
         }
     }
     // The running state, through one import.
-    let (marker, recorded) = running_for(&store, active);
     let from = follows.base_of(marker.as_deref(), new_sha);
     let moved = from.map_or(0, |f| moves(f, new, active).len());
     // The state the engine holds is shaped by its topology: the import is
@@ -1032,21 +1088,25 @@ async fn reload(
     sha256: &str,
 ) -> Applied {
     let active = old.lineup().id.clone();
+    // Kept before any state is marked with it.
+    keep(&state.config_dir, sha256, text);
     let unsettled = state.unsettled();
     let old_base = Base {
         roster: Arc::clone(&old.roster),
         sha256: old.sha256.clone(),
     };
-    let base = unsettled.as_ref().and_then(|u| u.base.as_ref());
+    let base = unsettled.as_ref().and_then(|u| u.base.clone());
     let follows = Follows {
-        known: std::iter::once(&old_base).chain(base).collect(),
+        known: std::iter::once(old_base.clone())
+            .chain(base.clone())
+            .collect(),
         unmarked: if unsettled.is_some() {
             base
         } else {
-            Some(&old_base)
+            Some(old_base)
         },
     };
-    let done = match transition(state, &follows, &new, sha256, &active).await {
+    let done = match transition(state, follows, &new, sha256, &active).await {
         Ok(done) => done,
         Err(not) => return not,
     };
@@ -1101,10 +1161,10 @@ pub async fn settle(state: &AppState) -> Result<(), Applied> {
     };
     let active = r.lineup().id.clone();
     let follows = Follows {
-        known: unsettled.base.iter().collect(),
-        unmarked: unsettled.base.as_ref(),
+        known: unsettled.base.iter().cloned().collect(),
+        unmarked: unsettled.base,
     };
-    let done = transition(state, &follows, &r.roster, &r.sha256, &active).await?;
+    let done = transition(state, follows, &r.roster, &r.sha256, &active).await?;
     state.set_unsettled(None);
     record_in_use(&state.config_dir, &r.sha256);
     tracing::info!(lineup = %active, moved = done.moved, "the roster reached the states");
