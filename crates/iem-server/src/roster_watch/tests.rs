@@ -723,7 +723,7 @@ async fn a_move_needs_a_synced_engine() {
     let text = swapped();
     assert_eq!(
         apply_text(&state, &text, &sha256_hex(text.as_bytes())).await,
-        Applied::Refused(vec![
+        Applied::Deferred(vec![
             "the engine state is not synced: a person's mix cannot move to their new set now"
                 .to_string()
         ])
