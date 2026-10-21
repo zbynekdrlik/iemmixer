@@ -531,6 +531,54 @@ mod tests {
         until("the switch free", || state.switching.try_lock().is_ok()).await;
     }
 
+    /// #58 review: a capture that comes while the band is being switched
+    /// waits for the switch and backs up the band that plays then: no
+    /// refusal, which the scheduled capture would turn into an alarm.
+    #[tokio::test]
+    async fn a_capture_waits_for_a_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = app(dir.path());
+        state.set_roster(Some(crate::roster_state::tests::test_roster("main")));
+        crate::lineup_store::LineupStore::new(dir.path())
+            .set_active("main", 1)
+            .unwrap();
+        let (engine, mut peer) = fake::announced(crate::site_view::tests::test_topology()).await;
+        state.engine = engine;
+        fake::sync(&state.engine, &mut peer, 1, MixState::default()).await;
+        let switch = {
+            let s = state.clone();
+            let by = iem_core::AuthClaims {
+                sub: "engineer".into(),
+                engineer: true,
+                exp: u64::MAX,
+                iat: 0,
+            };
+            tokio::spawn(async move { crate::lineup_switch::switch_lineup(&s, "youth", &by).await })
+        };
+        let (id, imported) = fake::next_import(&mut peer).await;
+        let api = router(state.clone());
+        let eng = token("engineer", true);
+        let capture = tokio::spawn(async move {
+            call(&api, Method::POST, "/api/backups/capture", Some(&eng), None).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!capture.is_finished(), "it waits for the switch");
+        fake::answer_import(&mut peer, id, 2, imported).await;
+        let within = std::time::Duration::from_secs(5);
+        let switched = tokio::time::timeout(within, switch).await.unwrap().unwrap();
+        assert_eq!(switched, Ok(()));
+        let (status, info) = tokio::time::timeout(within, capture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, StatusCode::OK, "{info}");
+        let saved = state
+            .backup_store
+            .load(info["filename"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(saved.lineup.as_deref(), Some("youth"));
+    }
+
     /// #58 review: a restore's import holds the active lineup's rules, as a
     /// switch's does: a set nobody wears in youth is silent.
     #[tokio::test]
