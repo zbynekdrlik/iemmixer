@@ -174,6 +174,14 @@ pub enum SiteError {
         "mix {mix:?} can hear as a peer only another stereo set mix, each once and not also in mixes: {peer:?}"
     )]
     Peer { mix: String, peer: String },
+    #[error(
+        "mix {0:?} cannot hear peers: only a stereo set mix does, not the engineer's or a mono mix"
+    )]
+    PeersOnNonSet(String),
+    #[error(
+        "mix {mix:?} cannot hear {heard:?} whole: {heard:?}, or a mix it hears whole, hears {mix:?} as a peer, so {mix:?} would hear itself back"
+    )]
+    HearsItselfBack { mix: String, heard: String },
     #[error("more than one talkback input")]
     SecondTalkback,
     #[error("engineer {0:?} is not a stereo mix")]

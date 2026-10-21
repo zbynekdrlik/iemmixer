@@ -244,8 +244,12 @@ pub fn compile(site: &Site) -> Result<Topology, SiteError> {
         Some(&m) if mixes.get(m).is_some_and(|n| !n.mono) => m,
         _ => return Err(SiteError::Engineer(site.engineer.clone())),
     };
-    // Peers (#58) may be declared anywhere: resolved once every mix is.
+    // Peers (#58) may be declared anywhere: resolved once every mix is. Only
+    // a stereo set mix hears peers (not the engineer's, not a mono mix).
     for (m, mix) in site.mixes.iter().enumerate() {
+        if !mix.peers.is_empty() && (m == engineer || mixes.get(m).is_none_or(|n| n.mono)) {
+            return Err(SiteError::PeersOnNonSet(mix.id.clone()));
+        }
         let mut peers = Vec::with_capacity(mix.peers.len());
         for name in &mix.peers {
             let peer = declared.get(name.as_str()).copied().filter(|&s| {
@@ -266,6 +270,30 @@ pub fn compile(site: &Site) -> Result<Topology, SiteError> {
         if let Some(node) = mixes.get_mut(m) {
             node.peers = peers;
         }
+    }
+    // A mix heard whole brings its own output, the outputs of the mixes it
+    // hears whole and its peers' own outputs. A mix must not hear one that
+    // brings its own output back (design §8: a set never hears itself): in
+    // declaration order, every mix's `carries` is the own outputs its whole
+    // output holds.
+    let mut carries: Vec<BTreeSet<usize>> = Vec::with_capacity(mixes.len());
+    for (m, node) in mixes.iter().enumerate() {
+        let mut own: BTreeSet<usize> = node.peers.iter().copied().collect();
+        own.insert(m);
+        for &h in &node.mixes {
+            let Some(brought) = carries.get(h) else {
+                continue;
+            };
+            if brought.contains(&m) {
+                let name = |i: usize| site.mixes.get(i).map(|x| x.id.clone()).unwrap_or_default();
+                return Err(SiteError::HearsItselfBack {
+                    mix: name(m),
+                    heard: name(h),
+                });
+            }
+            own.extend(brought.iter().copied());
+        }
+        carries.push(own);
     }
     let heard_as_peer: Vec<bool> = (0..mixes.len())
         .map(|m| mixes.iter().any(|n| n.peers.contains(&m)))
@@ -982,6 +1010,87 @@ mixes = ["m1"]
             .to_string(),
             "mix \"m1\" can hear as a peer only another stereo set mix, each once and not also in mixes: \"m1\""
         );
+        assert_eq!(
+            SiteError::PeersOnNonSet("tr".into()).to_string(),
+            "mix \"tr\" cannot hear peers: only a stereo set mix does, not the engineer's or a mono mix"
+        );
+        assert_eq!(
+            SiteError::HearsItselfBack {
+                mix: "m2".into(),
+                heard: "m1".into()
+            }
+            .to_string(),
+            "mix \"m2\" cannot hear \"m1\" whole: \"m1\", or a mix it hears whole, hears \"m2\" as a peer, so \"m2\" would hear itself back"
+        );
+    }
+
+    /// #58: only a stereo set mix hears peers; the engineer's mix hears
+    /// whole mixes, and a mono mix (the translator) hears no mix.
+    #[test]
+    fn only_a_stereo_set_mix_hears_peers() {
+        let eng = format!(
+            "{}[[engine.mixes]]\nid = \"m2\"\ntx = [6, 7]\n",
+            BASE.replacen(
+                "mixes = [\"m1\"]\n",
+                "mixes = [\"m1\"]\npeers = [\"m2\"]\n",
+                1
+            )
+        );
+        assert_eq!(
+            compile(&parse(&eng).unwrap()).unwrap_err(),
+            SiteError::PeersOnNonSet("eng".into())
+        );
+        assert_eq!(
+            replaced(
+                "id = \"tr\"\ntx = [5]\n",
+                "id = \"tr\"\ntx = [5]\npeers = [\"m1\"]\n"
+            ),
+            SiteError::PeersOnNonSet("tr".into())
+        );
+        // An empty list is no peers, on any mix.
+        let none = BASE.replacen(
+            "id = \"tr\"\ntx = [5]\n",
+            "id = \"tr\"\ntx = [5]\npeers = []\n",
+            1,
+        );
+        assert!(compiled(&none).mixes.iter().all(|n| n.peers.is_empty()));
+        // A stereo set mix may.
+        assert_eq!(
+            compiled(&with_peers("\"m2\"", &["m2"])).mixes[0].peers,
+            vec![3]
+        );
+    }
+
+    /// #58 design §8: a set never hears its own set back. A mix heard whole
+    /// brings its peers' own output, and the whole outputs it hears with
+    /// theirs, so a mix may not hear whole one that has it as a peer, also
+    /// through another mix heard whole.
+    #[test]
+    fn a_mix_never_hears_its_own_set_back() {
+        // m2 hears m1 whole, and m1 hears m2 as a peer.
+        let direct = with_peers("\"m2\"", &["m2mixes = [\"m1\"]\n"]);
+        assert_eq!(
+            compile(&parse(&direct).unwrap()).unwrap_err(),
+            SiteError::HearsItselfBack {
+                mix: "m2".into(),
+                heard: "m1".into()
+            }
+        );
+        // m3 hears m2 whole, which hears m1 whole, which has m3 as a peer.
+        let through = with_peers("\"m3\"", &["m2mixes = [\"m1\"]\n", "m3mixes = [\"m2\"]\n"]);
+        assert_eq!(
+            compile(&parse(&through).unwrap()).unwrap_err(),
+            SiteError::HearsItselfBack {
+                mix: "m3".into(),
+                heard: "m2".into()
+            }
+        );
+        // The engineer, never a peer, hears a mix with peers whole; a mix
+        // hears whole one whose peers are others.
+        let fine = with_peers("\"m3\"", &["m2mixes = [\"m1\"]\n", "m3"]);
+        let t = compiled(&fine);
+        assert_eq!(t.mixes[t.engineer].mixes, vec![0]);
+        assert_eq!(t.mixes[mix(&t, "m2")].mixes, vec![0]);
     }
 
     /// `BASE` with `m1` hearing `peers` and the stereo mixes `extra` after
@@ -1112,8 +1221,8 @@ mixes = ["m1"]
         assert!(!t.mixes[m4].shadow, "a peer that hears nothing");
         assert!(!t.mixes[t.engineer].shadow, "a mix nobody hears as a peer");
         assert!(!t.mixes[mix(&t, "tr")].shadow);
-        // A peer of two mixes that hears one whole has its shadow too.
-        let whole = with_peers("\"m2\"", &["m2mixes = [\"m1\"]\n", "m3peers = [\"m2\"]\n"]);
+        // A peer that hears a mix whole has its shadow too.
+        let whole = with_peers("", &["m2mixes = [\"m1\"]\n", "m3peers = [\"m2\"]\n"]);
         let t = compiled(&whole);
         assert!(t.mixes[mix(&t, "m2")].shadow);
         assert!(!t.mixes[mix(&t, "m2")].hears_nothing());
