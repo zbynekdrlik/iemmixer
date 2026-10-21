@@ -509,8 +509,8 @@ fn the_reference_model_encodes_a3_a6_a7_a9_a10() {
 
 /// #58 design §8: a peer is heard as its own mix, without the mixes it
 /// hears; a mix heard whole brings everything it hears. On the test site
-/// member3 hears member1 as a peer and member1 hears member2 and member3
-/// whole, and the engine agrees.
+/// member1 and member3 hear each other as peers, member1 hears member2 as a
+/// peer and the engineer hears member1 whole; the engine agrees.
 #[test]
 fn the_reference_model_encodes_peers() {
     let site = site();
@@ -534,6 +534,7 @@ fn the_reference_model_encodes_peers() {
     set(&mut state, "member1", heard("member2"));
     set(&mut state, "member1", heard("member3"));
     set(&mut state, "member3", heard("member1"));
+    set(&mut state, "engineer", heard("member1"));
     let mut model = Model::new(&site, &state);
     let m = model.tx_matrix();
     let col = |id: &str| topo.inputs[topo.input_index(&InputId::new(id)).unwrap()].rx[0];
@@ -541,13 +542,16 @@ fn the_reference_model_encodes_peers() {
     let g = gains(0.0).0;
     // member1's own output carries mic1 at its level and volume (g²);
     // member3 hears it as a peer: g² at its level and volume, g⁴, and
-    // nothing of member2, which member1 hears whole.
+    // nothing of member2, which member1 hears as a peer.
     assert!((m[row("member3")][col("mic1")] - g.powi(4)).abs() < 1e-15);
     assert_eq!(m[row("member3")][col("mic2")], 0.0);
-    // member1 hears member2 whole (g⁴) and member3 whole, which carries
-    // member1's own output again: mic1 at g² + g⁶.
+    // member1 hears member2's own output (g⁴) and member3's, which carries
+    // nothing of member1 back: mic1 only at its own level and volume.
     assert!((m[row("member1")][col("mic2")] - g.powi(4)).abs() < 1e-15);
-    assert!((m[row("member1")][col("mic1")] - (g * g + g.powi(6))).abs() < 1e-15);
+    assert!((m[row("member1")][col("mic1")] - g * g).abs() < 1e-15);
+    // The engineer hears member1 whole: its peer member2 too.
+    assert!((m[row("engineer")][col("mic1")] - g.powi(4)).abs() < 1e-15);
+    assert!((m[row("engineer")][col("mic2")] - g.powi(6)).abs() < 1e-15);
     // The engine agrees on this state (impulses kept below every limit).
     let times = impulse_times(topo.rx.len());
     let out = render(&topo, &state, &impulses(topo.rx.len()), 32);

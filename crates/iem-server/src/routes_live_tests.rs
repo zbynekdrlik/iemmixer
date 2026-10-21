@@ -140,8 +140,8 @@ async fn a_capture_answers_with_its_backup_and_never_overwrites_one() {
         assert_eq!(info["timestamp"].as_str(), Some(ts));
         assert!(ts.len() == 24 && ts.ends_with('Z'), "{ts}");
         assert!(t0.as_str() <= ts && ts <= t1.as_str(), "{t0} ≤ {ts} ≤ {t1}");
-        // Every level of every mix: 11 mixes × 24 inputs, the mixes
-        // member1 (8) and the engineer (9) hear, and member3's peers (8).
+        // Every level of every mix: 11 mixes × 24 inputs, member1's peers
+        // (8), the mixes the engineer hears (9) and member3's peers (8).
         assert_eq!(info["send_count"].as_u64(), Some(11 * 24 + 8 + 9 + 8));
         assert_eq!(saved.level_count(), 11 * 24 + 8 + 9 + 8);
         assert_eq!(info["track_count"].as_u64(), Some(11));

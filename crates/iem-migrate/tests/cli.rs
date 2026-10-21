@@ -34,8 +34,12 @@ fn topo() -> Topology {
     site::open(&site_path()).unwrap().topology
 }
 
+/// The predecessor's routing: its REAPER project's, where member1 receives
+/// the other members' tracks (#58: the site has them as member1's peers;
+/// member3's peers have no receive, REAPER cannot let two tracks hear each
+/// other).
 fn routing() -> Routing {
-    synthetic_routing(&topo())
+    synthetic_routing(&synthetic_site())
 }
 
 fn member(id: &str, archived: bool) -> MemberAlias {
@@ -114,24 +118,36 @@ fn import_args(w: &World, extra: &[&str]) -> Vec<String> {
     a
 }
 
+/// The synthetic predecessor project's topology fits the test site (#58):
+/// its member1 receives the other members' tracks, which the site has as
+/// member1's peers, and member3's peers are levels no REAPER project can
+/// hold. The other way round, a project holding member3's peers would hear
+/// sources the predecessor's site lacks.
 #[test]
 fn the_synthetic_site_is_the_test_site() {
-    assert_eq!(topo().diff(&synthetic_site()), Vec::<String>::new());
+    assert_eq!(synthetic_site().diff(&topo()), Vec::<String>::new());
+    let back = topo().diff(&synthetic_site());
+    assert_eq!(back.len(), 1, "{back:#?}");
+    assert!(back[0].starts_with("mix member3: hears "), "{back:#?}");
 }
 
-/// #58: the importer's topology carries the site's peers (member3 hears the
-/// other sets as peers) and its `[engine]` table written back compiles to
-/// the same topology, peers included.
+/// #58: the importer's topology carries the site's peers (member1 and member3
+/// hear the other sets as peers) and its `[engine]` table written back
+/// compiles to the same topology, peers included.
 #[test]
 fn the_site_topology_carries_the_peers_and_writes_them_back() {
     let t = topo();
+    let m1 = t.mix(&MixId::new("member1")).unwrap();
     let m3 = t.mix(&MixId::new("member3")).unwrap();
-    assert_eq!(m3.peers.len(), 8);
+    assert!(m1.mixes.is_empty() && m3.mixes.is_empty());
+    assert_eq!((m1.peers.len(), m3.peers.len()), (8, 8));
+    assert_eq!(m1.peers[0], MixId::new("member2"));
     assert_eq!(m3.peers[0], MixId::new("member1"));
+    let with_peers = [MixId::new("member1"), MixId::new("member3")];
     assert!(
         t.mixes
             .iter()
-            .filter(|m| m.id != MixId::new("member3"))
+            .filter(|m| !with_peers.contains(&m.id))
             .all(|m| m.peers.is_empty())
     );
     let table = iem_engine::site::parse(&t.engine_toml(160)).unwrap();

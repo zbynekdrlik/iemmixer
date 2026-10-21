@@ -36,10 +36,11 @@ fn import_replaces_state_and_fits_one_block() {
         ]
     );
     assert_eq!(r.mixes.len(), 11);
-    // 24 inputs per mix, 17 heard mixes and member3's 8 peers (#58).
+    // 24 inputs per mix, the engineer's 9 heard mixes and member1's and
+    // member3's 8 peers each (#58).
     assert_eq!(
         r.mixes.iter().map(|x| x.levels.len()).sum::<usize>(),
-        11 * 24 + 17 + 8
+        11 * 24 + 9 + 8 + 8
     );
     let out = c
         .apply(&Cmd::ImportState {
@@ -50,7 +51,7 @@ fn import_replaces_state_and_fits_one_block() {
     assert_eq!(out.rev, 2);
     assert_eq!(out.effect, Effect::Imported { baseline: true });
     assert!(out.rt.len() <= MAX_CMDS_PER_BLOCK);
-    assert_eq!(out.rt.len(), 24 * 2 + 11 * 3 + 11 * 24 + 17 + 8 + 11 * 2);
+    assert_eq!(out.rt.len(), 24 * 2 + 11 * 3 + 11 * 24 + 9 + 8 + 8 + 11 * 2);
     let st = c.state();
     assert_eq!(st.mixes[&mix("member2")].out.volume_db, 12.0);
     assert_eq!(
@@ -263,10 +264,11 @@ fn full_sync_covers_every_stage() {
     assert_eq!(count(|o| matches!(o, RtOp::Limiter { .. })), 11);
     assert_eq!(count(|o| matches!(o, RtOp::Group { .. })), 11);
     assert_eq!(count(|o| matches!(o, RtOp::GroupEq { .. })), 11);
-    // Every level: 24 inputs per mix, 17 heard mixes, member3's 8 peers.
+    // Every level: 24 inputs per mix, the engineer's 9 heard mixes,
+    // member1's and member3's 8 peers each.
     assert_eq!(
         count(|o| matches!(o, RtOp::Level { gain, .. } if *gain == 0.0)),
-        11 * 24 + 17 + 8
+        11 * 24 + 9 + 8 + 8
     );
     let err: ErrorBody = CmdError::new(ErrCode::Forbidden, "x").into();
     assert_eq!(err.code, ErrCode::Forbidden);

@@ -268,7 +268,7 @@ pub(crate) mod tests {
         assert_eq!(m3.hears.len(), 8);
         assert_eq!(m3.hears[0], MixId::new("member1"));
         assert!(!m3.hears.contains(&MixId::new("member3")));
-        // member1 still hears the other members whole.
+        // member1 hears the other members as peers, member2 first.
         assert_eq!(
             v.mix(&MixId::new("member1")).unwrap().hears[0],
             MixId::new("member2")

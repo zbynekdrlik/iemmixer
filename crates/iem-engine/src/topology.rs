@@ -526,23 +526,25 @@ mod tests {
         }
         assert_eq!(t.inputs.iter().filter(|n| n.talkback).count(), 1);
         assert_eq!(t.inputs.iter().filter(|n| n.stereo).count(), 8);
+        // #58: member1 and member3 hear the other members' sets as peers and
+        // hear no whole mix; they hear each other, so both have a shadow.
         let m1 = mix(&t, "member1");
-        assert_eq!(t.mixes[m1].mixes.len(), 8);
-        assert!(t.mixes[m1].peers.is_empty());
+        assert!(t.mixes[m1].mixes.is_empty());
+        assert_eq!(t.mixes[m1].peers.len(), 8);
         for m in 2..=9 {
             let s = mix(&t, &format!("member{m}"));
             assert!(s < m1, "member{m} is declared before member1");
             assert!(t.mixes[s].mixes.is_empty());
+            assert_eq!(t.mixes[m1].peers[m - 2], s, "member{m}");
         }
-        // #58: member3 hears the other members' sets as peers, member1 (declared
-        // after it) first; member1 hears member3 whole, so it has a shadow.
         let m3 = mix(&t, "member3");
+        assert!(t.mixes[m3].mixes.is_empty());
         assert_eq!(t.mixes[m3].peers.len(), 8);
         assert_eq!(t.mixes[m3].peers[0], m1);
         assert!(!t.mixes[m3].peers.contains(&m3));
-        assert!(t.mixes[m1].shadow && !t.mixes[m3].shadow);
-        assert_eq!(t.mixes.iter().filter(|n| !n.peers.is_empty()).count(), 1);
-        assert_eq!(t.mixes.iter().filter(|n| n.shadow).count(), 1);
+        assert!(t.mixes[m1].shadow && t.mixes[m3].shadow);
+        assert_eq!(t.mixes.iter().filter(|n| !n.peers.is_empty()).count(), 2);
+        assert_eq!(t.mixes.iter().filter(|n| n.shadow).count(), 2);
         // The render order: the seven members and the translator that hear
         // nothing, then member3, member1 and the engineer as declared.
         assert_eq!(t.order.len(), 11);
@@ -580,7 +582,8 @@ mod tests {
         assert_eq!(info.inputs.iter().filter(|i| i.group.is_some()).count(), 7);
         assert_eq!(info.mixes[eng].mixes[0], MixId::new("member1"));
         assert_eq!(info.mixes[m3].peers[0], MixId::new("member1"));
-        assert!(info.mixes[m1].peers.is_empty());
+        assert_eq!(info.mixes[m1].peers[0], MixId::new("member2"));
+        assert!(info.mixes[m1].mixes.is_empty());
     }
 
     #[test]

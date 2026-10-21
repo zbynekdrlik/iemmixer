@@ -11,7 +11,9 @@ use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Persisted, Store, encode};
 use iem_migrate::{EXIT_INPUT, EXIT_IO, run, site};
 use iem_rpp::aliases::MemberAlias;
-use iem_rpp::sitegen::{aliases_toml, project, sample_state, synthetic_routing, track_name};
+use iem_rpp::sitegen::{
+    aliases_toml, project, sample_state, synthetic_routing, synthetic_site, track_name,
+};
 use serde_json::Value;
 
 fn site_path() -> PathBuf {
@@ -32,8 +34,11 @@ struct World {
 impl World {
     fn new(seed: u64) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        // The site's topology, and the predecessor's REAPER routing: member1
+        // receives the other members' tracks (the site's peers of member1),
+        // member3's peers have no receive (#58).
         let t = site::open(&site_path()).unwrap().topology;
-        let r = synthetic_routing(&t);
+        let r = synthetic_routing(&synthetic_site());
         let rpp = dir.path().join("project.RPP");
         let state = sample_state(&t, &r, seed);
         std::fs::write(&rpp, project(&t, &r, &state, &track_name).unwrap()).unwrap();
@@ -151,7 +156,7 @@ fn the_band_s_changes_are_named_by_id_and_field_never_by_value() {
         &sf.compiled,
         &reconcile(
             &sf.compiled,
-            &sample_state(&sf.topology, &synthetic_routing(&sf.topology), 77),
+            &sample_state(&sf.topology, &synthetic_routing(&synthetic_site()), 77),
         )
         .0,
     );
