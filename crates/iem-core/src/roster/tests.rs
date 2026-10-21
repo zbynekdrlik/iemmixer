@@ -298,9 +298,10 @@ fn exactly_one_main_lineup() {
 #[test]
 fn a_leader_whose_set_cannot_hear_the_others_is_refused() {
     // member1's set no longer hears member3's (a site copy without that peer).
-    let from = "\"member2\", \"member3\", \"member4\"";
+    // The engineer's `mixes` lists the same run of ids, so match `peers = [`.
+    let from = "peers = [\"member2\", \"member3\", \"member4\"";
     assert_eq!(SITE.matches(from).count(), 1, "only member1's peers");
-    let site = SITE.replacen(from, "\"member2\", \"member4\"", 1);
+    let site = SITE.replacen(from, "peers = [\"member2\", \"member4\"", 1);
     let facts = site_facts(&site).unwrap();
     assert_eq!(
         roster().problems_against(&facts),
