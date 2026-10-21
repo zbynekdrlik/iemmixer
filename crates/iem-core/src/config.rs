@@ -123,9 +123,11 @@ pub struct Config {
     #[serde(default = "default_tunnel_ready_url")]
     pub tunnel_ready_url: String,
 
-    /// The engine's topology table (`[engine]`): read by `iem-engine` only.
+    /// The engine's topology table (`[engine]`): `iem-engine` reads it; the
+    /// server only checks a roster against it at the start
+    /// (`roster::engine_facts`).
     #[serde(default, skip_serializing)]
-    pub engine: Option<serde::de::IgnoredAny>,
+    pub engine: Option<toml::Table>,
 
     /// The engine's ASIO card (`[card]`, S6): read by `iem-engine` and the
     /// guard only.

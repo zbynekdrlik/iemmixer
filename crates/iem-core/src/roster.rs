@@ -470,7 +470,21 @@ pub fn site_facts(site_text: &str) -> Result<TopologyFacts, RosterError> {
     let engine = site
         .engine
         .ok_or_else(|| RosterError::Site("no [engine] table".into()))?;
-    Ok(TopologyFacts {
+    Ok(facts_of(engine))
+}
+
+/// The topology facts of a site's `[engine]` table as the site's config
+/// holds it (`Config::engine`; the server's start, before the engine
+/// speaks).
+pub fn engine_facts(table: &toml::Table) -> Result<TopologyFacts, RosterError> {
+    toml::Value::Table(table.clone())
+        .try_into::<EngineTable>()
+        .map(facts_of)
+        .map_err(|e| RosterError::Site(format!("[engine]: {}", redact(e.message()))))
+}
+
+fn facts_of(engine: EngineTable) -> TopologyFacts {
+    TopologyFacts {
         mixes: engine
             .mixes
             .into_iter()
@@ -482,7 +496,7 @@ pub fn site_facts(site_text: &str) -> Result<TopologyFacts, RosterError> {
             .collect(),
         inputs: engine.inputs.into_iter().map(|i| i.id).collect(),
         engineer: engine.engineer,
-    })
+    }
 }
 
 #[cfg(test)]

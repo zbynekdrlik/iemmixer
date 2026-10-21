@@ -216,7 +216,21 @@ impl AppState {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
         let mut pin_store = pin_store::PinStore::load(&secrets_dir)?;
-        let roster = roster_watch::load(config_dir, &config, &mut pin_store, None)
+        // A roster is checked against the site's own `[engine]` table, as
+        // `iem-server roster check` does (a site config built in code has
+        // none, and one the engine could not read either is only logged:
+        // no topology check until the engine speaks).
+        let facts = config
+            .engine
+            .as_ref()
+            .and_then(|t| match iem_core::roster::engine_facts(t) {
+                Ok(facts) => Some(facts),
+                Err(e) => {
+                    tracing::error!(error = %e, "the site's [engine] table: a roster is checked once the engine speaks");
+                    None
+                }
+            });
+        let roster = roster_watch::load(config_dir, &config, &mut pin_store, facts.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         // A switch a restart cut short: no change until it is finished
         // (`lineup_switch::replay_when_synced`).

@@ -41,7 +41,9 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::engine::client::EngineError;
-use crate::lineup_store::{ACTIVE_FILE, LineupStore, migrate_legacy, migration_problems};
+use crate::lineup_store::{
+    ACTIVE_FILE, LineupStore, SWITCH_FILE, migrate_legacy, migration_problems,
+};
 use crate::lineup_switch::REPLAY_RETRY;
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
@@ -309,11 +311,35 @@ fn adopt(
     Ok((state, people))
 }
 
+/// The problem of a start without `roster.toml` beside a recorded roster.
+const NOT_FOUND: &str = "roster file: not found";
+/// The last problem of a start that fell back to the recorded roster.
+const FALLBACK: &str = "in use instead: the roster applied last";
+
+/// The roster in `bytes` (SHA-256 `sha256`) validated and adopted
+/// ([`adopt`]).
+fn take(
+    config_dir: &Path,
+    cfg: &Config,
+    pins: &mut PinStore,
+    bytes: &[u8],
+    sha256: &str,
+    facts: Option<&TopologyFacts>,
+) -> Result<(RosterState, People), Vec<String>> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| vec![NOT_UTF8.to_string()])
+        .and_then(|text| validate(text, facts))
+        .and_then(|roster| adopt(config_dir, cfg, pins, roster, sha256))
+}
+
 /// The roster at the server's start: `None` without `roster.toml` (legacy
 /// mode). Otherwise it must parse and have no problems (against `facts`
 /// too, when given); the legacy layout is migrated first, or a committed
 /// migration finished; its active lineup is the recorded one and must be
-/// the roster's; the people archive follows it. The status file says what
+/// the roster's; the people archive follows it. A `roster.toml` that cannot
+/// be used, or none, beside a recorded roster (`LineupStore::applied_roster`,
+/// the one the states follow) starts with that one (#58 review: a server
+/// that does not start is the worst outcome). The status file says what
 /// happened; an error refuses the start.
 pub fn load(
     config_dir: &Path,
@@ -321,34 +347,67 @@ pub fn load(
     pins: &mut PinStore,
     facts: Option<&TopologyFacts>,
 ) -> Result<Option<RosterState>, String> {
-    let Some(bytes) = read_roster(config_dir)? else {
-        return Ok(None);
-    };
-    let sha256 = sha256_hex(&bytes);
-    let adopted = std::str::from_utf8(&bytes)
-        .map_err(|_| vec![NOT_UTF8.to_string()])
-        .and_then(|text| validate(text, facts))
-        .and_then(|roster| adopt(config_dir, cfg, pins, roster, &sha256));
-    match adopted {
-        Ok((state, people)) => {
-            tracing::info!(
-                lineup = %state.active,
-                people = state.roster.people.len(),
-                restored = people.restored.len(),
-                archived = people.archived.len(),
-                "roster mode"
-            );
-            note(
-                config_dir,
-                &Status::applied(&sha256, people.restored, people.archived, people.problems),
-            );
-            Ok(Some(state))
+    let file = read_roster(config_dir)?;
+    let (sha256, problems) = match &file {
+        Some(bytes) => {
+            let sha256 = sha256_hex(bytes);
+            match take(config_dir, cfg, pins, bytes, &sha256, facts) {
+                Ok((state, people)) => {
+                    tracing::info!(
+                        lineup = %state.active,
+                        people = state.roster.people.len(),
+                        restored = people.restored.len(),
+                        archived = people.archived.len(),
+                        "roster mode"
+                    );
+                    note(
+                        config_dir,
+                        &Status::applied(
+                            &sha256,
+                            people.restored,
+                            people.archived,
+                            people.problems,
+                        ),
+                    );
+                    return Ok(Some(state));
+                }
+                Err(problems) => (sha256, problems),
+            }
         }
-        Err(problems) => {
-            note(config_dir, &Status::refused(&sha256, problems.clone()));
-            Err(format!("{ROSTER_FILE}: {}", problems.join("; ")))
+        None => (String::new(), vec![NOT_FOUND.to_string()]),
+    };
+    let recorded = match LineupStore::new(config_dir).applied_roster() {
+        Ok(recorded) => recorded,
+        Err(e) => {
+            tracing::error!(error = %e, "the roster applied last is unreadable");
+            None
+        }
+    };
+    if let Some(text) = recorded {
+        let copy = sha256_hex(text.as_bytes());
+        match take(config_dir, cfg, pins, text.as_bytes(), &copy, facts) {
+            Ok((state, _)) => {
+                tracing::error!(
+                    lineup = %state.active,
+                    problems = problems.len(),
+                    "roster.toml cannot be used: the roster applied last is in use"
+                );
+                let mut why = problems;
+                why.push(FALLBACK.to_string());
+                note(config_dir, &Status::refused(&sha256, why));
+                return Ok(Some(state));
+            }
+            Err(more) => tracing::error!(
+                problems = more.len(),
+                "the roster applied last cannot be used either"
+            ),
         }
     }
+    if file.is_none() {
+        return Ok(None);
+    }
+    note(config_dir, &Status::refused(&sha256, problems.clone()));
+    Err(format!("{ROSTER_FILE}: {}", problems.join("; ")))
 }
 
 /// The people of `new` that `old` lacks, and those of `old` that `new`
@@ -877,7 +936,9 @@ pub async fn watch(state: AppState) {
 
 /// `iem-server roster check <file>`: the roster file's problems on its own
 /// and against the site file's topology (`[engine]`), with the migration's
-/// own while the site's directory is not migrated yet.
+/// own while the site's directory is not migrated yet, and against the
+/// site's lineup files the start reads (the lineup that plays, the target
+/// of a switch a restart cut short).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckReport {
     pub ok: bool,
@@ -915,15 +976,32 @@ fn check_problems(bytes: &[u8], site_path: &Path) -> Vec<String> {
         Ok(roster) => roster,
         Err(e) => return vec![e.to_string()],
     };
-    let migrated = crate::provision::config_dir_of(site_path)
-        .join(ACTIVE_FILE)
-        .exists();
+    let config_dir = crate::provision::config_dir_of(site_path);
+    let migrated = config_dir.join(ACTIVE_FILE).exists();
     let mut problems = if migrated {
         roster.problems()
     } else {
         migration_problems(&roster)
     };
     problems.extend(roster.problems_against(&facts));
+    // What the start depends on (#58 review): the lineup that plays, and the
+    // one a switch a restart cut short goes to.
+    let store = LineupStore::new(&config_dir);
+    match store.active() {
+        Ok(Some(active)) if roster.lineup(&active).is_none() => {
+            problems.push(missing_active(&active));
+        }
+        Ok(_) => {}
+        Err(e) => problems.push(format!("{ACTIVE_FILE}: {}", e.kind())),
+    }
+    match store.intent() {
+        Ok(Some(intent)) if roster.lineup(&intent.to).is_none() => problems.push(format!(
+            "the roster has no lineup '{}', which a switch a restart cut short goes to",
+            intent.to
+        )),
+        Ok(_) => {}
+        Err(e) => problems.push(format!("{SWITCH_FILE}: {}", e.kind())),
+    }
     problems
 }
 

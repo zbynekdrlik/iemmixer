@@ -96,6 +96,19 @@ fn site_facts_read_the_engine_table() {
     ));
 }
 
+/// #58 review: the server's start reads the facts from the site config's
+/// own `[engine]` table, the same as `roster check` reads from the file.
+#[test]
+fn engine_facts_read_the_site_configs_table() {
+    let config: crate::config::Config = toml::from_str(SITE).unwrap();
+    assert_eq!(engine_facts(config.engine.as_ref().unwrap()), Ok(facts()));
+    let table: toml::Table = toml::from_str("inputs = []\n").unwrap();
+    assert!(matches!(
+        engine_facts(&table),
+        Err(RosterError::Site(e)) if e.starts_with("[engine]: ")
+    ));
+}
+
 #[test]
 fn facts_of_an_announced_topology() {
     let topo = TopologyInfo {
