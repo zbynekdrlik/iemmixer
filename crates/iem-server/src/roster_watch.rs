@@ -37,7 +37,8 @@ use std::time::{Duration, SystemTime};
 use iem_core::backup::MixerBackup;
 use iem_core::config::Config;
 use iem_core::roster::{Lineup, ROSTER_FILE, Roster, TopologyFacts, site_facts};
-use iem_engine_proto::{Cmd, MixId, MixState, Transient};
+use iem_engine_proto::shape;
+use iem_engine_proto::{Cmd, MixId, MixState, TopologyInfo, Transient};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -765,10 +766,16 @@ fn follow(
     new: &Roster,
     sets: &BTreeSet<String>,
     lineup: &Lineup,
+    topology: Option<&TopologyInfo>,
 ) {
     let shift = from.map(|f| moves(f, new, &lineup.id)).unwrap_or_default();
     apply_moves(state, &shift);
     move_silenced(silenced, &shift);
+    // A moved mix keeps the slots of the set it came from: shaped as the
+    // engine will hold it (the running state, #58 third review).
+    if let Some(topology) = topology {
+        *state = shape::reconcile(topology, state).0;
+    }
     fit_sets(state, sets, lineup, silenced);
 }
 
@@ -836,9 +843,14 @@ async fn transition(
         // A switch a restart cut short, between its replay's tries.
         return Err(Applied::Deferred(vec![UNFINISHED_SWITCH.to_string()]));
     }
-    if !state.engine.mirror().synced {
+    let topology = {
+        let m = state.engine.mirror();
+        m.topology.clone().filter(|_| m.synced)
+    };
+    let Some(topology) = topology else {
         return Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]));
-    }
+    };
+    let topology: &TopologyInfo = &topology;
     let store = LineupStore::new(&state.config_dir);
     let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
     // Every other lineup's stored state, worked out first.
@@ -857,7 +869,15 @@ async fn transition(
         };
         let mut next = stored.clone();
         let from = follows.base_of(stored.follows.as_deref(), new_sha);
-        follow(&mut next.state, &mut next.silenced, from, new, &sets, l);
+        follow(
+            &mut next.state,
+            &mut next.silenced,
+            from,
+            new,
+            &sets,
+            l,
+            None,
+        );
         next.follows = Some(new_sha.to_string());
         if next != stored {
             planned.push((l.id.clone(), stored, next));
@@ -867,10 +887,21 @@ async fn transition(
     let (marker, recorded) = running_for(&store, active);
     let from = follows.base_of(marker.as_deref(), new_sha);
     let moved = from.map_or(0, |f| moves(f, new, active).len());
+    // The state the engine holds is shaped by its topology: the import is
+    // sent so shaped, and compared so (#58 third review).
+    let shaped = |s: &MixState| shape::reconcile(topology, s).0;
     let next_of = |current: &MixState| {
         let mut next = current.clone();
         let mut silenced = recorded.clone();
-        follow(&mut next, &mut silenced, from, new, &sets, &lineup);
+        follow(
+            &mut next,
+            &mut silenced,
+            from,
+            new,
+            &sets,
+            &lineup,
+            Some(topology),
+        );
         let running = Running {
             lineup: active.to_string(),
             follows: Some(new_sha.to_string()),
@@ -888,7 +919,7 @@ async fn transition(
         (m.state.clone(), soloed_now(&m.transient))
     };
     let (next, running) = next_of(&current);
-    if next == current && soloed.is_empty() {
+    if next == shaped(&current) && soloed.is_empty() {
         write_planned(&store, &planned)?;
         note_running(&store, &running);
         return Ok(Transition {
@@ -924,7 +955,7 @@ async fn transition(
     };
     let taken = if synced {
         let (next, running) = next_of(&current);
-        if next == current {
+        if next == shaped(&current) {
             Ok(running)
         } else {
             match state
