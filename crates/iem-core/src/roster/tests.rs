@@ -516,7 +516,9 @@ fn problems_never_echo_a_value_that_is_no_id() {
     for want in [
         "lineup 'main': set #1 is not a stereo mix of the site other than the engineer's",
         "lineup 'main': input #1 is not an input of the site",
-        "leader member1 in main: set member1 does not hear #1; the site needs peers (F30)",
+        // member1 also wears the typed set, which `set_of` finds first (keys
+        // sort upper case first), so member3's line is the stable one.
+        "leader member3 in main: set member3 does not hear #1; the site needs peers (F30)",
         "leader #2 in lineup #2: set member4 does not hear member1; the site needs peers (F30)",
     ] {
         assert!(has(&against, want), "{want}: {against:?}");
