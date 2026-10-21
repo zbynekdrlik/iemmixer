@@ -151,6 +151,19 @@ pub fn MixerPage() -> impl IntoView {
     let badge = Memo::new(move |_| lineup.with(|v| v.badge().map(str::to_owned)));
     let notice = Memo::new(move |_| lineup.with(|v| v.notice().cloned()));
     let mixer_shown = move || notice.with(Option::is_none);
+    // The band switch in the settings: a leader who plays, on their own
+    // page; the engineer on /engineer. After a switch the page reads the
+    // band again (from the notice it has no socket to hear it on).
+    let (bearer, bearer_engineer) = crate::auth::get_auth()
+        .map(|a| (a.member, a.engineer))
+        .unwrap_or_default();
+    let switch_info = Memo::new(move |_| {
+        lineup.with(|v| {
+            v.switch_here(&member_id(), &bearer, bearer_engineer)
+                .cloned()
+        })
+    });
+    let on_switched = Callback::new(move |_: ()| connection::read_lineup(state));
 
     // Check if member has photo on mount (reaperiem#16)
     // Use try_set (via state method) to guard against disposal race — if the
@@ -291,7 +304,9 @@ pub fn MixerPage() -> impl IntoView {
 
             // A person who does not play in the band that plays sees which
             // band plays instead of the mixer (#58).
-            {move || notice.get().map(|info| view! { <LineupNotice info=info /> })}
+            {move || notice.get().map(|info| view! {
+                <LineupNotice info=info on_switched=on_switched />
+            })}
 
             <Show when=mixer_shown fallback=|| ()>
                 // Internet access (Cloudflare tunnel) status (reaperiem#202): indicator for
@@ -454,6 +469,8 @@ pub fn MixerPage() -> impl IntoView {
                 set_has_photo=set_has_photo
                 console=console
                 ws=ws
+                lineup=Signal::from(switch_info)
+                on_switched=on_switched
             />
 
             <PinChangeModal

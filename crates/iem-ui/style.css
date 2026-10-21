@@ -1581,6 +1581,36 @@ body {
   color: var(--text-primary);
 }
 
+/* #58: the band switch (settings "Kapela", and a leader's notice). */
+.lineup-switch {
+  width: 100%;
+  max-width: 340px;
+}
+
+.lineup-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lineup-target {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--touch-min);
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-channel);
+  color: var(--text-primary);
+  font-size: 0.9em;
+}
+
+.lineup-switch-message {
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: var(--text-secondary);
+}
+
 /* Empty state */
 .empty-state {
   display: flex;

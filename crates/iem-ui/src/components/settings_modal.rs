@@ -73,6 +73,14 @@ pub fn SettingsModal(
     /// The mixer socket (console commands)
     #[prop(optional)]
     ws: Option<ReadSignal<Option<web_sys::WebSocket>>>,
+    /// The band switch (#58), shown as "Kapela" while it holds the band:
+    /// for a leader who plays, on their own page, and the engineer on
+    /// `/engineer`.
+    #[prop(optional)]
+    lineup: Option<Signal<Option<iem_core::LineupInfo>>>,
+    /// After a switch: the page reads the band again.
+    #[prop(optional)]
+    on_switched: Option<Callback<()>>,
 ) -> impl IntoView {
     // StoredValue is Copy + Send + Sync — closures inside view! can use it freely
     let member_id = StoredValue::new(member_id);
@@ -232,6 +240,19 @@ pub fn SettingsModal(
                             </div>
                         </div>
                     </div>
+
+                    // The band switch (#58)
+                    {lineup.zip(on_switched).map(|(lineup, on_switched)| view! {
+                        <Show when=move || lineup.with(Option::is_some) fallback=|| ()>
+                            <div class="settings-section" data-testid="lineup-section">
+                                <div class="settings-section-title">"Kapela"</div>
+                                <crate::components::lineup_switch::LineupSwitch
+                                    info=lineup
+                                    on_switched=on_switched
+                                />
+                            </div>
+                        </Show>
+                    })}
 
                     {if is_engineer {
                         Some(view! {

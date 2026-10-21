@@ -273,6 +273,55 @@ pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
     }
 }
 
+/// What a band switch came to (#58).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switched {
+    /// The band plays now (204).
+    Now,
+    /// The mixer dropped in the middle: the switch finishes once it is back
+    /// (202 `SWITCH_PENDING`). Not a failure.
+    Pending,
+}
+
+/// A switch that did not happen: the answer's status (0: no answer) and
+/// the server's code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchFailure {
+    pub status: u16,
+    pub code: String,
+}
+
+/// `POST /api/lineup/switch`'s answer by its status and body.
+pub fn switch_answer(status: u16, body: &str) -> Result<Switched, SwitchFailure> {
+    match status {
+        202 => Ok(Switched::Pending),
+        200..=299 => Ok(Switched::Now),
+        _ => Err(SwitchFailure {
+            status,
+            code: ApiError::of(status, body).code,
+        }),
+    }
+}
+
+/// `POST /api/lineup/switch` (#58): band `to` plays from now on.
+pub async fn switch_lineup(to: &str) -> Result<Switched, SwitchFailure> {
+    let no_answer = |code: &str| SwitchFailure {
+        status: 0,
+        code: code.to_string(),
+    };
+    let token = crate::auth::get_token().ok_or_else(|| no_answer("NO_TOKEN"))?;
+    let resp = Request::post(&format!("{API_BASE}/lineup/switch"))
+        .header("Authorization", &format!("Bearer {token}"))
+        .json(&iem_core::SwitchRequest { to: to.to_string() })
+        .map_err(|_| no_answer("REQUEST"))?
+        .send()
+        .await
+        .map_err(|_| no_answer("NETWORK"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    switch_answer(status, &body)
+}
+
 /// Whether the answer to the token check (`GET /api/mixer/<page>`) is the
 /// server refusing the token, which sends the page to the login: 401 (an
 /// invalid or expired token) or 403 (a token not for this page). Any other
@@ -532,6 +581,31 @@ mod tests {
             }
         );
         assert_eq!(lineup_answer(200, "{}").unwrap_err().code, "UNREADABLE");
+    }
+
+    #[test]
+    fn a_switch_answer_is_done_pending_or_refused() {
+        assert_eq!(switch_answer(204, ""), Ok(Switched::Now));
+        // The mixer dropped mid-switch: it finishes later, no failure.
+        let pending = r#"{"code":"SWITCH_PENDING","message":"the engine went away"}"#;
+        assert_eq!(switch_answer(202, pending), Ok(Switched::Pending));
+        let busy = r#"{"code":"BUSY","message":"a switch runs"}"#;
+        assert_eq!(
+            switch_answer(409, busy),
+            Err(SwitchFailure {
+                status: 409,
+                code: "BUSY".into()
+            })
+        );
+        assert_eq!(
+            switch_answer(502, "Bad Gateway"),
+            Err(SwitchFailure {
+                status: 502,
+                code: "HTTP_502".into()
+            })
+        );
+        assert_eq!(switch_answer(199, "").unwrap_err().status, 199);
+        assert_eq!(switch_answer(300, "").unwrap_err().status, 300);
     }
 
     #[test]
