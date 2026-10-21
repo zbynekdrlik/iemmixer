@@ -22,6 +22,7 @@
 //! them but the copy inside the stored state (a backup's shape), which is
 //! never read back at a switch.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use crate::AppState;
 use crate::backup::{capture, keep_running};
 use crate::engine::client::EngineError;
 use crate::lineup_store::{LineupStore, SwitchIntent};
-use crate::roster_watch::fit;
+use crate::roster_watch::{fit_recorded, keep_silenced, silenced_of};
 use crate::site_view::SiteView;
 
 /// How long [`replay_when_synced`] waits between two tries.
@@ -82,11 +83,23 @@ pub fn target_state(
     roster: &Roster,
     lineup: &Lineup,
 ) -> MixState {
+    target_state_recorded(target, current, roster, lineup, &mut BTreeSet::new())
+}
+
+/// [`target_state`] keeping `silenced`, the record of the sets the rules
+/// silenced in the state it starts from (`roster_watch::fit_recorded`).
+pub fn target_state_recorded(
+    target: Option<MixState>,
+    current: &MixState,
+    roster: &Roster,
+    lineup: &Lineup,
+    silenced: &mut BTreeSet<String>,
+) -> MixState {
     let mut state = match target {
         Some(stored) => keep_running(&stored, current),
         None => current.clone(),
     };
-    fit(&mut state, roster, lineup);
+    fit_recorded(&mut state, roster, lineup, silenced);
     state
 }
 
@@ -233,7 +246,7 @@ async fn steps(
     store
         .set_intent(&intent)
         .map_err(|e| Failed::Back(io("the switch's intent was not written", e)))?;
-    if let Err(e) = forward(state, &store, roster, &live.state, to).await {
+    if let Err(e) = forward(state, &store, roster, &live.state, from, to).await {
         // The band that played plays on, once its state is back in for
         // sure; else the intent stays.
         if let Err(back) = state
@@ -256,19 +269,33 @@ async fn steps(
     Ok(())
 }
 
+/// The record of what the rules silenced in the state `lineup` starts
+/// from: its own when it has a stored state, else (it starts from the
+/// running state) that of `running`, whose state the engine holds.
+fn silenced_from(
+    store: &LineupStore,
+    lineup: &str,
+    stored: bool,
+    running: &str,
+) -> BTreeSet<String> {
+    silenced_of(store, if stored { lineup } else { running })
+}
+
 /// The target's state to the engine, then the target recorded active.
 async fn forward(
     state: &AppState,
     store: &LineupStore,
     roster: &Roster,
     live: &MixState,
+    from: &str,
     to: &Lineup,
 ) -> Result<(), SwitchError> {
     let stored = store
         .state(&to.id)
         .map_err(|e| io("the band's stored state is unreadable", e))?
         .map(|b| b.state);
-    let target = target_state(stored, live, roster, to);
+    let mut silenced = silenced_from(store, &to.id, stored.is_some(), from);
+    let target = target_state_recorded(stored, live, roster, to, &mut silenced);
     state
         .engine
         .request_applied(import(target), None)
@@ -276,18 +303,22 @@ async fn forward(
         .map_err(SwitchError::Engine)?;
     store
         .set_active(&to.id, chrono::Utc::now().timestamp())
-        .map_err(|e| io("the band that plays was not recorded", e))
+        .map_err(|e| io("the band that plays was not recorded", e))?;
+    keep_silenced(store, &to.id, &silenced);
+    Ok(())
 }
 
 /// Imports `lineup`'s state (`stored` completed with the running values
-/// and under the lineup's rules, as [`target_state`]) and records it as the
-/// band that plays, on disk and in use.
+/// and under the lineup's rules, as [`target_state`]; no `stored`: the
+/// running state, which is `running`'s) and records it as the band that
+/// plays, on disk and in use.
 async fn play(
     state: &AppState,
     store: &LineupStore,
     roster: &Roster,
     lineup: &Lineup,
     stored: Option<MixState>,
+    running: &str,
 ) -> Result<(), String> {
     let current = {
         let mirror = state.engine.mirror();
@@ -296,7 +327,8 @@ async fn play(
         }
         mirror.state.clone()
     };
-    let target = target_state(stored, &current, roster, lineup);
+    let mut silenced = silenced_from(store, &lineup.id, stored.is_some(), running);
+    let target = target_state_recorded(stored, &current, roster, lineup, &mut silenced);
     state
         .engine
         .request_applied(import(target), None)
@@ -305,6 +337,7 @@ async fn play(
     store
         .set_active(&lineup.id, chrono::Utc::now().timestamp())
         .map_err(|e| e.to_string())?;
+    keep_silenced(store, &lineup.id, &silenced);
     set_active_in_use(state, &lineup.id);
     Ok(())
 }
@@ -334,7 +367,7 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
             .state(&lineup.id)
             .map_err(|e| e.to_string())?
             .map(|b| b.state);
-        play(state, &store, &roster.roster, &lineup, stored).await?;
+        play(state, &store, &roster.roster, &lineup, stored, &intent.from).await?;
         tracing::warn!(lineup = %lineup.id, "a switch a restart cut short is finished");
     }
     store.clear_intent().map_err(|e| e.to_string())?;
@@ -368,7 +401,7 @@ pub async fn fall_back(state: &AppState) -> Result<(), String> {
             None
         }
     };
-    play(state, &store, &roster.roster, &lineup, stored).await?;
+    play(state, &store, &roster.roster, &lineup, stored, &lineup.id).await?;
     store.clear_intent().map_err(|e| e.to_string())?;
     state.frozen.store(false, Ordering::SeqCst);
     tracing::warn!(lineup = %lineup.id, "a switch a restart cut short was given up: the band before it plays");

@@ -322,6 +322,39 @@ fn fit_mutes_heard_mixes_off_a_leaders_set_and_silences_empty_sets() {
     assert_eq!(empty, MixState::default());
 }
 
+/// #58 review: the record of what the rules silenced: a set they mute is
+/// recorded, a set muted already is not, a recorded set someone wears is
+/// unmuted and forgotten; a moved mix takes its set's record along.
+#[test]
+fn the_rules_record_what_they_silenced() {
+    let r = test_roster("youth");
+    let youth = r.roster.lineup("youth").unwrap();
+    let mut s = running();
+    mix_mut(&mut s, "member5").out.muted = true;
+    let mut silenced = BTreeSet::new();
+    fit_recorded(&mut s, &r.roster, youth, &mut silenced);
+    let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+    assert_eq!(
+        silenced,
+        set(&["member2", "member6", "member7", "member8", "member9"]),
+        "member5 was muted already"
+    );
+    let main = r.roster.lineup("main").unwrap();
+    fit_recorded(&mut s, &r.roster, main, &mut silenced);
+    assert!(silenced.is_empty());
+    for id in ["member2", "member6", "member7", "member8", "member9"] {
+        assert!(!s.mixes[&MixId::new(id)].out.muted, "{id}");
+    }
+    assert!(s.mixes[&MixId::new("member5")].out.muted, "its wearer's");
+    // A set takes the record of the set whose mix it takes.
+    let mut silenced = set(&["member5", "member9"]);
+    move_silenced(
+        &mut silenced,
+        &[pair("member5", "member6"), pair("member1", "member9")],
+    );
+    assert_eq!(silenced, set(&["member5", "member6"]));
+}
+
 #[test]
 fn the_people_diff_names_who_came_and_who_left() {
     let (old, new) = (parse(TEXT), parse(&without_member11()));
@@ -923,6 +956,22 @@ async fn a_set_the_rules_silenced_sounds_again_once_worn() {
     let back = fake::imports(&mut peer, 3).await;
     assert_eq!(within(task).await, applied(&["member11"], &[]));
     assert!(!back.mixes[&MixId::new("member4")].out.muted);
+}
+
+/// The record of what the rules silenced is the lineup's file: it
+/// outlives the server.
+#[tokio::test]
+async fn the_record_of_what_the_rules_silenced_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "youth");
+    let mut peer = synced(&mut state, youth_running()).await;
+    let task = spawn_apply(&state, &without_member11());
+    imports(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &["member11"]));
+    assert_eq!(
+        LineupStore::new(dir.path()).silenced("youth").unwrap(),
+        BTreeSet::from(["member4".to_string()])
+    );
 }
 
 /// #58 review: a set its wearer muted stays muted when it is left empty

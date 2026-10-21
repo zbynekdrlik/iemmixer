@@ -5,8 +5,10 @@
 //! `customizations/`, keyed by person). `lineups/active.json` names the
 //! active lineup; `lineups/switch.json` exists only while a switch runs (its
 //! intent, replayed after a crash); `lineups/applied-roster.toml` is a copy
-//! of the roster the stored states and the running one follow. Every write
-//! is a synced temporary file renamed over the old one.
+//! of the roster the stored states and the running one follow, and
+//! `lineups/<id>/silenced.json` names the sets of a lineup its rules
+//! silenced because nobody wore them. Every write is a synced temporary
+//! file renamed over the old one.
 //!
 //! Also the one-time migration of the legacy layout (no
 //! `lineups/active.json`): today's per-member files and the engineer's
@@ -15,6 +17,7 @@
 //! `lineups/migration.json` until done, so a crash anywhere is finished by
 //! the next start.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -53,6 +56,7 @@ const ACTIVE_NAME: &str = "active.json";
 const SWITCH_NAME: &str = "switch.json";
 const STATE_NAME: &str = "state.json";
 const APPLIED_NAME: &str = "applied-roster.toml";
+const SILENCED_NAME: &str = "silenced.json";
 const PENDING_NAME: &str = "migration.json";
 
 /// How often a rename a transient Windows error fails is tried, and the
@@ -216,6 +220,23 @@ impl LineupStore {
         check_id(id)?;
         let json = serde_json::to_string_pretty(backup).map_err(io::Error::other)?;
         write_durable(&self.data_dir(id).join(STATE_NAME), &json)
+    }
+
+    /// The sets of lineup `id` its rules silenced because nobody wore them
+    /// (`roster_watch::fit_recorded`); none before any was recorded.
+    pub fn silenced(&self, id: &str) -> io::Result<BTreeSet<String>> {
+        check_id(id)?;
+        let path = self.data_dir(id).join(SILENCED_NAME);
+        let Some(text) = read_optional(&path)? else {
+            return Ok(BTreeSet::new());
+        };
+        serde_json::from_str(&text).map_err(|e| invalid(format!("{}: {e}", path.display())))
+    }
+
+    pub fn set_silenced(&self, id: &str, sets: &BTreeSet<String>) -> io::Result<()> {
+        check_id(id)?;
+        let json = serde_json::to_string(sets).map_err(io::Error::other)?;
+        write_durable(&self.data_dir(id).join(SILENCED_NAME), &json)
     }
 
     /// The roster the states follow ([`APPLIED_FILE`]); `None` before one

@@ -472,27 +472,85 @@ fn roster_sets(roster: &Roster) -> BTreeSet<String> {
 /// not one of `lineup`'s leaders every mix it hears, whole or as a peer, is
 /// muted, so only a leader hears another person's mix; a set of the roster
 /// nobody wears in `lineup` is muted. Only mixes the state holds are
-/// touched.
+/// touched. With no record of what the rules silenced ([`fit_recorded`]).
 pub fn fit(state: &mut MixState, roster: &Roster, lineup: &Lineup) {
-    fit_sets(state, &roster_sets(roster), lineup);
+    fit_recorded(state, roster, lineup, &mut BTreeSet::new());
 }
 
-/// [`fit`] over `sets`: a reload passes the old roster's sets too, so a set
-/// the new roster no longer lists at all is silent as well.
-fn fit_sets(state: &mut MixState, sets: &BTreeSet<String>, lineup: &Lineup) {
+/// [`fit`] keeping `silenced`, the lineup's record of the sets its rules
+/// muted because nobody wore them (#58 review): such a set is recorded when
+/// the rules mute it, and unmuted and forgotten once someone wears it. A
+/// set that was muted already (its wearer's choice) is never recorded, so
+/// the rules never unmute it.
+pub fn fit_recorded(
+    state: &mut MixState,
+    roster: &Roster,
+    lineup: &Lineup,
+    silenced: &mut BTreeSet<String>,
+) {
+    fit_sets(state, &roster_sets(roster), lineup, silenced);
+}
+
+/// [`fit_recorded`] over `sets`: a reload passes the old roster's sets too,
+/// so a set the new roster no longer lists at all is silent as well.
+fn fit_sets(
+    state: &mut MixState,
+    sets: &BTreeSet<String>,
+    lineup: &Lineup,
+    silenced: &mut BTreeSet<String>,
+) {
     for set in sets {
         let Some(mix) = state.mixes.get_mut(&MixId::new(set.as_str())) else {
             continue;
         };
         match lineup.person_on(set) {
-            None => mix.out.muted = true,
-            Some(person) if !lineup.leads(person) => {
-                for level in mix.mixes.values_mut() {
-                    level.muted = true;
+            None => {
+                if !mix.out.muted {
+                    mix.out.muted = true;
+                    silenced.insert(set.clone());
                 }
             }
-            Some(_) => {}
+            Some(person) => {
+                if silenced.remove(set) {
+                    mix.out.muted = false;
+                }
+                if !lineup.leads(person) {
+                    for level in mix.mixes.values_mut() {
+                        level.muted = true;
+                    }
+                }
+            }
         }
+    }
+}
+
+/// `silenced` after `moves` ([`apply_moves`]): a set that takes a copy of
+/// another set's mix takes its record too.
+pub fn move_silenced(silenced: &mut BTreeSet<String>, moves: &[(String, String)]) {
+    let before = silenced.clone();
+    for (from, to) in moves {
+        if before.contains(from) {
+            silenced.insert(to.clone());
+        } else {
+            silenced.remove(to);
+        }
+    }
+}
+
+/// Lineup `id`'s record of the sets its rules silenced (one that cannot be
+/// read is logged: none).
+pub(crate) fn silenced_of(store: &LineupStore, id: &str) -> BTreeSet<String> {
+    store.silenced(id).unwrap_or_else(|e| {
+        tracing::error!(lineup = %id, error = %e, "the sets the rules silenced are unknown");
+        BTreeSet::new()
+    })
+}
+
+/// Writes lineup `id`'s record (a failure is logged: a set the rules
+/// silenced then stays muted once someone wears it).
+pub(crate) fn keep_silenced(store: &LineupStore, id: &str, silenced: &BTreeSet<String>) {
+    if let Err(e) = store.set_silenced(id, silenced) {
+        tracing::error!(lineup = %id, error = %e, "the sets the rules silenced were not recorded");
     }
 }
 
@@ -612,8 +670,10 @@ async fn transition(
         .collect();
     let shift_of = |id: &str| base.map(|b| moves(b, new, id)).unwrap_or_default();
     // The other lineups' stored states first, each original kept so a
-    // failure below can put it back.
+    // failure below can put it back; the records of what the rules
+    // silenced are written once all went well.
     let mut written: Vec<(String, MixerBackup)> = Vec::new();
+    let mut records: Vec<(String, BTreeSet<String>)> = Vec::new();
     for l in new.lineups.iter().filter(|l| l.id != active) {
         let stored = match store.state(&l.id) {
             Ok(Some(b)) => b,
@@ -627,9 +687,16 @@ async fn transition(
                 )]));
             }
         };
+        let recorded = silenced_of(&store, &l.id);
+        let mut silenced = recorded.clone();
         let mut next = stored.clone();
-        apply_moves(&mut next.state, &shift_of(&l.id));
-        fit_sets(&mut next.state, &sets, l);
+        let shift = shift_of(&l.id);
+        apply_moves(&mut next.state, &shift);
+        move_silenced(&mut silenced, &shift);
+        fit_sets(&mut next.state, &sets, l, &mut silenced);
+        if silenced != recorded {
+            records.push((l.id.clone(), silenced));
+        }
         if next.state == stored.state {
             continue;
         }
@@ -645,14 +712,27 @@ async fn transition(
     }
     // The active lineup's running state, through one import.
     let shift = shift_of(active);
+    let recorded = silenced_of(&store, active);
     let next_of = |current: &MixState| {
         let mut next = current.clone();
+        let mut silenced = recorded.clone();
         apply_moves(&mut next, &shift);
-        fit_sets(&mut next, &sets, &lineup);
-        next
+        move_silenced(&mut silenced, &shift);
+        fit_sets(&mut next, &sets, &lineup, &mut silenced);
+        (next, silenced)
+    };
+    let keep_records = |active_silenced: BTreeSet<String>| {
+        for (id, silenced) in &records {
+            keep_silenced(&store, id, silenced);
+        }
+        if active_silenced != recorded {
+            keep_silenced(&store, active, &active_silenced);
+        }
     };
     let current = state.engine.mirror().state.clone();
-    if next_of(&current) == current {
+    let (next, silenced) = next_of(&current);
+    if next == current {
+        keep_records(silenced);
         return Ok(Transition {
             moved: shift.len(),
             frozen: None,
@@ -682,9 +762,9 @@ async fn transition(
         (m.synced, m.state.clone())
     };
     let imported = if synced {
-        let next = next_of(&current);
+        let (next, silenced) = next_of(&current);
         if next == current {
-            Ok(())
+            Ok(silenced)
         } else {
             state
                 .engine
@@ -696,15 +776,19 @@ async fn transition(
                     None,
                 )
                 .await
+                .map(|()| silenced)
                 .map_err(failed)
         }
     } else {
         Err(Applied::Deferred(vec![NOT_SYNCED.to_string()]))
     };
-    if let Err(not) = imported {
-        state.frozen.store(was, Ordering::SeqCst);
-        undo(&store, &written);
-        return Err(not);
+    match imported {
+        Ok(silenced) => keep_records(silenced),
+        Err(not) => {
+            state.frozen.store(was, Ordering::SeqCst);
+            undo(&store, &written);
+            return Err(not);
+        }
     }
     Ok(Transition {
         moved: shift.len(),
