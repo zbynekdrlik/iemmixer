@@ -2118,3 +2118,39 @@ async fn a_learned_roster_moves_people_but_brings_no_set_under_the_rules() {
         "no import"
     );
 }
+
+/// #58 fourth review: when what the running state follows once the import
+/// is in (`Running::pending`) cannot be written before it, nothing is
+/// imported (a lost answer and a stop would otherwise move the same people
+/// again at the next start): the stored states go back, the pages are
+/// free, and the roster waits for the next poll.
+#[tokio::test]
+async fn a_reload_whose_pending_record_cannot_be_written_imports_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "main");
+    let store = LineupStore::new(d);
+    let stored = MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, running());
+    store.save_state("youth", &stored).unwrap();
+    // running.json cannot be written: a directory holds its name.
+    std::fs::create_dir_all(d.join(crate::lineup_store::RUNNING_FILE)).unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    let task = spawn_apply(&state, &swapped());
+    // The freeze's barrier.
+    fake::answer_ping(&mut peer).await;
+    assert_eq!(
+        within(task).await,
+        Applied::Deferred(vec![
+            "what the running state follows could not be written: the roster waits".to_string()
+        ])
+    );
+    assert_eq!(store.state("youth").unwrap(), Some(stored), "put back");
+    assert_eq!(state.roster(), Some(test_roster("main")));
+    assert!(!state.frozen_now());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "no import"
+    );
+}
