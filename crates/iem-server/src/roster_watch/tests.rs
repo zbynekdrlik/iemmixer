@@ -2201,3 +2201,33 @@ async fn a_settle_on_the_roster_the_running_state_follows_keeps_its_solos() {
         "no freeze, no SetSolo, no import"
     );
 }
+
+/// #58 fourth review: a pending import that a read of `running.json`
+/// resolves (the start's settle or replay is the first) is saved at once,
+/// taken or not, so it is never resolved again against an engine state
+/// that pages have changed since.
+#[test]
+fn a_resolved_pending_import_is_saved_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LineupStore::new(dir.path());
+    let sent = running();
+    let with_pending = Running {
+        lineup: "main".into(),
+        follows: Some("old".into()),
+        silenced: BTreeSet::new(),
+        pending: Some(Pending {
+            follows: "new".into(),
+            silenced: BTreeSet::from(["member5".to_string()]),
+            digest: state_digest(&sent),
+        }),
+    };
+    store.set_running(&with_pending).unwrap();
+    let taken = running_of(&store, &state_digest(&sent)).unwrap();
+    assert_eq!(taken.follows.as_deref(), Some("new"));
+    assert_eq!(store.running().unwrap(), Some(taken), "saved, taken");
+    store.set_running(&with_pending).unwrap();
+    let not = running_of(&store, &state_digest(&MixState::default())).unwrap();
+    assert_eq!(not.follows.as_deref(), Some("old"));
+    assert_eq!(not.pending, None);
+    assert_eq!(store.running().unwrap(), Some(not), "saved, not taken");
+}
