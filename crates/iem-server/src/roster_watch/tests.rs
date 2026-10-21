@@ -1863,3 +1863,55 @@ async fn a_state_on_a_kept_roster_moves_from_it() {
     );
     assert_eq!(youth.follows, Some(sha256_hex(text.as_bytes())));
 }
+
+/// #58 third review: two reloads one after the other, A to B, then B to C
+/// where C moves member5 to set member9: the states the first marked B
+/// move from B (the roster in use then) at the second.
+#[tokio::test]
+async fn a_second_reload_moves_people_from_the_roster_the_first_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    store
+        .save_state("youth", &MixerBackup::new("t".into(), 1, running()))
+        .unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    // A to B: member11 leaves youth, nothing of main changes (no import).
+    let b = without_member11();
+    let b_sha = sha256_hex(b.as_bytes());
+    assert_eq!(
+        within(spawn_apply(&state, &b)).await,
+        applied(&[], &["member11"])
+    );
+    assert_eq!(
+        store.running().unwrap().and_then(|r| r.follows),
+        Some(b_sha.clone())
+    );
+    assert_eq!(
+        store.state("youth").unwrap().unwrap().follows,
+        Some(b_sha.clone())
+    );
+    // B to C: member5 wears set member9 in main.
+    let c = edit(&b, "member5 = \"member5\"\n", "");
+    let c = edit(&c, "member9 = \"member9\"\n", "member9 = \"member5\"\n");
+    let c = edit(
+        &c,
+        "mic10 = { name = \"MEMBER9 mic\", owner = \"member9\" }\n",
+        "mic10 = { name = \"MEMBER9 mic\" }\n",
+    );
+    let c_sha = sha256_hex(c.as_bytes());
+    let task = spawn_apply(&state, &c);
+    let imported = imports(&mut peer).await;
+    assert_eq!(within(task).await, applied(&[], &[]));
+    let set9 = &imported.mixes[&MixId::new("member9")];
+    assert_eq!(
+        set9.inputs[&InputId::new("keys")].gain_db,
+        -6.0,
+        "member5's mix, moved from B's set member5"
+    );
+    assert_eq!(
+        store.running().unwrap().and_then(|r| r.follows),
+        Some(c_sha.clone())
+    );
+    assert_eq!(store.state("youth").unwrap().unwrap().follows, Some(c_sha));
+}
