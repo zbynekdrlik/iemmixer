@@ -446,9 +446,9 @@ pub const MAX_REPLAYS: u32 = 3;
 /// The alarms' title, and what they say once the outcome is known.
 const NOT_SWITCHED: &str = "Kapela neprepnutá";
 const FELL_BACK: &str = "Prepnutie kapely sa nedalo dokončiť: hrá znova kapela pred ním.";
-const GAVE_UP: &str = "Prepnutie kapely sa nedalo dokončiť ani vrátiť: server nevie, ktorej \
-                       kapely mixy engine drží. Mixy sa dajú znova meniť; skontroluj ich a \
-                       prepni kapelu znova.";
+const GAVE_UP: &str = "Prepnutie kapely sa nedalo dokončiť a kapela pred ním sa nevrátila: \
+                       server nevie, čie mixy engine drží. Mixy sa dajú znova meniť; \
+                       skontroluj ich a prepni kapelu znova.";
 
 /// How [`replay_when_synced`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
