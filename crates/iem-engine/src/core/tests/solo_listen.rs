@@ -6,30 +6,30 @@ use super::*;
 fn solo_silences_the_other_levels_of_its_mix_and_clears() {
     let mut c = core(Flags::default());
     let t = Arc::clone(c.topology());
-    let m3 = t.mix_index(&mix("member3")).unwrap() as u16;
-    let out = c.apply(&solo("member3", vec![src("mic2")])).unwrap();
+    let m5 = t.mix_index(&mix("member5")).unwrap() as u16;
+    let out = c.apply(&solo("member5", vec![src("mic2")])).unwrap();
     assert_eq!(out.rev, 1);
     assert_eq!(
         out.changes,
         vec![Change::Solo {
-            mix: mix("member3"),
+            mix: mix("member5"),
             sources: vec![src("mic2")]
         }]
     );
-    // Every input level of member3 (it hears no mix), only mic2 open; the
+    // Every input level of member5 (it hears no mix), only mic2 open; the
     // group strip and the output are untouched.
     assert_eq!(out.rt.len(), 24);
     for op in &out.rt {
         let RtOp::Level { m, k, muted, .. } = *op else {
             panic!("{op:?}")
         };
-        assert_eq!(m, m3);
+        assert_eq!(m, m5);
         assert_eq!(muted, k != 1, "slot {k}");
     }
     assert_eq!(c.transient().solo.len(), 1);
     // The stored levels are untouched.
     assert!(
-        c.state().mixes[&mix("member3")]
+        c.state().mixes[&mix("member5")]
             .inputs
             .values()
             .all(|l| !l.muted)
@@ -40,26 +40,26 @@ fn solo_silences_the_other_levels_of_its_mix_and_clears() {
         other.rt.as_slice(),
         [RtOp::Level { muted: false, .. }]
     ));
-    let inside = c.apply(&set_level("member3", src("mic1"), -6.0)).unwrap();
+    let inside = c.apply(&set_level("member5", src("mic1"), -6.0)).unwrap();
     assert!(matches!(
         inside.rt.as_slice(),
         [RtOp::Level { muted: true, .. }]
     ));
-    let open = c.apply(&set_level("member3", src("mic2"), -6.0)).unwrap();
+    let open = c.apply(&set_level("member5", src("mic2"), -6.0)).unwrap();
     assert!(matches!(
         open.rt.as_slice(),
         [RtOp::Level { muted: false, .. }]
     ));
     // A stems input can be soloed like any input.
-    c.apply(&solo("member3", vec![src("drums")])).unwrap();
-    let same = c.apply(&solo("member3", vec![src("drums")])).unwrap();
+    c.apply(&solo("member5", vec![src("drums")])).unwrap();
+    let same = c.apply(&solo("member5", vec![src("drums")])).unwrap();
     assert_eq!(same.changes.len(), 0);
     let cleared = c.clear_solos();
     assert_eq!(cleared.rev, 6);
     assert_eq!(
         cleared.changes,
         vec![Change::Solo {
-            mix: mix("member3"),
+            mix: mix("member5"),
             sources: vec![]
         }]
     );
@@ -109,7 +109,7 @@ fn solo_rejects_sources_the_mix_does_not_hear() {
     let mut c = core(Flags::default());
     for (m, source) in [
         ("member3", src("drums2")),
-        ("member3", Source::Mix(mix("member2"))),
+        ("member4", Source::Mix(mix("member2"))),
         ("member1", Source::Mix(mix("member1"))),
         ("translator", Source::Mix(mix("member1"))),
     ] {

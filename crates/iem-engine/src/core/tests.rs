@@ -297,8 +297,8 @@ fn unknown_ids_are_unknown_id_with_short_messages() {
             muted: None,
             processing: None,
         },
-        // member3 hears no other mix; nobody hears the translator.
-        set_level("member3", Source::Mix(mix("member2")), 0.0),
+        // member4 hears no other mix; nobody hears the translator.
+        set_level("member4", Source::Mix(mix("member2")), 0.0),
         set_level("engineer", Source::Mix(mix("translator")), 0.0),
         set_level("member1", Source::Mix(mix(&long)), 0.0),
         set_level("member1", src(&long), 0.0),
@@ -415,10 +415,10 @@ fn batches_are_atomic_and_bounded() {
         (out.rev, out.changes.len(), out.rt.len()),
         (2, MAX_BATCH, MAX_BATCH)
     );
-    // Exactly 512 RT commands fit one block: 20 solo toggles on member3
-    // (24 levels each) and 32 volume moves.
-    let member3 = |on: bool| solo("member3", if on { vec![src("mic2")] } else { vec![] });
-    let mut ops: Vec<Cmd> = (0..20).map(|k| member3(k % 2 == 0)).collect();
+    // Exactly 512 RT commands fit one block: 20 solo toggles on member5
+    // (24 levels each: it hears no other mix) and 32 volume moves.
+    let member5 = |on: bool| solo("member5", if on { vec![src("mic2")] } else { vec![] });
+    let mut ops: Vec<Cmd> = (0..20).map(|k| member5(k % 2 == 0)).collect();
     ops.extend((1..=32).map(|k| set_mix("member6", Some(-f64::from(k)), None)));
     let out = c.apply(&Cmd::Batch { ops }).unwrap();
     assert_eq!((out.rev, out.rt.len()), (3, MAX_CMDS_PER_BLOCK));
