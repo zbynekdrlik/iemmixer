@@ -482,6 +482,42 @@ async fn a_frozen_or_stale_persons_page_hears_nothing_of_the_engine() {
     assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
 }
 
+/// #58 fifth review: a thaw after a try that changed nothing for the pages
+/// (`AppState::thaw_unchanged`) announces the band only when a person's page
+/// dropped an engine event while frozen, so that page hears the band again
+/// (#9's guarantee) and no other thaw closes the people's sockets. A thaw
+/// after a change (`AppState::thaw`) always announces.
+#[tokio::test]
+async fn a_quiet_thaw_announces_only_after_a_page_missed_an_engine_event() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _peer) = on_fake_engine(dir.path(), "main", Vec::new()).await;
+    let page = s.page("member1").unwrap();
+    let m1 = viewer("member1", false);
+    let engineer = s.page("engineer").unwrap();
+    let eng = viewer("engineer", true);
+    let mut rx = s.lineup_tx.subscribe();
+    s.frozen.store(true, SeqCst);
+    s.thaw_unchanged();
+    assert!(!s.frozen_now());
+    assert!(rx.try_recv().is_err(), "nothing missed");
+    s.frozen.store(true, SeqCst);
+    // The engineer's page hears the engine while frozen: it misses nothing.
+    assert!(!engine_event(&s, 6, &engineer, &eng, EngineEvent::Reset).is_empty());
+    s.thaw_unchanged();
+    assert!(rx.try_recv().is_err(), "the engineer missed nothing");
+    s.frozen.store(true, SeqCst);
+    assert!(engine_event(&s, 5, &page, &m1, EngineEvent::Reset).is_empty());
+    s.thaw_unchanged();
+    assert_eq!(rx.try_recv().unwrap().id, "main", "member1 missed one");
+    s.frozen.store(true, SeqCst);
+    s.thaw_unchanged();
+    assert!(rx.try_recv().is_err(), "told once: the mark is gone");
+    s.frozen.store(true, SeqCst);
+    s.thaw();
+    assert_eq!(rx.try_recv().unwrap().id, "main", "after a change");
+}
+
 /// Commands, engine events and meters against the real engine (NullRt).
 #[cfg(unix)]
 mod live {

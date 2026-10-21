@@ -2348,3 +2348,26 @@ async fn a_reload_that_cannot_record_its_import_alarms_once() {
     assert_eq!(alarms(), 1, "only one");
     barriers.abort();
 }
+
+/// #58 fifth review: a reload that imports nothing changes nothing for the
+/// pages, so its thaw announces nothing and no person's mixer socket closes
+/// (4003): a reload the watcher tries every 2 s would otherwise reconnect
+/// every phone every 2 s.
+#[tokio::test]
+async fn a_reload_that_imports_nothing_closes_no_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "main");
+    std::fs::create_dir_all(d.join(crate::lineup_store::RUNNING_FILE)).unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    let mut rx = state.lineup_tx.subscribe();
+    let task = spawn_apply(&state, &swapped());
+    // The freeze's barrier.
+    fake::answer_ping(&mut peer).await;
+    assert_eq!(
+        within(task).await,
+        Applied::Deferred(vec![NOT_RECORDED.to_string()])
+    );
+    assert!(!state.frozen_now());
+    assert!(rx.try_recv().is_err(), "nothing announced");
+}
