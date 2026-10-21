@@ -123,7 +123,7 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
         return Err(SwitchError::Same);
     }
     // Set already: a switch a restart cut short is not finished yet.
-    if state.frozen.swap(true, Ordering::SeqCst) {
+    if state.frozen_now() {
         return Err(SwitchError::Busy);
     }
     let result = match state.site() {
@@ -131,9 +131,10 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
         None => Err(SwitchError::NotSynced),
     };
     if result.is_ok() {
+        // Still frozen: no page changes before the roster says `to`.
         set_active_in_use(state, &target.id);
+        state.frozen.store(false, Ordering::SeqCst);
     }
-    state.frozen.store(false, Ordering::SeqCst);
     match &result {
         Ok(()) => {
             tracing::warn!(%from, to = %target.id, by = %by.sub, "the band was switched");
@@ -151,8 +152,33 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
     result
 }
 
-/// The switch's steps under the lock, the pages frozen.
+/// The switch under the lock: the pages frozen ([`AppState::freeze`]: no
+/// change on its way is left out of the live state), then its steps. On
+/// success the pages stay frozen for the caller to record `to` first; on a
+/// failure they are free again.
 async fn run(
+    state: &AppState,
+    roster: &Roster,
+    view: &SiteView,
+    from: &str,
+    to: &Lineup,
+) -> Result<(), SwitchError> {
+    if !state.engine.mirror().synced {
+        return Err(SwitchError::NotSynced);
+    }
+    if state.freeze().await.map_err(SwitchError::Engine)? {
+        // Frozen meanwhile by a switch a restart cut short: it is that one's.
+        return Err(SwitchError::Busy);
+    }
+    let done = steps(state, roster, view, from, to).await;
+    if done.is_err() {
+        state.frozen.store(false, Ordering::SeqCst);
+    }
+    done
+}
+
+/// The switch's steps, the pages frozen.
+async fn steps(
     state: &AppState,
     roster: &Roster,
     view: &SiteView,

@@ -615,20 +615,18 @@ pub(crate) async fn handle(
                 tracing::warn!(page = %page.id, "command before the engine's topology: dropped");
                 return;
             };
+            // The mirror's guard is gone before `apply` checks the page.
             let cmds = view::command(&site, &state.engine.mirror(), page, viewer, &msg);
-            // The mirror's guard is gone: `may_change` reads it again.
-            let cmds = cmds.and_then(|cmds| state.may_change(page).map(|()| cmds));
             match cmds {
-                Ok(cmds) => {
-                    if cmds.iter().any(|c| changes_mix(c, &page.mix)) {
-                        state.auto_snapshot(page);
+                Ok(cmds) => match state.apply(page, cmds, Some(session)).await {
+                    Ok(()) => {}
+                    Err(crate::ChangeError::Refused(e)) => {
+                        tracing::warn!(page = %page.id, error = %e, "WS command refused");
                     }
-                    for cmd in cmds {
-                        if let Err(e) = state.engine.request_applied(cmd, Some(session)).await {
-                            tracing::warn!(page = %page.id, error = %e, "WS command failed");
-                        }
+                    Err(crate::ChangeError::Engine(e)) => {
+                        tracing::warn!(page = %page.id, error = %e, "WS command failed");
                     }
-                }
+                },
                 Err(e) => tracing::warn!(page = %page.id, error = %e, "WS command refused"),
             }
         }

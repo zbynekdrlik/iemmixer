@@ -157,6 +157,10 @@ pub struct AppState {
     /// until it is finished): no page's change reaches the engine
     /// ([`AppState::may_change`]).
     pub frozen: Arc<std::sync::atomic::AtomicBool>,
+    /// A page's change is checked and queued under the read side, `frozen`
+    /// is set under the write side ([`AppState::apply`],
+    /// [`AppState::freeze`]). A std lock: never held across an `.await`.
+    change_gate: Arc<std::sync::RwLock<()>>,
     /// Merged meters every 100 ms
     pub meters_tx: broadcast::Sender<Arc<Merged>>,
     /// Latest limiter active seconds per mix (topology order)
@@ -248,6 +252,7 @@ impl AppState {
             lineup_tx,
             switching: Arc::new(tokio::sync::Mutex::new(())),
             frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
+            change_gate: Arc::new(std::sync::RwLock::new(())),
             meters_tx,
             active_s: Arc::new(Mutex::new(Vec::new())),
             sessions: Arc::new(AtomicU64::new(1)),
@@ -458,19 +463,69 @@ impl AppState {
         lock(&self.auto_snapshots).insert(key, today);
     }
 
-    /// Sends commands that change `page`'s mix, after its daily snapshot.
+    /// Sends a page's commands to the engine and waits until the mirror
+    /// holds each: refused while a switch runs or from a page whose band no
+    /// longer plays ([`AppState::may_change`]); when they change the page's
+    /// mix, its daily snapshot is taken first. The check, the snapshot and
+    /// the queueing happen under the read side of the change gate, which a
+    /// switch or a reload holds to freeze ([`AppState::freeze`]): no change
+    /// slips in between its check and the freeze (#58).
     pub async fn apply(
         &self,
         page: &Page,
         cmds: Vec<Cmd>,
         origin: Option<u64>,
-    ) -> Result<(), EngineError> {
-        self.auto_snapshot(page);
-        for cmd in cmds {
-            self.engine.request_applied(cmd, origin).await?;
+    ) -> Result<(), ChangeError> {
+        let sent = {
+            let _gate = self
+                .change_gate
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.may_change(page)?;
+            if cmds.iter().any(|c| mixer_ws::changes_mix(c, &page.mix)) {
+                self.auto_snapshot(page);
+            }
+            cmds.into_iter()
+                .map(|cmd| self.engine.send(cmd, origin))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for s in sent {
+            s.applied().await?;
         }
         Ok(())
     }
+
+    /// Freezes every page's changes for a switch or a reload: `frozen` set
+    /// under the change gate's write side (no page is between its check and
+    /// its queueing), then a `Ping` that comes back only after every change
+    /// queued before it reached the mirror. Returns whether `frozen` was set
+    /// already (a switch a restart cut short); a failed barrier puts it back
+    /// as it was.
+    pub async fn freeze(&self) -> Result<bool, EngineError> {
+        let was = {
+            let _gate = self
+                .change_gate
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.frozen.swap(true, Ordering::SeqCst)
+        };
+        if let Err(e) = self.engine.request_applied(Cmd::Ping, None).await {
+            self.frozen.store(was, Ordering::SeqCst);
+            return Err(e);
+        }
+        Ok(was)
+    }
+}
+
+/// Why a page's commands did not reach the engine ([`AppState::apply`]).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ChangeError {
+    /// [`AppState::may_change`] refused: a switch runs, or the page's band
+    /// no longer plays.
+    #[error(transparent)]
+    Refused(#[from] view::ViewError),
+    #[error(transparent)]
+    Engine(#[from] EngineError),
 }
 
 /// What [`AppState::auto_snapshot`] records a day's snapshot under: the

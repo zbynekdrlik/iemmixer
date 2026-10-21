@@ -218,17 +218,34 @@ async fn batch_control(
     match payload.operation {
         iem_core::BatchOperation::MuteAll => {
             let cmd = crate::view::mute_all(&site, &page);
-            state.apply(&page, vec![cmd], None).await.map_err(|e| {
-                tracing::error!(page = %page.id, error = %e, "Mute All failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ApiError::new("ENGINE_ERROR", e.to_string())),
-                )
-            })?;
+            state
+                .apply(&page, vec![cmd], None)
+                .await
+                .map_err(|e| change_refused(&page, "Mute All", e))?;
             tracing::info!(page = %page.id, "Mute All");
         }
     }
     Ok(StatusCode::OK)
+}
+
+/// The answer to a page change [`AppState::apply`] did not make: 409
+/// `SWITCHING` while a switch runs or from another band's page, 502
+/// `ENGINE_ERROR` when the engine did not take it.
+pub(crate) fn change_refused(
+    page: &crate::site_view::Page,
+    what: &str,
+    e: crate::ChangeError,
+) -> Reject {
+    match e {
+        crate::ChangeError::Refused(v) => switching(v),
+        crate::ChangeError::Engine(e) => {
+            tracing::error!(page = %page.id, error = %e, "{what} failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ApiError::new("ENGINE_ERROR", e.to_string())),
+            )
+        }
+    }
 }
 
 /// Error report sent by the WASM client when a panic occurs.

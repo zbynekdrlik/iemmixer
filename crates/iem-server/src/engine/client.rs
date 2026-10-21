@@ -81,6 +81,42 @@ pub struct EngineClient {
     inner: Arc<Inner>,
 }
 
+/// A request queued with [`EngineClient::send`], its reply still due.
+pub struct Sent {
+    client: EngineClient,
+    id: u64,
+    rx: oneshot::Receiver<Result<u64, ErrorBody>>,
+}
+
+impl Sent {
+    /// Waits for the reply: the revision after the request.
+    pub async fn reply(self) -> Result<u64, EngineError> {
+        match tokio::time::timeout(REQUEST_TIMEOUT, self.rx).await {
+            Ok(Ok(Ok(rev))) => Ok(rev),
+            Ok(Ok(Err(body))) => Err(EngineError::Refused(body)),
+            Ok(Err(_)) => Err(EngineError::Disconnected),
+            Err(_) => {
+                lock(&self.client.inner.pending).remove(&self.id);
+                Err(EngineError::Timeout)
+            }
+        }
+    }
+
+    /// Waits for the reply, then until the mirror holds the request's
+    /// effect.
+    pub async fn applied(self) -> Result<(), EngineError> {
+        let client = self.client.clone();
+        let rev = self.reply().await?;
+        let mut watch = client.inner.rev.subscribe();
+        let reached = tokio::time::timeout(APPLY_TIMEOUT, watch.wait_for(|r| *r >= rev)).await;
+        match reached {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) => Err(EngineError::Disconnected),
+            Err(_) => Err(EngineError::Timeout),
+        }
+    }
+}
+
 /// Why one connection ended.
 #[derive(Debug, PartialEq)]
 enum End {
@@ -165,8 +201,10 @@ impl EngineClient {
         let _ = self.inner.events.send(e);
     }
 
-    /// Sends `cmd` and waits for its reply: the revision after it.
-    pub async fn request(&self, cmd: Cmd, origin: Option<u64>) -> Result<u64, EngineError> {
+    /// Queues `cmd` for the engine now (no await: its place among every
+    /// other request is taken here); its reply is awaited with
+    /// [`Sent::reply`] or [`Sent::applied`].
+    pub fn send(&self, cmd: Cmd, origin: Option<u64>) -> Result<Sent, EngineError> {
         if !self.connected() {
             return Err(EngineError::Disconnected);
         }
@@ -182,27 +220,21 @@ impl EngineClient {
             lock(&self.inner.pending).remove(&id);
             return Err(EngineError::Disconnected);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(Ok(rev))) => Ok(rev),
-            Ok(Ok(Err(body))) => Err(EngineError::Refused(body)),
-            Ok(Err(_)) => Err(EngineError::Disconnected),
-            Err(_) => {
-                lock(&self.inner.pending).remove(&id);
-                Err(EngineError::Timeout)
-            }
-        }
+        Ok(Sent {
+            client: self.clone(),
+            id,
+            rx,
+        })
+    }
+
+    /// Sends `cmd` and waits for its reply: the revision after it.
+    pub async fn request(&self, cmd: Cmd, origin: Option<u64>) -> Result<u64, EngineError> {
+        self.send(cmd, origin)?.reply().await
     }
 
     /// Sends `cmd`, then waits until the mirror holds its effect.
     pub async fn request_applied(&self, cmd: Cmd, origin: Option<u64>) -> Result<(), EngineError> {
-        let rev = self.request(cmd, origin).await?;
-        let mut watch = self.inner.rev.subscribe();
-        let reached = tokio::time::timeout(APPLY_TIMEOUT, watch.wait_for(|r| *r >= rev)).await;
-        match reached {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(_)) => Err(EngineError::Disconnected),
-            Err(_) => Err(EngineError::Timeout),
-        }
+        self.send(cmd, origin)?.applied().await
     }
 
     async fn run(&self) {

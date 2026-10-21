@@ -112,18 +112,10 @@ pub(crate) async fn apply_ramp(
 /// One batch of the ramp, applied (in the mirror) before the next is sent;
 /// none once a band switch began (#58).
 async fn ramp_step(state: &AppState, page: &Page, ops: Vec<Cmd>) -> Result<(), Reject> {
-    state.may_change(page).map_err(crate::routes::switching)?;
     state
-        .engine
-        .request_applied(Cmd::Batch { ops }, None)
+        .apply(page, vec![Cmd::Batch { ops }], None)
         .await
-        .map_err(|e| {
-            tracing::error!(page = %page.id, error = %e, "ramp step failed");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ApiError::new("ENGINE_ERROR", e.to_string())),
-            )
-        })
+        .map_err(|e| crate::routes::change_refused(page, "ramp step", e))
 }
 
 async fn list_presets(

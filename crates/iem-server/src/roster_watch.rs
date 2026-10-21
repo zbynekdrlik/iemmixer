@@ -517,7 +517,15 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
             // No page's change lands between this state and the import;
             // the flag is put back as it was (a switch a restart cut short
             // keeps it).
-            let was = state.frozen.swap(true, Ordering::SeqCst);
+            let was = match state.freeze().await {
+                Ok(was) => was,
+                Err(e) => {
+                    undo(&store, &written);
+                    return Applied::Deferred(vec![format!(
+                        "the engine did not take lineup {active}'s new mixes: {e}"
+                    )]);
+                }
+            };
             let imported = state.engine.request_applied(import, None).await;
             state.frozen.store(was, Ordering::SeqCst);
             if let Err(e) = imported {
