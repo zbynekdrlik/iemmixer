@@ -278,6 +278,36 @@ async fn forward(
         .map_err(|e| io("the band that plays was not recorded", e))
 }
 
+/// Imports `lineup`'s state (`stored` completed with the running values
+/// and under the lineup's rules, as [`target_state`]) and records it as the
+/// band that plays, on disk and in use.
+async fn play(
+    state: &AppState,
+    store: &LineupStore,
+    roster: &Roster,
+    lineup: &Lineup,
+    stored: Option<MixState>,
+) -> Result<(), String> {
+    let current = {
+        let mirror = state.engine.mirror();
+        if !mirror.synced {
+            return Err("the engine state is not synced".into());
+        }
+        mirror.state.clone()
+    };
+    let target = target_state(stored, &current, roster, lineup);
+    state
+        .engine
+        .request_applied(import(target), None)
+        .await
+        .map_err(|e| e.to_string())?;
+    store
+        .set_active(&lineup.id, chrono::Utc::now().timestamp())
+        .map_err(|e| e.to_string())?;
+    set_active_in_use(state, &lineup.id);
+    Ok(())
+}
+
 /// Finishes a switch a restart cut short (§7 step 5), once the mirror has
 /// synced: with the intent's target recorded active it only clears the
 /// intent; otherwise it imports the target's state and records it (a
@@ -292,57 +322,105 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
         return Ok(());
     };
     let active = store.active().map_err(|e| e.to_string())?;
-    if active.as_deref() != Some(intent.to.as_str()) {
+    let played = active.as_deref() != Some(intent.to.as_str());
+    if played {
         let lineup = roster
             .roster
             .lineup(&intent.to)
             .unwrap_or_else(|| roster.lineup())
             .clone();
-        let current = {
-            let mirror = state.engine.mirror();
-            if !mirror.synced {
-                return Err("the engine state is not synced".into());
-            }
-            mirror.state.clone()
-        };
         let stored = store
             .state(&lineup.id)
             .map_err(|e| e.to_string())?
             .map(|b| b.state);
-        let target = target_state(stored, &current, &roster.roster, &lineup);
-        state
-            .engine
-            .request_applied(import(target), None)
-            .await
-            .map_err(|e| e.to_string())?;
-        store
-            .set_active(&lineup.id, chrono::Utc::now().timestamp())
-            .map_err(|e| e.to_string())?;
-        set_active_in_use(state, &lineup.id);
+        play(state, &store, &roster.roster, &lineup, stored).await?;
         tracing::warn!(lineup = %lineup.id, "a switch a restart cut short is finished");
-        state.announce_lineup();
     }
     store.clear_intent().map_err(|e| e.to_string())?;
     state.frozen.store(false, Ordering::SeqCst);
+    if played {
+        state.announce_lineup();
+    }
     Ok(())
 }
 
-/// At the start: when a switch was cut short (`frozen` set), waits for the
-/// engine's state and finishes it ([`replay_intent`]), trying again every
-/// [`REPLAY_RETRY`] until it succeeds.
+/// Gives up a switch a restart cut short: the band it came from plays again
+/// from its stored state (the running one where that cannot be read),
+/// recorded, the intent cleared, the pages free.
+pub async fn fall_back(state: &AppState) -> Result<(), String> {
+    let _running = state.switching.lock().await;
+    let store = LineupStore::new(&state.config_dir);
+    let (Some(intent), Some(roster)) = (store.intent().map_err(|e| e.to_string())?, state.roster())
+    else {
+        state.frozen.store(false, Ordering::SeqCst);
+        return Ok(());
+    };
+    let lineup = roster
+        .roster
+        .lineup(&intent.from)
+        .unwrap_or_else(|| roster.lineup())
+        .clone();
+    let stored = match store.state(&lineup.id) {
+        Ok(stored) => stored.map(|b| b.state),
+        Err(e) => {
+            tracing::error!(lineup = %lineup.id, error = %e, "the band's stored state is unreadable: the running state goes on");
+            None
+        }
+    };
+    play(state, &store, &roster.roster, &lineup, stored).await?;
+    store.clear_intent().map_err(|e| e.to_string())?;
+    state.frozen.store(false, Ordering::SeqCst);
+    tracing::warn!(lineup = %lineup.id, "a switch a restart cut short was given up: the band before it plays");
+    state.announce_lineup();
+    Ok(())
+}
+
+/// Tries [`replay_when_synced`] makes before it gives a switch up.
+pub const MAX_REPLAYS: u32 = 3;
+
+/// At the start, and after a switch the engine dropped in: when a switch
+/// was cut short (`frozen` set), waits for the engine's state and finishes
+/// it ([`replay_intent`]), trying again every [`REPLAY_RETRY`]. After
+/// [`MAX_REPLAYS`] failed tries the engineer's devices hear of it (once)
+/// and the band before the switch plays again ([`fall_back`], tried until
+/// it succeeds).
 pub async fn replay_when_synced(state: AppState) {
     if !state.frozen_now() {
         return;
     }
+    let mut failures = 0;
     loop {
         let synced = state.engine.mirror().synced;
         if synced {
-            match replay_intent(&state).await {
+            let done = if failures < MAX_REPLAYS {
+                replay_intent(&state).await
+            } else {
+                fall_back(&state).await
+            };
+            match done {
                 Ok(()) => return,
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "a switch a restart cut short is not finished: trying again"
-                ),
+                Err(e) => {
+                    failures += 1;
+                    tracing::error!(
+                        error = %e,
+                        failures,
+                        "a switch a restart cut short is not finished: trying again"
+                    );
+                    if failures == MAX_REPLAYS {
+                        let devices = crate::notify::push_alarm(
+                            &state,
+                            "Kapela neprepnutá",
+                            "Prepnutie kapely, ktoré prerušil reštart servera, sa nedá dokončiť: \
+                             hrá znova kapela pred ním.",
+                        )
+                        .await;
+                        tracing::warn!(
+                            devices,
+                            "the engineer's devices heard the switch is given up"
+                        );
+                        continue;
+                    }
+                }
             }
         }
         tokio::time::sleep(REPLAY_RETRY).await;
