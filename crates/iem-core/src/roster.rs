@@ -8,13 +8,14 @@
 //!
 //! Validation lists every problem together, in ids only (never a name): on
 //! its own ([`Roster::problems`]) and against the engine's topology
-//! ([`Roster::problems_against`]). Parse errors carry a line and the message
-//! with its quoted values dropped, so no status file or log line holds a
-//! person's name.
+//! ([`Roster::problems_against`]). A value that is no valid id (a name typed
+//! into an id field) is named by its field and position, never echoed; parse
+//! errors carry a line and the message with its quoted spans dropped. So no
+//! status file or log line holds a person's name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use iem_engine_proto::TopologyInfo;
+use iem_engine_proto::{TopologyInfo, valid_id};
 use serde::Deserialize;
 
 use crate::config::validate_member_id;
@@ -115,22 +116,37 @@ pub fn valid_lineup_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
 }
 
-/// A parse error as a line number and the message with every quoted value
-/// dropped: serde quotes the offending value (a name, say) and toml's own
-/// rendering shows the line, and neither may reach a status file or a log.
-fn parse_error(text: &str, e: &toml::de::Error) -> String {
-    let mut message = String::new();
-    let mut quoted = false;
-    for c in e.message().chars() {
-        if c == '"' {
-            if !quoted {
-                message.push_str("\"\u{2026}\"");
+/// `message` with every quoted span, `"…"` or `` `…` ``, cut to its quote
+/// marks around an ellipsis; inside a span a backslash escapes the next
+/// character, and an unclosed span runs to the end. serde quotes the
+/// offending value and toml backticks a key, and either may be a name.
+fn redact(message: &str) -> String {
+    let mut out = String::new();
+    let mut open: Option<char> = None;
+    let mut escaped = false;
+    for c in message.chars() {
+        match open {
+            None if c == '"' || c == '`' => {
+                out.push(c);
+                out.push('\u{2026}');
+                out.push(c);
+                open = Some(c);
             }
-            quoted = !quoted;
-        } else if !quoted {
-            message.push(c);
+            None => out.push(c),
+            Some(_) if escaped => escaped = false,
+            Some(_) if c == '\\' => escaped = true,
+            Some(q) if c == q => open = None,
+            Some(_) => {}
         }
     }
+    out
+}
+
+/// A parse error as a line number and the message with every quoted span
+/// dropped ([`redact`]): toml's own rendering shows the line, and neither
+/// it nor a quoted value may reach a status file or a log.
+fn parse_error(text: &str, e: &toml::de::Error) -> String {
+    let message = redact(e.message());
     match e.span() {
         Some(span) => {
             let end = span.start.min(text.len());
@@ -149,6 +165,36 @@ fn parse_error(text: &str, e: &toml::de::Error) -> String {
 /// `takes_over` id must be.
 fn lower_member_id(id: &str) -> bool {
     validate_member_id(id).is_ok() && !id.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// How a problem names a value: `'<value>'` when it is a valid id, else
+/// `#<n>`, its 1-based position. A name typed into an id field never
+/// reaches a status file or a log.
+fn quoted(value: &str, valid: bool, n: usize) -> String {
+    if valid {
+        format!("'{value}'")
+    } else {
+        format!("#{n}")
+    }
+}
+
+/// [`quoted`] without the quotes (the leader check's sentence).
+fn unquoted(value: &str, valid: bool, n: usize) -> String {
+    if valid {
+        value.to_string()
+    } else {
+        format!("#{n}")
+    }
+}
+
+/// A set's wearer or an input's owner as a problem names it: `'<id>'`, or
+/// `fallback` when it is no person id.
+fn someone(id: &str, fallback: &str) -> String {
+    if lower_member_id(id) {
+        format!("'{id}'")
+    } else {
+        fallback.to_string()
+    }
 }
 
 impl Lineup {
@@ -183,98 +229,90 @@ impl Roster {
         toml::from_str(text).map_err(|e| RosterError::Parse(parse_error(text, &e)))
     }
 
-    /// Every problem of the roster on its own, in ids only.
+    /// Every problem of the roster on its own, in ids and positions only.
+    /// A `takes_over` that names a person is the migration's to refuse
+    /// (`takes_over` is read only then), never a problem of the roster.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut ids = HashSet::new();
-        for p in &self.people {
-            if let Err(e) = validate_member_id(&p.id) {
-                out.push(format!("person: {e}"));
-            } else if !lower_member_id(&p.id) {
-                out.push(format!("person id '{}' must be lower case", p.id));
-            }
-            if p.id == ENGINEER {
+        let person = |i: usize, p: &Person| {
+            format!("person {}", quoted(&p.id, lower_member_id(&p.id), i + 1))
+        };
+        for (i, p) in self.people.iter().enumerate() {
+            let who = person(i, p);
+            if !lower_member_id(&p.id) {
                 out.push(format!(
-                    "person id '{ENGINEER}' is the engineer's, never a person"
+                    "{who}: the id must be lower-case a-z 0-9 _ -, at least one"
                 ));
             }
+            if p.id == ENGINEER {
+                out.push(format!("{who} is the engineer's id, never a person's"));
+            }
             if !ids.insert(p.id.as_str()) {
-                out.push(format!("person '{}' is listed twice", p.id));
+                out.push(format!("{who} is listed twice"));
             }
             if p.name.trim().is_empty() {
-                out.push(format!("person '{}' has no name", p.id));
+                out.push(format!("{who} has no name"));
             }
         }
-        let mut taken: HashMap<&str, &str> = HashMap::new();
-        for p in &self.people {
+        let mut taken: HashMap<&str, String> = HashMap::new();
+        for (i, p) in self.people.iter().enumerate() {
             let Some(t) = p.takes_over.as_deref() else {
                 continue;
             };
+            let who = person(i, p);
             if !lower_member_id(t) || t == p.id || t == ENGINEER {
                 out.push(format!(
-                    "person '{}': takes_over '{t}' must be another member's lower-case id",
-                    p.id
+                    "{who}: takes_over must be another member's lower-case id"
                 ));
-            } else if ids.contains(t) {
+            } else if let Some(first) = taken.insert(t, who.clone()) {
                 out.push(format!(
-                    "person '{}': takes_over '{t}' is a person, whose files are their own",
-                    p.id
-                ));
-            }
-            if let Some(first) = taken.insert(t, p.id.as_str()) {
-                out.push(format!(
-                    "takes_over '{t}' is claimed by both '{first}' and '{}'",
-                    p.id
+                    "takes_over '{t}' is claimed by both {first} and {who}"
                 ));
             }
         }
         let mut lineup_ids = HashSet::new();
-        for l in &self.lineups {
+        for (i, l) in self.lineups.iter().enumerate() {
+            let lineup = format!("lineup {}", quoted(&l.id, valid_lineup_id(&l.id), i + 1));
             if !valid_lineup_id(&l.id) {
                 out.push(format!(
-                    "lineup id '{}' must be 1 to {MAX_LINEUP_ID} of a-z 0-9 _ -",
-                    l.id
+                    "{lineup}: the id must be 1 to {MAX_LINEUP_ID} of a-z 0-9 _ -"
                 ));
             }
             if !lineup_ids.insert(l.id.as_str()) {
-                out.push(format!("lineup '{}' is listed twice", l.id));
+                out.push(format!("{lineup} is listed twice"));
             }
             if l.name.trim().is_empty() {
-                out.push(format!("lineup '{}' has no name", l.id));
+                out.push(format!("{lineup} has no name"));
             }
             let mut placed = HashSet::new();
-            for (set, person) in &l.sets {
-                if !ids.contains(person.as_str()) {
-                    out.push(format!(
-                        "lineup '{}': set '{set}': '{person}' is not a person",
-                        l.id
-                    ));
+            for (j, (set, p)) in l.sets.iter().enumerate() {
+                let set = format!("set {}", quoted(set, valid_id(set), j + 1));
+                let wearer = someone(p, "its wearer");
+                if !ids.contains(p.as_str()) {
+                    out.push(format!("{lineup}: {set}: {wearer} is not a person"));
                 }
-                if !placed.insert(person.as_str()) {
-                    out.push(format!(
-                        "lineup '{}': person '{person}' wears two sets",
-                        l.id
-                    ));
+                if !placed.insert(p.as_str()) {
+                    out.push(format!("{lineup}: {set}: {wearer} wears another set too"));
                 }
             }
-            for leader in &l.leaders {
+            for (k, leader) in l.leaders.iter().enumerate() {
                 if !placed.contains(leader.as_str()) {
-                    out.push(format!(
-                        "lineup '{}': leader '{leader}' wears no set of it",
-                        l.id
-                    ));
+                    let who = quoted(leader, lower_member_id(leader), k + 1);
+                    out.push(format!("{lineup}: leader {who} wears no set of it"));
                 }
             }
-            for (input, i) in &l.inputs {
+            for (k, (input, i)) in l.inputs.iter().enumerate() {
+                let input = format!("input {}", quoted(input, valid_id(input), k + 1));
                 if i.name.trim().is_empty() {
-                    out.push(format!("lineup '{}': input '{input}' has no name", l.id));
+                    out.push(format!("{lineup}: {input} has no name"));
                 }
                 if let Some(o) = &i.owner
                     && !placed.contains(o.as_str())
                 {
+                    let owner = someone(o, "its owner");
                     out.push(format!(
-                        "lineup '{}': input '{input}': owner '{o}' wears no set of it",
-                        l.id
+                        "{lineup}: {input}: owner {owner} wears no set of it"
                     ));
                 }
             }
@@ -289,37 +327,48 @@ impl Roster {
     /// Every problem of the roster against the site's topology: a set is a
     /// stereo mix other than the engineer's, an input is the site's, and
     /// each leader's set hears every other set of their lineup (whole or as
-    /// a peer).
+    /// a peer). Values that are no valid id are named by position.
     pub fn problems_against(&self, facts: &TopologyFacts) -> Vec<String> {
         let mut out = Vec::new();
         let mix = |id: &str| facts.mixes.iter().find(|m| m.id == id);
-        for l in &self.lineups {
-            for set in l.sets.keys() {
+        for (i, l) in self.lineups.iter().enumerate() {
+            let valid = valid_lineup_id(&l.id);
+            let lineup = format!("lineup {}", quoted(&l.id, valid, i + 1));
+            for (j, set) in l.sets.keys().enumerate() {
                 if !mix(set.as_str()).is_some_and(|m| m.stereo && m.id != facts.engineer) {
                     out.push(format!(
-                        "lineup '{}': set '{set}' is not a stereo mix of the site other than the engineer's",
-                        l.id
+                        "{lineup}: set {} is not a stereo mix of the site other than the engineer's",
+                        quoted(set, valid_id(set), j + 1)
                     ));
                 }
             }
-            for input in l.inputs.keys() {
+            for (k, input) in l.inputs.keys().enumerate() {
                 if !facts.inputs.contains(input) {
                     out.push(format!(
-                        "lineup '{}': input '{input}' is not an input of the site",
-                        l.id
+                        "{lineup}: input {} is not an input of the site",
+                        quoted(input, valid_id(input), k + 1)
                     ));
                 }
             }
-            for leader in &l.leaders {
+            let line = if valid {
+                l.id.clone()
+            } else {
+                format!("lineup #{}", i + 1)
+            };
+            let sets: Vec<&String> = l.sets.keys().collect();
+            for (k, leader) in l.leaders.iter().enumerate() {
                 let Some(set) = l.set_of(leader) else {
                     continue; // problems() names a leader without a set
                 };
+                let who = unquoted(leader, lower_member_id(leader), k + 1);
+                let n = sets.iter().position(|s| s.as_str() == set).unwrap_or(0) + 1;
+                let own = unquoted(set, valid_id(set), n);
                 let hears = mix(set).map(|m| m.hears.as_slice()).unwrap_or_default();
-                for other in l.sets.keys().filter(|s| s.as_str() != set) {
-                    if !hears.contains(other) {
+                for (j, other) in sets.iter().enumerate() {
+                    if other.as_str() != set && !hears.contains(other) {
                         out.push(format!(
-                            "leader {leader} in {}: set {set} does not hear {other}; the site needs peers (F30)",
-                            l.id
+                            "leader {who} in {line}: set {own} does not hear {}; the site needs peers (F30)",
+                            unquoted(other, valid_id(other), j + 1)
                         ));
                     }
                 }

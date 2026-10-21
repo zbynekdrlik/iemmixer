@@ -171,16 +171,17 @@ type Edit = fn(&mut Roster);
 fn problems_name_every_offender() {
     let base = roster();
     assert_eq!(base.problems(), Vec::<String>::new());
-    let cases: [(&str, Edit); 22] = [
+    let cases: [(&str, Edit); 23] = [
         (
-            "person: member_id '../x' contains invalid characters",
+            "person #2: the id must be lower-case a-z 0-9 _ -, at least one",
             |r| r.people[1].id = "../x".into(),
         ),
-        ("person id 'Member2' must be lower case", |r| {
-            r.people[1].id = "Member2".into()
-        }),
         (
-            "person id 'engineer' is the engineer's, never a person",
+            "person #2: the id must be lower-case a-z 0-9 _ -, at least one",
+            |r| r.people[1].id = "Member2".into(),
+        ),
+        (
+            "person 'engineer' is the engineer's id, never a person's",
             |r| r.people.push(person("engineer")),
         ),
         ("person 'member2' is listed twice", |r| {
@@ -190,36 +191,32 @@ fn problems_name_every_offender() {
             r.people[1].name = " ".into()
         }),
         (
-            "person 'member10': takes_over 'member10' must be another member's lower-case id",
+            "person 'member10': takes_over must be another member's lower-case id",
             |r| r.people[9].takes_over = Some("member10".into()),
         ),
         (
-            "person 'member10': takes_over 'Old1' must be another member's lower-case id",
+            "person 'member10': takes_over must be another member's lower-case id",
             |r| r.people[9].takes_over = Some("Old1".into()),
         ),
         (
-            "person 'member10': takes_over '../x' must be another member's lower-case id",
+            "person 'member10': takes_over must be another member's lower-case id",
             |r| r.people[9].takes_over = Some("../x".into()),
         ),
         (
-            "person 'member10': takes_over 'engineer' must be another member's lower-case id",
+            "person 'member10': takes_over must be another member's lower-case id",
             |r| r.people[9].takes_over = Some("engineer".into()),
         ),
         (
-            "person 'member10': takes_over 'member2' is a person, whose files are their own",
-            |r| r.people[9].takes_over = Some("member2".into()),
-        ),
-        (
-            "takes_over 'old1' is claimed by both 'member10' and 'member11'",
+            "takes_over 'old1' is claimed by both person 'member10' and person 'member11'",
             |r| {
                 r.people[9].takes_over = Some("old1".into());
                 r.people[10].takes_over = Some("old1".into());
             },
         ),
-        ("lineup id 'Youth' must be 1 to 32 of a-z 0-9 _ -", |r| {
+        ("lineup #2: the id must be 1 to 32 of a-z 0-9 _ -", |r| {
             r.lineups[1].id = "Youth".into()
         }),
-        ("lineup id '' must be 1 to 32 of a-z 0-9 _ -", |r| {
+        ("lineup #2: the id must be 1 to 32 of a-z 0-9 _ -", |r| {
             r.lineups[1].id = String::new()
         }),
         ("lineup 'main' is listed twice", |r| {
@@ -236,9 +233,12 @@ fn problems_name_every_offender() {
                 r.lineups[1].sets.insert("member2".into(), "ghost".into());
             },
         ),
-        ("lineup 'youth': person 'member3' wears two sets", |r| {
-            r.lineups[1].sets.insert("member2".into(), "member3".into());
-        }),
+        (
+            "lineup 'youth': set 'member3': 'member3' wears another set too",
+            |r| {
+                r.lineups[1].sets.insert("member2".into(), "member3".into());
+            },
+        ),
         ("lineup 'youth': leader 'member1' wears no set of it", |r| {
             r.lineups[1].leaders.push("member1".into())
         }),
@@ -261,6 +261,15 @@ fn problems_name_every_offender() {
         ("exactly one lineup must be main, not 0", |r| {
             r.lineups[0].main = false
         }),
+        // A person's id named by position, a lineup's too.
+        ("person #1 has no name", |r| {
+            r.people[0].id = "Member1".into();
+            r.people[0].name = String::new();
+        }),
+        ("lineup #2 has no name", |r| {
+            r.lineups[1].id = "Youth".into();
+            r.lineups[1].name = String::new();
+        }),
     ];
     for (want, edit) in cases {
         let mut r = base.clone();
@@ -268,10 +277,12 @@ fn problems_name_every_offender() {
         let p = r.problems();
         assert!(p.iter().any(|x| x.contains(want)), "{want}: {p:?}");
     }
-    // A person who takes over a former member's files, and a lineup input
-    // without an owner, are fine.
+    // A person who takes over a former member's files (or, the migration
+    // long done, a person's: `takes_over` is read only by the migration),
+    // and a lineup input without an owner, are fine.
     let mut r = base.clone();
     r.people[9].takes_over = Some("old1".into());
+    r.people[10].takes_over = Some("member2".into());
     r.lineups[1].inputs.insert(
         "keys".into(),
         LineupInput {
@@ -410,4 +421,104 @@ fn a_parse_error_names_the_line_never_the_value() {
         panic!("a syntax error");
     };
     assert!(e.starts_with("line 3: "), "{e}");
+}
+
+#[test]
+fn quoted_spans_are_cut_to_their_quotes() {
+    let dots = "\u{2026}";
+    assert_eq!(redact("no quotes"), "no quotes");
+    assert_eq!(
+        redact("invalid type: string \"x\\\"zyxname\", expected a boolean"),
+        format!("invalid type: string \"{dots}\", expected a boolean")
+    );
+    assert_eq!(
+        redact("unknown field `zyxname`, expected `id` or `name`"),
+        format!("unknown field `{dots}`, expected `{dots}` or `{dots}`")
+    );
+    // A backslash escapes the next character, a doubled one too; an
+    // unclosed span runs to the end.
+    assert_eq!(
+        redact("a \"b\\\\\" c `d\\`e` f"),
+        format!("a \"{dots}\" c `{dots}` f")
+    );
+    assert_eq!(redact("a \"b"), format!("a \"{dots}\""));
+    assert_eq!(redact("`\"x` \"`y\""), format!("`{dots}` \"{dots}\""));
+}
+
+/// P6: a name typed into a key or a value never comes back in the error.
+#[test]
+fn a_parse_error_drops_a_quoted_key_and_an_escaped_value() {
+    for (from, to) in [
+        // A quoted key in a table that refuses unknown keys.
+        (
+            "name = \"Member 1\"\n",
+            "name = \"Member 1\"\n\"zyxname\" = 1\n",
+        ),
+        // A value holding an escaped quote.
+        ("main = true\n", "main = \"x\\\"zyxname\"\n"),
+    ] {
+        assert_eq!(ROSTER.matches(from).count(), 1, "{from}");
+        let text = ROSTER.replacen(from, to, 1);
+        let Err(RosterError::Parse(e)) = Roster::parse(&text) else {
+            panic!("{to}: refused");
+        };
+        assert!(!e.to_lowercase().contains("zyxname"), "{e}");
+        assert!(e.starts_with("line "), "{e}");
+    }
+}
+
+/// P6: a value that is no valid id (a name typed into an id field) is named
+/// by its field and position, in problems() and problems_against() alike.
+#[test]
+fn problems_never_echo_a_value_that_is_no_id() {
+    // Three typed names: a person's id, a wearer/key/lineup id placed in a
+    // set, and a leader/owner placed nowhere.
+    let (id, typed, nowhere) = ("Wvqz Yx", "Zyxq Wvn", "Qzyx Lw");
+    let mut r = roster();
+    r.people[1].id = id.into();
+    r.people[9].takes_over = Some(typed.into());
+    r.lineups[1].id = typed.into();
+    r.lineups[1].sets.insert("member4".into(), typed.into());
+    r.lineups[1].leaders.push(typed.into());
+    let main = &mut r.lineups[0];
+    main.sets.insert(typed.into(), "member1".into());
+    main.sets.insert("member9".into(), typed.into());
+    main.leaders.push(nowhere.into());
+    main.inputs.insert(
+        typed.into(),
+        LineupInput {
+            name: String::new(),
+            owner: Some(nowhere.into()),
+        },
+    );
+    let p = r.problems();
+    let against = r.problems_against(&facts());
+    for x in p.iter().chain(&against) {
+        let x = x.to_lowercase();
+        for name in ["wvqz", "zyxq", "qzyx"] {
+            assert!(!x.contains(name), "{x}");
+        }
+    }
+    let has = |list: &[String], s: &str| list.iter().any(|x| x == s);
+    for want in [
+        "person #2: the id must be lower-case a-z 0-9 _ -, at least one",
+        "person 'member10': takes_over must be another member's lower-case id",
+        "lineup #2: the id must be 1 to 32 of a-z 0-9 _ -",
+        "lineup 'main': set 'member1': 'member1' wears another set too",
+        "lineup 'main': set 'member9': its wearer is not a person",
+        "lineup 'main': leader #3 wears no set of it",
+        "lineup 'main': input #1 has no name",
+        "lineup 'main': input #1: owner its owner wears no set of it",
+        "lineup #2: set 'member4': its wearer is not a person",
+    ] {
+        assert!(has(&p, want), "{want}: {p:?}");
+    }
+    for want in [
+        "lineup 'main': set #1 is not a stereo mix of the site other than the engineer's",
+        "lineup 'main': input #1 is not an input of the site",
+        "leader member1 in main: set member1 does not hear #1; the site needs peers (F30)",
+        "leader #2 in lineup #2: set member4 does not hear member1; the site needs peers (F30)",
+    ] {
+        assert!(has(&against, want), "{want}: {against:?}");
+    }
 }
