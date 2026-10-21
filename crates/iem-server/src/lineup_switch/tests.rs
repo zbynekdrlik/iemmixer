@@ -529,9 +529,13 @@ async fn a_restart_mid_switch_replays_the_intent() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = cut_short(dir.path(), "main", "gone");
     let mut peer = synced(&mut state, running()).await;
-    let replay = tokio::spawn(async move { replay_intent(&state).await.map(|()| state) });
+    let replay = tokio::spawn(async move {
+        let done = replay_intent(&state).await;
+        (done, state)
+    });
     assert_eq!(fake::imports(&mut peer, 2).await, running());
-    let state = within(replay).await.unwrap();
+    let (done, state) = within(replay).await;
+    assert_eq!(done, Ok(()));
     assert_eq!(state.roster().unwrap().active, "main");
     assert_eq!(LineupStore::new(dir.path()).intent().unwrap(), None);
 }
