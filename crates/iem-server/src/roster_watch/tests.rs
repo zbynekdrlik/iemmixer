@@ -865,7 +865,9 @@ async fn a_reload_the_engine_does_not_answer_waits() {
         tokio::spawn(async move { check_file(&s).await })
     };
     fake::next_import(&mut peer).await;
-    // No answer: the request times out.
+    // No answer: the request times out; the engine answers again, its
+    // state as it was: the import did not go in.
+    fake::answer_ping(&mut peer).await;
     let result = within(task).await;
     assert!(
         matches!(&result, Some(Applied::Deferred(p)) if p.len() == 1
