@@ -1,8 +1,10 @@
 //! Loading, checking and reloading the roster (#58 design §9): the private
-//! `roster.toml` beside the site file. Without it the server runs in legacy
-//! mode. At the start a roster must parse and have no problems, or the
-//! server does not start; the legacy layout is migrated first (or a
-//! committed migration finished, at every start). While the server runs,
+//! `roster.toml` beside the site file. Without it (and without a roster
+//! applied before) the server runs in legacy mode. At the start a roster
+//! must parse, have no problems and fit the site's topology; one that does
+//! not refuses the start, unless the roster applied last can stand in
+//! ([`load`], [`fallback_alarm`]); the legacy layout is migrated first (or
+//! a committed migration finished, at every start). While the server runs,
 //! [`watch`] polls the file: a change that parses, has no problems, fits the
 //! engine's topology and keeps the active lineup is applied without a
 //! restart (a running legacy server adopts its first roster the same way);
@@ -334,6 +336,15 @@ fn adopt(
     Ok((state, people))
 }
 
+/// The roster a start runs on ([`load`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Loaded {
+    pub roster: RosterState,
+    /// `roster.toml` could not be used (or there was none): this is the
+    /// roster applied last (`AppState::fallback`).
+    pub fallback: bool,
+}
+
 /// The problem of a start without `roster.toml` beside a recorded roster.
 const NOT_FOUND: &str = "roster file: not found";
 /// The last problem of a start that fell back to the recorded roster.
@@ -362,14 +373,14 @@ fn take(
 /// the roster's; the people archive follows it. A `roster.toml` that cannot
 /// be used, or none, beside a recorded roster (`LineupStore::applied_roster`,
 /// the one the states follow) starts with that one (#58 review: a server
-/// that does not start is the worst outcome). The status file says what
-/// happened; an error refuses the start.
+/// that does not start is the worst outcome; [`Loaded::fallback`]). The
+/// status file says what happened; an error refuses the start.
 pub fn load(
     config_dir: &Path,
     cfg: &Config,
     pins: &mut PinStore,
     facts: Option<&TopologyFacts>,
-) -> Result<Option<RosterState>, String> {
+) -> Result<Option<Loaded>, String> {
     let file = read_roster(config_dir)?;
     let (sha256, problems) = match &file {
         Some(bytes) => {
@@ -392,7 +403,10 @@ pub fn load(
                             people.problems,
                         ),
                     );
-                    return Ok(Some(state));
+                    return Ok(Some(Loaded {
+                        roster: state,
+                        fallback: false,
+                    }));
                 }
                 Err(problems) => (sha256, problems),
             }
@@ -418,7 +432,10 @@ pub fn load(
                 let mut why = problems;
                 why.push(FALLBACK.to_string());
                 note(config_dir, &Status::refused(&sha256, why));
-                return Ok(Some(state));
+                return Ok(Some(Loaded {
+                    roster: state,
+                    fallback: true,
+                }));
             }
             Err(more) => tracing::error!(
                 problems = more.len(),
@@ -1132,6 +1149,28 @@ fn waits(not: &Applied) -> bool {
     matches!(not, Applied::Deferred(_))
 }
 
+/// After a start on the roster applied last (`AppState::fallback`), the
+/// engineer's devices hear of it once (#58 re-review): the reason is in
+/// `roster.status.json`. How many devices took it (none without a
+/// fallback).
+pub async fn fallback_alarm(state: &AppState) -> usize {
+    if !state.fallback.load(Ordering::SeqCst) {
+        return 0;
+    }
+    let devices = crate::notify::push_alarm(
+        state,
+        "Zostava zo zálohy",
+        "Server sa spustil so zostavou použitou naposledy: roster.toml sa nedá použiť \
+         (dôvod je v roster.status.json).",
+    )
+    .await;
+    tracing::warn!(
+        devices,
+        "the engineer's devices heard of the start on the roster applied last"
+    );
+    devices
+}
+
 /// Reads `roster.toml` once and applies it ([`apply_text`]), writing the
 /// status file unless nothing changed. `None` when the file cannot be read
 /// (gone: the roster in use stays until a restart).
@@ -1140,7 +1179,7 @@ pub async fn check_file(state: &AppState) -> Option<Applied> {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
             tracing::warn!(
-                "roster.toml is gone: the roster in use stays until the server restarts"
+                "roster.toml is gone: the roster in use stays (a restart starts with the roster applied last)"
             );
             return None;
         }
@@ -1154,25 +1193,40 @@ pub async fn check_file(state: &AppState) -> Option<Applied> {
         Ok(text) => apply_text(state, text, &sha256).await,
         Err(_) => Applied::Refused(vec![NOT_UTF8.to_string()]),
     };
+    // After a start on the roster applied last, the status says so until a
+    // roster file is in use again.
+    let fallback = state.fallback.load(Ordering::SeqCst);
     match &applied {
+        Applied::Unchanged if fallback => {
+            // roster.toml is the roster in use again.
+            state.fallback.store(false, Ordering::SeqCst);
+            note(
+                &state.config_dir,
+                &Status::applied(&sha256, Vec::new(), Vec::new(), Vec::new()),
+            );
+        }
         Applied::Unchanged => {}
         Applied::Applied {
             added,
             removed,
             problems,
-        } => note(
-            &state.config_dir,
-            &Status::applied(&sha256, added.clone(), removed.clone(), problems.clone()),
-        ),
+        } => {
+            state.fallback.store(false, Ordering::SeqCst);
+            note(
+                &state.config_dir,
+                &Status::applied(&sha256, added.clone(), removed.clone(), problems.clone()),
+            );
+        }
         Applied::Refused(problems) => {
             tracing::warn!(
                 problems = problems.len(),
                 "a roster was refused: the one in use stays"
             );
-            note(
-                &state.config_dir,
-                &Status::refused(&sha256, problems.clone()),
-            );
+            let mut why = problems.clone();
+            if fallback {
+                why.push(FALLBACK.to_string());
+            }
+            note(&state.config_dir, &Status::refused(&sha256, why));
         }
         Applied::Deferred(why) => {
             tracing::info!(

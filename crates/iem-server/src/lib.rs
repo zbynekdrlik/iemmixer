@@ -160,6 +160,10 @@ pub struct AppState {
     /// How long the replay of a switch and the settle of a roster wait
     /// between two tries (`lineup_switch::REPLAY_RETRY`; tests shorten it).
     pub retry: std::time::Duration,
+    /// The server started on the roster applied last because `roster.toml`
+    /// could not be used (`roster_watch::Loaded::fallback`), until a roster
+    /// file is in use again: the status says so.
+    pub fallback: Arc<std::sync::atomic::AtomicBool>,
     /// A page's change is checked and queued under the read side, `frozen`
     /// is set under the write side ([`AppState::apply`],
     /// [`AppState::freeze`]). A std lock: never held across an `.await`.
@@ -233,8 +237,10 @@ impl AppState {
                     None
                 }
             });
-        let roster = roster_watch::load(config_dir, &config, &mut pin_store, facts.as_ref())
+        let loaded = roster_watch::load(config_dir, &config, &mut pin_store, facts.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let fallback = loaded.as_ref().is_some_and(|l| l.fallback);
+        let roster = loaded.map(|l| l.roster);
         // A switch a restart cut short: no change until it is finished
         // (`lineup_switch::replay_when_synced`).
         let cut_short = roster.is_some()
@@ -284,6 +290,7 @@ impl AppState {
             switching: Arc::new(tokio::sync::Mutex::new(())),
             frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
             retry: lineup_switch::REPLAY_RETRY,
+            fallback: Arc::new(std::sync::atomic::AtomicBool::new(fallback)),
             change_gate: Arc::new(std::sync::RwLock::new(())),
             unsettled: Arc::new(Mutex::new(unsettled)),
             meters_tx,
@@ -720,8 +727,17 @@ where
         // states (each once the engine has synced).
         let s = state.clone();
         tokio::spawn(async move {
-            lineup_switch::replay_when_synced(s.clone()).await;
+            let replayed = lineup_switch::replay_when_synced(s.clone()).await;
+            tracing::info!(
+                ?replayed,
+                "the start's replay of an unfinished switch is done"
+            );
             roster_watch::settle_when_synced(s).await;
+        });
+        // A start on the roster applied last: the engineer hears of it.
+        let s = state.clone();
+        tokio::spawn(async move {
+            roster_watch::fallback_alarm(&s).await;
         });
     }
 
