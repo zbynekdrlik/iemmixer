@@ -113,14 +113,9 @@ impl From<CmdError> for ErrorBody {
     }
 }
 
-/// At most 64 bytes of an id for messages (ids may come from anyone).
-fn clip(s: &str) -> &str {
-    let mut end = s.len().min(64);
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s.get(..end).unwrap_or_default()
-}
+// At most 64 bytes of an id for messages (ids may come from anyone): moved
+// to the protocol with the reconcile that uses it.
+use iem_engine_proto::shape::clip;
 
 fn ix(i: usize) -> u16 {
     u16::try_from(i).unwrap_or(u16::MAX)

@@ -5,7 +5,9 @@
 //! - [`state`]: the persisted mix state and the transient engine state;
 //! - [`msg`]: commands, replies and events, protocol N/N−1 negotiation;
 //! - [`frame`]: the control pipe's length-prefixed JSON frames;
-//! - [`media`]: the media pipe's binary 48 kHz frames.
+//! - [`media`]: the media pipe's binary 48 kHz frames;
+//! - [`shape`]: the caps and a state shaped by a topology, as the engine
+//!   holds it.
 //!
 //! Schemas are additive (§2.4): readers ignore unknown fields and default
 //! missing ones, so no type here denies unknown fields.
@@ -25,6 +27,7 @@ pub mod frame;
 pub mod ids;
 pub mod media;
 pub mod msg;
+pub mod shape;
 pub mod state;
 
 pub use frame::{FrameError, MAX_FRAME, read_frame, write_frame};

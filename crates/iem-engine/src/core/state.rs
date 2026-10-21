@@ -2,10 +2,9 @@
 //! id capped and every missing one defaulted, back in the protocol's form,
 //! and the load chain's muted defaults.
 
+use iem_engine_proto::shape;
 use iem_engine_proto::{InputState, Level, Mix, MixGroup, MixOut, MixState, Source};
 
-use super::clip;
-use crate::params::{cap_group, cap_input, cap_level, cap_out};
 use crate::topology::Topology;
 
 /// One mix in topology order: its output, its level slots (every input, then
@@ -25,76 +24,47 @@ pub struct Reconciled {
 }
 
 /// The state for this topology: known ids capped, missing ones defaulted;
-/// returns what the topology does not have.
+/// returns what the topology does not have. The shaping is the protocol's
+/// (`iem_engine_proto::shape::reconcile`, which the server uses too, #58
+/// re-review); this lays it out in topology order.
 pub fn reconcile(topo: &Topology, state: &MixState) -> (Reconciled, Vec<String>) {
+    let (shaped, dropped) = shape::reconcile(&topo.info(), state);
     let inputs = topo
         .inputs
         .iter()
-        .map(|n| state.inputs.get(&n.id).map(cap_input).unwrap_or_default())
+        .map(|n| shaped.inputs.get(&n.id).copied().unwrap_or_default())
         .collect();
-    let mut dropped: Vec<String> = state
-        .inputs
-        .keys()
-        .filter(|id| topo.input_index(id).is_none())
-        .map(|id| format!("input {}", clip(&id.0)))
+    let mixes = topo
+        .mixes
+        .iter()
+        .enumerate()
+        .map(|(m, node)| {
+            let mix = shaped.mixes.get(&node.id);
+            let levels = (0..topo.levels(m))
+                .map(|k| {
+                    let level = match topo.source(m, k) {
+                        Some(source) => mix.and_then(|x| x.level(&source)),
+                        None => None,
+                    };
+                    level.copied().unwrap_or_default()
+                })
+                .collect();
+            let groups = topo
+                .groups
+                .iter()
+                .map(|g| {
+                    mix.and_then(|x| x.groups.get(&g.id))
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .collect();
+            MixRec {
+                out: mix.map(|x| x.out).unwrap_or_default(),
+                levels,
+                groups,
+            }
+        })
         .collect();
-    let mut mixes = Vec::with_capacity(topo.mixes.len());
-    for (m, node) in topo.mixes.iter().enumerate() {
-        let given = state.mixes.get(&node.id);
-        let mut levels = Vec::with_capacity(topo.levels(m));
-        for i in &topo.inputs {
-            let level = given.and_then(|x| x.inputs.get(&i.id));
-            levels.push(level.map(cap_level).unwrap_or_default());
-        }
-        // The mixes it hears, then its peers (#58): both are `Mix::mixes`.
-        for &s in node.mixes.iter().chain(&node.peers) {
-            let heard = topo.mixes.get(s).and_then(|h| given?.mixes.get(&h.id));
-            levels.push(heard.map(cap_level).unwrap_or_default());
-        }
-        let groups = topo
-            .groups
-            .iter()
-            .map(|g| {
-                given
-                    .and_then(|x| x.groups.get(&g.id))
-                    .map(cap_group)
-                    .unwrap_or_default()
-            })
-            .collect();
-        if let Some(x) = given {
-            let mix = clip(&node.id.0);
-            dropped.extend(
-                x.inputs
-                    .keys()
-                    .filter(|id| topo.input_index(id).is_none())
-                    .map(|id| format!("mix {mix} input {}", clip(&id.0))),
-            );
-            dropped.extend(
-                x.groups
-                    .keys()
-                    .filter(|id| topo.group_index(id).is_none())
-                    .map(|id| format!("mix {mix} group {}", clip(&id.0))),
-            );
-            dropped.extend(
-                x.mixes
-                    .keys()
-                    .filter(|id| topo.slot(m, &Source::Mix((*id).clone())).is_none())
-                    .map(|id| format!("mix {mix} hearing {}", clip(&id.0))),
-            );
-        }
-        mixes.push(MixRec {
-            out: given.map(|x| cap_out(&x.out)).unwrap_or_default(),
-            levels,
-            groups,
-        });
-    }
-    dropped.extend(
-        state
-            .mixes
-            .keys()
-            .filter(|id| topo.mix_index(id).is_none())
-            .map(|id| format!("mix {}", clip(&id.0))),
-    );
     (Reconciled { inputs, mixes }, dropped)
 }
 
