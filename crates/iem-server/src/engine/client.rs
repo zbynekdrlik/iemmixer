@@ -435,9 +435,16 @@ pub(crate) mod fake {
     pub struct Peer {
         pub r: ReadHalf<DuplexStream>,
         pub w: WriteHalf<DuplexStream>,
+        /// The engine's revision as far as this end told the client: the
+        /// highest of every state, delta and successful reply it sent.
+        pub rev: u64,
     }
 
     impl Peer {
+        pub fn new(r: ReadHalf<DuplexStream>, w: WriteHalf<DuplexStream>) -> Self {
+            Self { r, w, rev: 0 }
+        }
+
         pub async fn recv(&mut self) -> ClientMsg {
             let body = tokio::time::timeout(Duration::from_secs(5), wire::read_frame(&mut self.r))
                 .await
@@ -447,6 +454,14 @@ pub(crate) mod fake {
         }
 
         pub async fn send(&mut self, msg: &EngineMsg) {
+            let rev = match msg {
+                EngineMsg::State { rev, .. } | EngineMsg::Delta { rev, .. } => Some(*rev),
+                EngineMsg::Reply(r) if r.error.is_none() => Some(r.rev),
+                _ => None,
+            };
+            if let Some(rev) = rev {
+                self.rev = self.rev.max(rev);
+            }
             wire::write_msg(&mut self.w, msg).await.expect("send");
         }
     }
@@ -461,7 +476,7 @@ pub(crate) mod fake {
                 let (client, engine) = tokio::io::duplex(1 << 20);
                 let (cr, cw) = tokio::io::split(client);
                 let (er, ew) = tokio::io::split(engine);
-                tx.send(Peer { r: er, w: ew })
+                tx.send(Peer::new(er, ew))
                     .map_err(|_| io::Error::other("test over"))?;
                 Ok((Box::new(cr) as Reader, Box::new(cw) as Writer))
             })
@@ -511,8 +526,8 @@ pub(crate) mod fake {
     }
 
     /// The next request that is no `Ping` (a freeze's barrier: every
-    /// `Ping` before it is answered at once, at revision 0, which every
-    /// mirror has reached): its id and command.
+    /// `Ping` before it is answered at once, at the engine's current
+    /// revision, [`Peer::rev`]): its id and command.
     pub async fn next_request(peer: &mut Peer) -> (u64, Cmd) {
         loop {
             let ClientMsg::Request { id, cmd, .. } = peer.recv().await else {
@@ -521,13 +536,30 @@ pub(crate) mod fake {
             if cmd != Cmd::Ping {
                 return (id, cmd);
             }
+            let rev = peer.rev;
             peer.send(&EngineMsg::Reply(Reply {
                 id,
-                rev: 0,
+                rev,
                 error: None,
             }))
             .await;
         }
+    }
+
+    /// Answers the next request, which must be a `Ping`, at the engine's
+    /// current revision.
+    pub async fn answer_ping(peer: &mut Peer) {
+        let ClientMsg::Request { id, cmd, .. } = peer.recv().await else {
+            panic!("a request");
+        };
+        assert_eq!(cmd, Cmd::Ping, "a Ping");
+        let rev = peer.rev;
+        peer.send(&EngineMsg::Reply(Reply {
+            id,
+            rev,
+            error: None,
+        }))
+        .await;
     }
 
     /// [`next_request`], which must be an `ImportState`: its id and the
@@ -927,7 +959,7 @@ mod tests {
                 let (client, engine) = tokio::io::duplex(1 << 20);
                 let (cr, cw) = tokio::io::split(client);
                 let (er, ew) = tokio::io::split(engine);
-                tx.send(Peer { r: er, w: ew })
+                tx.send(Peer::new(er, ew))
                     .map_err(|_| io::Error::other("test over"))?;
                 let writer = tokio::io::BufWriter::new(cw);
                 Ok((Box::new(cr) as Reader, Box::new(writer) as Writer))
