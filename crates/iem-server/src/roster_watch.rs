@@ -840,7 +840,9 @@ impl Follows {
         }
     }
 
-    /// Every set a roster the states may follow lists.
+    /// Every set the rosters known so far list; [`transition`] reads it
+    /// before any marker's roster is learned, so it is the roster before's
+    /// and the unsettled base's (#58 fourth review).
     fn sets(&self) -> BTreeSet<String> {
         self.known
             .iter()
@@ -973,6 +975,10 @@ async fn transition(
     };
     let topology: &TopologyInfo = &topology;
     let store = LineupStore::new(&state.config_dir);
+    // The rules hold on the sets the roster before (or the unsettled base)
+    // and the new one list; a roster learned from a marker below only moves
+    // people (#58 fourth review).
+    let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
     // Every other lineup's stored state and what the running state follows,
     // each marker's roster learned from the kept ones.
     let mut stored_states = Vec::new();
@@ -995,7 +1001,6 @@ async fn transition(
     let held = state_digest(&state.engine.mirror().state);
     let (marker, recorded) = running_for(&store, active, &held);
     follows.learn(&store, marker.as_deref());
-    let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
     // The stored states, worked out first.
     let mut planned: Vec<Planned> = Vec::new();
     for (l, stored) in stored_states {
