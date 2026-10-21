@@ -120,6 +120,10 @@ pub struct RestorePreview {
     /// topology after the capture); the restore leaves it as it is
     #[serde(default)]
     pub not_in_backup: Vec<SkippedEntry>,
+    /// The inactive lineups whose stored state the restore replaces (#58,
+    /// roster mode); not written when none
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineups: Vec<String>,
 }
 
 /// A single proposed change from a restore
@@ -263,6 +267,7 @@ mod tests {
                 description: "KEYS".into(),
                 reason: "not in the backup; stays as it is".into(),
             }],
+            lineups: vec!["youth".into()],
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains(r#""category":"Level""#), "{json}");
@@ -270,7 +275,11 @@ mod tests {
             json.contains(r#""not_in_backup":[{"category":"Input","description":"KEYS""#),
             "{json}"
         );
+        assert!(json.ends_with(r#","lineups":["youth"]}"#), "{json}");
         assert_eq!(serde_json::from_str::<RestorePreview>(&json).unwrap(), p);
+        // #58: the lineups are additive, not written when there are none.
+        let legacy = RestorePreview::default();
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("lineups"));
         assert!(RestoreCategory::Level < RestoreCategory::Customization);
         // A preview without the list (an older server) reads as an empty one.
         let old = r#"{"changes":[],"unchanged_count":0,"skipped":[]}"#;

@@ -11,6 +11,7 @@ use iem_engine_proto::{Eq, InputId, InputState, Level, MixId, MixState, Source};
 use crate::band_store::BandStore;
 use crate::engine::mirror::Mirror;
 use crate::lineup_store::LineupStore;
+use crate::pin_store::ENGINEER_ID;
 use crate::roster_state::RosterState;
 use crate::site_view::SiteView;
 use crate::view::GROUP_NAME;
@@ -40,13 +41,9 @@ pub fn inactive_lineups(
     store: &LineupStore,
     roster: &RosterState,
 ) -> Result<std::collections::BTreeMap<String, MixerBackup>, String> {
+    let active = &roster.lineup().id;
     let mut out = std::collections::BTreeMap::new();
-    for l in roster
-        .roster
-        .lineups
-        .iter()
-        .filter(|l| l.id != roster.active)
-    {
+    for l in roster.roster.lineups.iter().filter(|l| l.id != *active) {
         let state = store
             .state(&l.id)
             .map_err(|e| format!("the stored state of lineup {} is unreadable: {e}", l.id))?;
@@ -57,37 +54,77 @@ pub fn inactive_lineups(
     Ok(out)
 }
 
-/// Writes back the stored state of each inactive lineup `backup` carries
-/// that the roster still holds (a restore, after the live state went in);
-/// the ids written, in order.
+/// The inactive lineups whose stored state a restore of `backup` replaces:
+/// those it carries that the roster still holds, never the active one (its
+/// state is the live one).
+pub fn lineups_to_restore(backup: &MixerBackup, roster: &RosterState) -> Vec<String> {
+    let active = &roster.lineup().id;
+    backup
+        .lineups
+        .keys()
+        .filter(|id| *id != active && roster.roster.lineup(id).is_some())
+        .cloned()
+        .collect()
+}
+
+/// Writes back the stored state of each lineup [`lineups_to_restore`]
+/// names (a restore, after the live state went in), and its people's pins
+/// and hides into that lineup's own files (`bands`: the lineup's store),
+/// keeping the sources `known` accepts and the people the lineup still
+/// places (and the engineer), so no second copy disagrees. The ids written;
+/// the first failure is an error naming its lineup.
 pub fn restore_lineups(
     store: &LineupStore,
     roster: &RosterState,
     backup: &MixerBackup,
+    bands: &dyn Fn(&str) -> std::sync::Arc<BandStore>,
+    known: &dyn Fn(&Source) -> bool,
 ) -> Result<Vec<String>, String> {
-    let mut written = Vec::new();
-    for (id, state) in &backup.lineups {
-        if *id == roster.active || roster.roster.lineup(id).is_none() {
+    let ids = lineups_to_restore(backup, roster);
+    for id in &ids {
+        let (Some(state), Some(lineup)) = (backup.lineups.get(id), roster.roster.lineup(id)) else {
             continue;
-        }
+        };
         store
             .save_state(id, state)
             .map_err(|e| format!("the stored state of lineup {id} was not written: {e}"))?;
-        written.push(id.clone());
+        let band = bands(id);
+        let keep = |list: &[Source]| -> Vec<Source> {
+            list.iter().filter(|&s| known(s)).cloned().collect()
+        };
+        for (person, c) in &state.customizations {
+            if person != ENGINEER_ID && !lineup.plays(person) {
+                continue;
+            }
+            band.save_customization(person, keep(&c.pinned), keep(&c.hidden))
+                .map_err(|e| {
+                    format!("the pins and hides of {person} in lineup {id} were not written: {e}")
+                })?;
+        }
     }
-    Ok(written)
+    Ok(ids)
 }
 
-/// Whether `backup`'s live state may go live with `active` playing: a
-/// backup of another lineup would put that band's mixes on this band's
-/// sets, so it is refused until that lineup plays again. A backup of no
-/// lineup (legacy mode, or from before) restores as it always did.
-pub fn live_lineup_fits(backup: &MixerBackup, active: Option<&str>) -> Result<(), String> {
-    match (backup.lineup.as_deref(), active) {
-        (Some(of), Some(now)) if of != now => Err(format!(
+/// Whether `backup`'s live state may go live now: a backup of another
+/// lineup would put that band's mixes on this band's sets, so it is refused
+/// until that lineup plays again. In roster mode a backup of no lineup
+/// (from before the roster) is the main lineup's; in legacy mode every
+/// backup restores as it always did.
+pub fn live_lineup_fits(backup: &MixerBackup, roster: Option<&RosterState>) -> Result<(), String> {
+    let Some(r) = roster else {
+        return Ok(());
+    };
+    let of = backup
+        .lineup
+        .as_deref()
+        .unwrap_or(r.roster.main().id.as_str());
+    let now = r.lineup().id.as_str();
+    if of == now {
+        Ok(())
+    } else {
+        Err(format!(
             "this backup's live state is lineup {of}'s and lineup {now} plays: switch to {of} first"
-        )),
-        _ => Ok(()),
+        ))
     }
 }
 
@@ -676,32 +713,81 @@ mod tests {
         MixerBackup::new("2026-10-21T12:00:00Z".into(), 1, state)
     }
 
+    /// A lineup's band store over `dir`, the way AppState keeps one per
+    /// lineup.
+    fn bands(dir: &std::path::Path) -> impl Fn(&str) -> std::sync::Arc<BandStore> {
+        let store = LineupStore::new(dir);
+        move |id: &str| std::sync::Arc::new(BandStore::new(&store.data_dir(id)))
+    }
+
+    fn any(_: &Source) -> bool {
+        true
+    }
+
     /// #58 design §6: a backup carries every inactive lineup's stored state;
     /// a restore writes back those the roster still holds, never the active
-    /// one's (that one is the live state).
+    /// one's (that one is the live state), and their people's pins and
+    /// hides into that lineup's own files.
     #[test]
     fn a_backup_carries_every_inactive_lineup_and_a_restore_writes_them_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = LineupStore::new(dir.path());
         let roster = crate::roster_state::tests::test_roster("main");
-        store.save_state("youth", &stored(3.0)).unwrap();
+        let mut youth = stored(3.0);
+        let pins = |id: &str| {
+            CustomizationFile::new(id, vec![Source::Input(InputId::new("mic1"))], vec![])
+        };
+        for person in ["member10", "member2", "engineer"] {
+            youth.customizations.insert(person.into(), pins(person));
+        }
+        youth.customizations.get_mut("member10").unwrap().hidden =
+            vec![Source::Input(InputId::new("gone"))];
+        store.save_state("youth", &youth).unwrap();
         // Main's own file (from when youth played) is no inactive state.
         store.save_state("main", &stored(9.0)).unwrap();
         let lineups = inactive_lineups(&store, &roster).unwrap();
         assert_eq!(lineups.keys().collect::<Vec<_>>(), ["youth"]);
-        assert_eq!(lineups["youth"], stored(3.0));
+        assert_eq!(lineups["youth"], youth);
 
         let mut b = MixerBackup::new("t".into(), 2, MixState::default());
         b.lineup = Some("main".into());
         b.lineups = lineups;
         b.lineups.insert("gone".into(), stored(1.0));
         b.lineups.insert("main".into(), stored(5.0));
+        assert_eq!(lineups_to_restore(&b, &roster), ["youth"]);
         // Youth's stored state changed since; the restore brings it back.
         store.save_state("youth", &stored(-2.0)).unwrap();
-        assert_eq!(restore_lineups(&store, &roster, &b).unwrap(), ["youth"]);
-        assert_eq!(store.state("youth").unwrap(), Some(stored(3.0)));
+        let known = |s: &Source| *s != Source::Input(InputId::new("gone"));
+        let written = restore_lineups(&store, &roster, &b, &bands(dir.path()), &known).unwrap();
+        assert_eq!(written, ["youth"]);
+        assert_eq!(store.state("youth").unwrap(), Some(youth));
         assert_eq!(store.state("main").unwrap(), Some(stored(9.0)), "active");
         assert_eq!(store.state("gone").unwrap(), None, "not in the roster");
+        // The pins and hides of youth's people (and the engineer) are in
+        // youth's own files, sources the site lacks dropped; member2 plays
+        // in no set of youth.
+        let youth_band = BandStore::new(&store.data_dir("youth"));
+        let c = youth_band.customization("member10").unwrap();
+        assert_eq!((c.pinned.len(), c.hidden.len()), (1, 0));
+        assert_eq!(
+            youth_band.customization("engineer").unwrap().pinned.len(),
+            1
+        );
+        assert!(
+            youth_band
+                .customization("member2")
+                .unwrap()
+                .pinned
+                .is_empty()
+        );
+        let main_band = BandStore::new(&store.data_dir("main"));
+        assert!(
+            main_band
+                .customization("member10")
+                .unwrap()
+                .pinned
+                .is_empty()
+        );
 
         // A lineup without a stored state yet is not in the backup.
         let fresh = tempfile::tempdir().unwrap();
@@ -713,8 +799,24 @@ mod tests {
         let err = inactive_lineups(&broken, &roster).unwrap_err();
         assert!(err.contains("lineup youth"), "{err}");
         // A write that fails is an error naming the lineup.
-        let err = restore_lineups(&broken, &roster, &b).unwrap_err();
+        let err = restore_lineups(&broken, &roster, &b, &bands(fresh.path()), &any).unwrap_err();
         assert!(err.contains("lineup youth"), "{err}");
+        // So is a pins-and-hides file that cannot be written.
+        let blocked = tempfile::tempdir().unwrap();
+        let tmp = LineupStore::new(blocked.path())
+            .data_dir("youth")
+            .join("customizations")
+            .join("member10.tmp");
+        std::fs::create_dir_all(tmp).unwrap();
+        let err = restore_lineups(
+            &LineupStore::new(blocked.path()),
+            &roster,
+            &b,
+            &bands(blocked.path()),
+            &any,
+        )
+        .unwrap_err();
+        assert!(err.contains("member10 in lineup youth"), "{err}");
     }
 
     #[test]
@@ -728,7 +830,7 @@ mod tests {
         store.save_state("youth", &stored(3.0)).unwrap();
         let roster = crate::roster_state::tests::test_roster("main");
         assert_eq!(
-            restore_lineups(&store, &roster, &old).unwrap(),
+            restore_lineups(&store, &roster, &old, &bands(dir.path()), &any).unwrap(),
             Vec::<String>::new()
         );
         assert_eq!(
@@ -736,25 +838,48 @@ mod tests {
             Some(stored(3.0)),
             "untouched"
         );
-        // Its live state goes live whatever plays, as before the roster.
-        assert_eq!(live_lineup_fits(&old, Some("youth")), Ok(()));
+        // Legacy mode: its live state goes live, as before the roster.
         assert_eq!(live_lineup_fits(&old, None), Ok(()));
+        // Roster mode: a backup from before the roster is the main lineup's.
+        assert_eq!(live_lineup_fits(&old, Some(&roster)), Ok(()));
+        let youth = crate::roster_state::tests::test_roster("youth");
+        assert_eq!(
+            live_lineup_fits(&old, Some(&youth)),
+            Err(
+                "this backup's live state is lineup main's and lineup youth plays: switch to main first"
+                    .into()
+            )
+        );
     }
 
     /// #58: one band's live state never goes onto another band's sets.
     #[test]
     fn a_live_state_restores_only_while_its_lineup_plays() {
+        let (main, youth) = (
+            crate::roster_state::tests::test_roster("main"),
+            crate::roster_state::tests::test_roster("youth"),
+        );
         let mut b = stored(0.0);
         b.lineup = Some("youth".into());
-        assert_eq!(live_lineup_fits(&b, Some("youth")), Ok(()));
+        assert_eq!(live_lineup_fits(&b, Some(&youth)), Ok(()));
         assert_eq!(live_lineup_fits(&b, None), Ok(()), "legacy mode, as before");
         assert_eq!(
-            live_lineup_fits(&b, Some("main")),
+            live_lineup_fits(&b, Some(&main)),
             Err(
                 "this backup's live state is lineup youth's and lineup main plays: switch to youth first"
                     .into()
             )
         );
+        // An active lineup the roster lacks plays as main.
+        let gone = crate::roster_state::tests::test_roster("gone");
+        assert!(live_lineup_fits(&b, Some(&gone)).is_err());
+        b.lineup = Some("main".into());
+        assert_eq!(live_lineup_fits(&b, Some(&gone)), Ok(()));
+        // What a restore replaces: never the active lineup's stored state.
+        b.lineups.insert("youth".into(), stored(1.0));
+        b.lineups.insert("main".into(), stored(1.0));
+        assert_eq!(lineups_to_restore(&b, &main), ["youth"]);
+        assert_eq!(lineups_to_restore(&b, &youth), ["main"]);
     }
 
     #[test]

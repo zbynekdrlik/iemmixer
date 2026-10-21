@@ -84,7 +84,7 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
     // Roster mode (#58 design §6): whose live state it is, and every other
     // lineup's stored state.
     if let Some(roster) = state.roster() {
-        b.lineup = Some(roster.active.clone());
+        b.lineup = Some(roster.lineup().id.clone());
         b.lineups = crate::backup::inactive_lineups(&LineupStore::new(&state.config_dir), &roster)?;
     }
     let name = state.backup_store.save(&b).map_err(|e| e.to_string())?;
@@ -109,8 +109,8 @@ async fn get_backup(
 }
 
 fn preview_of(state: &AppState, b: &MixerBackup) -> Result<RestorePreview, Reject> {
-    let active = state.roster().map(|r| r.active);
-    crate::backup::live_lineup_fits(b, active.as_deref()).map_err(|e| {
+    let roster = state.roster();
+    crate::backup::live_lineup_fits(b, roster.as_ref()).map_err(|e| {
         (
             StatusCode::CONFLICT,
             Json(ApiError::new("LINEUP_MISMATCH", e)),
@@ -119,12 +119,17 @@ fn preview_of(state: &AppState, b: &MixerBackup) -> Result<RestorePreview, Rejec
     let site = state.site().ok_or_else(unavailable)?;
     let current = state.engine.mirror().state.clone();
     let band = state.band();
-    Ok(crate::backup::preview(
+    let mut p = crate::backup::preview(
         &site,
         &current,
         &move |m: &str| band.customization(m).ok(),
         b,
-    ))
+    );
+    // Roster mode: the inactive lineups whose stored state it replaces.
+    p.lineups = roster
+        .map(|r| crate::backup::lineups_to_restore(b, &r))
+        .unwrap_or_default();
+    Ok(p)
 }
 
 async fn preview_backup(
@@ -165,19 +170,16 @@ async fn restore_backup(
             )
         })?;
     let site = state.site().ok_or_else(unavailable)?;
+    let known = |s: &Source| match s {
+        Source::Input(i) => site.input(&i.0).is_some(),
+        Source::Mix(m) => site.mix(m).is_some(),
+    };
+    let keep =
+        |list: &[Source]| -> Vec<Source> { list.iter().filter(|&s| known(s)).cloned().collect() };
     for (member, c) in &b.customizations {
         if site.member(member).is_none() {
             continue;
         }
-        let keep = |list: &[Source]| -> Vec<Source> {
-            list.iter()
-                .filter(|s| match s {
-                    Source::Input(i) => site.input(&i.0).is_some(),
-                    Source::Mix(m) => site.mix(m).is_some(),
-                })
-                .cloned()
-                .collect()
-        };
         if let Err(e) = state
             .band()
             .save_customization(member, keep(&c.pinned), keep(&c.hidden))
@@ -185,16 +187,30 @@ async fn restore_backup(
             tracing::error!(%member, error = %e, "restoring pins and hides failed");
         }
     }
-    if let Some(roster) = state.roster() {
-        match crate::backup::restore_lineups(&LineupStore::new(&state.config_dir), &roster, &b) {
-            Ok(ids) if ids.is_empty() => {}
-            Ok(ids) => tracing::warn!(%filename, lineups = ?ids, "stored lineup states restored"),
-            Err(e) => {
-                tracing::error!(%filename, error = %e, "restoring the stored lineup states failed")
-            }
-        }
-    }
-    tracing::warn!(%filename, changes = preview.changes.len(), "backup restored");
+    // Roster mode: every other lineup's stored state and its people's pins
+    // and hides, the live state being in already; a failure is the caller's
+    // to see.
+    let lineups = match state.roster() {
+        Some(roster) => crate::backup::restore_lineups(
+            &LineupStore::new(&state.config_dir),
+            &roster,
+            &b,
+            &|id: &str| state.band_of(Some(id)),
+            &known,
+        )
+        .map_err(|e| {
+            tracing::error!(%filename, error = %e, "the live state was restored, a lineup's was not");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new(
+                    "RESTORE_INCOMPLETE",
+                    format!("the live state was restored, but {e}"),
+                )),
+            )
+        })?,
+        None => Vec::new(),
+    };
+    tracing::warn!(%filename, changes = preview.changes.len(), ?lineups, "backup restored");
     Ok(Json(RestoreResult {
         restored_count: preview.changes.len(),
         skipped: preview.skipped,
@@ -365,18 +381,38 @@ mod tests {
         );
         let (status, json) = call(&app, Method::POST, &preview, Some(&eng), None).await;
         assert_eq!(status, StatusCode::OK, "{json}");
+        // It names the lineups whose stored state a restore replaces.
+        assert_eq!(json["lineups"], serde_json::json!(["youth"]), "{json}");
         // A backup taken while youth played is not put on main's sets.
         let mut other = saved.clone();
         other.lineup = Some("youth".into());
         let name = state.backup_store.save(&other).unwrap();
-        for action in ["preview", "restore"] {
-            let uri = format!("/api/backups/{name}/{action}");
-            let (status, json) = call(&app, Method::POST, &uri, Some(&eng), None).await;
+        // Nor, once youth plays, one from before the roster (main's).
+        let mut before = saved.clone();
+        before.lineup = None;
+        before.lineups.clear();
+        let old = state.backup_store.save(&before).unwrap();
+        let mismatch = |status: StatusCode, json: &serde_json::Value, what: &str| {
             assert_eq!(
                 (status, json["code"].as_str()),
                 (StatusCode::CONFLICT, Some("LINEUP_MISMATCH")),
-                "{action}: {json}"
+                "{what}: {json}"
             );
+        };
+        for action in ["preview", "restore"] {
+            let uri = format!("/api/backups/{name}/{action}");
+            let (status, json) = call(&app, Method::POST, &uri, Some(&eng), None).await;
+            mismatch(status, &json, action);
+        }
+        let uri = format!("/api/backups/{old}/preview");
+        let (status, json) = call(&app, Method::POST, &uri, Some(&eng), None).await;
+        assert_eq!(status, StatusCode::OK, "main plays: {json}");
+        assert!(json.get("lineups").is_none(), "{json}");
+        state.roster.write().unwrap().as_mut().unwrap().active = "youth".into();
+        for action in ["preview", "restore"] {
+            let uri = format!("/api/backups/{old}/{action}");
+            let (status, json) = call(&app, Method::POST, &uri, Some(&eng), None).await;
+            mismatch(status, &json, action);
         }
     }
 
