@@ -2231,3 +2231,41 @@ fn a_resolved_pending_import_is_saved_at_once() {
     assert_eq!(not.pending, None);
     assert_eq!(store.running().unwrap(), Some(not), "saved, not taken");
 }
+
+/// #58 fifth review: a settle that sees a synced engine resolves and saves
+/// a pending import first, whatever fails after it. Here another lineup's
+/// stored state cannot be read, which refuses the settle; the pending
+/// import the engine holds must still be resolved (taken) and saved, so a
+/// later switch or restore never resolves it against a state pages have
+/// changed since.
+#[tokio::test]
+async fn a_refused_settle_still_resolves_a_pending_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    std::fs::write(d.join(ROSTER_FILE), TEXT).unwrap();
+    let held = shape::reconcile(&test_topology(), &running()).0;
+    let sha = sha256_hex(TEXT.as_bytes());
+    store
+        .set_running(&Running {
+            lineup: "main".into(),
+            follows: None,
+            silenced: BTreeSet::new(),
+            pending: Some(Pending {
+                follows: sha.clone(),
+                silenced: BTreeSet::new(),
+                digest: state_digest(&held),
+            }),
+        })
+        .unwrap();
+    // Youth's stored state cannot be read: a directory holds its name.
+    std::fs::create_dir_all(store.data_dir("youth").join("state.json")).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let _peer = synced(&mut state, held).await;
+    assert!(matches!(settle(&state).await, Err(Applied::Refused(_))));
+    let running = store.running().unwrap().unwrap();
+    assert_eq!(running.follows, Some(sha), "the import had gone in");
+    assert_eq!(running.pending, None, "resolved and saved");
+}
