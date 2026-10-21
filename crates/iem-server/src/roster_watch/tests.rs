@@ -2342,9 +2342,9 @@ async fn a_reload_that_cannot_record_its_import_alarms_once() {
         assert_eq!(within(spawn_apply(&state, &text)).await, unrecorded);
     }
     assert_eq!(alarms(), 0, "not before the last try");
-    for _ in 0..2 {
-        assert_eq!(within(spawn_apply(&state, &text)).await, unrecorded);
-    }
-    assert_eq!(alarms(), 1, "one alarm");
+    assert_eq!(within(spawn_apply(&state, &text)).await, unrecorded);
+    assert_eq!(alarms(), 1, "one alarm, at the last try");
+    assert_eq!(within(spawn_apply(&state, &text)).await, unrecorded);
+    assert_eq!(alarms(), 1, "only one");
     barriers.abort();
 }
