@@ -82,8 +82,8 @@ fn a_peer_hears_the_other_mixs_own_output_without_what_that_mix_hears() {
             out.channel(ch)[511]
         );
     }
-    // Hearing b whole would have added b's x·g0⁴ again at a's level and
-    // fader (x·g0⁶ ≈ 0.03): the tolerance above leaves no room for it.
+    // Hearing b whole would have brought a's own x back through b (about
+    // 0.25 more): the tolerance above leaves no room for it.
     // Block-size independence with two shadows reading each other.
     let mut odd = peers_rig(&cmds);
     assert_eq!(odd.run(&xy(x, y, 512), 97), out);
@@ -128,8 +128,9 @@ fn a_shadow_follows_the_mixs_eq_limiter_and_volume() {
 
 #[test]
 fn a_tripping_shadow_resets_and_counts() {
-    // 9e5 passes the input (X1 at 1e6); +12 dB at b's level and volume with
-    // its limiter out trips b's own output and its shadow once per block.
+    // +12 dB at b's level and volume with its limiter out: 9e5 passes the
+    // input (X1 at 1e6) and trips b's own output and its shadow in every
+    // block, so nothing that loud reaches a, a limiter or a safety stage.
     let cmds = [
         level("b", src_in("y"), 12.0),
         limiter("b", false, -6.0),
@@ -137,12 +138,12 @@ fn a_tripping_shadow_resets_and_counts() {
         level("a", peer("b"), -6.0),
     ];
     let mut r = peers_rig(&cmds);
-    // b's limiter, disabled at start, fades out over its first 10 ms.
-    r.run(&xy(0.0, 9e5, 3200), 32);
-    let before = r.h.status.trips.load(Ordering::Relaxed);
-    assert!(before > 0);
+    // b's limiter, disabled at start, fades out over its first 10 ms: a
+    // quiet y meanwhile.
+    r.run(&xy(0.0, 0.01, 3200), 32);
+    assert_eq!(r.h.status.trips.load(Ordering::Relaxed), 0);
     let out = r.run(&xy(0.0, 9e5, 3200), 32);
-    let trips = r.h.status.trips.load(Ordering::Relaxed) - before;
+    let trips = r.h.status.trips.load(Ordering::Relaxed);
     assert_eq!(trips, 2 * 100, "b and its shadow, once per 32-sample block");
     assert!(out.channel(B_L).iter().all(|v| *v == 0.0), "b is silenced");
     assert!(
@@ -151,11 +152,14 @@ fn a_tripping_shadow_resets_and_counts() {
     );
     // Back to a quiet y: the shadow, reset, follows b again (a at −6 dB).
     let out = r.run(&xy(0.0, 0.05, 3200), 32);
-    let tail = r.h.status.trips.load(Ordering::Relaxed) - before;
-    assert_eq!(tail, trips, "no more trips");
+    assert_eq!(
+        r.h.status.trips.load(Ordering::Relaxed),
+        trips,
+        "no more trips"
+    );
     let k = 10f64.powf(-0.3) * g0() * g0();
     let (ya, yb) = (out.channel(A_L), out.channel(B_L));
-    assert!(yb[3199] > 0.1, "{}", yb[3199]);
+    assert!(yb[3199] > 0.5, "{}", yb[3199]);
     for (t, (va, vb)) in ya.iter().zip(yb).enumerate() {
         assert!(close(*va, vb * k, 1e-12), "{t}: {va} vs {}", vb * k);
     }
