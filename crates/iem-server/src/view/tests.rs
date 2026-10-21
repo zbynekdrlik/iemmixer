@@ -206,7 +206,8 @@ fn the_state_message_names_the_mix_and_the_stems_strip() {
     else {
         panic!("a State");
     };
-    assert_eq!(channels.len(), 24);
+    // Every input, then the eight sets member3 hears as peers (#58).
+    assert_eq!(channels.len(), 24 + 8);
     assert!(connected);
     assert_eq!((global_level_db, global_muted), (Some(-4.0), Some(true)));
     assert_eq!(mx.as_deref(), Some("member3"));

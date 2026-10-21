@@ -124,7 +124,18 @@ test.describe("Mixer page (F4–F9)", () => {
     await expect(strip(page, "hand1")).toBeVisible();
     await expect(strip(page, "content")).toBeVisible();
 
-    // Only a mix that hears other mixes has the Mixes tab.
+    // member3 hears the other sets as peers (#58): its Mixes tab lists
+    // them, never member3 itself.
+    await expect(page.locator(".category-tab.mixes")).not.toHaveClass(/tab-hidden/);
+    await tab(page, "Mixes");
+    await expect(strip(page, "member1")).toBeVisible();
+    await expect(strip(page, "member2")).toBeVisible();
+    await expect(strip(page, "member3")).toHaveCount(0);
+  });
+
+  test("only a mix that hears other mixes has the Mixes tab", async ({ page }) => {
+    // member2 hears no mix, whole or as a peer (its page is only looked at).
+    await openMixer(page, "member2");
     await expect(page.locator(".category-tab.mixes")).toHaveClass(/tab-hidden/);
   });
 
