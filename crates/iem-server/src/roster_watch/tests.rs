@@ -675,6 +675,38 @@ async fn a_refused_import_puts_the_stored_states_back() {
     assert_eq!(state.roster(), Some(test_roster("main")));
 }
 
+/// #58 review: every reload waits for a synced engine, also one that moves
+/// nobody (the rules must reach the running state with it), and no stored
+/// state is rewritten while it waits.
+#[tokio::test]
+async fn a_reload_waits_for_a_synced_engine_even_without_a_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = with_roster(dir.path(), "main");
+    let store = LineupStore::new(dir.path());
+    store
+        .save_state("youth", &MixerBackup::new("t".into(), 1, running()))
+        .unwrap();
+    let file = store.data_dir("youth").join("state.json");
+    let before = (
+        std::fs::read(&file).unwrap(),
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+    );
+    // member11 leaves: youth's set member4 is nobody's, nothing moves.
+    let text = without_member11();
+    assert_eq!(
+        apply_text(&state, &text, &sha256_hex(text.as_bytes())).await,
+        Applied::Deferred(vec![
+            "the engine state is not synced: the roster waits for it".to_string()
+        ])
+    );
+    let after = (
+        std::fs::read(&file).unwrap(),
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+    );
+    assert_eq!(after, before, "youth's stored state untouched");
+    assert_eq!(state.roster(), Some(test_roster("main")));
+}
+
 /// A person's mix moves only through the engine: without a synced one the
 /// roster waits.
 #[tokio::test]
