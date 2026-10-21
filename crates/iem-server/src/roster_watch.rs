@@ -1098,7 +1098,7 @@ async fn transition(
             // What the running state follows once the import is in, written
             // before it: its answer may be lost with the server (#58 third
             // review); a failed import puts the record before back.
-            let before = Running {
+            let prior = Running {
                 lineup: active.to_string(),
                 follows: marker.clone(),
                 silenced: recorded.clone(),
@@ -1113,7 +1113,7 @@ async fn transition(
                 &store,
                 &Running {
                     pending: Some(pending),
-                    ..before.clone()
+                    ..prior.clone()
                 },
             );
             let sent = match state
@@ -1134,7 +1134,7 @@ async fn transition(
                 }
             };
             if sent.is_err() {
-                note_running(&store, &before);
+                note_running(&store, &prior);
             }
             sent
         }
