@@ -579,10 +579,7 @@ async fn an_engine_gone_during_the_import_finishes_the_switch_once_back() {
     fake::next_import(&mut peer).await;
     drop(peer);
     let result = within(task).await;
-    assert!(
-        matches!(result, Err(SwitchError::Engine(EngineError::Disconnected))),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(SwitchError::Pending(_))), "{result:?}");
     assert!(state.frozen_now(), "no change until the switch is finished");
     assert_eq!(
         store.intent().unwrap(),

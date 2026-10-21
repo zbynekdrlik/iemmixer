@@ -115,6 +115,11 @@ fn a_refused_switch_answers_with_its_reason() {
             StatusCode::BAD_GATEWAY,
             "SWITCH_FAILED",
         ),
+        (
+            SwitchError::Pending("the engine is not connected".into()),
+            StatusCode::ACCEPTED,
+            "SWITCH_PENDING",
+        ),
     ] {
         assert_eq!(answer(e), (status, code.to_string()));
     }
@@ -212,4 +217,69 @@ async fn a_switch_finishes_when_its_request_is_dropped() {
     }
     assert_eq!(store.active().unwrap().as_deref(), Some("youth"));
     assert_eq!(store.intent().unwrap(), None);
+}
+
+/// Waits (≤ 5 s) until `done` holds.
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !done() {
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{what} within 5 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// #58 re-review (decision): a switch the engine dropped in, whose old
+/// band could not go back in either, answers 202 SWITCH_PENDING; once the
+/// engine is back the replay finishes it, and the pages and the
+/// engineer's devices hear of it as of any switch.
+#[tokio::test]
+async fn a_pending_switch_answers_202_and_is_announced_once_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, _) = app(dir.path());
+    state.set_roster(Some(test_roster("main")));
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    let (connector, mut peers) = fake::connector();
+    state.engine = crate::engine::EngineClient::spawn_with(connector, "test".into());
+    state.retry = std::time::Duration::from_millis(50);
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 1, MixState::default()).await;
+    let mut rx = state.lineup_tx.subscribe();
+    let api = router(state.clone());
+    let leader = token("member3", false);
+    let request = tokio::spawn(async move { switch(&api, &leader, "youth").await });
+    fake::next_import(&mut peer).await;
+    drop(peer);
+    let (status, json) = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .expect("within 5 s")
+        .unwrap();
+    assert_eq!(
+        (status, json["code"].as_str()),
+        (StatusCode::ACCEPTED, Some("SWITCH_PENDING")),
+        "{json}"
+    );
+    assert!(state.frozen_now());
+    assert!(seen.lock().unwrap().is_empty(), "not switched yet");
+    let mut peer = fake::accept(&mut peers, test_topology()).await;
+    fake::sync(&state.engine, &mut peer, 2, MixState::default()).await;
+    fake::imports(&mut peer, 3).await;
+    until("the switch finished", || {
+        !state.frozen_now() && state.roster().unwrap().active == "youth"
+    })
+    .await;
+    assert_eq!(rx.try_recv().unwrap().id, "youth");
+    until("the engineer's devices heard of it", || {
+        seen.lock().unwrap().len() == 1
+    })
+    .await;
 }
