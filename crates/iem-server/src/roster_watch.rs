@@ -632,13 +632,20 @@ pub(crate) async fn end_solos(state: &AppState, mixes: &[MixId]) {
 
 /// What the running state follows (one that cannot be read is logged: not
 /// known); `held` is the [`state_digest`] of the engine's state, which
-/// resolves an import whose answer was never known ([`resolved`]).
+/// resolves an import whose answer was never known ([`resolved`]). A
+/// resolved record is saved at once (#58 fourth review), so it is never
+/// resolved again against a state pages have changed since.
 pub(crate) fn running_of(store: &LineupStore, held: &str) -> Option<Running> {
     let running = store.running().unwrap_or_else(|e| {
         tracing::error!(error = %e, "what the running state follows is unknown");
         None
     })?;
-    Some(resolved(running, held))
+    if running.pending.is_none() {
+        return Some(running);
+    }
+    let settled = resolved(running, held);
+    note_running(store, &settled);
+    Some(settled)
 }
 
 /// What the running state follows when it is `lineup`'s: its marker and
