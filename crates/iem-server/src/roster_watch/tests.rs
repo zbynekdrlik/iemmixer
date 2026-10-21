@@ -2269,3 +2269,44 @@ async fn a_refused_settle_still_resolves_a_pending_import() {
     assert_eq!(running.follows, Some(sha), "the import had gone in");
     assert_eq!(running.pending, None, "resolved and saved");
 }
+
+/// #58 fifth review: a settle whose pending record cannot be written
+/// (running.json unwritable) counts the try as refused: waiting does not
+/// make the file writable, so the settle gives up after [`MAX_SETTLES`]
+/// tries with one alarm and frees the pages.
+#[tokio::test]
+async fn a_settle_that_cannot_record_its_import_gives_up_with_one_alarm() {
+    assert!(!waits(&Applied::Deferred(vec![NOT_RECORDED.to_string()])));
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(TEXT).unwrap();
+    // member5 wears set member9 now: the running state takes an import.
+    std::fs::write(d.join(ROSTER_FILE), moved()).unwrap();
+    std::fs::create_dir_all(d.join(crate::lineup_store::RUNNING_FILE)).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let (base, seen) = crate::push::tests::fake_push_service().await;
+    state.config.write().await.vapid_private_key = crate::push::tests::vapid_private_key();
+    state
+        .push_store
+        .write()
+        .await
+        .add(crate::push::tests::subscription(format!("{base}/201")))
+        .unwrap();
+    let mut peer = synced(&mut state, running()).await;
+    state.retry = Duration::from_millis(100);
+    // The engine answers every freeze's barrier; no import comes.
+    let barriers = tokio::spawn(async move {
+        loop {
+            fake::answer_ping(&mut peer).await;
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), settle_when_synced(state.clone()))
+        .await
+        .expect("given up within 5 s");
+    barriers.abort();
+    assert_eq!(seen.lock().unwrap().len(), 1, "one alarm");
+    let page = state.page("member2").unwrap();
+    assert_eq!(state.may_change(&page), Ok(()));
+}
