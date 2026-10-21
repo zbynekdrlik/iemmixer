@@ -349,7 +349,7 @@ async fn get_customization(
     let Some(member) = page.member else {
         return Ok(Json(iem_core::Customization::default()));
     };
-    let c = state.band.customization(&member).map_err(|e| {
+    let c = state.band().customization(&member).map_err(|e| {
         tracing::error!(%member, error = %e, "pins and hides unreadable");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -385,7 +385,7 @@ async fn put_customization(
     let (pinned, pinned_src) = keep(&payload.pinned);
     let (hidden, hidden_src) = keep(&payload.hidden);
     state
-        .band
+        .band()
         .save_customization(&member, pinned_src, hidden_src)
         .map_err(|e| {
             tracing::error!(%member, error = %e, "saving pins and hides failed");

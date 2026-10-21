@@ -488,7 +488,7 @@ async fn a_preset_is_saved_listed_loaded_and_deleted() {
     let (status, p) = call(&app, Method::POST, "/api/presets/member6", Some(&m6), body).await;
     assert_eq!(status, StatusCode::CREATED, "{p}");
     assert_eq!(p["name"], "rehearsal", "the name is trimmed");
-    let stored = s.band.preset("member6", "rehearsal").unwrap().unwrap();
+    let stored = s.band().preset("member6", "rehearsal").unwrap().unwrap();
     let k = stored.sends.iter().find(|x| x.src == keys).unwrap();
     assert_eq!(k.gain_db, -6.0, "the page mix as it was");
     let (status, list) = call(&app, Method::GET, "/api/presets/member6", Some(&m6), None).await;
@@ -515,7 +515,7 @@ async fn a_preset_is_saved_listed_loaded_and_deleted() {
         call(&app, Method::DELETE, one, Some(&m6), None).await.0,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(s.band.preset("member6", "rehearsal").unwrap(), None);
+    assert_eq!(s.band().preset("member6", "rehearsal").unwrap(), None);
     assert_eq!(
         call(&app, Method::DELETE, one, Some(&m6), None).await.0,
         StatusCode::NOT_FOUND
@@ -553,14 +553,14 @@ async fn a_history_entry_is_taken_pinned_unpinned_and_deleted() {
         call(&app, Method::POST, &pin, Some(&m6), gig).await.0,
         StatusCode::OK
     );
-    let entry = s.band.snapshot("member6", ts).unwrap().unwrap();
+    let entry = s.band().snapshot("member6", ts).unwrap().unwrap();
     assert_eq!((entry.pinned, entry.label.as_str()), (true, "gig"));
     let unpin = format!("/api/snapshots/member6/{ts}/unpin");
     assert_eq!(
         call(&app, Method::POST, &unpin, Some(&m6), None).await.0,
         StatusCode::OK
     );
-    let entry = s.band.snapshot("member6", ts).unwrap().unwrap();
+    let entry = s.band().snapshot("member6", ts).unwrap().unwrap();
     assert_eq!((entry.pinned, entry.label.as_str()), (false, "gig"));
 
     // An unknown entry is not found.
@@ -584,7 +584,7 @@ async fn a_history_entry_is_taken_pinned_unpinned_and_deleted() {
         call(&app, Method::DELETE, &one, Some(&m6), None).await.0,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(s.band.snapshot("member6", ts).unwrap(), None);
+    assert_eq!(s.band().snapshot("member6", ts).unwrap(), None);
     assert_eq!(
         call(&app, Method::DELETE, &one, Some(&m6), None).await.0,
         StatusCode::NOT_FOUND

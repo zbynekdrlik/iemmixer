@@ -130,7 +130,7 @@ async fn list_presets(
 ) -> Result<Json<Vec<PresetInfo>>, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     let list = state
-        .band
+        .band()
         .presets(&m)
         .map_err(|e| store_error(e, "reading presets"))?;
     Ok(Json(list.iter().map(PresetInfo::from).collect()))
@@ -147,7 +147,7 @@ async fn save(state: &AppState, page: &Page, member: &str, name: &str) -> Result
     let site = state.site().ok_or_else(engine_unavailable)?;
     let content = capture(&site, &state.engine.mirror(), page);
     state
-        .band
+        .band()
         .save_preset(member, name, content, chrono::Utc::now().timestamp())
         .map_err(|e| store_error(e, "saving the preset"))
 }
@@ -171,7 +171,7 @@ async fn get_preset(
 ) -> Result<Json<Preset>, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     state
-        .band
+        .band()
         .preset(&m, &name)
         .map_err(|e| store_error(e, "reading presets"))?
         .map(Json)
@@ -185,7 +185,7 @@ async fn update_preset(
 ) -> Result<Json<PresetInfo>, Reject> {
     let (page, m) = member_page(&state, &headers, &member).await?;
     if state
-        .band
+        .band()
         .preset(&m, &name)
         .map_err(|e| store_error(e, "reading presets"))?
         .is_none()
@@ -204,7 +204,7 @@ async fn delete_preset(
 ) -> Result<StatusCode, Reject> {
     let (_, m) = member_page(&state, &headers, &member).await?;
     if state
-        .band
+        .band()
         .delete_preset(&m, &name)
         .map_err(|e| store_error(e, "deleting the preset"))?
     {
@@ -222,7 +222,7 @@ async fn restore_preset(
 ) -> Result<Json<serde_json::Value>, Reject> {
     let (page, m) = member_page(&state, &headers, &member).await?;
     let preset = state
-        .band
+        .band()
         .preset(&m, &name)
         .map_err(|e| store_error(e, "reading presets"))?
         .ok_or((StatusCode::NOT_FOUND, Json(ApiError::not_found("Preset"))))?;

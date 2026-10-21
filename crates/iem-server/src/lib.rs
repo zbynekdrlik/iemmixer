@@ -159,8 +159,8 @@ pub struct AppState {
     pub login_guard: Arc<login_guard::LoginGuard>,
     /// Bounded concurrency for argon2id work
     pub hash_gate: Arc<login_guard::HashGate>,
-    /// Presets, history, pins and hides (band schema 3)
-    pub band: Arc<band_store::BandStore>,
+    /// Presets, history, pins and hides (band schema 3): [`AppState::band`]
+    band: Arc<band_store::BandStore>,
     /// Backup files
     pub backup_store: Arc<backup_store::BackupStore>,
     /// Profile photo storage (per-member JPEG files)
@@ -252,6 +252,11 @@ impl AppState {
         Self::try_new(config, config_dir).expect("test AppState: pepper and PIN store")
     }
 
+    /// The presets, history and pins/hides store.
+    pub fn band(&self) -> Arc<band_store::BandStore> {
+        Arc::clone(&self.band)
+    }
+
     /// The roster in use (a copy; its roster is shared), `None` in legacy
     /// mode.
     pub fn roster(&self) -> Option<roster_state::RosterState> {
@@ -333,7 +338,7 @@ impl AppState {
         if lock(&self.auto_snapshots).get(member) == Some(&today) {
             return;
         }
-        match self.band.has_auto_snapshot_on(member, &today) {
+        match self.band().has_auto_snapshot_on(member, &today) {
             Ok(true) => {}
             Ok(false) => {
                 let Some(view) = self.site() else {
@@ -350,7 +355,7 @@ impl AppState {
                     archived: false,
                     legacy_member: None,
                 };
-                if let Err(e) = self.band.add_snapshot(member, snap) {
+                if let Err(e) = self.band().add_snapshot(member, snap) {
                     tracing::error!(%member, error = %e, "daily auto-snapshot failed");
                     return;
                 }

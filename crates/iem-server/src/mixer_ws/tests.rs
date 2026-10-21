@@ -399,7 +399,7 @@ mod live {
             hidden: vec!["keys".into()],
         };
         handle(&s, 1, &page, &m2, pins, &tx).await;
-        let c = s.band.customization("member2").unwrap();
+        let c = s.band().customization("member2").unwrap();
         assert_eq!(c.pinned, vec![Source::Input(InputId::new("mic1"))]);
         assert_eq!(c.hidden, vec![Source::Input(InputId::new("keys"))]);
         let told = ServerMsg::CustomizationUpdate {

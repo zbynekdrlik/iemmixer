@@ -186,7 +186,11 @@ fn solo_msg(state: &AppState, page: &Page) -> ServerMsg {
 }
 
 fn customization_msg(state: &AppState, page: &Page) -> ServerMsg {
-    let (pinned, hidden) = match page.member.as_deref().map(|m| state.band.customization(m)) {
+    let (pinned, hidden) = match page
+        .member
+        .as_deref()
+        .map(|m| state.band().customization(m))
+    {
         Some(Ok(c)) => (
             c.pinned.iter().map(ToString::to_string).collect(),
             c.hidden.iter().map(ToString::to_string).collect(),
@@ -483,7 +487,7 @@ async fn handle(
             let (pinned_ids, pinned_src) = known(pinned);
             let (hidden_ids, hidden_src) = known(hidden);
             if let Err(e) = state
-                .band
+                .band()
                 .save_customization(member, pinned_src, hidden_src)
             {
                 tracing::error!(%member, error = %e, "saving pins and hides failed");

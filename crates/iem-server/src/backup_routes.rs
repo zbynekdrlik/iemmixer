@@ -75,7 +75,7 @@ pub fn capture_now(state: &AppState) -> Result<(String, MixerBackup), String> {
     let b = crate::backup::capture(
         &site,
         &state.engine.mirror(),
-        &state.band,
+        &state.band(),
         chrono::Utc::now()
             .format("%Y-%m-%dT%H:%M:%S%.3fZ")
             .to_string(),
@@ -104,7 +104,7 @@ async fn get_backup(
 fn preview_of(state: &AppState, b: &MixerBackup) -> Result<RestorePreview, Reject> {
     let site = state.site().ok_or_else(unavailable)?;
     let current = state.engine.mirror().state.clone();
-    let band = std::sync::Arc::clone(&state.band);
+    let band = state.band();
     Ok(crate::backup::preview(
         &site,
         &current,
@@ -165,7 +165,7 @@ async fn restore_backup(
                 .collect()
         };
         if let Err(e) = state
-            .band
+            .band()
             .save_customization(member, keep(&c.pinned), keep(&c.hidden))
         {
             tracing::error!(%member, error = %e, "restoring pins and hides failed");

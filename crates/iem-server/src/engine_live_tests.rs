@@ -118,7 +118,7 @@ async fn a_ui_command_changes_the_engine_and_tells_the_other_sessions() {
         }]
     );
     // The daily auto-snapshot was taken before the change.
-    let snaps = s.band.snapshots("member2").unwrap();
+    let snaps = s.band().snapshots("member2").unwrap();
     assert_eq!(snaps.len(), 1);
     assert_eq!(snaps[0].label, "auto");
     let keys = snaps[0]
@@ -296,7 +296,7 @@ async fn a_backup_restores_through_import_state() {
         )
         .await
         .unwrap();
-    let backup = crate::backup::capture(&site, &s.engine.mirror(), &s.band, "t".into()).unwrap();
+    let backup = crate::backup::capture(&site, &s.engine.mirror(), &s.band(), "t".into()).unwrap();
     s.engine
         .request_applied(
             Cmd::SetInput {
