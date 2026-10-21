@@ -45,6 +45,7 @@ fn mix(id: &str, tx: &[u16], hears: &[&str]) -> TopoMix {
         id: MixId::new(id),
         tx: tx.to_vec(),
         mixes: hears.iter().map(|h| MixId::new(*h)).collect(),
+        peers: Vec::new(),
     }
 }
 

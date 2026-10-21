@@ -119,6 +119,27 @@ fn the_synthetic_site_is_the_test_site() {
     assert_eq!(topo().diff(&synthetic_site()), Vec::<String>::new());
 }
 
+/// #58: the importer's topology carries the site's peers (member3 hears the
+/// other sets as peers) and its `[engine]` table written back compiles to
+/// the same topology, peers included.
+#[test]
+fn the_site_topology_carries_the_peers_and_writes_them_back() {
+    let t = topo();
+    let m3 = t.mix(&MixId::new("member3")).unwrap();
+    assert_eq!(m3.peers.len(), 8);
+    assert_eq!(m3.peers[0], MixId::new("member1"));
+    assert!(
+        t.mixes
+            .iter()
+            .filter(|m| m.id != MixId::new("member3"))
+            .all(|m| m.peers.is_empty())
+    );
+    let table = iem_engine::site::parse(&t.engine_toml(160)).unwrap();
+    let back = iem_engine::topology::compile(&table).unwrap();
+    assert_eq!(back.hash, site::open(&site_path()).unwrap().compiled.hash);
+    assert_eq!(site::topology(&table), t);
+}
+
 fn unix_ms() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     u64::try_from(since.as_millis()).unwrap()

@@ -64,6 +64,7 @@ pub fn topology(site: &Site) -> Topology {
                 id: MixId::new(m.id.clone()),
                 tx: m.tx.clone(),
                 mixes: m.mixes.iter().map(|h| MixId::new(h.clone())).collect(),
+                peers: m.peers.iter().map(|p| MixId::new(p.clone())).collect(),
             })
             .collect(),
         engineer: Some(MixId::new(site.engineer.clone())),

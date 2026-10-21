@@ -348,6 +348,7 @@ fn mix_track(
             id: id.clone(),
             tx,
             mixes: Vec::new(),
+            peers: Vec::new(),
         },
         out,
         listen,

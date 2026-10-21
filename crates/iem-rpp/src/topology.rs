@@ -1,7 +1,7 @@
 //! The engine topology as the importer sees it (#20 design note §4, §7): the
 //! same content as the `[engine]` table of `site.toml` — inputs, groups,
-//! mixes and the mixes each one hears — so a project and a site file compare
-//! id by id. The project's own routing (which levels and group strips it can
+//! mixes, the mixes each one hears and its peers (#58) — so a project and a
+//! site file compare id by id. The project's own routing (which levels and group strips it can
 //! hold) is [`Routing`]; its REAPER counts are [`Counts`].
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +29,10 @@ pub struct TopoMix {
     pub tx: Vec<u16>,
     /// The mixes it hears.
     pub mixes: Vec<MixId>,
+    /// The sets it hears as peers (#58): carried from `site.toml` and
+    /// written back to it. A predecessor project holds none (REAPER cannot
+    /// let two tracks hear each other), so they are not compared.
+    pub peers: Vec<MixId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -176,7 +180,8 @@ impl Topology {
     }
 
     /// Differences between this topology (the project's) and `site`'s, by id;
-    /// the order of groups' inputs and of heard mixes does not matter.
+    /// the order of groups' inputs and of heard mixes does not matter. Peers
+    /// (#58) are iemmixer's own and not compared: a project holds none.
     pub fn diff(&self, site: &Topology) -> Vec<String> {
         let mut out = Vec::new();
         let a: BTreeMap<&InputId, &TopoInput> = self.inputs.iter().map(|i| (&i.id, i)).collect();
@@ -307,6 +312,9 @@ impl Topology {
             if !m.mixes.is_empty() {
                 let _ = writeln!(s, "mixes = {}", list(&m.mixes));
             }
+            if !m.peers.is_empty() {
+                let _ = writeln!(s, "peers = {}", list(&m.peers));
+            }
         }
         s
     }
@@ -390,6 +398,7 @@ mod tests {
             id: mix("spare"),
             tx: vec![150],
             mixes: vec![],
+            peers: vec![],
         });
         b.engineer = None;
         let d = a.diff(&b);
@@ -442,6 +451,8 @@ mod tests {
         tx: Vec<u16>,
         #[serde(default)]
         mixes: Vec<String>,
+        #[serde(default)]
+        peers: Vec<String>,
     }
 
     #[test]
@@ -478,11 +489,48 @@ mod tests {
             .unwrap();
         assert_eq!(tr.tx, vec![93]);
         assert!(tr.mixes.is_empty() && !text.contains("mixes = []"));
+        assert!(tr.peers.is_empty() && !text.contains("peers"));
         let no_engineer = Topology {
             engineer: None,
             ..t
         };
         assert!(!no_engineer.engine_toml(8).contains("engineer ="));
+    }
+
+    /// #58: a site's peers round-trip through the importer's topology: the
+    /// `[engine]` table written back keeps them, in their order, they do not
+    /// change the declaration order (a peer may be declared after), and they
+    /// are not compared with a project, which cannot hold any.
+    #[test]
+    fn a_sites_peers_round_trip_through_the_topology() {
+        let plain = synthetic_site();
+        let mut t = plain.clone();
+        let m3 = t.mixes.iter().position(|m| m.id == mix("member3")).unwrap();
+        t.mixes[m3].peers = vec![mix("member1"), mix("member2")];
+        let text = t.engine_toml(160);
+        assert!(
+            text.contains("peers = [\"member1\", \"member2\"]\n"),
+            "{text}"
+        );
+        let file: File = toml::from_str(&text).unwrap();
+        let ids: Vec<&str> = file.engine.mixes.iter().map(|m| m.id.as_str()).collect();
+        let plain_text = plain.engine_toml(160);
+        let before: File = toml::from_str(&plain_text).unwrap();
+        let plain_ids: Vec<&str> = before.engine.mixes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, plain_ids, "peers do not reorder the mixes");
+        for m in &file.engine.mixes {
+            let want: Vec<String> = t
+                .mix(&mix(&m.id))
+                .unwrap()
+                .peers
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(m.peers, want, "{}", m.id);
+        }
+        assert_eq!(text.matches("peers = ").count(), 1);
+        assert_eq!(plain.diff(&t), Vec::<String>::new());
+        assert_eq!(t.diff(&plain), Vec::<String>::new());
     }
 
     #[test]
@@ -491,6 +539,7 @@ mod tests {
             id: mix(id),
             tx: vec![1, 2],
             mixes: hears.iter().map(|h| mix(h)).collect(),
+            peers: Vec::new(),
         };
         let t = Topology {
             mixes: vec![

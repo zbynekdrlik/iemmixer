@@ -23,7 +23,8 @@ pub struct MixView {
     pub id: MixId,
     pub name: String,
     pub member: Option<String>,
-    /// The mixes it hears (its Mixes tab), in topology order.
+    /// The mixes it hears (its Mixes tab) in its level slots' order: the
+    /// mixes it hears whole, then its peers (#58).
     pub hears: Vec<MixId>,
     pub mono: bool,
 }
@@ -114,7 +115,7 @@ impl SiteView {
                     id: m.id.clone(),
                     name: member.map_or_else(|| title(&m.id.0), |s| s.name.clone()),
                     member: member.map(|s| s.id.clone()),
-                    hears: m.mixes.clone(),
+                    hears: m.mixes.iter().chain(&m.peers).cloned().collect(),
                     mono: m.channels == 1,
                 }
             })
@@ -256,6 +257,40 @@ pub(crate) mod tests {
             v.member_of_mix(&MixId::new("engineer"))
                 .map(|m| m.id.as_str()),
             Some("engineer")
+        );
+    }
+
+    /// #58: a peer is a mix the page hears, after the mixes it hears whole.
+    #[test]
+    fn a_mix_hears_its_peers_after_its_mixes() {
+        let v = test_view();
+        let m3 = v.mix(&MixId::new("member3")).unwrap();
+        assert_eq!(m3.hears.len(), 8);
+        assert_eq!(m3.hears[0], MixId::new("member1"));
+        assert!(!m3.hears.contains(&MixId::new("member3")));
+        // member1 still hears the other members whole.
+        assert_eq!(
+            v.mix(&MixId::new("member1")).unwrap().hears[0],
+            MixId::new("member2")
+        );
+        // A mix that hears both: its heard mixes, then its peers.
+        let mut topo = test_topology();
+        let m2 = topo
+            .mixes
+            .iter_mut()
+            .find(|m| m.id == MixId::new("member2"))
+            .unwrap();
+        m2.mixes = vec![MixId::new("member4")];
+        m2.peers = vec![MixId::new("member9"), MixId::new("member1")];
+        let (v, problems) = SiteView::build(&test_config(), &topo);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            v.mix(&MixId::new("member2")).unwrap().hears,
+            [
+                MixId::new("member4"),
+                MixId::new("member9"),
+                MixId::new("member1")
+            ]
         );
     }
 

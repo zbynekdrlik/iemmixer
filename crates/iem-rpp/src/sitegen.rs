@@ -58,17 +58,20 @@ pub fn synthetic_site() -> Topology {
             } else {
                 Vec::new()
             },
+            peers: Vec::new(),
         });
     }
     t.mixes.push(TopoMix {
         id: MixId::new("engineer"),
         tx: vec![91, 92],
         mixes: members.clone(),
+        peers: Vec::new(),
     });
     t.mixes.push(TopoMix {
         id: MixId::new("translator"),
         tx: vec![93],
         mixes: Vec::new(),
+        peers: Vec::new(),
     });
     t.engineer = Some(MixId::new("engineer"));
     t
@@ -723,6 +726,7 @@ mod tests {
             id: MixId::new(m),
             tx,
             mixes: heard.iter().map(|h| MixId::new(*h)).collect(),
+            peers: Vec::new(),
         };
         let topo = Topology {
             inputs: vec![input("a", 1), input("b", 2), input("c", 3)],
