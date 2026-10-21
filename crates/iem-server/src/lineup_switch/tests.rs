@@ -521,7 +521,36 @@ async fn an_engine_refusal_keeps_the_old_lineup() {
     assert_eq!(store.intent().unwrap(), None);
     assert_eq!(state.roster().unwrap().active, "main");
     assert!(!state.frozen_now());
-    assert!(rx.try_recv().is_err(), "nothing announced");
+    // #58 re-review: the pages heard nothing of the engine while frozen:
+    // they hear which band plays (still main).
+    assert_eq!(rx.try_recv().unwrap().id, "main");
+    assert!(rx.try_recv().is_err(), "once");
+}
+
+/// #58 re-review: every unfreeze tells the pages, which heard nothing of
+/// the engine while frozen: a switch a restart cut short after its target
+/// was recorded only clears the intent, and the pages hear which band
+/// plays.
+#[tokio::test]
+async fn a_replay_that_only_clears_the_intent_tells_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = cut_short(dir.path(), "youth", "youth");
+    let mut rx = state.lineup_tx.subscribe();
+    assert_eq!(replay_intent(&state).await, Ok(()));
+    assert!(!state.frozen_now());
+    assert_eq!(rx.try_recv().unwrap(), youth_ref());
+}
+
+/// #58 re-review: a freeze whose barrier fails frees the pages again and
+/// tells them.
+#[tokio::test]
+async fn a_failed_freeze_tells_the_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = with_roster(dir.path(), "main");
+    let mut rx = state.lineup_tx.subscribe();
+    assert_eq!(state.freeze().await, Err(EngineError::Disconnected));
+    assert!(!state.frozen_now());
+    assert_eq!(rx.try_recv().unwrap().id, "main");
 }
 
 /// Waits (≤ 5 s) until `done` holds.
