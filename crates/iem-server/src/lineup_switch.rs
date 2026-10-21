@@ -395,10 +395,15 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
         .lineup(&intent.to)
         .unwrap_or_else(|| roster.lineup())
         .clone();
+    let other = roster.roster.lineup(&intent.from);
     if active.as_deref() != Some(intent.to.as_str()) {
         let stored = store.state(&lineup.id).map_err(|e| e.to_string())?;
-        let other = roster.roster.lineup(&intent.from);
         play(state, &store, &roster.roster, &lineup, stored, other).await?;
+    } else if let Some(before) = other {
+        // The engine holds the target's state already, with the band
+        // before's solos: those of the sets whose wearer changed end.
+        let soloed = soloed_changing(&state.engine.mirror().transient, before, &lineup);
+        end_solos(state, &soloed).await;
     }
     store.clear_intent().map_err(|e| e.to_string())?;
     tracing::warn!(lineup = %lineup.id, "a switch the engine dropped or a restart cut short is finished");

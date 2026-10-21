@@ -591,6 +591,16 @@ pub(crate) fn soloed_changing(
         .collect()
 }
 
+/// Every mix someone solos in `transient`.
+pub(crate) fn every_solo(transient: &Transient) -> Vec<MixId> {
+    transient
+        .solo
+        .iter()
+        .filter(|s| !s.sources.is_empty())
+        .map(|s| s.mix.clone())
+        .collect()
+}
+
 /// Ends the solo of each of `mixes` (a failure is logged: the solo then
 /// ends when its mix's last page has gone).
 pub(crate) async fn end_solos(state: &AppState, mixes: &[MixId]) {
@@ -909,11 +919,16 @@ async fn transition(
         };
         (next, running)
     };
-    // A solo ends on every set of the active lineup whose wearer changes
-    // (when who wore it is not known, every solo stays).
+    // A solo ends on every set of the active lineup whose wearer changes;
+    // when who wore the sets is not known, every solo ends (#58 third
+    // review); a state on the new roster already changes nobody's set.
+    let already = marker.as_deref() == Some(new_sha);
     let before = from.and_then(|f| f.lineup(active));
-    let soloed_now =
-        |t: &Transient| before.map_or_else(Vec::new, |b| soloed_changing(t, b, &lineup));
+    let soloed_now = |t: &Transient| match before {
+        _ if already => Vec::new(),
+        Some(b) => soloed_changing(t, b, &lineup),
+        None => every_solo(t),
+    };
     let (current, soloed) = {
         let m = state.engine.mirror();
         (m.state.clone(), soloed_now(&m.transient))
