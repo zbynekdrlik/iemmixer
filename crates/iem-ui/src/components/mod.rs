@@ -11,6 +11,7 @@ pub mod console_section;
 pub mod eq_modal;
 pub mod fader;
 pub mod limiter_modal;
+pub mod lineup_notice;
 pub mod meter;
 pub mod pan;
 pub mod pin_change_modal;

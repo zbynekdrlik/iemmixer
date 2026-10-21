@@ -14,13 +14,21 @@ const API_BASE: &str = "/api";
 /// Network timeout in milliseconds
 const NETWORK_TIMEOUT_MS: i32 = 5000;
 
+fn yes() -> bool {
+    true
+}
+
 /// Member info from server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberInfo {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub has_photo: bool,
+    /// Plays in the band that plays (#58); a server that does not say:
+    /// everyone plays.
+    #[serde(default = "yes")]
+    pub playing: bool,
 }
 
 /// Re-export Channel from iem_core to avoid duplicate type
@@ -461,6 +469,28 @@ mod tests {
         for status in [404, 500, 502, 503, 504, 530] {
             assert!(!token_refused(status), "{status} is no verdict");
         }
+    }
+
+    #[test]
+    fn lineup_info_reads_and_a_missing_playing_means_playing() {
+        let member: MemberInfo =
+            serde_json::from_str(r#"{"id":"member1","name":"Member 1"}"#).unwrap();
+        assert!(member.playing, "a server without rosters: everyone plays");
+        assert!(!member.has_photo);
+        let away: MemberInfo = serde_json::from_str(
+            r#"{"id":"member10","name":"Member 10","has_photo":true,"playing":false}"#,
+        )
+        .unwrap();
+        assert!(!away.playing && away.has_photo);
+        let info: iem_core::LineupInfo = serde_json::from_str(concat!(
+            r#"{"active":{"id":"main","name":"Main band"},"#,
+            r#""lineups":[{"id":"main","name":"Main band"},{"id":"youth","name":"Youth band"}],"#,
+            r#""playing":true,"leader":true,"can_switch":true}"#
+        ))
+        .unwrap();
+        assert_eq!(info.active.id, "main");
+        assert_eq!(info.lineups[1].name, "Youth band");
+        assert!(info.playing && info.leader && info.can_switch);
     }
 
     #[test]
