@@ -1223,3 +1223,37 @@ async fn a_reload_waits_for_a_switch_and_applies_to_its_lineup() {
     assert!(imported.mixes[&MixId::new("member4")].out.muted);
     assert_eq!(state.roster().unwrap().active, "youth");
 }
+
+/// #58 review: the watcher's step reads a roster that waits for the engine
+/// (Deferred) again at every poll until it is in use; a stamp it has seen
+/// is not read again, whatever the file holds.
+#[tokio::test]
+async fn the_watcher_reads_a_waiting_roster_again_at_every_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "youth");
+    let path = d.join(ROSTER_FILE);
+    let text = without_member11();
+    std::fs::write(&path, &text).unwrap();
+    let first = stamp(&path);
+    assert!(first.is_some());
+    // The engine is not synced: the roster waits, and is read again.
+    assert_eq!(poll(&state, &path, None).await, None);
+    assert_eq!(poll(&state, &path, None).await, None);
+    assert_eq!(state.roster(), Some(test_roster("youth")));
+    let mut peer = synced(&mut state, youth_running()).await;
+    let step = {
+        let s = state.clone();
+        let p = path.clone();
+        tokio::spawn(async move { poll(&s, &p, None).await })
+    };
+    imports(&mut peer).await;
+    assert_eq!(within(step).await, first, "in use: compared from now on");
+    assert!(status(d).applied);
+    let in_use = state.roster().unwrap().sha256;
+    assert_eq!(in_use, sha256_hex(text.as_bytes()));
+    std::fs::write(&path, TEXT).unwrap();
+    let edited = stamp(&path);
+    assert_eq!(poll(&state, &path, edited).await, edited);
+    assert_eq!(state.roster().unwrap().sha256, in_use, "not read");
+}

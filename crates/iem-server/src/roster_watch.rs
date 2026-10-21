@@ -1052,13 +1052,22 @@ pub async fn watch(state: AppState) {
     let mut seen: Stamp = None;
     loop {
         tokio::time::sleep(POLL).await;
-        let now = stamp(&path);
-        if now != seen {
-            seen = now;
-            if let Some(Applied::Deferred(_)) = check_file(&state).await {
-                seen = None;
-            }
-        }
+        seen = poll(&state, &path, seen).await;
+    }
+}
+
+/// One poll of [`watch`]: the file at `path` is read ([`check_file`]) when
+/// its stamp is not `seen`. Returns what the next poll compares with: the
+/// file's stamp, or `None` after a roster [`Applied::Deferred`] so the next
+/// poll reads it again.
+async fn poll(state: &AppState, path: &Path, seen: Stamp) -> Stamp {
+    let now = stamp(path);
+    if now == seen {
+        return seen;
+    }
+    match check_file(state).await {
+        Some(Applied::Deferred(_)) => None,
+        _ => now,
     }
 }
 
