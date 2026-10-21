@@ -260,13 +260,13 @@
   pub struct LineupRef { pub id: String, pub name: String }
   ```
   (`LineupInfo` and `LineupRef` live in `iem-core` beside `ws.rs` so the UI shares them.)
-- `switch_lineup` order (spec §7): right (engineer, or `roster.leads_any(sub)`) → `switching.try_lock()` else `Busy` → target exists and differs → `frozen = true` → capture the mirror (synced) with the active lineup's customizations into `lineups/<from>/state.json` → `set_intent({from, to})` → `request_applied(ImportState { state: target_state(..), baseline: false }, None)` → `set_active(to)` → `clear_intent` → swap `AppState.roster.active` → `frozen = false` → broadcast `LineupChanged`, close every member mixer socket with code `CLOSE_LINEUP = 4002` → Web Push to the engineer. Any error after the intent: import `lineups/<from>/state.json` again (best effort), `clear_intent`, `frozen = false`, return the error; the active lineup is unchanged.
+- `switch_lineup` order (spec §7): right (engineer, or `roster.leads_any(sub)`) → `switching.try_lock()` else `Busy` → target exists and differs → `frozen = true` → capture the mirror (synced) with the active lineup's customizations into `lineups/<from>/state.json` → `set_intent({from, to})` → `request_applied(ImportState { state: target_state(..), baseline: false }, None)` → `set_active(to)` → `clear_intent` → swap `AppState.roster.active` → `frozen = false` → broadcast `LineupChanged`, close every member mixer socket with code `CLOSE_LINEUP = 4003` (4001 is `CLOSE_RELOAD`, 4002 `ws_alive::CLOSE_SILENT`) → Web Push to the engineer. Any error after the intent: import `lineups/<from>/state.json` again (best effort), `clear_intent`, `frozen = false`, return the error; the active lineup is unchanged.
 - `target_state`: the target's stored state completed by `keep_running(.., current)`, or a copy of `current` when it has none; then every entry of `mixes[set].mixes` (the heard mixes and peers) on a set whose person in the target is not one of its leaders is `muted`, and a set with no person in the target gets `out.muted = true`.
 - `replay_intent` at start: with an intent and `active == from`, import `to`'s stored state, `set_active(to)`, clear; with `active == to`, clear only.
 - `LineupInfo.can_switch` = engineer, or a leader of any lineup. `playing` = the bearer is placed in the active lineup (the engineer: true). `leader` = a leader of the active lineup.
 
 - [ ] **Step 1: Failing tests** (`engine::client::fake` for the engine, temp config dirs):
-  - `lineup_switch::tests::a_leader_switches_and_everyone_gets_their_lineup_state` (main → youth: the import carries youth's stored state, `active.json` says youth, the intent is gone, `LineupChanged` broadcast, member sockets closed with 4002).
+  - `lineup_switch::tests::a_leader_switches_and_everyone_gets_their_lineup_state` (main → youth: the import carries youth's stored state, `active.json` says youth, the intent is gone, `LineupChanged` broadcast, member sockets closed with 4003).
   - `…a_non_leader_cannot_switch` (403), `…the_engineer_can`, `…a_youth_leader_can_switch_back_to_main_without_playing_in_it`.
   - `…a_second_switch_is_busy` (two concurrent calls: one 204, one `Busy`).
   - `…mix_changes_are_refused_while_switching` (a `SetLevel` through `mixer_ws::handle` while `frozen` gets `ViewError::Switching` and reaches no engine).
@@ -295,11 +295,11 @@
 
 ## Part C — The UI (PR 3)
 
-### Task 10: `LineupChanged` and close code 4002 in the protocol
+### Task 10: `LineupChanged` and close code 4003 in the protocol
 
 **Files:**
-- Modify: `crates/iem-core/src/ws.rs` (`ServerMsg::LineupChanged(LineupRef)`; round-trip tests), `crates/iem-server/src/mixer_ws.rs` (`CLOSE_LINEUP = 4002`)
-- Modify: `crates/iem-ui/src/pages/mixer/connection.rs` (handle `LineupChanged`, a close with 4002 re-reads `/api/lineup` and reconnects or shows the notice; never `location.reload()`)
+- Modify: `crates/iem-core/src/ws.rs` (`ServerMsg::LineupChanged(LineupRef)`; round-trip tests), `crates/iem-server/src/mixer_ws.rs` (`CLOSE_LINEUP = 4003` (4001 is `CLOSE_RELOAD`, 4002 `ws_alive::CLOSE_SILENT`))
+- Modify: `crates/iem-ui/src/pages/mixer/connection.rs` (handle `LineupChanged`, a close with 4003 re-reads `/api/lineup` and reconnects or shows the notice; never `location.reload()`)
 - Test: `ws.rs` round trip; `crates/iem-ui/src/pages/mixer/helpers.rs` native test `a_lineup_close_is_neither_a_failure_nor_a_reload`
 
 - [ ] Steps: failing tests → push → implement → push → commit `feat(ui): follow a lineup change (#58)`.
