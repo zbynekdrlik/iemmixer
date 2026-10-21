@@ -375,7 +375,7 @@ pub(crate) enum Step {
 /// The work a committed migration still has to do, kept in
 /// [`PENDING_FILE`] until it is done.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Pending {
+struct MigrationPending {
     format: String,
     /// Ids whose legacy files (`<kind>/<id>.json`) are copies now: deleted.
     delete: Vec<String>,
@@ -540,7 +540,7 @@ pub(crate) fn migrate_with(
         .copied()
         .chain(takers.iter().map(|&(_, x)| x))
         .collect();
-    let pending = Pending {
+    let pending = MigrationPending {
         format: PENDING_FORMAT.into(),
         delete: former.iter().copied().map(str::to_string).collect(),
         archive: former
@@ -575,7 +575,7 @@ fn finish(config_dir: &Path, roster: &Roster, pins: &mut PinStore) -> io::Result
     let Some(text) = read_optional(&path)? else {
         return Ok(Vec::new());
     };
-    let pending: Pending =
+    let pending: MigrationPending =
         serde_json::from_str(&text).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
     if pending.format != PENDING_FORMAT {
         return Err(invalid(format!(
