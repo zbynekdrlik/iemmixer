@@ -510,16 +510,17 @@ fn the_reference_model_encodes_a3_a6_a7_a9_a10() {
 /// #58 design §8: a peer is heard as its own mix, without the mixes it
 /// hears; a mix heard whole brings everything it hears. On the test site
 /// member1 and member3 hear each other as peers, member1 hears member2 as a
-/// peer and the engineer hears member1 whole; the engine agrees.
+/// peer and the engineer hears member1 whole; the engine agrees. Every level
+/// differs (0, −3, −6, −12, −18 dB), so each gain is seen to apply once.
 #[test]
 fn the_reference_model_encodes_peers() {
     let site = site();
     let topo = common::topology();
     let mut state = MixState::default();
-    let set = |s: &mut MixState, mix: &str, source: Source| {
+    let set = |s: &mut MixState, mix: &str, source: Source, gain_db: f64| {
         let m = s.mixes.entry(MixId::new(mix)).or_default();
         let l = Level {
-            gain_db: 0.0,
+            gain_db,
             ..Level::default()
         };
         match source {
@@ -529,29 +530,48 @@ fn the_reference_model_encodes_peers() {
     };
     let input = |s: &str| Source::Input(InputId::new(s));
     let heard = |s: &str| Source::Mix(MixId::new(s));
-    set(&mut state, "member2", input("mic2"));
-    set(&mut state, "member1", input("mic1"));
-    set(&mut state, "member1", heard("member2"));
-    set(&mut state, "member1", heard("member3"));
-    set(&mut state, "member3", heard("member1"));
-    set(&mut state, "engineer", heard("member1"));
+    set(&mut state, "member2", input("mic2"), 0.0);
+    set(&mut state, "member1", input("mic1"), 0.0);
+    set(&mut state, "member3", input("mic3"), 0.0);
+    set(&mut state, "member1", heard("member2"), -6.0);
+    set(&mut state, "member1", heard("member3"), -12.0);
+    set(&mut state, "member3", heard("member1"), -18.0);
+    set(&mut state, "engineer", heard("member1"), -3.0);
     let mut model = Model::new(&site, &state);
     let m = model.tx_matrix();
     let col = |id: &str| topo.inputs[topo.input_index(&InputId::new(id)).unwrap()].rx[0];
     let row = |id: &str| topo.mixes[topo.mix_index(&MixId::new(id)).unwrap()].tx[0].unwrap();
+    let close = |got: f64, want: f64| (got - want).abs() < 1e-15;
+    // A level of `db` at the centre, and each volume at 0 dB (g).
     let g = gains(0.0).0;
-    // member1's own output carries mic1 at its level and volume (g²);
-    // member3 hears it as a peer: g² at its level and volume, g⁴, and
-    // nothing of member2, which member1 hears as a peer.
-    assert!((m[row("member3")][col("mic1")] - g.powi(4)).abs() < 1e-15);
-    assert_eq!(m[row("member3")][col("mic2")], 0.0);
-    // member1 hears member2's own output (g⁴) and member3's, which carries
-    // nothing of member1 back: mic1 only at its own level and volume.
-    assert!((m[row("member1")][col("mic2")] - g.powi(4)).abs() < 1e-15);
-    assert!((m[row("member1")][col("mic1")] - g * g).abs() < 1e-15);
-    // The engineer hears member1 whole: its peer member2 too.
-    assert!((m[row("engineer")][col("mic1")] - g.powi(4)).abs() < 1e-15);
-    assert!((m[row("engineer")][col("mic2")] - g.powi(6)).abs() < 1e-15);
+    let lvl = |db: f64| db_to_lin(db) * g;
+    // Each mix's own output: its own input at 0 dB and its volume.
+    let own = g * g;
+    // member1: its mic1 once (member3's own output carries nothing of
+    // member1 back), member2's and member3's own output each at its level.
+    let m1 = |id: &str| m[row("member1")][col(id)];
+    assert!(close(m1("mic1"), own), "{}", m1("mic1"));
+    assert!(close(m1("mic2"), lvl(-6.0) * own * g), "{}", m1("mic2"));
+    assert!(close(m1("mic3"), lvl(-12.0) * own * g), "{}", m1("mic3"));
+    // member3: member1's own output at −18 dB, without member2, which
+    // member1 hears as a peer.
+    let m3 = |id: &str| m[row("member3")][col(id)];
+    assert!(close(m3("mic3"), own), "{}", m3("mic3"));
+    assert!(close(m3("mic1"), lvl(-18.0) * own * g), "{}", m3("mic1"));
+    assert_eq!(m3("mic2"), 0.0);
+    // The engineer hears member1 whole at −3 dB: its peers come along.
+    let eng = |id: &str| m[row("engineer")][col(id)];
+    for (id, of_member1) in [
+        ("mic1", own),
+        ("mic2", lvl(-6.0) * own * g),
+        ("mic3", lvl(-12.0) * own * g),
+    ] {
+        assert!(
+            close(eng(id), lvl(-3.0) * of_member1 * g),
+            "{id}: {}",
+            eng(id)
+        );
+    }
     // The engine agrees on this state (impulses kept below every limit).
     let times = impulse_times(topo.rx.len());
     let out = render(&topo, &state, &impulses(topo.rx.len()), 32);
