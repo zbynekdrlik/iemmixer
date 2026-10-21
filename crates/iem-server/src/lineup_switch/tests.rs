@@ -1069,6 +1069,43 @@ async fn a_replay_waits_for_the_engines_state() {
     assert_eq!(state.roster().unwrap().active, "youth");
 }
 
+/// A switch a restart cut short, with the engine synced: replay_when_synced
+/// finishes it at the first try. Bounded on a thread of its own: the
+/// replay runs on that thread's runtime and the test waits 5 s for its
+/// outcome. A synced engine answers `wait_synced` at once without yielding,
+/// so a mutant that loops on it (`continue` while synced) holds that
+/// runtime for good, which no timer on it could end; this test then fails
+/// in 5 s instead of hanging.
+#[test]
+fn a_replay_on_a_synced_engine_finishes_at_the_first_try() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = cut_short(dir.path(), "main", "youth");
+            let (engine, mut peer) = fake::announced(test_topology()).await;
+            state.engine = engine;
+            fake::sync(&state.engine, &mut peer, 1, running()).await;
+            let replay = tokio::spawn(replay_when_synced(state.clone()));
+            fake::imports(&mut peer, 2).await;
+            let replayed = replay.await.unwrap();
+            let active = state.roster().unwrap().active;
+            (replayed, state.frozen_now(), active)
+        });
+        let _ = tx.send(outcome);
+    });
+    let (replayed, frozen, active) = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the replay's outcome within 5 s");
+    assert_eq!(replayed, Replayed::Finished { tries: 1 });
+    assert!(!frozen);
+    assert_eq!(active, "youth");
+}
+
 /// A solo of `input` on `mix`.
 fn solo(mix: &str, input: &str) -> iem_engine_proto::Solo {
     iem_engine_proto::Solo {
