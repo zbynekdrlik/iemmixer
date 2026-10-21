@@ -518,6 +518,82 @@ async fn a_quiet_thaw_announces_only_after_a_page_missed_an_engine_event() {
     assert_eq!(rx.try_recv().unwrap().id, "main", "after a change");
 }
 
+/// #58 Part C: after a switch or a roster change every page first hears
+/// which band plays (`LineupChanged`, read from the roster in use). A
+/// person's page then closes with 4003; the engineer's page and the
+/// translator's (no person) stay and get their state and pins and hides
+/// again. Legacy mode has no band to tell of.
+#[tokio::test]
+async fn every_page_first_hears_which_band_plays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _peer) = on_fake_engine(dir.path(), "youth", Vec::new()).await;
+    let youth = ServerMsg::LineupChanged(iem_core::LineupRef {
+        id: "youth".into(),
+        name: "Youth band".into(),
+    });
+    let m10 = s.page("member10").unwrap();
+    match on_lineup(&s, &m10, &viewer("member10", false)) {
+        OnLineup::Close(told, frame) => {
+            assert_eq!(told, [youth.clone()]);
+            assert_eq!(frame.code, CLOSE_LINEUP);
+        }
+        other => panic!("{other:?}"),
+    }
+    for id in ["engineer", "translator"] {
+        let page = s.page(id).unwrap();
+        match on_lineup(&s, &page, &viewer("engineer", true)) {
+            OnLineup::Refresh(msgs) => {
+                assert_eq!(msgs.first(), Some(&youth), "{id}");
+                assert!(
+                    matches!(
+                        &msgs[1..],
+                        [
+                            ServerMsg::State { .. },
+                            ServerMsg::CustomizationUpdate { .. }
+                        ]
+                    ),
+                    "{id}: {msgs:?}"
+                );
+            }
+            other => panic!("{id}: {other:?}"),
+        }
+    }
+    // The band in use, whatever the announcement carried.
+    s.set_roster(Some(crate::roster_state::tests::test_roster("main")));
+    let m1 = s.page("member1").unwrap();
+    match on_lineup(&s, &m1, &viewer("member1", false)) {
+        OnLineup::Close(told, _) => assert_eq!(
+            told,
+            [ServerMsg::LineupChanged(iem_core::LineupRef {
+                id: "main".into(),
+                name: "Main band".into(),
+            })]
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Legacy mode: no band to tell of.
+    s.set_roster(None);
+    let m1 = s.page("member1").unwrap();
+    assert!(matches!(
+        on_lineup(&s, &m1, &viewer("member1", false)),
+        OnLineup::Close(told, _) if told.is_empty()
+    ));
+    let engineer = s.page("engineer").unwrap();
+    match on_lineup(&s, &engineer, &viewer("engineer", true)) {
+        OnLineup::Refresh(msgs) => assert!(
+            matches!(
+                msgs.as_slice(),
+                [
+                    ServerMsg::State { .. },
+                    ServerMsg::CustomizationUpdate { .. }
+                ]
+            ),
+            "{msgs:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Commands, engine events and meters against the real engine (NullRt).
 #[cfg(unix)]
 mod live {

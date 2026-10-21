@@ -36,10 +36,62 @@ pub struct LoginResponse {
 }
 
 /// API error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
+}
+
+impl ApiError {
+    /// The error a refused answer carries: the server's `{code, message}`
+    /// when its body is one, else `HTTP_<status>`.
+    pub fn of(status: u16, body: &str) -> Self {
+        serde_json::from_str(body).unwrap_or_else(|_| Self {
+            code: format!("HTTP_{status}"),
+            message: format!("Server error: {status}"),
+        })
+    }
+}
+
+/// `GET /api/lineup`'s answer (#58) by its status and body: the band that
+/// plays and what the bearer may do, or `None` on a site without a roster
+/// (204, or the 404 `NOT_CONFIGURED` of a server from before Part C).
+pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupInfo>, ApiError> {
+    match status {
+        200 => serde_json::from_str(body).map(Some).map_err(|e| ApiError {
+            code: "UNREADABLE".to_string(),
+            message: e.to_string(),
+        }),
+        204 => Ok(None),
+        _ => {
+            let e = ApiError::of(status, body);
+            if status == 404 && e.code == "NOT_CONFIGURED" {
+                Ok(None)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// `GET /api/lineup` (#58): which band plays and what the signed-in person
+/// may do; `None` on a site without a roster.
+pub async fn get_lineup() -> Result<Option<iem_core::LineupInfo>, ApiError> {
+    let token = crate::auth::get_token().ok_or_else(|| ApiError {
+        code: "NO_TOKEN".to_string(),
+        message: "Not authenticated".to_string(),
+    })?;
+    let resp = Request::get(&format!("{API_BASE}/lineup"))
+        .header("Authorization", &format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|e| ApiError {
+            code: "NETWORK".to_string(),
+            message: e.to_string(),
+        })?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    lineup_answer(status, &body)
 }
 
 /// Get list of band members
@@ -409,6 +461,47 @@ mod tests {
         for status in [404, 500, 502, 503, 504, 530] {
             assert!(!token_refused(status), "{status} is no verdict");
         }
+    }
+
+    #[test]
+    fn the_lineup_answer_reads_the_band_or_no_roster() {
+        let json = concat!(
+            r#"{"active":{"id":"youth","name":"Youth band"},"#,
+            r#""lineups":[{"id":"main","name":"Main band"},{"id":"youth","name":"Youth band"}],"#,
+            r#""playing":false,"leader":false,"can_switch":true}"#
+        );
+        let info = lineup_answer(200, json).unwrap().unwrap();
+        assert_eq!(info.active.name, "Youth band");
+        assert_eq!(info.lineups.len(), 2);
+        assert!(!info.playing && !info.leader && info.can_switch);
+        // A site without a roster: 204, or a server from before Part C.
+        assert_eq!(lineup_answer(204, ""), Ok(None));
+        let legacy = r#"{"code":"NOT_CONFIGURED","message":"this site has no roster"}"#;
+        assert_eq!(lineup_answer(404, legacy), Ok(None));
+        // Anything else is no answer on the band.
+        let gone = r#"{"code":"UNAUTHORIZED","message":"gone"}"#;
+        assert_eq!(
+            lineup_answer(401, gone),
+            Err(ApiError {
+                code: "UNAUTHORIZED".into(),
+                message: "gone".into()
+            })
+        );
+        assert_eq!(lineup_answer(404, "").unwrap_err().code, "HTTP_404");
+        assert_eq!(
+            lineup_answer(500, r#"{"code":"NOT_CONFIGURED","message":"x"}"#)
+                .unwrap_err()
+                .code,
+            "NOT_CONFIGURED"
+        );
+        assert_eq!(
+            lineup_answer(502, "<html>").unwrap_err(),
+            ApiError {
+                code: "HTTP_502".into(),
+                message: "Server error: 502".into()
+            }
+        );
+        assert_eq!(lineup_answer(200, "{}").unwrap_err().code, "UNREADABLE");
     }
 
     #[test]

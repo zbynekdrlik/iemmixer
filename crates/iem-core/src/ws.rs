@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::Channel;
+use crate::lineup::LineupRef;
 use crate::tunnel::TunnelStatusInfo;
 
 /// The UI protocol this build speaks.
@@ -261,6 +262,11 @@ pub enum ServerMsg {
     Console(ConsoleInfo),
     /// One console input changed
     InputUpdate(ConsoleInput),
+    /// The band that plays now (#58), after a switch or a roster change. A
+    /// person's page then closes with 4003 and reads `/api/lineup` again;
+    /// the engineer's page and a page without a person stay open and get
+    /// their state again.
+    LineupChanged(LineupRef),
 }
 
 #[cfg(test)]
@@ -753,6 +759,13 @@ mod tests {
             }),
             "InputUpdate",
         );
+        round_trip_server(
+            ServerMsg::LineupChanged(LineupRef {
+                id: "youth".into(),
+                name: "Youth band".into(),
+            }),
+            "LineupChanged",
+        );
     }
 
     /// Every event's JSON, field names included (W4 of the gen1 test parity
@@ -1013,6 +1026,14 @@ mod tests {
                     r#"{"event":"InputUpdate","data":{"id":"keys","name":"KEYS","trim_db":-3.0,"#,
                     r#""muted":true,"processing":false}}"#,
                 ),
+            ),
+            // The page reads the band's id and name by name (#58).
+            (
+                ServerMsg::LineupChanged(LineupRef {
+                    id: "youth".into(),
+                    name: "Youth band".into(),
+                }),
+                r#"{"event":"LineupChanged","data":{"id":"youth","name":"Youth band"}}"#,
             ),
         ];
         let mut tags = std::collections::BTreeSet::new();

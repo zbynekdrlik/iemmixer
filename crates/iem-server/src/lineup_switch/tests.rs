@@ -190,7 +190,10 @@ async fn a_leader_switches_and_everyone_gets_their_lineup_state() {
         sub: "member10".into(),
         engineer: false,
     };
-    assert!(matches!(on_lineup(&state, &page10, &member10), OnLineup::Close(f) if f.code == 4003));
+    let told = iem_core::ServerMsg::LineupChanged(youth_ref());
+    assert!(
+        matches!(on_lineup(&state, &page10, &member10), OnLineup::Close(t, f) if f.code == 4003 && t == [told.clone()])
+    );
     let eng_page = state.page("engineer").unwrap();
     let eng = Viewer {
         sub: "engineer".into(),
@@ -201,9 +204,10 @@ async fn a_leader_switches_and_everyone_gets_their_lineup_state() {
             assert!(matches!(
                 msgs.as_slice(),
                 [
+                    iem_core::ServerMsg::LineupChanged(r),
                     iem_core::ServerMsg::State { .. },
                     iem_core::ServerMsg::CustomizationUpdate { .. }
-                ]
+                ] if *r == youth_ref()
             ));
         }
         other => panic!("{other:?}"),

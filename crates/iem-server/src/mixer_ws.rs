@@ -246,12 +246,25 @@ pub fn alert_catchup(
 /// changed (#58).
 #[derive(Debug, Clone, PartialEq)]
 pub enum OnLineup {
-    /// A person's page closes with [`CLOSE_LINEUP`]: whether they play,
-    /// on which set, and under which names is the new band's.
-    Close(CloseFrame),
-    /// The engineer's page and a page without a person stay; their names
-    /// and pins and hides are the new band's, sent again.
+    /// A person's page hears which band plays (these messages:
+    /// [`ServerMsg::LineupChanged`]), then closes with [`CLOSE_LINEUP`]:
+    /// whether they play, on which set, and under which names is the new
+    /// band's.
+    Close(Vec<ServerMsg>, CloseFrame),
+    /// The engineer's page and a page without a person stay: they hear
+    /// which band plays, then get their names and pins and hides again, the
+    /// new band's.
     Refresh(Vec<ServerMsg>),
+}
+
+/// The band that plays as the pages hear of it (#58); none in legacy mode.
+fn lineup_msg(state: &AppState) -> Option<ServerMsg> {
+    let roster = state.roster()?;
+    let active = roster.lineup();
+    Some(ServerMsg::LineupChanged(iem_core::LineupRef {
+        id: active.id.clone(),
+        name: active.name.clone(),
+    }))
 }
 
 /// [`OnLineup`] for a session on `page`.
@@ -260,16 +273,19 @@ pub fn on_lineup(state: &AppState, page: &Page, viewer: &Viewer) -> OnLineup {
         .member
         .as_deref()
         .is_some_and(|m| m != crate::pin_store::ENGINEER_ID);
+    let mut msgs: Vec<ServerMsg> = lineup_msg(state).into_iter().collect();
     if person {
-        OnLineup::Close(CloseFrame {
-            code: CLOSE_LINEUP,
-            reason: "lineup".into(),
-        })
+        OnLineup::Close(
+            msgs,
+            CloseFrame {
+                code: CLOSE_LINEUP,
+                reason: "lineup".into(),
+            },
+        )
     } else {
-        OnLineup::Refresh(vec![
-            full_state(state, page, viewer),
-            customization_msg(state, page),
-        ])
+        msgs.push(full_state(state, page, viewer));
+        msgs.push(customization_msg(state, page));
+        OnLineup::Refresh(msgs)
     }
 }
 
@@ -402,8 +418,14 @@ async fn session(
             ev = lineup_rx.recv() => match ev {
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                     match on_lineup(&state, &page, &viewer) {
-                        OnLineup::Close(frame) => {
+                        OnLineup::Close(told, frame) => {
                             tracing::info!(page = %page.id, session, "the band changed: closing the page (4003)");
+                            // Which band plays, before the close.
+                            for m in &told {
+                                if !ws_alive::send(socket.send(text(m))).await {
+                                    break;
+                                }
+                            }
                             let close = socket.send(Message::Close(Some(frame)));
                             let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, close).await;
                             break;
