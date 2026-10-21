@@ -1066,7 +1066,7 @@ fn record_in_use(config_dir: &Path, sha256: &str) {
 
 /// At the start, after the replay of a switch a restart cut short, and
 /// after a legacy server adopted its roster: [`settle`] once the engine has
-/// synced, tried again every `AppState::retry` while the engine is not there.
+/// synced (woken by its state arriving), tried again `AppState::retry` after a try that failed.
 /// After [`MAX_SETTLES`] refused tries (the engine refuses the import, a
 /// stored state cannot be read or written) the pages are freed without it
 /// and the engineer's devices hear of it (once); what the states follow is
@@ -1077,33 +1077,34 @@ pub async fn settle_when_synced(state: AppState) {
         if !state.settling() {
             return;
         }
-        let synced = state.engine.mirror().synced;
-        if synced {
-            let Err(not) = settle(&state).await else {
+        // Woken by the engine's state arriving, not by the next retry.
+        if !state.engine.wait_synced(state.retry).await {
+            continue;
+        }
+        let Err(not) = settle(&state).await else {
+            return;
+        };
+        if waits(&not) {
+            tracing::info!(?not, "the roster waits for the engine");
+        } else {
+            refusals += 1;
+            tracing::error!(?not, refusals, "the roster did not reach the states");
+            if refusals == MAX_SETTLES {
+                give_up(&state).await;
+                let devices = crate::notify::push_alarm(
+                    &state,
+                    "Zostava neplatí v mixoch",
+                    "Server nevedel preniesť zmenu zostavy do mixov: presunutí ľudia ešte \
+                     nemajú svoje mixy na nových setoch a pravidlá zostavy (napr. stíšené \
+                     prázdne sety) neplatia. Mixy sa dajú meniť; doplní sa to pri ďalšej \
+                     zmene zostavy.",
+                )
+                .await;
+                tracing::warn!(
+                    devices,
+                    "the engineer's devices heard the roster did not reach the states"
+                );
                 return;
-            };
-            if waits(&not) {
-                tracing::info!(?not, "the roster waits for the engine");
-            } else {
-                refusals += 1;
-                tracing::error!(?not, refusals, "the roster did not reach the states");
-                if refusals == MAX_SETTLES {
-                    give_up(&state).await;
-                    let devices = crate::notify::push_alarm(
-                        &state,
-                        "Zostava neplatí v mixoch",
-                        "Server nevedel preniesť zmenu zostavy do mixov: presunutí ľudia ešte \
-                         nemajú svoje mixy na nových setoch a pravidlá zostavy (napr. stíšené \
-                         prázdne sety) neplatia. Mixy sa dajú meniť; doplní sa to pri ďalšej \
-                         zmene zostavy.",
-                    )
-                    .await;
-                    tracing::warn!(
-                        devices,
-                        "the engineer's devices heard the roster did not reach the states"
-                    );
-                    return;
-                }
             }
         }
         tokio::time::sleep(state.retry).await;
