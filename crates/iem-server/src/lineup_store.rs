@@ -43,8 +43,9 @@ pub const APPLIED_FILE: &str = "lineups/applied-roster.toml";
 /// What the engine's running state follows ([`Running`]).
 pub const RUNNING_FILE: &str = "lineups/running.json";
 /// Every roster a state may follow, `<sha256>.toml` (#58 third review):
-/// written when a roster comes into use, never deleted here.
-pub const ROSTERS_DIR: &str = "lineups/rosters";
+/// written when a roster comes into use, never deleted here. Its name is no
+/// lineup id (the dot), so it is no lineup's folder (#58 fourth review).
+pub const ROSTERS_DIR: &str = "lineups/rosters.kept";
 /// The active file's format.
 pub const ACTIVE_FORMAT: &str = "iemmixer-active-lineup";
 /// The migration builds `lineups/` here and renames it as its commit.
@@ -62,7 +63,7 @@ const SWITCH_NAME: &str = "switch.json";
 const STATE_NAME: &str = "state.json";
 const APPLIED_NAME: &str = "applied-roster.toml";
 const RUNNING_NAME: &str = "running.json";
-const ROSTERS_NAME: &str = "rosters";
+const ROSTERS_NAME: &str = "rosters.kept";
 const PENDING_NAME: &str = "migration.json";
 
 /// How often a rename a transient Windows error fails is tried, and the

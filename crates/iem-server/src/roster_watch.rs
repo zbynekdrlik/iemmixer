@@ -24,7 +24,7 @@
 //! put it into the states, under the switching lock, once the engine has
 //! synced: no page changes a mix and no switch or restore runs before. Every
 //! roster a state may follow is kept (`LineupStore::keep_roster`,
-//! `lineups/rosters/<sha256>.toml`) and each state names its own, so the
+//! `lineups/rosters.kept/<sha256>.toml`) and each state names its own, so the
 //! start moves the mixes of people a roster changed while the server was
 //! down from the roster each state follows; one without a marker follows
 //! the roster applied last (`LineupStore::applied_roster`).
