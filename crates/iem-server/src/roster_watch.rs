@@ -1043,13 +1043,15 @@ async fn reload(
         active,
     }));
     state.set_unsettled(None);
-    // Free again only now: a page of the roster before must not change a
-    // mix that moved.
-    if let Some(was) = done.frozen {
-        state.frozen.store(was, Ordering::SeqCst);
-    }
     record(&state.config_dir, text);
-    state.announce_lineup();
+    // Free again only now (a page of the roster before must not change a
+    // mix that moved), and every page hears of the new roster: the thaw
+    // announces it when this froze them.
+    if done.frozen == Some(false) {
+        state.thaw();
+    } else {
+        state.announce_lineup();
+    }
     let people = {
         let mut pins = state.pin_store.write().await;
         follow_people(&state.config_dir, &roster, &mut pins, &removed)
@@ -1089,13 +1091,10 @@ pub async fn settle(state: &AppState) -> Result<(), Applied> {
     };
     let done = transition(state, &follows, &r.roster, &r.sha256, &active).await?;
     state.set_unsettled(None);
-    if let Some(was) = done.frozen {
-        state.frozen.store(was, Ordering::SeqCst);
-    }
     record_in_use(&state.config_dir, &r.sha256);
     tracing::info!(lineup = %active, moved = done.moved, "the roster reached the states");
-    if done.frozen.is_some() {
-        state.announce_lineup();
+    if done.frozen == Some(false) {
+        state.thaw();
     }
     Ok(())
 }
