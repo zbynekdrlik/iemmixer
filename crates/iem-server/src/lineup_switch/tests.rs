@@ -541,16 +541,17 @@ async fn a_replay_that_only_clears_the_intent_tells_the_pages() {
     assert_eq!(rx.try_recv().unwrap(), youth_ref());
 }
 
-/// #58 re-review: a freeze whose barrier fails frees the pages again and
-/// tells them.
+/// #58 re-review: a freeze whose barrier fails frees the pages again; #58
+/// fifth review: nothing changed for them, so it announces nothing (no
+/// person's socket closes; no page dropped an engine event meanwhile).
 #[tokio::test]
-async fn a_failed_freeze_tells_the_pages() {
+async fn a_failed_freeze_frees_the_pages_quietly() {
     let dir = tempfile::tempdir().unwrap();
     let state = with_roster(dir.path(), "main");
     let mut rx = state.lineup_tx.subscribe();
     assert_eq!(state.freeze().await, Err(EngineError::Disconnected));
     assert!(!state.frozen_now());
-    assert_eq!(rx.try_recv().unwrap().id, "main");
+    assert!(rx.try_recv().is_err(), "nothing announced");
 }
 
 /// Waits (≤ 5 s) until `done` holds.
