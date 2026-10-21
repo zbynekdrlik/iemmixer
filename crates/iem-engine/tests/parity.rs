@@ -1,10 +1,10 @@
 //! Parity of the linear mix (program spec §3.5; #20 design note §3, §8):
 //!
 //! - the impulse oracle: an independent reference model, written from the
-//!   design note's model (A2–A10) over the declarative site (not the engine's
-//!   topology code), gives the gain from every RX channel to every TX channel;
-//!   the engine's `Offline` output of staggered impulses equals it within
-//!   1e-12 and is exactly zero elsewhere;
+//!   design note's model (A2–A10, and #58 design §8 for peers) over the
+//!   declarative site (not the engine's topology code), gives the gain from
+//!   every RX channel to every TX channel; the engine's `Offline` output of
+//!   staggered impulses equals it within 1e-12 and is exactly zero elsewhere;
 //! - block-size invariance: hot material, EQs and limiters working, commands
 //!   inside blocks; blocks of 32, 64, 97 and 256 agree bit for bit (§3.5
 //!   asks ≤ 1e-12).
@@ -88,6 +88,9 @@ struct Model<'a> {
     rx: usize,
     /// Each mix's output O, in declaration order.
     out: HashMap<String, Sig>,
+    /// Each mix's own output (#58 design §8), what its peers hear: its own
+    /// sum after its volume and mute, without the mixes and peers it hears.
+    own: HashMap<String, Sig>,
 }
 
 impl<'a> Model<'a> {
@@ -109,6 +112,7 @@ impl<'a> Model<'a> {
             columns,
             rx,
             out: HashMap::new(),
+            own: HashMap::new(),
         }
     }
 
@@ -149,10 +153,10 @@ impl<'a> Model<'a> {
         send_gains(db_to_lin(l.gain_db), l.muted, l.pan)
     }
 
-    /// A7–A9: a mix's output O after its volume and mute.
-    fn mix(&mut self, id: &str) -> Sig {
+    /// A6, A7: a mix's own sum: every ungrouped input at its level, read at
+    /// P, and each group's strip (its inputs at their levels → fader → mute).
+    fn own_sum(&self, id: &str) -> Sig {
         let site: &'a Site = self.site;
-        let spec = site.mixes.iter().find(|m| m.id == id).unwrap();
         let state = self.mix_state(id);
         let level = |input: &str| {
             state
@@ -167,13 +171,11 @@ impl<'a> Model<'a> {
             .flat_map(|g| g.inputs.iter().map(String::as_str))
             .collect();
         let mut sum = Sig::zero(self.rx);
-        // A6: every ungrouped input at its level, read at P.
         for input in &site.inputs {
             if !grouped.contains(&input.id.as_str()) {
                 sum.add(&self.pre(&input.id).scaled(Self::law(&level(&input.id))));
             }
         }
-        // A7: each group's strip: its inputs at their levels → fader → mute.
         for group in &site.groups {
             let mut g = Sig::zero(self.rx);
             for input in &group.inputs {
@@ -186,22 +188,48 @@ impl<'a> Model<'a> {
                 .unwrap_or_default();
             sum.add(&g.scaled(send_gains(db_to_lin(strip.gain_db), strip.muted, 0.0)));
         }
+        sum
+    }
+
+    /// A8: volume and mute (the EQ is flat, the limiter below its threshold).
+    fn out_law(&self, id: &str) -> (f64, f64) {
+        let out = self.mix_state(id).out;
+        send_gains(db_to_lin(out.volume_db), out.muted, 0.0)
+    }
+
+    /// The level mix `id` hears mix `heard` at, whole or as a peer.
+    fn heard_level(&self, id: &str, heard: &str) -> Level {
+        self.mix_state(id)
+            .mixes
+            .get(&MixId::new(heard))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// #58 §8: a mix's own output, what its peers hear: its own sum through
+    /// its volume and mute, without the mixes and peers it hears.
+    fn own_out(&self, id: &str) -> Sig {
+        self.own_sum(id).scaled(self.out_law(id))
+    }
+
+    /// A7–A9 and #58 §8: a mix's output O after its volume and mute: its own
+    /// sum, the mixes it hears after their mute and unclipped (their O), and
+    /// its peers' own output.
+    fn mix(&mut self, id: &str) -> Sig {
+        let site: &'a Site = self.site;
+        let spec = site.mixes.iter().find(|m| m.id == id).unwrap();
+        let mut sum = self.own_sum(id);
         // A9: the mixes it hears, after their mute, unclipped.
         for heard in &spec.mixes {
-            let l = state
-                .mixes
-                .get(&MixId::new(heard.clone()))
-                .copied()
-                .unwrap_or_default();
-            let o = self.out[heard.as_str()].clone();
-            sum.add(&o.scaled(Self::law(&l)));
+            let l = self.heard_level(id, heard);
+            sum.add(&self.out[heard.as_str()].scaled(Self::law(&l)));
         }
-        // A8: volume and mute (the EQ is flat, the limiter below its threshold).
-        let o = sum.scaled(send_gains(
-            db_to_lin(state.out.volume_db),
-            state.out.muted,
-            0.0,
-        ));
+        // #58 §8: its peers, each one's own output.
+        for peer in &spec.peers {
+            let l = self.heard_level(id, peer);
+            sum.add(&self.own[peer.as_str()].scaled(Self::law(&l)));
+        }
+        let o = sum.scaled(self.out_law(id));
         self.out.insert(id.to_owned(), o.clone());
         o
     }
@@ -215,6 +243,12 @@ impl<'a> Model<'a> {
             .iter()
             .map(|m| (m.id.clone(), m.tx.len()))
             .collect();
+        // #58 §8: every mix's own output first: a peer may be declared after
+        // the mix that hears it.
+        for (id, _) in &mixes {
+            let own = self.own_out(id);
+            self.own.insert(id.clone(), own);
+        }
         for (id, tx) in mixes {
             let o = self.mix(&id);
             if tx == 1 {
@@ -293,7 +327,7 @@ fn random_state(topo: &Topology, rng: &mut Rng) -> MixState {
                 },
             );
         }
-        for &h in &n.mixes {
+        for &h in n.mixes.iter().chain(&n.peers) {
             mix.mixes.insert(topo.mixes[h].id.clone(), level(rng));
         }
         s.mixes.insert(n.id.clone(), mix);
@@ -473,6 +507,86 @@ fn the_reference_model_encodes_a3_a6_a7_a9_a10() {
     }
 }
 
+/// #58 design §8: a peer is heard as its own mix, without the mixes it
+/// hears; a mix heard whole brings everything it hears. On the test site
+/// member1 and member3 hear each other as peers, member1 hears member2 as a
+/// peer and the engineer hears member1 whole; the engine agrees. Every level
+/// differs (0, −3, −6, −12, −18 dB), so each gain is seen to apply once.
+#[test]
+fn the_reference_model_encodes_peers() {
+    let site = site();
+    let topo = common::topology();
+    let mut state = MixState::default();
+    let set = |s: &mut MixState, mix: &str, source: Source, gain_db: f64| {
+        let m = s.mixes.entry(MixId::new(mix)).or_default();
+        let l = Level {
+            gain_db,
+            ..Level::default()
+        };
+        match source {
+            Source::Input(id) => m.inputs.insert(id, l),
+            Source::Mix(id) => m.mixes.insert(id, l),
+        };
+    };
+    let input = |s: &str| Source::Input(InputId::new(s));
+    let heard = |s: &str| Source::Mix(MixId::new(s));
+    set(&mut state, "member2", input("mic2"), 0.0);
+    set(&mut state, "member1", input("mic1"), 0.0);
+    set(&mut state, "member3", input("mic3"), 0.0);
+    set(&mut state, "member1", heard("member2"), -6.0);
+    set(&mut state, "member1", heard("member3"), -12.0);
+    set(&mut state, "member3", heard("member1"), -18.0);
+    set(&mut state, "engineer", heard("member1"), -3.0);
+    let mut model = Model::new(&site, &state);
+    let m = model.tx_matrix();
+    let col = |id: &str| topo.inputs[topo.input_index(&InputId::new(id)).unwrap()].rx[0];
+    let row = |id: &str| topo.mixes[topo.mix_index(&MixId::new(id)).unwrap()].tx[0].unwrap();
+    let close = |got: f64, want: f64| (got - want).abs() < 1e-15;
+    // A level of `db` at the centre, and each volume at 0 dB (g).
+    let g = gains(0.0).0;
+    let lvl = |db: f64| db_to_lin(db) * g;
+    // Each mix's own output: its own input at 0 dB and its volume.
+    let own = g * g;
+    // member1: its mic1 once (member3's own output carries nothing of
+    // member1 back), member2's and member3's own output each at its level.
+    let m1 = |id: &str| m[row("member1")][col(id)];
+    assert!(close(m1("mic1"), own), "{}", m1("mic1"));
+    assert!(close(m1("mic2"), lvl(-6.0) * own * g), "{}", m1("mic2"));
+    assert!(close(m1("mic3"), lvl(-12.0) * own * g), "{}", m1("mic3"));
+    // member3: member1's own output at −18 dB, without member2, which
+    // member1 hears as a peer.
+    let m3 = |id: &str| m[row("member3")][col(id)];
+    assert!(close(m3("mic3"), own), "{}", m3("mic3"));
+    assert!(close(m3("mic1"), lvl(-18.0) * own * g), "{}", m3("mic1"));
+    assert_eq!(m3("mic2"), 0.0);
+    // The engineer hears member1 whole at −3 dB: its peers come along.
+    let eng = |id: &str| m[row("engineer")][col(id)];
+    for (id, of_member1) in [
+        ("mic1", own),
+        ("mic2", lvl(-6.0) * own * g),
+        ("mic3", lvl(-12.0) * own * g),
+    ] {
+        assert!(
+            close(eng(id), lvl(-3.0) * of_member1 * g),
+            "{id}: {}",
+            eng(id)
+        );
+    }
+    // The engine agrees on this state (impulses kept below every limit).
+    let times = impulse_times(topo.rx.len());
+    let out = render(&topo, &state, &impulses(topo.rx.len()), 32);
+    for (tx, r) in m.iter().enumerate() {
+        for (k, t) in times.iter().enumerate() {
+            assert!(
+                (out.channel(tx)[*t] / AMP - r[k]).abs() <= 1e-12,
+                "tx {tx} rx {k}: {} vs {}",
+                out.channel(tx)[*t] / AMP,
+                r[k]
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 fn random_eq(rng: &mut Rng) -> Eq {
@@ -513,7 +627,9 @@ fn random_cmd(topo: &Topology, rng: &mut Rng) -> Cmd {
             muted: Some(rng.chance(0.2)),
         },
         1 | 2 => {
-            let heard = &topo.mixes[m].mixes;
+            // A heard mix or a peer (#58).
+            let node = &topo.mixes[m];
+            let heard: Vec<usize> = node.mixes.iter().chain(&node.peers).copied().collect();
             let source = if !heard.is_empty() && rng.chance(0.3) {
                 Source::Mix(topo.mixes[heard[rng.below(heard.len())]].id.clone())
             } else {

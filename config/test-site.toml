@@ -203,8 +203,10 @@ name = "BGVS"
 # Engine topology (program spec §3.1, #20 design note §4): 24 inputs on 32 RX
 # channels, the stems group, and 11 mixes: 9 members and the engineer (stereo)
 # and the translator (mono). Every mix hears every input (the stems through
-# the group); member1 and the engineer also hear other members' mixes (the
-# Mixes tab), so member1 is declared after the mixes it hears.
+# the group). member1 and member3 hear the other members' sets as peers
+# (#58, the Mixes tab): each one's own mix, without the mixes that set hears,
+# declared anywhere, so member1 and member3 hear each other. The engineer
+# hears every member's whole mix, each declared before it.
 # Synthetic channels: RX 101-132, TX 71-88 (members), 91/92 (engineer),
 # 93 (translator), in a synthetic 160-channel map; TX 94/95 are HIL's spare
 # outputs (above).
@@ -320,6 +322,7 @@ tx = [73, 74]
 [[engine.mixes]]
 id = "member3"
 tx = [75, 76]
+peers = ["member1", "member2", "member4", "member5", "member6", "member7", "member8", "member9"]
 
 [[engine.mixes]]
 id = "member4"
@@ -348,7 +351,7 @@ tx = [87, 88]
 [[engine.mixes]]
 id = "member1"
 tx = [71, 72]
-mixes = ["member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9"]
+peers = ["member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9"]
 
 [[engine.mixes]]
 id = "engineer"

@@ -13,7 +13,7 @@ use iem_engine::core::{reconcile, to_state};
 use iem_engine::persist::{Loaded, Source as Saved};
 use iem_engine_proto::{Eq as EqSettings, Level, MixId, MixState};
 use iem_rpp::import::{Imported, close, compare as capped, db_close, project};
-use iem_rpp::topology::{Counts, Routing, Topology};
+use iem_rpp::topology::{Counts, Routing, Topology, hears_alike};
 use serde_json::{Value, json};
 
 use crate::import_cmd::CAP_TOLERANCE_DB;
@@ -76,7 +76,8 @@ fn sides<'a, K: Ord + Display + 'a, T: 'a>(
 /// Where the project's topology differs from `site`'s, as `Topology::diff`
 /// finds it (the order of a group's inputs and of the heard mixes does not
 /// matter): an input's `rx`, `talkback`; a group's `inputs`; a mix's `tx`,
-/// `hears`; the engineer's `mix` (id: the project's, or `none`).
+/// `hears` (`hears_alike`: a receive matches a mix the site hears whole or
+/// as a peer, #58); the engineer's `mix` (id: the project's, or `none`).
 pub fn site_diffs(project: &Topology, site: &Topology) -> Vec<Diff> {
     let mut out = Vec::new();
     sides(
@@ -117,7 +118,7 @@ pub fn site_diffs(project: &Topology, site: &Topology) -> Vec<Diff> {
             if x.tx != y.tx {
                 f.push("tx");
             }
-            if sorted(&x.mixes) != sorted(&y.mixes) {
+            if !hears_alike(x, y) {
                 f.push("hears");
             }
             f

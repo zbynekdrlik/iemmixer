@@ -29,7 +29,8 @@ pub struct SiteGroup {
 }
 
 /// A mix: one listener. It hears every input; `mixes` are the other mixes it
-/// hears (the Mixes tab), each declared before it.
+/// hears whole (the Mixes tab), each declared before it; `peers` the sets it
+/// hears as their own mix (#58), declared anywhere.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SiteMix {
@@ -38,6 +39,11 @@ pub struct SiteMix {
     pub tx: Vec<u16>,
     #[serde(default)]
     pub mixes: Vec<String>,
+    /// Other stereo set mixes it hears as their own output (#58 design §8):
+    /// their inputs and group strips through their EQ, limiter and volume,
+    /// without the mixes they hear, so two sets can hear each other.
+    #[serde(default)]
+    pub peers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -164,6 +170,18 @@ pub enum SiteError {
     SecondGroup(String),
     #[error("mix {mix:?} can hear only mixes declared before it, each once: {heard:?}")]
     HeardMix { mix: String, heard: String },
+    #[error(
+        "mix {mix:?} can hear as a peer only another stereo set mix, each once and not also in mixes: {peer:?}"
+    )]
+    Peer { mix: String, peer: String },
+    #[error(
+        "mix {0:?} cannot hear peers: only a stereo set mix does, not the engineer's or a mono mix"
+    )]
+    PeersOnNonSet(String),
+    #[error(
+        "mix {mix:?} cannot hear {heard:?} whole: {heard:?}, or a mix it hears whole, hears {mix:?} as a peer, so {mix:?} would hear itself back"
+    )]
+    HearsItselfBack { mix: String, heard: String },
     #[error("more than one talkback input")]
     SecondTalkback,
     #[error("engineer {0:?} is not a stereo mix")]
@@ -297,7 +315,8 @@ mod tests {
             SiteMix {
                 id: "eng".into(),
                 tx: vec![1, 2],
-                mixes: vec!["m1".into()]
+                mixes: vec!["m1".into()],
+                peers: Vec::new()
             }
         );
     }

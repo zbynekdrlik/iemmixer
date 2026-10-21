@@ -45,6 +45,7 @@ fn mix(id: &str, tx: &[u16], hears: &[&str]) -> TopoMix {
         id: MixId::new(id),
         tx: tx.to_vec(),
         mixes: hears.iter().map(|h| MixId::new(*h)).collect(),
+        peers: Vec::new(),
     }
 }
 
@@ -128,6 +129,42 @@ fn an_equal_topology_has_no_difference_in_any_order() {
     });
     assert_eq!(site_diffs(&topo(), &site), Vec::<Diff>::new());
     assert_eq!(topo().diff(&site), Vec::<String>::new());
+}
+
+/// #58: a receive matches a mix the site hears whole or as a peer, and a
+/// site's peer may have no receive; a receive of a mix the site does not
+/// hear and a whole heard mix without its receive are `hears`, as
+/// `Topology::diff` prints them.
+#[test]
+fn a_sites_peers_are_matched_by_receives_or_none() {
+    // The site hears member1's two mixes as peers, and member3 as member2's.
+    let site = changed(|t| {
+        t.mixes[0].peers = std::mem::take(&mut t.mixes[0].mixes);
+        t.mixes[1].peers = vec![MixId::new("member3")];
+    });
+    assert_eq!(site_diffs(&topo(), &site), Vec::<Diff>::new());
+    assert_eq!(topo().diff(&site), Vec::<String>::new());
+    for (project, site, want) in [
+        // member2 receives member1, which the site has it hear in no way.
+        (
+            changed(|t| t.mixes[1].mixes = vec![MixId::new("member1")]),
+            site.clone(),
+            "member2",
+        ),
+        // member1 hears member2 whole in the site, without a receive.
+        (
+            changed(|t| t.mixes[0].mixes = vec![MixId::new("member3")]),
+            changed(|t| {
+                t.mixes[0].mixes = vec![MixId::new("member2")];
+                t.mixes[0].peers = vec![MixId::new("member3")];
+            }),
+            "member1",
+        ),
+    ] {
+        let got = site_diffs(&project, &site);
+        assert_eq!(got, [d("mix", want, "hears")]);
+        same_as_printed(&got, &project.diff(&site), printed_site);
+    }
 }
 
 #[test]

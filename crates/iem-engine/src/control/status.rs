@@ -24,6 +24,7 @@ pub(super) fn meters_msg(f: &MeterFrame) -> Meters {
             .map(|a| *a as f64 / f64::from(SAMPLE_RATE))
             .collect(),
         trips: f.trips,
+        own: f.own.iter().map(pair).collect(),
     }
 }
 

@@ -510,6 +510,7 @@ mod live {
             mixes: vec![[0.125, 0.125]; topo.mixes.len()],
             groups: vec![[0.0, 0.0]; topo.mixes.len() * topo.groups.len()],
             active_s: Vec::new(),
+            own: Vec::new(),
         };
         match meters_msg(&s, &page, &merged) {
             Some(ServerMsg::Meters { meters }) => {

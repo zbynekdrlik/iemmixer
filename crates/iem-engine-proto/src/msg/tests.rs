@@ -346,7 +346,48 @@ fn json_shapes_are_stable() {
     )
     .unwrap();
     assert!(info.groups.is_empty() && info.mixes[0].mixes.is_empty());
+    assert!(info.mixes[0].peers.is_empty());
     assert_eq!(info.inputs[0].group, None);
+}
+
+/// #58: a meter frame's own-output peaks are written only when some mix is
+/// shadowed, and a frame without them (an older engine) reads none.
+#[test]
+fn a_meter_frames_own_peaks_are_additive() {
+    let mut m = Meters {
+        seq: 1,
+        ..Meters::default()
+    };
+    assert!(!serde_json::to_string(&m).unwrap().contains("own"));
+    m.own = vec![[0.5, 0.25]];
+    let json = serde_json::to_string(&m).unwrap();
+    assert!(json.contains(r#""own":[[0.5,0.25]]"#), "{json}");
+    assert_eq!(serde_json::from_str::<Meters>(&json).unwrap(), m);
+    let old: Meters = serde_json::from_str(r#"{"seq":2,"mixes":[[0.5,0.5]]}"#).unwrap();
+    assert!(old.own.is_empty());
+}
+
+/// #58: a mix's peers are written only when it has some, so the topology
+/// (and its hash) of a site without peers reads as it did before.
+#[test]
+fn a_mixs_peers_are_written_only_when_it_has_some() {
+    let mut info = MixInfo {
+        id: mix("member1"),
+        channels: 2,
+        mixes: vec![mix("member2")],
+        peers: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&info).unwrap(),
+        r#"{"id":"member1","channels":2,"mixes":["member2"]}"#
+    );
+    info.peers.push(mix("member3"));
+    let json = serde_json::to_string(&info).unwrap();
+    assert_eq!(
+        json,
+        r#"{"id":"member1","channels":2,"mixes":["member2"],"peers":["member3"]}"#
+    );
+    assert_eq!(serde_json::from_str::<MixInfo>(&json).unwrap(), info);
 }
 
 #[test]
@@ -387,6 +428,7 @@ fn engine_messages_round_trip() {
                 id: mix("engineer"),
                 channels: 2,
                 mixes: vec![mix("member1")],
+                peers: vec![mix("member2")],
             }],
         }),
         EngineMsg::State {

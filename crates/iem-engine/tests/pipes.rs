@@ -430,6 +430,9 @@ fn meters_and_status_flow() {
                     (24, 11, 11, 11)
                 );
                 assert_eq!(m.limiter_active_s.len(), 11);
+                // #58: member1 and member3 are shadowed, so every mix's own
+                // output is metered for its peers.
+                assert_eq!(m.own.len(), 11);
                 loud |= m.inputs.iter().skip(1).all(|p| p[0] > 0.05);
                 active = m.limiter_active_s[m1];
                 gr = gr.min(m.gr_db[m1]);

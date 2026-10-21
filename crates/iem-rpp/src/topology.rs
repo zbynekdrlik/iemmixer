@@ -1,7 +1,7 @@
 //! The engine topology as the importer sees it (#20 design note §4, §7): the
 //! same content as the `[engine]` table of `site.toml` — inputs, groups,
-//! mixes and the mixes each one hears — so a project and a site file compare
-//! id by id. The project's own routing (which levels and group strips it can
+//! mixes, the mixes each one hears and its peers (#58) — so a project and a
+//! site file compare id by id. The project's own routing (which levels and group strips it can
 //! hold) is [`Routing`]; its REAPER counts are [`Counts`].
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,8 +27,37 @@ pub struct TopoMix {
     pub id: MixId,
     /// Two TX channels (stereo) or one (mono).
     pub tx: Vec<u16>,
-    /// The mixes it hears.
+    /// The mixes it hears whole (in a project: the mix tracks it receives).
     pub mixes: Vec<MixId>,
+    /// The sets it hears as peers (#58): carried from `site.toml` and
+    /// written back to it. A predecessor project holds none: REAPER cannot
+    /// let two tracks hear each other, and its receive of a set's track is
+    /// matched against both lists (`hears_alike`).
+    pub peers: Vec<MixId>,
+}
+
+impl TopoMix {
+    /// The mixes it hears, whole or as a peer.
+    fn heard(&self) -> Vec<MixId> {
+        let mut v: Vec<MixId> = self.mixes.iter().chain(&self.peers).cloned().collect();
+        v.sort();
+        v
+    }
+}
+
+/// Whether a project's mix and the site's hear alike (#58). A REAPER receive
+/// of another mix's track is a level the engine keeps for a mix the site
+/// hears whole or as a peer: every mix the site hears whole needs its
+/// receive, and every receive a mix the site hears; a site's peer may have
+/// none, a level no REAPER project can hold (two tracks cannot hear each
+/// other). In the predecessor no set that another set heard heard anything
+/// itself, so its receive carried that set's own mix, a peer's sound.
+pub fn hears_alike(project: &TopoMix, site: &TopoMix) -> bool {
+    let heard = project.heard();
+    site.mixes.iter().all(|m| heard.contains(m))
+        && heard
+            .iter()
+            .all(|m| site.mixes.contains(m) || site.peers.contains(m))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -156,11 +185,14 @@ impl Topology {
         self.groups.iter().find(|g| g.inputs.contains(input))
     }
 
-    /// Whether `mix` hears `source`: every input, and the mixes it lists.
+    /// Whether `mix` hears `source`: every input, and the mixes it lists,
+    /// whole or as peers (#58).
     pub fn hears(&self, mix: &MixId, source: &Source) -> bool {
         match source {
             Source::Input(id) => self.mix(mix).is_some() && self.input(id).is_some(),
-            Source::Mix(id) => self.mix(mix).is_some_and(|m| m.mixes.contains(id)),
+            Source::Mix(id) => self
+                .mix(mix)
+                .is_some_and(|m| m.mixes.contains(id) || m.peers.contains(id)),
         }
     }
 
@@ -176,7 +208,9 @@ impl Topology {
     }
 
     /// Differences between this topology (the project's) and `site`'s, by id;
-    /// the order of groups' inputs and of heard mixes does not matter.
+    /// the order of groups' inputs and of heard mixes does not matter. What
+    /// a mix hears is compared as `hears_alike` judges it (#58: a receive
+    /// matches a mix the site hears whole or as a peer).
     pub fn diff(&self, site: &Topology) -> Vec<String> {
         let mut out = Vec::new();
         let a: BTreeMap<&InputId, &TopoInput> = self.inputs.iter().map(|i| (&i.id, i)).collect();
@@ -231,11 +265,14 @@ impl Topology {
                             x.tx, y.tx
                         ));
                     }
-                    if sorted(&x.mixes) != sorted(&y.mixes) {
+                    if !hears_alike(x, y) {
+                        let mut site_hears = list(&sorted(&y.mixes));
+                        if !y.peers.is_empty() {
+                            let _ = write!(site_hears, " and as peers {}", list(&sorted(&y.peers)));
+                        }
                         out.push(format!(
-                            "mix {id}: hears {} in the project, {} in site.toml",
-                            list(&sorted(&x.mixes)),
-                            list(&sorted(&y.mixes))
+                            "mix {id}: hears {} in the project, {site_hears} in site.toml",
+                            list(&x.heard())
                         ));
                     }
                 }
@@ -306,6 +343,9 @@ impl Topology {
             );
             if !m.mixes.is_empty() {
                 let _ = writeln!(s, "mixes = {}", list(&m.mixes));
+            }
+            if !m.peers.is_empty() {
+                let _ = writeln!(s, "peers = {}", list(&m.peers));
             }
         }
         s
@@ -390,6 +430,7 @@ mod tests {
             id: mix("spare"),
             tx: vec![150],
             mixes: vec![],
+            peers: vec![],
         });
         b.engineer = None;
         let d = a.diff(&b);
@@ -442,6 +483,8 @@ mod tests {
         tx: Vec<u16>,
         #[serde(default)]
         mixes: Vec<String>,
+        #[serde(default)]
+        peers: Vec<String>,
     }
 
     #[test]
@@ -478,11 +521,101 @@ mod tests {
             .unwrap();
         assert_eq!(tr.tx, vec![93]);
         assert!(tr.mixes.is_empty() && !text.contains("mixes = []"));
+        assert!(tr.peers.is_empty() && !text.contains("peers"));
         let no_engineer = Topology {
             engineer: None,
             ..t
         };
         assert!(!no_engineer.engine_toml(8).contains("engineer ="));
+    }
+
+    /// #58: a site's peers round-trip through the importer's topology: the
+    /// `[engine]` table written back keeps them, in their order, and they do
+    /// not change the declaration order (a peer may be declared after). A
+    /// project without their receives fits the site; one that hears them
+    /// does not fit a site without them.
+    #[test]
+    fn a_sites_peers_round_trip_through_the_topology() {
+        let plain = synthetic_site();
+        let mut t = plain.clone();
+        let m3 = t.mixes.iter().position(|m| m.id == mix("member3")).unwrap();
+        t.mixes[m3].peers = vec![mix("member1"), mix("member2")];
+        let text = t.engine_toml(160);
+        assert!(
+            text.contains("peers = [\"member1\", \"member2\"]\n"),
+            "{text}"
+        );
+        let file: File = toml::from_str(&text).unwrap();
+        let ids: Vec<&str> = file.engine.mixes.iter().map(|m| m.id.as_str()).collect();
+        let plain_text = plain.engine_toml(160);
+        let before: File = toml::from_str(&plain_text).unwrap();
+        let plain_ids: Vec<&str> = before.engine.mixes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, plain_ids, "peers do not reorder the mixes");
+        for m in &file.engine.mixes {
+            let want: Vec<String> = t
+                .mix(&mix(&m.id))
+                .unwrap()
+                .peers
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(m.peers, want, "{}", m.id);
+        }
+        assert_eq!(text.matches("peers = ").count(), 1);
+        assert_eq!(plain.diff(&t), Vec::<String>::new());
+        assert_eq!(
+            t.diff(&plain),
+            ["mix member3: hears [\"member1\", \"member2\"] in the project, [] in site.toml"]
+        );
+    }
+
+    /// #58: a REAPER receive of another mix's track is a level of a mix the
+    /// site hears whole or as a peer; every mix the site hears whole needs
+    /// its receive, a site's peer may have none (no project can let two
+    /// tracks hear each other).
+    #[test]
+    fn a_receive_matches_a_mix_the_site_hears_whole_or_as_a_peer() {
+        let project = synthetic_site();
+        let at = |t: &Topology, id: &str| t.mixes.iter().position(|m| m.id == mix(id)).unwrap();
+        // The site: member1's receives are its peers, member3 hears member1
+        // and member2 as peers (no receive in the project).
+        let mut site = project.clone();
+        let (m1, m3) = (at(&site, "member1"), at(&site, "member3"));
+        site.mixes[m1].peers = std::mem::take(&mut site.mixes[m1].mixes);
+        site.mixes[m3].peers = vec![mix("member1"), mix("member2")];
+        assert_eq!(project.diff(&site), Vec::<String>::new());
+        assert!(hears_alike(
+            &project.mixes[at(&project, "member3")],
+            &site.mixes[m3]
+        ));
+        let heard = |m: &str, h: &str| site.hears(&mix(m), &Source::Mix(mix(h)));
+        assert!(heard("member1", "member2") && heard("member3", "member1"));
+        assert!(heard("engineer", "member1"));
+        assert!(!heard("member3", "member4") && !heard("member2", "member1"));
+        // A mix the site hears whole needs its receive.
+        let mut whole = site.clone();
+        whole.mixes[m1].mixes = vec![mix("member2")];
+        whole.mixes[m1].peers.retain(|p| *p != mix("member2"));
+        let mut missing = project.clone();
+        let p1 = at(&missing, "member1");
+        missing.mixes[p1].mixes.retain(|h| *h != mix("member2"));
+        assert_eq!(
+            missing.diff(&whole),
+            [
+                "mix member1: hears [\"member3\", \"member4\", \"member5\", \"member6\", \"member7\", \"member8\", \"member9\"] in the project, [\"member2\"] and as peers [\"member3\", \"member4\", \"member5\", \"member6\", \"member7\", \"member8\", \"member9\"] in site.toml"
+            ]
+        );
+        assert_eq!(project.diff(&whole), Vec::<String>::new());
+        // A receive of a mix the site does not hear.
+        let mut stray = project.clone();
+        let p3 = at(&stray, "member3");
+        stray.mixes[p3].mixes = vec![mix("member4")];
+        assert_eq!(
+            stray.diff(&site),
+            [
+                "mix member3: hears [\"member4\"] in the project, [] and as peers [\"member1\", \"member2\"] in site.toml"
+            ]
+        );
     }
 
     #[test]
@@ -491,6 +624,7 @@ mod tests {
             id: mix(id),
             tx: vec![1, 2],
             mixes: hears.iter().map(|h| mix(h)).collect(),
+            peers: Vec::new(),
         };
         let t = Topology {
             mixes: vec![

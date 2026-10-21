@@ -36,9 +36,11 @@ fn import_replaces_state_and_fits_one_block() {
         ]
     );
     assert_eq!(r.mixes.len(), 11);
+    // 24 inputs per mix, the engineer's 9 heard mixes and member1's and
+    // member3's 8 peers each (#58).
     assert_eq!(
         r.mixes.iter().map(|x| x.levels.len()).sum::<usize>(),
-        11 * 24 + 17
+        11 * 24 + 9 + 8 + 8
     );
     let out = c
         .apply(&Cmd::ImportState {
@@ -49,7 +51,7 @@ fn import_replaces_state_and_fits_one_block() {
     assert_eq!(out.rev, 2);
     assert_eq!(out.effect, Effect::Imported { baseline: true });
     assert!(out.rt.len() <= MAX_CMDS_PER_BLOCK);
-    assert_eq!(out.rt.len(), 24 * 2 + 11 * 3 + 11 * 24 + 17 + 11 * 2);
+    assert_eq!(out.rt.len(), 24 * 2 + 11 * 3 + 11 * 24 + 9 + 8 + 8 + 11 * 2);
     let st = c.state();
     assert_eq!(st.mixes[&mix("member2")].out.volume_db, 12.0);
     assert_eq!(
@@ -61,6 +63,7 @@ fn import_replaces_state_and_fits_one_block() {
     assert_eq!(st.mixes.len(), 11);
     assert!(st.mixes.values().all(|m| m.inputs.len() == 24));
     assert_eq!(st.mixes[&mix("member1")].mixes.len(), 8);
+    assert_eq!(st.mixes[&mix("member3")].mixes.len(), 8);
     assert_eq!(st.mixes[&mix("engineer")].mixes.len(), 9);
     assert!(st.mixes.values().all(|m| m.groups.len() == 1));
     // A core rebuilt from the state carries the same state and revision.
@@ -261,9 +264,11 @@ fn full_sync_covers_every_stage() {
     assert_eq!(count(|o| matches!(o, RtOp::Limiter { .. })), 11);
     assert_eq!(count(|o| matches!(o, RtOp::Group { .. })), 11);
     assert_eq!(count(|o| matches!(o, RtOp::GroupEq { .. })), 11);
+    // Every level: 24 inputs per mix, the engineer's 9 heard mixes,
+    // member1's and member3's 8 peers each.
     assert_eq!(
         count(|o| matches!(o, RtOp::Level { gain, .. } if *gain == 0.0)),
-        11 * 24 + 17
+        11 * 24 + 9 + 8 + 8
     );
     let err: ErrorBody = CmdError::new(ErrCode::Forbidden, "x").into();
     assert_eq!(err.code, ErrCode::Forbidden);
@@ -290,4 +295,44 @@ fn state_round_trips_through_the_topology_order() {
     let (r, dropped) = reconcile(&t, &st);
     assert!(dropped.is_empty());
     assert_eq!(to_state(&t, &r), st);
+}
+
+/// #58: a peer's level is kept with the heard mixes' (`Mix::mixes`), in the
+/// slot after them (member3 hears no mix whole, so right after its inputs),
+/// and round-trips through the topology order; a level for a mix it neither
+/// hears nor has as a peer is dropped.
+#[test]
+fn a_peer_level_is_kept_with_the_heard_levels_and_round_trips() {
+    let t = Arc::new(test_site());
+    let mut c = Core::new(Arc::clone(&t), &MixState::default(), 0, Flags::default());
+    let out = c
+        .apply(&set_level("member3", Source::Mix(mix("member1")), -4.0))
+        .unwrap();
+    let m3 = t.mix_index(&mix("member3")).unwrap();
+    let k = t.slot(m3, &Source::Mix(mix("member1"))).unwrap();
+    assert_eq!(k, 24);
+    assert!(
+        matches!(out.rt.as_slice(), [RtOp::Level { m, k: 24, .. }] if usize::from(*m) == m3),
+        "{:?}",
+        out.rt
+    );
+    let st = c.state();
+    assert_eq!(
+        st.mixes[&mix("member3")].mixes[&mix("member1")].gain_db,
+        -4.0
+    );
+    assert_eq!(st.mixes[&mix("member3")].mixes.len(), 8);
+    let (r, dropped) = reconcile(&t, &st);
+    assert!(dropped.is_empty());
+    assert_eq!(r.mixes[m3].levels.len(), 32);
+    assert_eq!(r.mixes[m3].levels[k].gain_db, -4.0);
+    assert_eq!(to_state(&t, &r), st);
+    let mut more = st.clone();
+    more.mixes
+        .get_mut(&mix("member3"))
+        .unwrap()
+        .mixes
+        .insert(mix("member3"), Level::default());
+    let (_, dropped) = reconcile(&t, &more);
+    assert_eq!(dropped, vec!["mix member3 hearing member3"]);
 }

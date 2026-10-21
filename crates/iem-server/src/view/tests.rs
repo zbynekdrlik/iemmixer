@@ -206,7 +206,8 @@ fn the_state_message_names_the_mix_and_the_stems_strip() {
     else {
         panic!("a State");
     };
-    assert_eq!(channels.len(), 24);
+    // Every input, then the eight sets member3 hears as peers (#58).
+    assert_eq!(channels.len(), 24 + 8);
     assert!(connected);
     assert_eq!((global_level_db, global_muted), (Some(-4.0), Some(true)));
     assert_eq!(mx.as_deref(), Some("member3"));
@@ -499,6 +500,78 @@ fn ui_commands_become_engine_commands_on_the_page_mix() {
     };
     assert_eq!(target, EqTarget::Input(InputId::new("mic1")));
     assert_eq!(eq.bands[2].gain_db, 4.5);
+}
+
+/// #58: member3 hears member1 as a peer: its channel is on member3's
+/// Mixes tab, after the inputs, and a mute there mutes member3's level of
+/// member1, as for a mix heard whole.
+#[test]
+fn member3_mutes_its_peer_member1() {
+    let v = test_view();
+    let m = Mirror::default();
+    let p3 = page(&v, "member3");
+    let me = member("member3");
+    let chs = channels(&v, &m, &p3, &me);
+    assert_eq!(chs.len(), 24 + 8);
+    assert_eq!(
+        (chs[24].id.as_str(), chs[24].category.as_str()),
+        ("member1", "mixes")
+    );
+    assert!(!chs[24].eq && !chs[24].own);
+    assert_eq!(
+        command(
+            &v,
+            &m,
+            &p3,
+            &me,
+            &ClientMsg::SetMute {
+                id: "member1".into(),
+                muted: true
+            }
+        )
+        .unwrap(),
+        vec![Cmd::SetLevel {
+            mix: mix("member3"),
+            source: Source::Mix(mix("member1")),
+            gain_db: None,
+            pan: None,
+            muted: Some(true)
+        }]
+    );
+    // A level change of that peer reaches member3's page.
+    let level = Level {
+        gain_db: -3.0,
+        pan: 0.0,
+        muted: true,
+    };
+    let changed = mirror_with(|s, _| {
+        s.mixes
+            .entry(mix("member3"))
+            .or_default()
+            .mixes
+            .insert(mix("member1"), level);
+    });
+    let peer = [Change::Level {
+        mix: mix("member3"),
+        source: Source::Mix(mix("member1")),
+        level,
+    }];
+    assert_eq!(
+        updates_for(&v, &changed, &p3, &peer),
+        vec![ServerMsg::ChannelUpdate {
+            id: "member1".into(),
+            level_db: -3.0,
+            muted: true,
+            pan: 0.5
+        }]
+    );
+    // member2 hears no peer: a level of member1 in its mix is never shown.
+    let unheard = [Change::Level {
+        mix: mix("member2"),
+        source: Source::Mix(mix("member1")),
+        level,
+    }];
+    assert!(updates_for(&v, &changed, &page(&v, "member2"), &unheard).is_empty());
 }
 
 #[test]

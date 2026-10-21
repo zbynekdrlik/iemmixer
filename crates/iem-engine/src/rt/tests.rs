@@ -996,3 +996,6 @@ fn the_test_sine_starts_upwards_and_fades_out_after_its_ttl() {
 mod hil;
 
 mod listen_probe;
+
+/// #58: peers and their shadows.
+mod peers;
