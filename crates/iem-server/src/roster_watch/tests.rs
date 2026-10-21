@@ -2371,3 +2371,16 @@ async fn a_reload_that_imports_nothing_closes_no_page() {
     assert!(!state.frozen_now());
     assert!(rx.try_recv().is_err(), "nothing announced");
 }
+
+/// A roster path that exists but cannot be read as a file (here a
+/// directory) is an error naming the path, never "no roster" (which would
+/// mean legacy mode).
+#[test]
+fn a_roster_path_that_cannot_be_read_is_an_error_never_none() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(read_roster(dir.path()), Ok(None), "none there");
+    let path = dir.path().join(ROSTER_FILE);
+    std::fs::create_dir_all(&path).unwrap();
+    let err = read_roster(dir.path()).unwrap_err();
+    assert!(err.starts_with(&path.display().to_string()), "{err}");
+}
