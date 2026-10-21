@@ -855,8 +855,11 @@ async fn an_adopted_roster_reaches_the_running_state() {
     std::fs::write(d.join(ROSTER_FILE), text).unwrap();
     assert_eq!(check_file(&state).await, Some(applied(&[], &[])));
     let imported = imports(&mut peer).await;
+    let set3 = &imported.mixes[&MixId::new("member3")].mixes;
+    assert!(set3[&MixId::new("member1")].muted, "member1 at 0 dB before");
+    assert_eq!(set3.len(), 8, "its eight peers");
     assert!(
-        imported.mixes[&MixId::new("member3")].mixes[&MixId::new("member1")].muted,
+        set3.values().all(|l| l.muted),
         "a set no leader wears hears no other mix"
     );
     assert!(
