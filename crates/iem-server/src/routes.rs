@@ -384,6 +384,7 @@ async fn put_customization(
     Json(payload): Json<iem_core::Customization>,
 ) -> Result<(StatusCode, Json<iem_core::Customization>), Reject> {
     let (page, _) = page_for(&state, &headers, &page).await?;
+    state.may_change(&page).map_err(switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     let Some(member) = page.member.clone() else {
         return Err((

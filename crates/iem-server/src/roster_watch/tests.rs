@@ -408,17 +408,27 @@ fn follow_people_archives_who_left_and_restores_who_came_back() {
     assert_eq!(pins.member_hash("member11"), None);
     assert_eq!(pins.member_hash("member2"), Some(PHC), "a person stays");
     let full = parse(TEXT);
+    // member9's PIN alone is archived (nothing else of theirs was): it
+    // comes back too.
+    pins.set_member_hash("member9", PHC.into()).unwrap();
+    assert!(pins.archive_member("member9").unwrap());
+    assert!(
+        !d.join(crate::people_archive::ARCHIVE_DIR)
+            .join("member9")
+            .exists()
+    );
     let back = follow_people(d, &full, &mut pins, &[]);
     assert_eq!(
         back,
         People {
-            restored: vec!["member11".into()],
+            restored: vec!["member9".into(), "member11".into()],
             archived: Vec::new(),
             problems: Vec::new(),
         }
     );
     assert_eq!(read(&file("member11")), "member11's");
     assert_eq!(pins.member_hash("member11"), Some(PHC));
+    assert_eq!(pins.member_hash("member9"), Some(PHC));
     assert!(!file("member12").exists(), "no person: still archived");
     assert_eq!(follow_people(d, &full, &mut pins, &[]), People::default());
     // member14's archive is blocked (a file where its directory belongs):
@@ -720,6 +730,41 @@ async fn a_move_needs_a_synced_engine() {
     );
     assert_eq!(store.state("youth").unwrap(), Some(stored), "put back");
     assert_eq!(state.roster(), Some(test_roster("main")));
+}
+
+/// A reload the engine does not answer waits: nothing changes, no status is
+/// written, and the watcher reads the file again at its next poll.
+#[tokio::test]
+async fn a_reload_the_engine_does_not_answer_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = with_roster(d, "main");
+    let mut peer = synced(&mut state, running()).await;
+    std::fs::write(d.join(ROSTER_FILE), swapped()).unwrap();
+    let task = {
+        let s = state.clone();
+        tokio::spawn(async move { check_file(&s).await })
+    };
+    let ClientMsg::Request {
+        cmd: Cmd::ImportState { .. },
+        ..
+    } = peer.recv().await
+    else {
+        panic!("an ImportState");
+    };
+    // No answer: the request times out.
+    let result = within(task).await;
+    assert!(
+        matches!(&result, Some(Applied::Deferred(p)) if p.len() == 1
+            && p[0].ends_with("the engine did not answer in time")),
+        "{result:?}"
+    );
+    assert!(
+        !d.join(STATUS_FILE).exists(),
+        "no status: it is tried again"
+    );
+    assert_eq!(state.roster(), Some(test_roster("main")));
+    assert!(!state.frozen_now());
 }
 
 /// A reload writes the inactive lineups' stored states through the moves

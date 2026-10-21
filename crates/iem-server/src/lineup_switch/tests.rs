@@ -376,6 +376,26 @@ async fn mix_changes_are_refused_while_switching() {
         (status, json["code"].as_str()),
         (StatusCode::CONFLICT, Some("SWITCHING"))
     );
+    let (status, json) = call(
+        &api,
+        Method::PUT,
+        "/api/mixer/member3/customization",
+        Some(&m3),
+        Some(r#"{"pinned":["mic1"],"hidden":[]}"#),
+    )
+    .await;
+    assert_eq!(
+        (status, json["code"].as_str()),
+        (StatusCode::CONFLICT, Some("SWITCHING"))
+    );
+    assert!(
+        state
+            .band()
+            .customization("member3")
+            .unwrap()
+            .pinned
+            .is_empty()
+    );
     let ramp = crate::preset_routes::apply_ramp(&state, &page, &[], &Default::default()).await;
     assert_eq!(ramp.unwrap_err().0, StatusCode::CONFLICT);
     let eng = token("engineer", true);

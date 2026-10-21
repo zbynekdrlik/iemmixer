@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
+use crate::engine::client::EngineError;
 use crate::lineup_store::{ACTIVE_FILE, LineupStore, migrate_legacy, migration_problems};
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
@@ -111,6 +112,10 @@ pub enum Applied {
     },
     /// Not in use; the roster before stays. Why.
     Refused(Vec<String>),
+    /// Not in use yet: the engine cannot take it now (not synced, gone, no
+    /// answer); the roster before stays, no status is written and
+    /// [`watch`] tries the file again at its next poll. Why.
+    Deferred(Vec<String>),
 }
 
 /// SHA-256 of `bytes`, lower-case hex.
@@ -360,11 +365,17 @@ fn roster_sets(roster: &Roster) -> BTreeSet<String> {
 /// nobody wears in `lineup` is muted. Only mixes the state holds are
 /// touched.
 pub fn fit(state: &mut MixState, roster: &Roster, lineup: &Lineup) {
-    for set in roster_sets(roster) {
+    fit_sets(state, &roster_sets(roster), lineup);
+}
+
+/// [`fit`] over `sets`: a reload passes the old roster's sets too, so a set
+/// the new roster no longer lists at all is silent as well.
+fn fit_sets(state: &mut MixState, sets: &BTreeSet<String>, lineup: &Lineup) {
+    for set in sets {
         let Some(mix) = state.mixes.get_mut(&MixId::new(set.as_str())) else {
             continue;
         };
-        match lineup.person_on(&set) {
+        match lineup.person_on(set) {
             None => mix.out.muted = true,
             Some(person) if !lineup.leads(person) => {
                 for level in mix.mixes.values_mut() {
@@ -450,6 +461,12 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
         return Applied::Refused(vec![missing_active(&active)]);
     };
     let store = LineupStore::new(&state.config_dir);
+    // The rules hold on every set either roster knows: one the new roster
+    // drops entirely is worn by nobody now.
+    let sets: BTreeSet<String> = roster_sets(&old.roster)
+        .into_iter()
+        .chain(roster_sets(&new))
+        .collect();
     // The inactive lineups' stored states first, each original kept so a
     // refusal below can put it back.
     let mut written: Vec<(String, MixerBackup)> = Vec::new();
@@ -468,7 +485,7 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
         };
         let mut next = stored.clone();
         apply_moves(&mut next.state, &moves(&old.roster, &new, &l.id));
-        fit(&mut next.state, &new, l);
+        fit_sets(&mut next.state, &sets, l);
         if next.state == stored.state {
             continue;
         }
@@ -491,7 +508,7 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
     if synced {
         let mut next = current.clone();
         apply_moves(&mut next, &shift);
-        fit(&mut next, &new, &lineup);
+        fit_sets(&mut next, &sets, &lineup);
         if next != current {
             let import = Cmd::ImportState {
                 state: next,
@@ -505,14 +522,20 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
             state.frozen.store(was, Ordering::SeqCst);
             if let Err(e) = imported {
                 undo(&store, &written);
-                return Applied::Refused(vec![format!(
+                let why = vec![format!(
                     "the engine did not take lineup {active}'s new mixes: {e}"
-                )]);
+                )];
+                // A refusal is the roster's; no engine or no answer is the
+                // moment's, and the watcher tries again.
+                return match e {
+                    EngineError::Refused(_) => Applied::Refused(why),
+                    EngineError::Disconnected | EngineError::Timeout => Applied::Deferred(why),
+                };
             }
         }
     } else if !shift.is_empty() {
         undo(&store, &written);
-        return Applied::Refused(vec![
+        return Applied::Deferred(vec![
             "the engine state is not synced: a person's mix cannot move to their new set now"
                 .to_string(),
         ]);
@@ -586,6 +609,12 @@ pub async fn check_file(state: &AppState) -> Option<Applied> {
                 &Status::refused(&sha256, problems.clone()),
             );
         }
+        Applied::Deferred(why) => {
+            tracing::info!(
+                reasons = why.len(),
+                "a roster waits for the engine: tried again at the next poll"
+            );
+        }
     }
     Some(applied)
 }
@@ -600,16 +629,20 @@ fn stamp(path: &Path) -> Stamp {
 }
 
 /// Polls `roster.toml` every [`POLL`] for the server's life; a changed
-/// length or modification time reads it ([`check_file`]).
+/// length or modification time reads it ([`check_file`]), and so does the
+/// first poll (a file changed since the start's read; the one in use reads
+/// as unchanged) and every poll after a roster [`Applied::Deferred`].
 pub async fn watch(state: AppState) {
     let path = state.config_dir.join(ROSTER_FILE);
-    let mut seen = stamp(&path);
+    let mut seen: Stamp = None;
     loop {
         tokio::time::sleep(POLL).await;
         let now = stamp(&path);
         if now != seen {
             seen = now;
-            check_file(&state).await;
+            if let Some(Applied::Deferred(_)) = check_file(&state).await {
+                seen = None;
+            }
         }
     }
 }
