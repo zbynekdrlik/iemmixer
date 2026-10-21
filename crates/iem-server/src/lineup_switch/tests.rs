@@ -1033,3 +1033,70 @@ async fn a_replay_waits_for_the_engines_state() {
     assert!(!state.frozen_now());
     assert_eq!(state.roster().unwrap().active, "youth");
 }
+
+/// A solo of `input` on `mix`.
+fn solo(mix: &str, input: &str) -> iem_engine_proto::Solo {
+    iem_engine_proto::Solo {
+        mix: mix_id(mix),
+        sources: pinned(input),
+    }
+}
+
+/// #58 re-review: the replay that finishes a cut switch ends the solos of
+/// the sets whose wearer changes, as the switch does (the engine keeps
+/// them across the import): member1's set is member10's in youth.
+#[tokio::test]
+async fn a_replay_ends_the_solos_of_the_sets_that_change_wearer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = cut_short(dir.path(), "main", "youth");
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    let transient = iem_engine_proto::Transient {
+        solo: vec![solo("member1", "mic1"), solo("member3", "mic3")],
+        ..Default::default()
+    };
+    peer.send(&EngineMsg::State {
+        rev: 1,
+        state: running(),
+        transient: transient.clone(),
+    })
+    .await;
+    until("synced", || state.engine.mirror().synced).await;
+    let replay = tokio::spawn(replay_when_synced(state.clone()));
+    let (id, imported) = fake::next_import(&mut peer).await;
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    peer.send(&EngineMsg::State {
+        rev: 2,
+        state: imported,
+        transient,
+    })
+    .await;
+    let (id, cmd) = fake::next_request(&mut peer).await;
+    assert_eq!(
+        cmd,
+        Cmd::SetSolo {
+            mix: mix_id("member1"),
+            sources: vec![],
+        }
+    );
+    assert!(state.frozen_now(), "before the pages are free");
+    peer.send(&EngineMsg::Reply(Reply {
+        id,
+        rev: 2,
+        error: None,
+    }))
+    .await;
+    within(replay).await;
+    assert!(!state.frozen_now());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "member3's solo stays"
+    );
+}
