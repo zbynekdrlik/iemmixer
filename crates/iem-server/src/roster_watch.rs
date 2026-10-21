@@ -896,7 +896,9 @@ async fn transition(
         Err(e) => return Err(failed(&e)),
     };
     if let Err(not) = write_planned(&store, &planned) {
-        state.frozen.store(was, Ordering::SeqCst);
+        if !was {
+            state.thaw();
+        }
         return Err(not);
     }
     let (synced, current, soloed) = {
@@ -936,7 +938,9 @@ async fn transition(
         }
         Err(not) => {
             undo(&store, &planned);
-            state.frozen.store(was, Ordering::SeqCst);
+            if !was {
+                state.thaw();
+            }
             return Err(not);
         }
     }

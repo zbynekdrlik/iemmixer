@@ -560,10 +560,22 @@ impl AppState {
             self.frozen.swap(true, Ordering::SeqCst)
         };
         if let Err(e) = self.engine.request_applied(Cmd::Ping, None).await {
-            self.frozen.store(was, Ordering::SeqCst);
+            if !was {
+                self.thaw();
+            }
             return Err(e);
         }
         Ok(was)
+    }
+
+    /// Frees the pages' changes again (#58 re-review): a person's page
+    /// heard nothing of the engine while they were frozen
+    /// (`mixer_ws::closing`), so every page hears which band plays
+    /// ([`AppState::announce_lineup`]).
+    pub fn thaw(&self) {
+        if self.frozen.swap(false, Ordering::SeqCst) {
+            self.announce_lineup();
+        }
     }
 }
 

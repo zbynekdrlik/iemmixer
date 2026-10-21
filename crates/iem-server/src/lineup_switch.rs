@@ -23,7 +23,6 @@
 //! never read back at a switch.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use iem_core::AuthClaims;
@@ -145,14 +144,14 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
         None => Err(SwitchError::NotSynced),
     };
     if result.is_ok() {
-        // Still frozen: no page changes before the roster says `to`.
+        // Still frozen: no page changes before the roster says `to`; then
+        // every page hears of it.
         set_active_in_use(state, &target.id);
-        state.frozen.store(false, Ordering::SeqCst);
+        state.thaw();
     }
     match &result {
         Ok(()) => {
             tracing::warn!(%from, to = %target.id, by = %by.sub, "the band was switched");
-            state.announce_lineup();
             let (s, payload) = (state.clone(), crate::notify::lineup_payload(&target.name));
             tokio::spawn(async move {
                 let devices = crate::notify::push_engineers(&s, &payload).await;
@@ -187,7 +186,7 @@ async fn run(
     match steps(state, roster, view, from, to).await {
         Ok(()) => Ok(()),
         Err(Failed::Back(e)) => {
-            state.frozen.store(false, Ordering::SeqCst);
+            state.thaw();
             Err(e)
         }
         Err(Failed::Pending(e)) => {
@@ -369,7 +368,7 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
     let store = LineupStore::new(&state.config_dir);
     let (Some(intent), Some(roster)) = (store.intent().map_err(|e| e.to_string())?, state.roster())
     else {
-        state.frozen.store(false, Ordering::SeqCst);
+        state.thaw();
         return Ok(());
     };
     let active = store.active().map_err(|e| e.to_string())?;
@@ -385,10 +384,7 @@ pub async fn replay_intent(state: &AppState) -> Result<(), String> {
         tracing::warn!(lineup = %lineup.id, "a switch a restart cut short is finished");
     }
     store.clear_intent().map_err(|e| e.to_string())?;
-    state.frozen.store(false, Ordering::SeqCst);
-    if played {
-        state.announce_lineup();
-    }
+    state.thaw();
     Ok(())
 }
 
@@ -400,7 +396,7 @@ pub async fn fall_back(state: &AppState) -> Result<(), String> {
     let store = LineupStore::new(&state.config_dir);
     let (Some(intent), Some(roster)) = (store.intent().map_err(|e| e.to_string())?, state.roster())
     else {
-        state.frozen.store(false, Ordering::SeqCst);
+        state.thaw();
         return Ok(());
     };
     let lineup = roster
@@ -417,9 +413,8 @@ pub async fn fall_back(state: &AppState) -> Result<(), String> {
     };
     play(state, &store, &roster.roster, &lineup, stored).await?;
     store.clear_intent().map_err(|e| e.to_string())?;
-    state.frozen.store(false, Ordering::SeqCst);
     tracing::warn!(lineup = %lineup.id, "a switch a restart cut short was given up: the band before it plays");
-    state.announce_lineup();
+    state.thaw();
     Ok(())
 }
 
