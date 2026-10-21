@@ -245,12 +245,12 @@ impl AppState {
         // (`roster_watch::settle_when_synced`), from the one they follow;
         // after a switch a restart cut short which band's state the engine
         // holds is not known, so nobody's mix moves then.
-        let unsettled = roster.as_ref().map(|_| roster_watch::Unsettled {
-            base: if cut_short {
+        let unsettled = roster.as_ref().map(|_| {
+            roster_watch::Unsettled::new(if cut_short {
                 None
             } else {
                 roster_watch::applied_base(config_dir)
-            },
+            })
         });
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
         // from loopback and this host's own addresses (design note §6).
@@ -386,6 +386,12 @@ impl AppState {
         *lock(&self.unsettled) = unsettled;
     }
 
+    /// Whether the pages wait for the roster in use to reach the engine's
+    /// state (`roster_watch::Unsettled::refusing`).
+    pub fn settling(&self) -> bool {
+        lock(&self.unsettled).as_ref().is_some_and(|u| u.refusing)
+    }
+
     /// Whether a change from `page` may reach the engine (or the page's
     /// pins and hides) now (#58 design §7): not while a switch runs or the
     /// roster in use has not reached the engine's state yet, and not from a
@@ -393,10 +399,7 @@ impl AppState {
     /// the page's socket is closing, its change would land on another
     /// person's mix).
     pub fn may_change(&self, page: &Page) -> Result<(), view::ViewError> {
-        if self.frozen_now()
-            || lock(&self.unsettled).is_some()
-            || self.page(&page.id).as_ref() != Some(page)
-        {
+        if self.frozen_now() || self.settling() || self.page(&page.id).as_ref() != Some(page) {
             return Err(view::ViewError::Switching);
         }
         Ok(())

@@ -137,7 +137,7 @@ pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Resul
     }
     // Set already: a switch a restart cut short is not finished yet; or the
     // roster in use has not reached the engine's state yet.
-    if state.frozen_now() || state.unsettled().is_some() {
+    if state.frozen_now() || state.settling() {
         return Err(SwitchError::Busy);
     }
     let result = match state.site() {

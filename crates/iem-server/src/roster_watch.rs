@@ -69,10 +69,23 @@ pub struct Base {
 
 /// The roster in use has not reached the states yet ([`settle`]): they
 /// follow `base` (`None`: not known, a legacy layout or a switch a restart
-/// cut short, so nobody's mix moves).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// cut short, so nobody's mix moves). While `refusing`, no page changes a
+/// mix and no switch or restore runs; a settle that gave up frees the pages
+/// but keeps `base` for the next roster change (#58 re-review).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Unsettled {
     pub base: Option<Base>,
+    pub refusing: bool,
+}
+
+impl Unsettled {
+    /// A roster that has just come into use: the pages wait for it.
+    pub fn new(base: Option<Base>) -> Self {
+        Self {
+            base,
+            refusing: true,
+        }
+    }
 }
 
 /// What the states follow at the start: the roster recorded last (`None`
@@ -649,7 +662,7 @@ async fn adopt_live(state: &AppState, roster: Roster, sha256: &str) -> Applied {
         Ok((r, people)) => {
             tracing::warn!(lineup = %r.active, "roster mode: a roster is in use from now on");
             // Before the roster: no page changes a mix until it is settled.
-            state.set_unsettled(Some(Unsettled::default()));
+            state.set_unsettled(Some(Unsettled::new(None)));
             state.set_roster(Some(r));
             state.announce_lineup();
             tokio::spawn(settle_when_synced(state.clone()));
@@ -1049,12 +1062,12 @@ fn record_in_use(config_dir: &Path, sha256: &str) {
 /// synced, tried again every `AppState::retry` while the engine is not there.
 /// After [`MAX_SETTLES`] refused tries (the engine refuses the import, a
 /// stored state cannot be read or written) the pages are freed without it
-/// and the engineer's devices hear of it (once): the next roster change
-/// brings the rules in again.
+/// and the engineer's devices hear of it (once); what the states follow is
+/// kept, so the next roster change moves people and brings the rules in.
 pub async fn settle_when_synced(state: AppState) {
     let mut refusals = 0;
     loop {
-        if state.unsettled().is_none() {
+        if !state.settling() {
             return;
         }
         let synced = state.engine.mirror().synced;
@@ -1068,12 +1081,14 @@ pub async fn settle_when_synced(state: AppState) {
                 refusals += 1;
                 tracing::error!(?not, refusals, "the roster did not reach the states");
                 if refusals == MAX_SETTLES {
-                    state.set_unsettled(None);
+                    give_up(&state).await;
                     let devices = crate::notify::push_alarm(
                         &state,
                         "Zostava neplatí v mixoch",
-                        "Server po zmene zostavy nevedel upraviť mixy (napr. stíšiť prázdne \
-                         sety): mixy zostávajú, ako boli.",
+                        "Server nevedel preniesť zmenu zostavy do mixov: presunutí ľudia ešte \
+                         nemajú svoje mixy na nových setoch a pravidlá zostavy (napr. stíšené \
+                         prázdne sety) neplatia. Mixy sa dajú meniť; doplní sa to pri ďalšej \
+                         zmene zostavy.",
                     )
                     .await;
                     tracing::warn!(
@@ -1085,6 +1100,17 @@ pub async fn settle_when_synced(state: AppState) {
             }
         }
         tokio::time::sleep(state.retry).await;
+    }
+}
+
+/// A settle that gave up: the pages are free, what the states follow stays
+/// for the next roster change (under the switching lock: a reload that
+/// settled them meanwhile is not undone).
+async fn give_up(state: &AppState) {
+    let _running = state.switching.lock().await;
+    if let Some(mut unsettled) = state.unsettled() {
+        unsettled.refusing = false;
+        state.set_unsettled(Some(unsettled));
     }
 }
 

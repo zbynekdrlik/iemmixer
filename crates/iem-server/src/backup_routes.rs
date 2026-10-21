@@ -177,7 +177,7 @@ async fn restore(state: AppState, filename: String) -> Result<Json<RestoreResult
     let Ok(_running) = state.switching.try_lock() else {
         return Err(busy());
     };
-    if state.frozen_now() || state.unsettled().is_some() {
+    if state.frozen_now() || state.settling() {
         return Err(busy());
     }
     let b = load(&state, &filename)?;
