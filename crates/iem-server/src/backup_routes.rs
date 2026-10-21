@@ -172,13 +172,17 @@ async fn restore(state: AppState, filename: String) -> Result<Json<RestoreResult
     let Ok(_running) = state.switching.try_lock() else {
         return Err(busy());
     };
-    if state.frozen_now() {
+    if state.frozen_now() || state.unsettled().is_some() {
         return Err(busy());
     }
     let b = load(&state, &filename)?;
     let preview = preview_of(&state, &b)?;
     // What the backup lacks (added to the topology after it) stays as it is.
-    let import = crate::backup::keep_running(&b.state, &state.engine.mirror().state);
+    let mut import = crate::backup::keep_running(&b.state, &state.engine.mirror().state);
+    // The active lineup's rules hold, as after a switch (#58 review).
+    if let Some(r) = state.roster() {
+        crate::roster_watch::fit(&mut import, &r.roster, r.lineup());
+    }
     state
         .engine
         .request_applied(

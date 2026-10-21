@@ -161,6 +161,9 @@ pub struct AppState {
     /// is set under the write side ([`AppState::apply`],
     /// [`AppState::freeze`]). A std lock: never held across an `.await`.
     change_gate: Arc<std::sync::RwLock<()>>,
+    /// The roster in use has not reached the engine's state yet
+    /// (`roster_watch::settle`): no page's change, switch or restore runs.
+    unsettled: Arc<Mutex<Option<roster_watch::Unsettled>>>,
     /// Merged meters every 100 ms
     pub meters_tx: broadcast::Sender<Arc<Merged>>,
     /// Latest limiter active seconds per mix (topology order)
@@ -221,6 +224,17 @@ impl AppState {
             && lineup_store::LineupStore::new(config_dir)
                 .intent()?
                 .is_some();
+        // The roster reaches the states once the engine has synced
+        // (`roster_watch::settle_when_synced`), from the one they follow;
+        // after a switch a restart cut short which band's state the engine
+        // holds is not known, so nobody's mix moves then.
+        let unsettled = roster.as_ref().map(|_| roster_watch::Unsettled {
+            base: if cut_short {
+                None
+            } else {
+                roster_watch::applied_base(config_dir).map(Arc::new)
+            },
+        });
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
         // from loopback and this host's own addresses (design note §6).
         let host = login_guard::HostAddrs::read();
@@ -253,6 +267,7 @@ impl AppState {
             switching: Arc::new(tokio::sync::Mutex::new(())),
             frozen: Arc::new(std::sync::atomic::AtomicBool::new(cut_short)),
             change_gate: Arc::new(std::sync::RwLock::new(())),
+            unsettled: Arc::new(Mutex::new(unsettled)),
             meters_tx,
             active_s: Arc::new(Mutex::new(Vec::new())),
             sessions: Arc::new(AtomicU64::new(1)),
@@ -343,13 +358,27 @@ impl AppState {
         self.frozen.load(Ordering::SeqCst)
     }
 
+    /// What the states follow while the roster in use has not reached them
+    /// (`None`: it has, or legacy mode).
+    pub fn unsettled(&self) -> Option<roster_watch::Unsettled> {
+        lock(&self.unsettled).clone()
+    }
+
+    pub fn set_unsettled(&self, unsettled: Option<roster_watch::Unsettled>) {
+        *lock(&self.unsettled) = unsettled;
+    }
+
     /// Whether a change from `page` may reach the engine (or the page's
-    /// pins and hides) now (#58 design §7): not while a switch runs, and
-    /// not from a page the active lineup no longer gives as it is (another
-    /// band plays: the page's socket is closing, its change would land on
-    /// another person's mix).
+    /// pins and hides) now (#58 design §7): not while a switch runs or the
+    /// roster in use has not reached the engine's state yet, and not from a
+    /// page the active lineup no longer gives as it is (another band plays:
+    /// the page's socket is closing, its change would land on another
+    /// person's mix).
     pub fn may_change(&self, page: &Page) -> Result<(), view::ViewError> {
-        if self.frozen_now() || self.page(&page.id).as_ref() != Some(page) {
+        if self.frozen_now()
+            || lock(&self.unsettled).is_some()
+            || self.page(&page.id).as_ref() != Some(page)
+        {
             return Err(view::ViewError::Switching);
         }
         Ok(())
@@ -653,7 +682,15 @@ where
     backup_daemon::spawn(state.clone());
     tunnel_watch::spawn_tunnel_watch(state.clone());
     tokio::spawn(roster_watch::watch(state.clone()));
-    tokio::spawn(lineup_switch::replay_when_synced(state.clone()));
+    {
+        // A switch a restart cut short first, then the roster into the
+        // states (each once the engine has synced).
+        let s = state.clone();
+        tokio::spawn(async move {
+            lineup_switch::replay_when_synced(s.clone()).await;
+            roster_watch::settle_when_synced(s).await;
+        });
+    }
 
     let app = app_router(state.clone());
 

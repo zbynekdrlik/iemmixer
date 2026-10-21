@@ -4,8 +4,9 @@
 //! and pins/hides (the band store's `presets/`, `snapshots/` and
 //! `customizations/`, keyed by person). `lineups/active.json` names the
 //! active lineup; `lineups/switch.json` exists only while a switch runs (its
-//! intent, replayed after a crash). Every write is a synced temporary file
-//! renamed over the old one.
+//! intent, replayed after a crash); `lineups/applied-roster.toml` is a copy
+//! of the roster the stored states and the running one follow. Every write
+//! is a synced temporary file renamed over the old one.
 //!
 //! Also the one-time migration of the legacy layout (no
 //! `lineups/active.json`): today's per-member files and the engineer's
@@ -32,6 +33,10 @@ pub const LINEUPS_DIR: &str = "lineups";
 pub const ACTIVE_FILE: &str = "lineups/active.json";
 /// `{"from":id,"to":id}`: present only while a switch runs.
 pub const SWITCH_FILE: &str = "lineups/switch.json";
+/// A copy of the roster the states follow (#58 review): what a reload or the
+/// start moves people's mixes from, and what the start falls back to when
+/// `roster.toml` cannot be used.
+pub const APPLIED_FILE: &str = "lineups/applied-roster.toml";
 /// The active file's format.
 pub const ACTIVE_FORMAT: &str = "iemmixer-active-lineup";
 /// The migration builds `lineups/` here and renames it as its commit.
@@ -47,6 +52,7 @@ pub const KINDS: [&str; 3] = ["presets", "snapshots", "customizations"];
 const ACTIVE_NAME: &str = "active.json";
 const SWITCH_NAME: &str = "switch.json";
 const STATE_NAME: &str = "state.json";
+const APPLIED_NAME: &str = "applied-roster.toml";
 const PENDING_NAME: &str = "migration.json";
 
 /// How often a rename a transient Windows error fails is tried, and the
@@ -210,6 +216,17 @@ impl LineupStore {
         check_id(id)?;
         let json = serde_json::to_string_pretty(backup).map_err(io::Error::other)?;
         write_durable(&self.data_dir(id).join(STATE_NAME), &json)
+    }
+
+    /// The roster the states follow ([`APPLIED_FILE`]); `None` before one
+    /// was recorded.
+    pub fn applied_roster(&self) -> io::Result<Option<String>> {
+        read_optional(&self.dir.join(APPLIED_NAME))
+    }
+
+    /// Records `text` as the roster the states follow.
+    pub fn set_applied_roster(&self, text: &str) -> io::Result<()> {
+        write_durable(&self.dir.join(APPLIED_NAME), text)
     }
 
     /// The running switch's intent; `None` when no switch runs.

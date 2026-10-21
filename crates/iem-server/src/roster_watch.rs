@@ -16,6 +16,14 @@
 //! the active lineup's running one through one `ImportState`, before the new
 //! roster is swapped in; then people it removed are archived and people it
 //! brings back restored ([`follow_people`]).
+//!
+//! A roster that comes into use without a synced engine (the start, a
+//! legacy server's adoption) is `AppState::unsettled` until [`settle`] has
+//! put it into the states, under the switching lock, once the engine has
+//! synced: no page changes a mix and no switch or restore runs before. The
+//! roster the states follow is recorded (`LineupStore::applied_roster`), so
+//! the start moves the mixes of people a roster changed while the server
+//! was down.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -34,6 +42,7 @@ use sha2::{Digest, Sha256};
 use crate::AppState;
 use crate::engine::client::EngineError;
 use crate::lineup_store::{ACTIVE_FILE, LineupStore, migrate_legacy, migration_problems};
+use crate::lineup_switch::REPLAY_RETRY;
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
 use crate::roster_state::RosterState;
@@ -45,6 +54,47 @@ pub const POLL: Duration = Duration::from_secs(2);
 
 /// The problem of a roster file that is not UTF-8 text.
 const NOT_UTF8: &str = "roster file: not UTF-8 text";
+
+/// Refused tries [`settle_when_synced`] makes before it gives up.
+pub const MAX_SETTLES: u32 = 3;
+
+/// The roster in use has not reached the states yet ([`settle`]): they
+/// follow `base` (`None`: not known, a legacy layout or a switch a restart
+/// cut short, so nobody's mix moves).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Unsettled {
+    pub base: Option<Arc<Roster>>,
+}
+
+/// What the states follow at the start: the roster recorded last (`None`
+/// when there is none or it cannot be read, each logged).
+pub fn applied_base(config_dir: &Path) -> Option<Roster> {
+    match LineupStore::new(config_dir).applied_roster() {
+        Ok(Some(text)) => match Roster::parse(&text) {
+            Ok(roster) => Some(roster),
+            Err(e) => {
+                tracing::error!(error = %e, "the roster applied last does not parse: nobody's mix moves");
+                None
+            }
+        },
+        Ok(None) => {
+            tracing::info!("no roster applied before: only its rules reach the states");
+            None
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "the roster applied last is unreadable: nobody's mix moves");
+            None
+        }
+    }
+}
+
+/// Records `text` as the roster the states follow (a failure is logged:
+/// the next start then moves nobody's mix).
+fn record(config_dir: &Path, text: &str) {
+    if let Err(e) = LineupStore::new(config_dir).set_applied_roster(text) {
+        tracing::error!(error = %e, "the roster the states follow was not recorded");
+    }
+}
 
 /// `roster.status.json`: the result for the file with `sha256`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,11 +464,12 @@ pub async fn apply_text(state: &AppState, text: &str, sha256: &str) -> Applied {
     };
     match current {
         None => adopt_live(state, roster, sha256).await,
-        Some(old) => reload(state, &old, roster, sha256).await,
+        Some(old) => reload(state, &old, roster, text, sha256).await,
     }
 }
 
-/// A running legacy server takes its first roster.
+/// A running legacy server takes its first roster; its rules reach the
+/// states once the engine has synced ([`settle_when_synced`], spawned).
 async fn adopt_live(state: &AppState, roster: Roster, sha256: &str) -> Applied {
     let adopted = {
         let mut pins = state.pin_store.write().await;
@@ -433,8 +484,11 @@ async fn adopt_live(state: &AppState, roster: Roster, sha256: &str) -> Applied {
     match adopted {
         Ok((r, people)) => {
             tracing::warn!(lineup = %r.active, "roster mode: a roster is in use from now on");
+            // Before the roster: no page changes a mix until it is settled.
+            state.set_unsettled(Some(Unsettled::default()));
             state.set_roster(Some(r));
             state.announce_lineup();
+            tokio::spawn(settle_when_synced(state.clone()));
             Applied::Applied {
                 added: people.restored,
                 removed: people.archived,
@@ -599,10 +653,23 @@ async fn transition(
     })
 }
 
-/// A new roster in place of `old` (see [`apply_text`]).
-async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) -> Applied {
+/// A new roster (`text`) in place of `old` (see [`apply_text`]): the states
+/// go over from what they follow (`old`, or an unsettled base), and `text`
+/// is recorded as what they follow now.
+async fn reload(
+    state: &AppState,
+    old: &RosterState,
+    new: Roster,
+    text: &str,
+    sha256: &str,
+) -> Applied {
     let active = old.lineup().id.clone();
-    let done = match transition(state, Some(&old.roster), &new, &active).await {
+    let unsettled = state.unsettled();
+    let base = match &unsettled {
+        Some(u) => u.base.as_deref(),
+        None => Some(&*old.roster),
+    };
+    let done = match transition(state, base, &new, &active).await {
         Ok(done) => done,
         Err(not) => return not,
     };
@@ -613,11 +680,13 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
         sha256: sha256.to_string(),
         active,
     }));
+    state.set_unsettled(None);
     // Free again only now: a page of the roster before must not change a
     // mix that moved.
     if let Some(was) = done.frozen {
         state.frozen.store(was, Ordering::SeqCst);
     }
+    record(&state.config_dir, text);
     state.announce_lineup();
     let people = {
         let mut pins = state.pin_store.write().await;
@@ -635,6 +704,94 @@ async fn reload(state: &AppState, old: &RosterState, new: Roster, sha256: &str) 
         added,
         removed,
         problems: people.problems,
+    }
+}
+
+/// Puts the roster in use into the states when it is unsettled (see the
+/// module docs): [`transition`] from what they follow, under the switching
+/// lock; then the pages are free and the roster is recorded. `Deferred`
+/// while the engine is not synced or does not answer.
+pub async fn settle(state: &AppState) -> Result<(), Applied> {
+    let _running = state.switching.lock().await;
+    let Some(unsettled) = state.unsettled() else {
+        return Ok(());
+    };
+    let Some(r) = state.roster() else {
+        state.set_unsettled(None);
+        return Ok(());
+    };
+    let active = r.lineup().id.clone();
+    let done = transition(state, unsettled.base.as_deref(), &r.roster, &active).await?;
+    state.set_unsettled(None);
+    if let Some(was) = done.frozen {
+        state.frozen.store(was, Ordering::SeqCst);
+    }
+    record_in_use(&state.config_dir, &r.sha256);
+    tracing::info!(lineup = %active, moved = done.moved, "the roster reached the states");
+    if done.frozen.is_some() {
+        state.announce_lineup();
+    }
+    Ok(())
+}
+
+/// Records the roster file in use as the one the states follow, read again
+/// (the start keeps no text): one changed since is the watcher's to apply
+/// and record.
+fn record_in_use(config_dir: &Path, sha256: &str) {
+    match read_roster(config_dir) {
+        Ok(Some(bytes)) if sha256_hex(&bytes) == sha256 => match std::str::from_utf8(&bytes) {
+            Ok(text) => record(config_dir, text),
+            Err(_) => tracing::error!("the roster file in use is no UTF-8 text"),
+        },
+        Ok(_) => {
+            tracing::info!("the roster in use is no longer roster.toml: the record stays as it is")
+        }
+        Err(e) => tracing::error!(error = %e, "the roster file is unreadable"),
+    }
+}
+
+/// At the start, after the replay of a switch a restart cut short, and
+/// after a legacy server adopted its roster: [`settle`] once the engine has
+/// synced, tried again every [`REPLAY_RETRY`] while the engine is not there.
+/// After [`MAX_SETTLES`] refused tries (the engine refuses the import, a
+/// stored state cannot be read or written) the pages are freed without it
+/// and the engineer's devices hear of it (once): the next roster change
+/// brings the rules in again.
+pub async fn settle_when_synced(state: AppState) {
+    let mut refusals = 0;
+    loop {
+        if state.unsettled().is_none() {
+            return;
+        }
+        let synced = state.engine.mirror().synced;
+        if synced {
+            match settle(&state).await {
+                Ok(()) => return,
+                Err(Applied::Deferred(why)) => {
+                    tracing::info!(reasons = why.len(), "the roster waits for the engine");
+                }
+                Err(not) => {
+                    refusals += 1;
+                    tracing::error!(?not, refusals, "the roster did not reach the states");
+                    if refusals == MAX_SETTLES {
+                        state.set_unsettled(None);
+                        let devices = crate::notify::push_alarm(
+                            &state,
+                            "Zostava neplatí v mixoch",
+                            "Server po zmene zostavy nevedel upraviť mixy (napr. stíšiť prázdne \
+                             sety): mixy zostávajú, ako boli.",
+                        )
+                        .await;
+                        tracing::warn!(
+                            devices,
+                            "the engineer's devices heard the roster did not reach the states"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(REPLAY_RETRY).await;
     }
 }
 
