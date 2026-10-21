@@ -277,11 +277,16 @@ impl LineupStore {
     }
 
     /// Keeps `text`, whose SHA-256 is `sha256`, as a roster a state may
-    /// follow ([`ROSTERS_DIR`]); never deleted here.
+    /// follow ([`ROSTERS_DIR`]); never deleted here. One kept already is not
+    /// written again: the file named by its SHA-256 holds it (written
+    /// durably, renamed into place whole).
     pub fn keep_roster(&self, sha256: &str, text: &str) -> io::Result<()> {
         let path = self
             .kept(sha256)
             .ok_or_else(|| invalid(format!("'{sha256}' is no SHA-256")))?;
+        if path.try_exists()? {
+            return Ok(());
+        }
         write_durable(&path, text)
     }
 
