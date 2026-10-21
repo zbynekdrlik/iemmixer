@@ -2070,3 +2070,51 @@ fn a_pending_import_counts_once_the_engine_holds_its_state() {
     };
     assert_eq!(resolved(plain.clone(), &other), plain);
 }
+
+/// #58 fourth review (decision): a roster learned from a state's marker
+/// only moves people. The rules hold on the sets the roster before and the
+/// new one list, never on a set only the learned roster lists. Here the
+/// roster before and the new one list no set member5 (member5 wears set
+/// member9 in main); youth's stored state follows the test roster, which
+/// lists set member5 and puts member10 on set member1.
+#[tokio::test]
+async fn a_learned_roster_moves_people_but_brings_no_set_under_the_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = moved();
+    let mut state = AppState::new(test_config(), dir.path());
+    state.set_roster(Some(RosterState {
+        roster: Arc::new(parse(&old)),
+        sha256: sha256_hex(old.as_bytes()),
+        active: "main".into(),
+    }));
+    let store = LineupStore::new(dir.path());
+    let kept = sha256_hex(TEXT.as_bytes());
+    store.keep_roster(&kept, TEXT).unwrap();
+    let mut youth = MixerBackup::new("t".into(), 1, running());
+    youth.follows = Some(kept);
+    store.save_state("youth", &youth).unwrap();
+    // Set member5 is silent in the running state already (its wearer's
+    // mute), so main's running state takes no import either way.
+    let mut live = running();
+    mix_mut(&mut live, "member5").out.muted = true;
+    let mut peer = synced(&mut state, live).await;
+    // The new roster: member10 wears set member2 in youth.
+    let new = edit(&old, "member1 = \"member10\"\n", "member2 = \"member10\"\n");
+    assert_eq!(within(spawn_apply(&state, &new)).await, applied(&[], &[]));
+    let youth = store.state("youth").unwrap().unwrap();
+    assert!(
+        youth.state.mixes[&MixId::new("member2")].mixes[&MixId::new("member1")].muted,
+        "member10's mix, moved from the learned roster's set member1"
+    );
+    assert!(
+        !youth.state.mixes[&MixId::new("member5")].out.muted,
+        "set member5 is a set of neither the roster before nor the new one"
+    );
+    assert!(!youth.silenced.contains("member5"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), peer.recv())
+            .await
+            .is_err(),
+        "no import"
+    );
+}
