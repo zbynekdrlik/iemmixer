@@ -75,6 +75,33 @@ fn move_file(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
+/// The most older copies one archived file keeps beside it.
+const ASIDE_MAX: usize = 999;
+
+/// Makes room at `path` in the archive: an older copy there (one an
+/// earlier restore left, a newer file having taken its place) moves aside
+/// to `<name>.<n>`, the first free `n`; nothing is ever renamed over.
+fn make_room(path: &Path) -> io::Result<()> {
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "an archive file's name"))?;
+    for n in 1..=ASIDE_MAX {
+        let aside = path.with_file_name(format!("{name}.{n}"));
+        if !aside.try_exists()? {
+            tracing::info!(file = %path.display(), n, "an older archived copy moved aside");
+            return fs::rename(path, aside);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("{}: {ASIDE_MAX} older copies already", path.display()),
+    ))
+}
+
 /// Removes `dir` and the directories in it that are empty; anything with
 /// a file left stays.
 fn prune(dir: &Path) -> io::Result<()> {
@@ -90,50 +117,59 @@ fn prune(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Archives `id`: their photo, every lineup's files of theirs and their PIN
-/// hash. `false` when nothing of theirs was found (nothing is created).
+/// Archives `id`: their PIN hash first (no login while their files move),
+/// then their photo and every lineup's files of theirs. An older archived
+/// copy in the way moves aside ([`make_room`]). `false` when nothing of
+/// theirs was found (nothing is created).
 pub fn archive_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Result<bool> {
     check_person(id)?;
     let home = config_dir.join(ARCHIVE_DIR).join(id);
-    let mut archived = PhotoStore::new(config_dir).move_to(id, &home.join(PHOTO))?;
+    let mut archived = pins.archive_member(id)?;
+    let photos = PhotoStore::new(config_dir);
+    if photos.exists(id) {
+        make_room(&home.join(PHOTO))?;
+        photos.move_to(id, &home.join(PHOTO))?;
+        archived = true;
+    }
     for (lineup, kind, path) in files_of(&config_dir.join(LINEUPS_DIR), id)? {
         let to = home
             .join(LINEUPS_DIR)
             .join(lineup)
             .join(kind)
             .join(format!("{id}.json"));
+        make_room(&to)?;
         move_file(&path, &to)?;
         archived = true;
     }
-    archived |= pins.archive_member(id)?;
     if archived {
         tracing::info!(person = %id, "archived");
     }
     Ok(archived)
 }
 
-/// Brings `id` back from the archive: the photo, each lineup's files and the
-/// PIN hash, each unless a newer one took its place (that one is kept, the
-/// archived one stays in the archive). `true` when anything came back.
+/// Brings `id` back from the archive: the photo and each lineup's files,
+/// each unless a newer one took its place (that one is kept, the archived
+/// one stays in the archive), then the PIN hash. Older copies moved aside
+/// stay in the archive. `true` when anything came back.
 pub fn restore_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Result<bool> {
     check_person(id)?;
     let home = config_dir.join(ARCHIVE_DIR).join(id);
-    let mut restored = false;
-    if home.try_exists()? {
-        restored |= PhotoStore::new(config_dir).restore_from(id, &home.join(PHOTO))?;
-        for (lineup, kind, path) in files_of(&home.join(LINEUPS_DIR), id)? {
-            let to = config_dir
-                .join(LINEUPS_DIR)
-                .join(lineup)
-                .join(kind)
-                .join(format!("{id}.json"));
-            if !to.try_exists()? {
-                move_file(&path, &to)?;
-                restored = true;
-            }
-        }
-        prune(&home)?;
+    if !home.try_exists()? {
+        return pins.restore_member(id);
     }
+    let mut restored = PhotoStore::new(config_dir).restore_from(id, &home.join(PHOTO))?;
+    for (lineup, kind, path) in files_of(&home.join(LINEUPS_DIR), id)? {
+        let to = config_dir
+            .join(LINEUPS_DIR)
+            .join(lineup)
+            .join(kind)
+            .join(format!("{id}.json"));
+        if !to.try_exists()? {
+            move_file(&path, &to)?;
+            restored = true;
+        }
+    }
+    prune(&home)?;
     restored |= pins.restore_member(id)?;
     if restored {
         tracing::info!(person = %id, "restored from the archive");

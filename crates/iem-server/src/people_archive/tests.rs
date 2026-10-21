@@ -75,6 +75,95 @@ fn archive_moves_photo_files_and_pin_hash_and_restore_brings_them_back() {
     let kept = home.join(files[0].strip_prefix(d).unwrap());
     assert_eq!(read(&kept), files[0].display().to_string());
     assert!(!home.join(PHOTO).exists(), "the photo came back");
+
+    // Archived once more: the newer file never lands on the older copy, the
+    // older copy moves aside under a number.
+    assert!(archive_person(d, &mut pins, "member5").unwrap());
+    assert_eq!(read(&kept), "newer");
+    let aside = |path: &Path, n: usize| {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        path.with_file_name(format!("{name}.{n}"))
+    };
+    assert_eq!(read(&aside(&kept, 1)), files[0].display().to_string());
+    assert!(!aside(&kept, 2).exists());
+    assert!(!aside(&home.join(PHOTO), 1).exists(), "no photo in the way");
+}
+
+/// A newer photo is kept at a restore; the next archive moves the older
+/// archived one aside. The aside copies stay in the archive.
+#[test]
+fn an_archived_photo_is_never_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let photos = PhotoStore::new(d);
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    photos.save("member5", b"first").unwrap();
+    assert!(archive_person(d, &mut pins, "member5").unwrap());
+    let home = d.join(ARCHIVE_DIR).join("member5");
+    photos.save("member5", b"second").unwrap();
+    assert!(
+        !restore_person(d, &mut pins, "member5").unwrap(),
+        "nothing came back"
+    );
+    assert_eq!(photos.load("member5").unwrap(), b"second");
+    assert!(archive_person(d, &mut pins, "member5").unwrap());
+    assert_eq!(fs::read(home.join(PHOTO)).unwrap(), b"second");
+    assert_eq!(fs::read(home.join("photo.jpg.1")).unwrap(), b"first");
+    photos.save("member5", b"third").unwrap();
+    assert!(archive_person(d, &mut pins, "member5").unwrap());
+    assert_eq!(fs::read(home.join("photo.jpg.2")).unwrap(), b"second");
+    assert_eq!(fs::read(home.join(PHOTO)).unwrap(), b"third");
+    // A restore brings the newest back; the older copies stay.
+    assert!(restore_person(d, &mut pins, "member5").unwrap());
+    assert_eq!(photos.load("member5").unwrap(), b"third");
+    assert!(home.join("photo.jpg.1").exists() && home.join("photo.jpg.2").exists());
+}
+
+/// A person whose only archived thing is the photo comes back by it alone;
+/// one whose photo is kept newer still gets the PIN back.
+#[test]
+fn a_photo_alone_or_a_pin_alone_brings_a_person_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let photos = PhotoStore::new(d);
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    photos.save("member5", b"jpeg").unwrap();
+    assert!(archive_person(d, &mut pins, "member5").unwrap());
+    assert!(restore_person(d, &mut pins, "member5").unwrap());
+    assert_eq!(photos.load("member5").unwrap(), b"jpeg");
+
+    pins.set_member_hash("member6", PHC.into()).unwrap();
+    photos.save("member6", b"old").unwrap();
+    assert!(archive_person(d, &mut pins, "member6").unwrap());
+    photos.save("member6", b"new").unwrap();
+    assert!(
+        restore_person(d, &mut pins, "member6").unwrap(),
+        "the PIN came back"
+    );
+    assert_eq!(pins.member_hash("member6"), Some(PHC));
+    assert_eq!(photos.load("member6").unwrap(), b"new");
+}
+
+/// The PIN hash goes first: an archive that fails half-way leaves no login.
+#[test]
+fn a_failed_archive_leaves_no_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write(&lineup_file(d, "main", "presets", "member5"), "presets");
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    pins.set_member_hash("member5", PHC.into()).unwrap();
+    // A file where the archive's lineups directory belongs.
+    write(
+        &d.join(ARCHIVE_DIR).join("member5").join(LINEUPS_DIR),
+        "in the way",
+    );
+    assert!(archive_person(d, &mut pins, "member5").is_err());
+    assert_eq!(pins.member_hash("member5"), None, "no login");
+    assert_eq!(pins.archived_hash("member5"), Some(PHC));
+    assert_eq!(
+        read(&lineup_file(d, "main", "presets", "member5")),
+        "presets"
+    );
 }
 
 #[test]
