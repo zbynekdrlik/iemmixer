@@ -361,9 +361,9 @@
 - `run(ctx, ip) -> int`: read the file and its sha256 → scp to `PC_ROOT\incoming\roster-<sha12>.toml` → on the PC (one `ssh_ps`, the upload's `hash_check` first): `iem-server.exe roster check <upload>` with `IEMMIXER_CONFIG` = `PC_SERVER_CONFIG` from the active bundle → if ok and not `--dry-run`: copy beside the server config as `roster.toml.new`, `Move-Item -Force` onto `roster.toml` → poll `roster.status.json` (every `POLL_S`, ≤ 20 s) until its `sha256` is the file's → print one JSON object `{"roster_install": {"ok", "problems", "applied", "added", "removed"}}` with ids and counts only.
 - Exit 0 applied (or dry-run ok), 1 refused or not applied in time.
 
-- [ ] **Step 1: Failing tests** on `iempc_test_support.Base` (`FakePc.replies`): `refused_while_event_now`; `a_check_with_problems_installs_nothing`; `dry_run_checks_only`; `install_waits_for_the_status_sha`; `a_status_that_never_matches_fails_naming_the_wait`.
-- [ ] **Step 2: Run** `python3 -m unittest scripts/iem-pc/test_iempc_roster.py` locally: fails. **Step 3: Implement. Step 4: Run: passes.**
-- [ ] **Step 5: Commit** `feat(iempc): roster-install (#58)`.
+- [x] **Step 1: Failing tests** on `iempc_test_support.Base` (`FakePc.replies`): `refused_while_event_now`; `a_check_with_problems_installs_nothing`; `dry_run_checks_only`; `install_waits_for_the_status_sha`; `a_status_that_never_matches_fails_naming_the_wait`.
+- [x] **Step 2: Run** `python3 -m unittest scripts/iem-pc/test_iempc_roster.py` locally: fails. **Step 3: Implement. Step 4: Run: passes.** (As built, `.claude/rules/roster-install.md`: the server runs from the admin-only stage (#15), the check and the install are two ssh calls, `applied` must be true, and an install waits for no soak or live run of the dev entry.)
+- [x] **Step 5: Commit** `feat(iempc): roster-install (#58)`.
 
 ### Task 15: Dante labels: decide the writer, then the tool
 

@@ -86,7 +86,9 @@ NOTHING = {"dispatch-soak": ("no soak", "(nothing was dispatched)"),
 RUNNING = {"activate": ("no activation", "the activation restarts the engine (nothing was activated)"),
            "dispatch-hil": ("no HIL dispatch", "the HIL run restarts the engine in its own job "
                                                "(nothing was dispatched)"),
-           "trace": ("no trace", "a kernel trace weighs on the times it measures (nothing was traced)")}
+           "trace": ("no trace", "a kernel trace weighs on the times it measures (nothing was traced)"),
+           "roster-install": ("no roster install", "the reload closes every person's mixer socket "
+                                                   "(nothing was installed)")}
 
 
 def live_refusal(reply, sha: str) -> str | None:
@@ -171,11 +173,13 @@ def refuse_while_live(ip, command: str) -> None:
 
 
 def refuse_while_running(ip, command: str) -> None:
-    """`activate`, `dispatch-hil` and `trace` first, before any call: refused
-    while a live run (named first) or a soak of this dev entry may still run.
-    An activation restarts the engine (inside the live run's HIL job too), a
-    HIL run begins its own job and restarts it, a kernel trace weighs on the
-    times both measure. `dev` (the owner's "event skončil") and `event` are
+    """`activate`, `dispatch-hil`, `trace` and `roster-install` (not its dry
+    run) first, before any call: refused while a live run (named first) or a
+    soak of this dev entry may still run. An activation restarts the engine
+    (inside the live run's HIL job too), a HIL run begins its own job and
+    restarts it, a kernel trace weighs on the times both measure, a roster
+    reload closes every person's mixer socket (4003), the soak client's and
+    the live run's too. `dev` (the owner's "event skončil") and `event` are
     never refused."""
     entry, now = ip.current_entry(), dt.datetime.now().astimezone()
     head, tail = RUNNING[command]

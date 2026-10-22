@@ -12,8 +12,9 @@ iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 (`ssh-shell`: iempc_sshshell.py), the cutover on the owner's message
 (`cutover`: iempc_cutover.py, PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and
 PC_AUTOSTART_STARTUP below),
-the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), and the hand-over of
-an open S1a window.
+the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), a
+roster file onto the PC (`roster-install`: iempc_roster.py, PC_SERVER_CONFIG
+below), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -71,8 +72,9 @@ and the guard last seen runs its build, iempc_bin) and PC_XPERF
 PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and PC_AUTOSTART_STARTUP (the
 predecessor's autostarts the cutover disables: `;`-separated task paths, Run
 values and shortcut names `name.lnk` in the desktop user's Startup folder;
-`cutover` refuses when all three are empty).
-Nothing is ever ended by force.
+`cutover` refuses when all three are empty) and PC_SERVER_CONFIG (optional,
+the server config's full path on the PC; `roster-install` refuses without
+it). Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
 the ssh session, so a session cut before it ends (a Bash timeout) stops it
@@ -95,6 +97,7 @@ import iempc_core as core
 import iempc_cutover
 import iempc_event
 import iempc_live
+import iempc_roster
 import iempc_shadow
 import iempc_soak
 import iempc_sshshell
@@ -217,6 +220,11 @@ def cmd_shadow_report(ctx: Ctx) -> int:
     return iempc_shadow.run(ctx, sys.modules[__name__])
 
 
+def cmd_roster_install(ctx: Ctx) -> int:
+    """A roster file onto the PC, checked there and followed until applied; the code lives in iempc_roster.py (#58)."""
+    return iempc_roster.run(ctx, sys.modules[__name__])
+
+
 def cmd_trace(ctx: Ctx) -> int:
     """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
     iempc_live.refuse_while_running(sys.modules[__name__], "trace")   # a live run or soak of this entry (#10)
@@ -275,6 +283,7 @@ COMMANDS: dict[str, Spec] = {
     "ssh-shell": Spec(cmd_ssh_shell, pc=True, dev_time=True, locked=True),
     "cutover": Spec(cmd_cutover, pc=True, dev_time=True, locked=True),
     "shadow-report": Spec(cmd_shadow_report, pc=True, dev_time=True, locked=False),
+    "roster-install": Spec(cmd_roster_install, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -317,6 +326,10 @@ def build_parser() -> argparse.ArgumentParser:
     cutover = sub.add_parser("cutover")
     cutover.add_argument("--sha", required=True, help="the active main bundle the PC runs in dev or a live trial")
     cutover.add_argument("--dry-run", action="store_true", help="the guard's refusals and the trial's precheck only")
+    roster = sub.add_parser("roster-install")
+    roster.add_argument("--file", required=True, help="the roster file (the private ops repo's site/roster.toml)")
+    roster.add_argument("--dry-run", action="store_true",
+                        help="check it on the PC with the active bundle's server, install nothing")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")

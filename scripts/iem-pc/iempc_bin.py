@@ -248,9 +248,16 @@ def install_after_activate(ctx, ip, sha: str) -> None:
 
 def staged_guard(ip, exe: str, want: str) -> tuple[tuple[str, ...], str]:
     """native_script's `checks` and `then` for a bundle's own guard (activate
-    --offline, install --first): `exe` read once, checked by `want` (this box's
-    fetch record), staged admin-only and read back; the stage copy runs."""
+    --offline, install --first): staged_program."""
+    return staged_program(ip, exe, GUARD, want)
+
+
+def staged_program(ip, exe: str, name: str, want: str) -> tuple[tuple[str, ...], str]:
+    """native_script's `checks` and `then` for a bundle's program `name` (the
+    guard above, the server's `roster check`: iempc_roster): `exe` read once,
+    checked by `want` (this box's fetch record), staged admin-only and read
+    back; the stage copy runs."""
     ep = ip.elevated_ps()
-    stage = (f"$ErrorActionPreference = 'Stop' ; {ep.staged([(ip.ps_quote(exe), GUARD, want)])} ; "
+    stage = (f"$ErrorActionPreference = 'Stop' ; {ep.staged([(ip.ps_quote(exe), name, want)])} ; "
              "$ErrorActionPreference = 'Continue'")
     return (stage,), "$x = $iemMod ; "
