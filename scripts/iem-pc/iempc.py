@@ -14,7 +14,9 @@ iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 PC_AUTOSTART_STARTUP below),
 the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), a
 roster file onto the PC (`roster-install`: iempc_roster.py, PC_SERVER_CONFIG
-below), and the hand-over of an open S1a window.
+below), the IEM card's Dante labels for the main lineup as a sheet
+(`dante-labels`: iempc_dante.py, no PC call), and the hand-over of an open
+S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -95,6 +97,7 @@ import iempc_bootstrap
 import iempc_bundle
 import iempc_core as core
 import iempc_cutover
+import iempc_dante
 import iempc_event
 import iempc_live
 import iempc_roster
@@ -225,6 +228,11 @@ def cmd_roster_install(ctx: Ctx) -> int:
     return iempc_roster.run(ctx, sys.modules[__name__])
 
 
+def cmd_dante_labels(ctx: Ctx) -> int:
+    """The IEM card's Dante labels for the main lineup, as a sheet; the code lives in iempc_dante.py (#58)."""
+    return iempc_dante.run(ctx, sys.modules[__name__])
+
+
 def cmd_trace(ctx: Ctx) -> int:
     """A kernel DPC/ISR trace on the guard's engine; the code lives in iempc_trace.py (#15, #36)."""
     iempc_live.refuse_while_running(sys.modules[__name__], "trace")   # a live run or soak of this entry (#10)
@@ -284,6 +292,8 @@ COMMANDS: dict[str, Spec] = {
     "cutover": Spec(cmd_cutover, pc=True, dev_time=True, locked=True),
     "shadow-report": Spec(cmd_shadow_report, pc=True, dev_time=True, locked=False),
     "roster-install": Spec(cmd_roster_install, pc=True, dev_time=True, locked=True),
+    # No PC call (a sheet); dev time and locked like the renames it is for (design §10).
+    "dante-labels": Spec(cmd_dante_labels, pc=False, dev_time=True, locked=True),
 }
 
 
@@ -330,6 +340,11 @@ def build_parser() -> argparse.ArgumentParser:
     roster.add_argument("--file", required=True, help="the roster file (the private ops repo's site/roster.toml)")
     roster.add_argument("--dry-run", action="store_true",
                         help="check it on the PC with the active bundle's server, install nothing")
+    labels = sub.add_parser("dante-labels")
+    labels.add_argument("--roster", required=True, help="the roster whose main lineup names the labels")
+    labels.add_argument("--site", help="the site file (default: site.toml beside the roster)")
+    labels.add_argument("--before", help="the roster the card's labels follow now: only the TX labels that "
+                                         "differ from its own are listed for resubscription")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")

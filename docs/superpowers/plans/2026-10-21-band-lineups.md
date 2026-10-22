@@ -372,8 +372,8 @@
 - Modify: `scripts/iem-pc/iempc.py` (`dante-labels --roster PATH [--apply]`), `.claude/rules/pc-tuning.md` or a new `.claude/rules/dante-labels.md` (what was learned)
 
 - [ ] **Step 1: Spike (dev time, record on #58):** whether `netaudio` (the predecessor's tool) can run on the IEM PC or another host on the Dante network, read the IEM card's channel labels, and set one label of a channel nothing subscribes (the HIL spare TX from `[guard] hil_tx`) and set it back. Never touch another device, never a subscription. Outcome A: it works → Step 2 with `--apply`. Outcome B: it does not → Step 2 prints the sheet only, and the owner types the labels in Dante Controller.
-- [ ] **Step 2: Failing tests:** `labels_follow_the_main_lineup_and_the_convention` (TX `NAME inear L NN` / `R NN`, RX `NN NAME mic`, ≤ 31 characters, the main lineup's person per set and input, from a synthetic roster and site); `renamed_tx_channels_are_listed_for_resubscription`; `apply_refuses_while_event_now`; with outcome A, `apply_touches_only_the_iem_card`.
-- [ ] **Step 3: Implement. Step 4: Tests pass.** The sheet holds site values: printed on the dev box only, never committed or posted.
+- [x] **Step 2: Failing tests:** `labels_follow_the_main_lineup_and_the_convention` (TX `NAME inear L NN` / `R NN`, RX `NN NAME mic`, ≤ 31 characters, the main lineup's person per set and input, from a synthetic roster and site); `renamed_tx_channels_are_listed_for_resubscription`; `apply_refuses_while_event_now`; with outcome A, `apply_touches_only_the_iem_card`. (Built for outcome B, the sheet, before the Step 1 spike; `--apply` and its test wait for the spike, `write_labels` is its seam. The RX type word follows the input's own label, `mic` otherwise: `.claude/rules/dante-labels.md`.)
+- [x] **Step 3: Implement. Step 4: Tests pass.** The sheet holds site values: printed on the dev box only, never committed or posted.
 - [ ] **Step 5: Commit** `feat(iempc): Dante labels for the main lineup (#58)`. Open PR 4, gates green, merge.
 
 ---
