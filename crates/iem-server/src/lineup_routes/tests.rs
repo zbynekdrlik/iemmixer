@@ -90,9 +90,9 @@ async fn get_page(api: &Router, bearer: &str, page: &str) -> (StatusCode, serde_
 /// so the engineer on a person's page (a dimmed tile, or `/member1` kept
 /// open across a switch) gets the notice, not a socket the server refuses.
 /// `/engineer` and a page without a person always play; a person's own
-/// page answers as without `page`. Only the engineer and the leaders may
-/// ask about another page (anyone else: 403, as the page itself);
-/// a page the site lacks is 404.
+/// page answers as without `page`. Only the engineer may ask about another
+/// page, as only the engineer may open it (#61 second review m1; anyone
+/// else: 403); a page the site lacks is 404.
 #[tokio::test]
 async fn the_lineup_of_a_page_says_whether_its_person_plays() {
     let dir = tempfile::tempdir().unwrap();
@@ -130,14 +130,15 @@ async fn the_lineup_of_a_page_says_whether_its_person_plays() {
     assert_eq!((status, playing(&json)), (StatusCode::OK, false));
     let (status, json) = get_page(&api, &token("member10", false), "member10").await;
     assert_eq!((status, playing(&json)), (StatusCode::OK, true));
-    // A leader may ask about another page (member1 leads main and plays no
-    // part of youth; member3 leads youth).
-    let (status, json) = get_page(&api, &token("member1", false), "member10").await;
-    assert_eq!((status, playing(&json)), (StatusCode::OK, true));
-    let (status, json) = get_page(&api, &token("member3", false), "member2").await;
-    assert_eq!((status, playing(&json)), (StatusCode::OK, false));
-    // Anyone else: 403, as the page itself.
-    for (who, page) in [("member10", "member2"), ("member2", "engineer")] {
+    // Anyone but the engineer asking about another page: 403, as opening
+    // that page (#61 second review m1), leaders too (member1 leads main,
+    // member3 leads youth).
+    for (who, page) in [
+        ("member1", "member10"),
+        ("member3", "member2"),
+        ("member10", "member2"),
+        ("member2", "engineer"),
+    ] {
         let (status, json) = get_page(&api, &token(who, false), page).await;
         assert_eq!(
             (status, json["code"].as_str()),
