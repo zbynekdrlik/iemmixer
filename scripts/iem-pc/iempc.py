@@ -76,9 +76,10 @@ PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and PC_AUTOSTART_STARTUP (the
 predecessor's autostarts the cutover disables: `;`-separated task paths, Run
 values and shortcut names `name.lnk` in the desktop user's Startup folder;
 `cutover` refuses when all three are empty), and DANTE_IEM_HOST,
-DANTE_IEM_NAME and NETAUDIO_PYTHON (optional: the IEM card's IP, its
-expected Dante device name and the netaudio venv's python; `dante-labels
---apply` refuses without all three, the sheet reads the card with them).
+DANTE_IEM_NAME and NETAUDIO_PYTHON (optional: the IEM card's unicast IPv4
+address, its expected Dante device name and the netaudio venv's python, an
+executable file; `dante-labels --apply` refuses without all three, the
+sheet reads the card with them).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside

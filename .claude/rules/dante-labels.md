@@ -17,17 +17,22 @@ paths:
 
 ## How the card is reached
 
-- **`scripts/iem-pc/dante_card.py` is the only module that imports netaudio** (`test_only_the_helper_imports_netaudio`). iempc runs it in a subprocess with the venv's python: `<NETAUDIO_PYTHON> -I dante_card.py read|write <host> <expected-name>`, through `guarded` with "ignore" and `CARD_S` (120 s), never ended by force. The flag is iempc's to read.
-  - `open_device` builds the `DanteDevice` by IP (`ipv4`, `services = {"arc": …}`, no mDNS). It is the one place netaudio is imported, and the place tests inject a fake device.
+- **`scripts/iem-pc/dante_card.py` is the only module that imports netaudio** (`test_only_the_helper_imports_netaudio`). iempc runs it with the venv's python: `<NETAUDIO_PYTHON> -I dante_card.py read <host> <expected-name>`, or `write <host> <expected-name> <EVENT-NOW path>`. iempc_dante imports the helper only for its checks (`unicast_ipv4`, `MAX_CHANNEL`); netaudio is imported only inside `open_device`.
+  - `open_device` builds the `DanteDevice` by IP (`ipv4`, `services = {"arc": …}`, no mDNS). It is the one place netaudio is imported, and the place tests inject a fake device. `OpenDeviceTests` runs the real one against stub netaudio modules.
+  - **A read is complete or refused** (`connect`): a name, the expected name, then as many TX and RX channels as the card reports, more than none. netaudio's `get_controls` ends with `error = None` and a timed-out reply sets nothing, so silence shows only as an empty read ("the card did not answer"), and a lost page as "incomplete read". The test fake behaves the same.
   - `read` prints one JSON line: name, counts, every TX/RX label (`friendly_name or name`).
-  - `write` takes `[{type, channel, label}]` on stdin. The device must name itself as expected before anything is written; else nothing is written (exit 1). A label equal to the channel's number is `reset_channel_name`, any other `set_channel_name`. Then it does a fresh read and reports each label that did not read back as a mismatch (exit 0; iempc decides).
-  - It calls only `get_controls`, `set_channel_name` and `reset_channel_name`: never a subscription, latency, sample-rate, encoding, gain or device-name command, nor a raw command. `test_the_helper_calls_no_command_but_its_reads_and_its_label_writes` greps the source for those names; do not even name them in its comments.
+  - `write` takes `[{type, channel, label}]` on stdin (a channel 1 to 255, `MAX_CHANNEL`). The device must give a complete read and name itself as expected before anything is written; else nothing is written (exit 1). A label equal to the channel's number is `reset_channel_name`, any other `set_channel_name`.
+  - **Once writing has started it always ends with one JSON line, exit 0:** `sent` (each change whose command returned), `failed` (the one whose command raised; netaudio's commands catch only a timeout, so a refused connection raises), `error`, `read_back`, `mismatches` (sent or failed changes that did not read back) and the labels of a fresh read (`tx`, `rx`, null when not read back). The EVENT-NOW path is checked before each label: when it appears, the writes stop and the rest is read back.
+  - It calls only `get_controls`, `set_channel_name` and `reset_channel_name`: never a subscription, latency, sample-rate, encoding, gain or device-name command, nor a raw command or socket. `test_the_helper_calls_no_command_but_its_reads_and_its_label_writes` greps the source for those names; do not even name them in its comments.
   - netaudio prints its own errors on stdout; the helper sends them to stderr, so stdout holds one JSON line.
   - A refusal never prints the device name the card answered with.
+- **The run** (`iempc_dante.helper`): its own process on the dev box, stdout and stderr to `dante-helper.out` / `.err` in iempc's state dir, bounded by `CARD_S` (120 s) and never ended by force.
+  - A run past the bound goes on by itself: `StillRunning` names its pid and where its answer goes. Its pid is in `dante-helper.json`, and no other run starts while that pid is still a run of `dante_card.py` (`/proc/<pid>/cmdline`; a reused pid does not count).
+  - An OSError at start is a StepError that does not name the path.
 - **The private env** (`~/.config/iemmixer/iem-pc.env`; none of the values is in this repo):
-  - `DANTE_IEM_HOST`: the card's IP; an IP literal, no host name.
+  - `DANTE_IEM_HOST`: the card's IP, a unicast IPv4 address (no host name, IPv6, multicast, broadcast, loopback or unspecified address; a link-local one is allowed, Dante uses it without DHCP).
   - `DANTE_IEM_NAME`: the expected Dante device name.
-  - `NETAUDIO_PYTHON`: the venv's python, a full path.
+  - `NETAUDIO_PYTHON`: the venv's python, the full path of an executable file.
   - `--apply` refuses unless all three are set and well-formed, naming the key, never its value.
 - **No PC call, no other device, no subscription.** The owner remakes the stagebox's subscriptions to renamed TX channels in Dante Controller by hand.
 
@@ -54,13 +59,18 @@ paths:
   - `"before"`: the `--before` roster's labels, the offline fallback when the env does not name the card or its read fails (a stderr WARNING).
   - `null`: nothing known, every TX row listed.
 - **`--apply`:**
-  1. It reads the card. A channel the card lacks refuses, with nothing written.
+  1. It reads the card. A channel above the card's count, or one its read did not list, refuses, with nothing written. A read whose counts are not its labels' is no read.
   2. It writes only the labels that differ from what the card holds. When none differs it says so and exits 0 without a write.
-  3. It reads the flag again right before the write: an "ide event" since the start refuses, with nothing written.
-  4. It prints one `{"dante_apply": {changed, unchanged, mismatches, written, resubscribe}}`, where `written` and `resubscribe` carry each label and what it was before. It exits 1 on a read-back mismatch.
-- **Dev time and locked** (`Spec(pc=False, dev_time=True, locked=True)`): the EVENT-NOW flag refuses the sheet and `--apply` (`test_apply_refuses_while_event_now`, the plan's name, covers both the start and the read right before the write). Renames happen only in dev time, with the owner ready to remake the listed subscriptions at once (design §10; plan Task 17 Step 5).
+  3. It reads the flag again right before the write: an "ide event" since the start refuses, with nothing written. The helper then checks it before each label.
+  4. It prints one `{"dante_apply": {changed, unchanged, confirmed, written, unsent, mismatches, resubscribe, error}}`. Each `written` entry and each `resubscribe` entry carries its label and what it was before.
+- **The report comes from the card, not from the plan** (the safety review on #62). A rerun cannot rebuild it, since the card then holds the new labels: so a failed write run must still print it.
+  - With the helper's answer and a read back (`confirmed: true`): `written` is what the card took. `unsent` is what the writes never reached (a write that raised, or the flag). `resubscribe` is the TX labels the card changed; a TX label that landed as another label is listed with that label and `mismatch: true`, and one that did not change is dropped.
+  - Not read back: `written` and `resubscribe` are what was sent, `confirmed: false`.
+  - A write run that fails, outlives its bound (`StillRunning`) or answers no report of its writes: the planned labels and subscriptions, `confirmed: false`, `unsent` and `mismatches` null. Then it fails.
+  - Exit 0 only when every label was taken and read back, with no error.
+- **Dev time and locked** (`Spec(pc=False, dev_time=True, locked=True)`): the EVENT-NOW flag refuses the sheet and `--apply` (`test_apply_refuses_while_event_now`, the plan's name, covers both the start and the read right before the write; `test_the_flag_during_the_writes_stops_them` the helper's checks). Renames happen only in dev time, with the owner ready to remake the listed subscriptions at once (design §10; plan Task 17 Step 5).
 - **P6:** the sheet and `--apply`'s report hold people's names and the site's channels. They are printed on the dev box only and go to the owner from there. Never commit them, paste them into a ticket, or post them anywhere.
   - Tests use `config/test-roster.toml` and `config/test-site.toml` (TX 71–88, RX 101–132), a documentation IP (`192.0.2.10`) and an invented device name.
   - Names with letters a label cannot hold are built from code points (`chr(0x17D)`), so the test files stay ASCII.
-  - No card exists in CI: `test_iempc_dante.ApplyTests` fakes the helper's subprocess (`iempc_dante.helper`), and `test_dante_card` runs the helper with a fake device.
-- **What the tool does not check:** it computes labels and refuses only what stops that (no single main lineup, an unknown person, set, mix or input, channels that are not one or two card numbers). Check the roster itself with `iempc roster-install --dry-run`, which runs the server's own check on the PC.
+  - No card exists in CI: `test_iempc_dante.ApplyTests` fakes the helper's subprocess (`iempc_dante.helper`), `HelperRunTests` runs the real `helper` with a stand-in program for the netaudio python, and `test_dante_card` runs the helper with a fake device.
+- **What the tool does not check:** it computes labels and refuses only what stops that (no single main lineup, an unknown person, set, mix or input, channels that are not one or two card numbers from 1 to 255). Check the roster itself with `iempc roster-install --dry-run`, which runs the server's own check on the PC.
