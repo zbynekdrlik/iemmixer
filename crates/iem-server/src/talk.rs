@@ -1,12 +1,21 @@
 //! The talkback lock (F18, X6, program spec §5.3): one talker at a time,
 //! held by a mixer session. Acquiring hands out a 128-bit talk id; the
-//! talkback socket binds by presenting it within 1 s; the lock is released
-//! on stop, when the holder's mixer socket closes, or after 2 s without
-//! talkback frames (which also ends a lock whose socket never came).
+//! talkback socket binds by presenting it while the unbound lock lives; the
+//! lock is released on stop, when the holder's mixer socket closes, or after
+//! 2 s without talkback frames (which also ends a lock whose socket never
+//! came).
+//!
+//! The bind window is that unbound life, not a shorter one (#63): through
+//! the public tunnel the upgrade came 1–1.8 s after the press, and a 1 s
+//! window refused a socket the lock still waited for, so the press was
+//! lost. Every bind and refusal is logged with its delay since the press;
+//! the talk id is a credential-like token and never logged.
 
 use std::time::{Duration, Instant};
 
-pub const BIND_WINDOW: Duration = Duration::from_secs(1);
+/// A lock without talkback frames for longer than this is over: a bound
+/// one is ended by `expire`, an unbound one (no frame since the press) also
+/// takes no socket any more (`bind`).
 pub const SILENCE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
@@ -17,6 +26,15 @@ struct Held {
     since: Instant,
     bound: bool,
     last_frame: Instant,
+}
+
+impl Held {
+    /// No talkback frame for longer than `SILENCE` (an unbound lock: since
+    /// the press, where `last_frame` starts): the lock is over, whether or
+    /// not `expire` has ended it yet.
+    fn silent(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_frame) > SILENCE
+    }
 }
 
 #[derive(Debug, Default)]
@@ -60,15 +78,44 @@ impl TalkLock {
     }
 
     /// A talkback socket presents `id` at `now`: the holder's session when
-    /// it may bind (right id, not bound yet, inside the window).
+    /// it may bind (the held id, not bound yet, the unbound lock still
+    /// alive). Logs the bind (info) or the refusal and its reason (warn),
+    /// with the delay since the press when `id` is the held one; never `id`.
     pub fn bind(&mut self, id: &str, now: Instant) -> Option<u64> {
-        let h = self.held.as_mut()?;
-        if h.id != id || h.bound || now.saturating_duration_since(h.since) > BIND_WINDOW {
-            return None;
+        let after_ms = self
+            .held
+            .as_ref()
+            .filter(|h| h.id == id)
+            .map(|h| now.saturating_duration_since(h.since).as_millis() as u64);
+        match self.admit(id, now) {
+            Ok(session) => {
+                tracing::info!(session, after_ms, "talkback socket bound to the held talk");
+                Some(session)
+            }
+            Err(reason) => {
+                tracing::warn!(reason, after_ms, "talkback socket refused");
+                None
+            }
+        }
+    }
+
+    /// Binds `id` at `now`, or why not.
+    fn admit(&mut self, id: &str, now: Instant) -> Result<u64, &'static str> {
+        let Some(h) = self.held.as_mut() else {
+            return Err("no lock");
+        };
+        if h.id != id {
+            return Err("wrong id");
+        }
+        if h.bound {
+            return Err("already bound");
+        }
+        if h.silent(now) {
+            return Err("too late");
         }
         h.bound = true;
         h.last_frame = now;
-        Some(h.session)
+        Ok(h.session)
     }
 
     /// A talkback frame arrived for the bound id.
@@ -90,10 +137,7 @@ impl TalkLock {
 
     /// Ends a lock without frames for 2 s; the session that held it.
     pub fn expire(&mut self, now: Instant) -> Option<u64> {
-        let quiet = self
-            .held
-            .as_ref()
-            .is_some_and(|h| now.saturating_duration_since(h.last_frame) > SILENCE);
+        let quiet = self.held.as_ref().is_some_and(|h| h.silent(now));
         if quiet {
             self.held.take().map(|h| h.session)
         } else {
@@ -145,25 +189,110 @@ mod tests {
         assert_eq!(l.acquire(2, "engineer", "cc".into(), t), Ok("cc".into()));
     }
 
+    /// The socket binds once, with the held id, while the unbound lock
+    /// lives: up to `SILENCE` after the press, exactly the life `expire`
+    /// gives a lock whose socket never came (#63).
     #[test]
-    fn the_socket_binds_once_with_the_held_id_inside_one_second() {
+    fn the_socket_binds_once_with_the_held_id_while_the_unbound_lock_lives() {
         let t = Instant::now();
         let mut l = TalkLock::default();
         assert_eq!(l.bind("aa", t), None, "nothing held");
         l.acquire(7, "engineer", "aa".into(), t).unwrap();
         assert_eq!(l.bind("zz", t), None);
         assert!(!l.is_bound("aa"));
-        assert_eq!(l.bind("aa", t + BIND_WINDOW), Some(7));
+        assert_eq!(
+            l.bind("aa", t + SILENCE),
+            Some(7),
+            "exactly 2 s still binds"
+        );
         assert!(l.is_bound("aa"));
         assert!(!l.is_bound("zz"));
         assert_eq!(l.bind("aa", t), None, "already bound");
         l.release(7);
         l.acquire(8, "engineer", "bb".into(), t).unwrap();
         assert_eq!(
-            l.bind("bb", t + BIND_WINDOW + Duration::from_millis(1)),
+            l.bind("bb", t + SILENCE + Duration::from_millis(1)),
             None,
             "too late"
         );
+    }
+
+    /// #63: through the public tunnel the upgrade came 1–1.8 s after the
+    /// press, and a 1 s window refused it while the lock still waited for
+    /// its socket. A socket 1.5 s after the press binds; one just after the
+    /// lock's unbound life does not, at the instant `expire` ends that lock.
+    #[test]
+    fn a_socket_1_5_s_after_the_press_binds_and_one_after_the_unbound_life_does_not() {
+        let t = Instant::now();
+        let mut l = TalkLock::default();
+        l.acquire(7, "engineer", "aa".into(), t).unwrap();
+        assert_eq!(l.bind("aa", t + Duration::from_millis(1_500)), Some(7));
+        assert!(l.is_bound("aa"));
+        l.release(7);
+        let late = t + SILENCE + Duration::from_millis(1);
+        l.acquire(8, "engineer", "bb".into(), t).unwrap();
+        assert_eq!(l.bind("bb", late), None, "the unbound life is over");
+        assert!(!l.is_bound("bb"));
+        assert_eq!(l.expire(late), Some(8), "expire ends it at that instant");
+    }
+
+    /// The one log line `lines` has with `what`.
+    fn the_line<'a>(lines: &[&'a str], what: &str) -> Result<&'a str, String> {
+        let found: Vec<&str> = lines.iter().copied().filter(|l| l.contains(what)).collect();
+        match found[..] {
+            [line] => Ok(line),
+            _ => Err(format!("{} lines with {what:?} in {lines:#?}", found.len())),
+        }
+    }
+
+    /// #63: a bind is logged at info with its delay since the press, a
+    /// refusal at warn with its reason and, when the id is the held one,
+    /// the delay, so the next run through the tunnel gives numbers. The
+    /// talk id is a credential-like token: never logged.
+    #[tracing_test::traced_test]
+    #[test]
+    fn binds_and_refusals_are_logged_with_the_delay_never_the_id() {
+        let t = Instant::now();
+        let (held, other) = (new_talk_id(), new_talk_id());
+        let mut l = TalkLock::default();
+        l.bind(&held, t);
+        l.acquire(7, "engineer", held.clone(), t).unwrap();
+        l.bind(&other, t + Duration::from_millis(300));
+        l.bind(&held, t + Duration::from_millis(1_500));
+        l.bind(&held, t + Duration::from_millis(1_700));
+        l.release(7);
+        l.acquire(8, "engineer", held.clone(), t).unwrap();
+        l.bind(&held, t + SILENCE + Duration::from_millis(1));
+        logs_assert(|lines: &[&str]| {
+            for (what, level, after) in [
+                ("talkback socket bound", "INFO", Some("after_ms=1500")),
+                ("no lock", "WARN", None),
+                ("wrong id", "WARN", None),
+                ("already bound", "WARN", Some("after_ms=1700")),
+                ("too late", "WARN", Some("after_ms=2001")),
+            ] {
+                let line = the_line(lines, what)?;
+                if !line.contains(level) {
+                    return Err(format!("{what}: not at {level}: {line}"));
+                }
+                match after {
+                    Some(after) if !line.contains(after) => {
+                        return Err(format!("{what}: no {after}: {line}"));
+                    }
+                    None if line.contains("after_ms") => {
+                        return Err(format!("{what}: a delay for an id not held: {line}"));
+                    }
+                    _ => {}
+                }
+            }
+            if lines
+                .iter()
+                .any(|l| l.contains(&held) || l.contains(&other))
+            {
+                return Err("a talk id was logged".into());
+            }
+            Ok(())
+        });
     }
 
     #[test]
