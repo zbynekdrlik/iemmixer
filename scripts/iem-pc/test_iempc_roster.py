@@ -202,7 +202,7 @@ class RosterInstallTests(RosterBase):
                  script.index(f"Copy-Item -LiteralPath {q(UPLOAD)} -Destination {q(NEW)} -Force"),
                  script.index(ip.hash_check(NEW, FILE_SHA)),
                  script.index(f"if (Test-Path -LiteralPath {q(DST)} -PathType Leaf) {{ [IO.File]::Replace({q(NEW)}, "
-                              f"{q(DST)}, $null) }} else {{ Move-Item -LiteralPath {q(NEW)} -Destination {q(DST)} }}"),
+                              f"{q(DST)}, [NullString]::Value) }} else {{ Move-Item -LiteralPath {q(NEW)} -Destination {q(DST)} }}"),
                  script.index(ip.hash_check(DST, FILE_SHA))]
         self.assertEqual(order, sorted(order))
         self.assertNotIn(f"Move-Item -LiteralPath {q(NEW)} -Destination {q(DST)} -Force", script)   # no forced move
@@ -253,7 +253,7 @@ class RosterInstallTests(RosterBase):
                  script.index(ip.hash_check(PREV, PREV_SHA)),
                  script.index(f"Copy-Item -LiteralPath {q(PREV)} -Destination {q(NEW)} -Force"),
                  script.index(ip.hash_check(NEW, PREV_SHA)),
-                 script.index(f"[IO.File]::Replace({q(NEW)}, {q(DST)}, $null)"),
+                 script.index(f"[IO.File]::Replace({q(NEW)}, {q(DST)}, [NullString]::Value)"),
                  script.index(ip.hash_check(DST, PREV_SHA))]
         self.assertEqual(order, sorted(order))
         self.assertNotIn("Remove-Item", script)

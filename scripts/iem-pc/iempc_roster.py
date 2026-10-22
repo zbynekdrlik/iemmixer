@@ -266,7 +266,7 @@ def install_body(ip, upload: str, config_dir: str, sha: str) -> str:
         f"$iemPrev = (Get-FileHash -LiteralPath {q(prev)} -Algorithm SHA256).Hash.ToLowerInvariant() }}",
         f"Copy-Item -LiteralPath {q(upload)} -Destination {q(new)} -Force",
         ip.hash_check(new, sha),
-        f"if (Test-Path -LiteralPath {q(dst)} -PathType Leaf) {{ [IO.File]::Replace({q(new)}, {q(dst)}, $null) }} "
+        f"if (Test-Path -LiteralPath {q(dst)} -PathType Leaf) {{ [IO.File]::Replace({q(new)}, {q(dst)}, [NullString]::Value) }} "
         f"else {{ Move-Item -LiteralPath {q(new)} -Destination {q(dst)} }}",
         ip.hash_check(dst, sha),
         f"[pscustomobject]@{{ {INSTALLED}; before = $iemBefore; prev = $iemPrev; applied = $iemApplied }}",
@@ -286,7 +286,7 @@ def restore_body(ip, config_dir: str, sha: str, prev: str | None) -> str:
         steps += [ip.hash_check(kept, prev),
                   f"Copy-Item -LiteralPath {q(kept)} -Destination {q(new)} -Force",
                   ip.hash_check(new, prev),
-                  f"[IO.File]::Replace({q(new)}, {q(dst)}, $null)",
+                  f"[IO.File]::Replace({q(new)}, {q(dst)}, [NullString]::Value)",
                   ip.hash_check(dst, prev)]
     return " ; ".join([*steps, RESTORED])
 
