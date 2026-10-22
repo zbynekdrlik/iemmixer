@@ -99,10 +99,17 @@ impl SwitchState {
     }
 
     /// What the line becomes once the band `active` (its id) plays: `None`
-    /// while it stays true.
+    /// while it stays true (#61 review M2). "Hrá …" goes once another band
+    /// plays; a pending switch reads done once its band plays; a refusal
+    /// goes once the band it was about no longer plays. A switch being sent
+    /// waits for its own answer.
     pub fn follow(&self, active: &str) -> Option<Self> {
-        let _ = active;
-        None
+        match self {
+            Self::Done(target) if target.id != active => Some(Self::Idle),
+            Self::Pending(target) if target.id == active => Some(Self::Done(target.clone())),
+            Self::Failed { active: then, .. } if then != active => Some(Self::Idle),
+            _ => None,
+        }
     }
 }
 
@@ -118,6 +125,16 @@ pub fn LineupSwitch(
     let (state, set_state) = signal(SwitchState::Idle);
     let (asking, set_asking) = signal(false);
     let (picked, set_picked) = signal(String::new());
+
+    // The line under the control follows the band that plays (#61 M2).
+    Effect::new(move |_| {
+        let active = info.with(|i| i.as_ref().map(|i| i.active.id.clone()));
+        if let Some(active) = active
+            && let Some(next) = state.try_with_untracked(|s| s.follow(&active)).flatten()
+        {
+            let _ = set_state.try_set(next);
+        }
+    });
 
     let target = move || info.with(|i| i.as_ref().and_then(|i| target_of(i, &picked.get())));
     let options = move || {
@@ -301,7 +318,7 @@ mod tests {
     /// #61 review M2: the line under the control follows the band that
     /// plays: "Hrá …" goes once another band plays, a pending switch reads
     /// done once its band plays, a refusal goes once the band it was about
-    /// no longer plays. Here `follow` still keeps every line.
+    /// no longer plays.
     #[test]
     fn the_switch_message_follows_the_band_that_plays() {
         let done = SwitchState::Done(youth());
