@@ -17,6 +17,38 @@ pub(crate) fn test_roster(active: &str) -> RosterState {
     }
 }
 
+/// The test roster's text after member9 left (#58, the owner's look at the
+/// live system): no person, set or input of theirs in any lineup, while the
+/// site's legacy `[[members]]` and `[[inputs]]` still name member9, their
+/// set member9 and their mic10.
+pub(crate) fn departed_text() -> String {
+    let cut = |text: &str, part: &str| {
+        assert_eq!(text.matches(part).count(), 1, "{part}");
+        text.replacen(part, "", 1)
+    };
+    let text = include_str!("../../../../config/test-roster.toml");
+    let text = cut(
+        text,
+        "[[people]]\nid = \"member9\"\nname = \"Member 9\"\n\n",
+    );
+    let text = cut(&text, "member9 = \"member9\"\n");
+    cut(
+        &text,
+        "mic10 = { name = \"MEMBER9 mic\", owner = \"member9\" }\n",
+    )
+}
+
+/// [`departed_text`]'s roster with `active` playing.
+pub(crate) fn departed_roster(active: &str) -> RosterState {
+    let roster = Roster::parse(&departed_text()).expect("the roster without member9");
+    assert_eq!(roster.problems(), Vec::<String>::new());
+    RosterState {
+        roster: Arc::new(roster),
+        sha256: "departed-roster".into(),
+        active: active.into(),
+    }
+}
+
 fn ids(members: &[SiteMember]) -> Vec<(&str, &str, &str)> {
     members
         .iter()

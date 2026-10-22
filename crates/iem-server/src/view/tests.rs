@@ -668,6 +668,97 @@ fn only_a_leader_sees_and_moves_heard_mixes() {
     );
 }
 
+/// #58, the owner's look at the live system: a departed person's set
+/// (member9: no lineup lists it, the site's legacy members still name it)
+/// is no Mixes channel for a leader or the engineer, whichever lineup
+/// plays, and no command or update reaches it; legacy mode still shows it.
+#[test]
+fn a_departed_persons_set_is_no_mixes_channel() {
+    let m = Mirror::default();
+    let mixes = |v: &SiteView, p: &Page, viewer: &Viewer| -> Vec<String> {
+        channels(v, &m, p, viewer)
+            .into_iter()
+            .filter(|c| c.category == "mixes")
+            .map(|c| c.id)
+            .collect()
+    };
+    let set9 = ClientMsg::SetLevel {
+        id: "member9".into(),
+        level_db: -6.0,
+    };
+    let change9 = |on: &str| {
+        [Change::Level {
+            mix: mix(on),
+            source: Source::Mix(mix("member9")),
+            level: Level {
+                gain_db: -3.0,
+                pan: 0.0,
+                muted: false,
+            },
+        }]
+    };
+    let ids = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+    for (active, leader, leads, everyone) in [
+        (
+            "main",
+            "member1",
+            ids(&[
+                "member2", "member3", "member4", "member5", "member6", "member7", "member8",
+            ]),
+            ids(&[
+                "member1", "member2", "member3", "member4", "member5", "member6", "member7",
+                "member8",
+            ]),
+        ),
+        (
+            "youth",
+            "member3",
+            ids(&["member1", "member4"]),
+            ids(&["member1", "member3", "member4"]),
+        ),
+    ] {
+        let roster = crate::roster_state::tests::departed_roster(active);
+        let (v, problems) = SiteView::build_with(
+            &crate::site_view::tests::test_config(),
+            Some(&roster),
+            &crate::site_view::tests::test_topology(),
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let lead = page(&v, leader);
+        let eng = page(&v, "engineer");
+        assert_eq!(mixes(&v, &lead, &member(leader)), leads, "{active}");
+        assert_eq!(mixes(&v, &lead, &engineer()), leads, "{active}");
+        assert_eq!(mixes(&v, &eng, &engineer()), everyone, "{active}");
+        for (p, viewer) in [
+            (&lead, member(leader)),
+            (&lead, engineer()),
+            (&eng, engineer()),
+        ] {
+            assert_eq!(
+                command(&v, &m, p, &viewer, &set9),
+                Err(ViewError::UnknownId("member9".into())),
+                "{active}: {} as {}",
+                p.id,
+                viewer.sub
+            );
+            assert!(
+                updates_seen(&v, &m, p, &viewer, &change9(&p.mix.0)).is_empty(),
+                "{active}: {} as {}",
+                p.id,
+                viewer.sub
+            );
+        }
+    }
+    // Legacy: member9 is a member, their set a channel as before.
+    let legacy = test_view();
+    let p1 = page(&legacy, "member1");
+    assert!(mixes(&legacy, &p1, &member("member1")).contains(&"member9".to_string()));
+    let on_eng = mixes(&legacy, &page(&legacy, "engineer"), &engineer());
+    assert_eq!(on_eng.len(), 9);
+    assert!(on_eng.contains(&"member9".to_string()));
+    assert!(command(&legacy, &m, &p1, &member("member1"), &set9).is_ok());
+}
+
 /// #58: without a roster the rule is today's: a member whose mix hears
 /// others leads (member1, member3), so every test above still holds.
 #[test]
