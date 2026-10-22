@@ -787,6 +787,7 @@ mod tests {
         assert!(reads.take(third));
         assert!(reads.take(fourth));
         assert!(!reads.take(third));
+        assert!(!reads.take(fourth), "an answer is taken once");
         assert_eq!(reads.applied, fourth);
     }
 
