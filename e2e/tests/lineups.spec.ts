@@ -141,6 +141,24 @@ test.describe("Bands (#58)", () => {
     await leader.close();
   });
 
+  // The e2e job runs in roster mode; a site without a roster answers
+  // /api/lineup 204, which the page here gets in its place (#61 review).
+  test("a site without a roster keeps the page as it was (legacy smoke)", async ({ page }) => {
+    await page.route(
+      (url) => url.pathname === "/api/lineup",
+      (route) => route.fulfill({ status: 204 }),
+    );
+    // member3 leads both bands: in roster mode the badge and the switch.
+    await openMixer(page, "member3");
+    await expect(page.locator(".mixer-header .status-dot")).toHaveClass(/\bconnected\b/);
+    await expect(page.getByTestId("lineup-badge")).toHaveCount(0);
+    await expect(page.getByTestId("lineup-notice")).toHaveCount(0);
+    await page.locator(".settings-btn").click();
+    await expect(page.locator(".settings-modal")).toBeVisible();
+    await expect(page.getByTestId("lineup-section")).toHaveCount(0);
+    await expect(page.getByTestId("lineup-switch")).toHaveCount(0);
+  });
+
   test("the login tiles show the band that plays first, then the others", async ({ page }) => {
     await page.goto("/");
     const nine = Array.from({ length: 9 }, (_, i) => `/member${i + 1}`);
