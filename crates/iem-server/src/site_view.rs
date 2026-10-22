@@ -58,8 +58,9 @@ pub struct SiteView {
     /// Every login tile, each with whether they play (legacy: the members,
     /// all playing; `roster_state::people`).
     pub people: Vec<PersonView>,
-    /// Sets of the roster that nobody wears in the active lineup: no page
-    /// (legacy: none).
+    /// People's sets nobody wears in the active lineup
+    /// (`roster_state::person_sets`: a departed person's too): no page, no
+    /// Mixes channel (legacy: none).
     pub vacant: Vec<MixId>,
 }
 
@@ -181,18 +182,14 @@ impl SiteView {
                 .collect(),
         };
         let vacant = match (roster, lineup) {
-            (Some(r), Some(l)) => topo
-                .mixes
-                .iter()
-                .filter(|m| {
-                    l.person_on(&m.id.0).is_none()
-                        && r.roster
-                            .lineups
-                            .iter()
-                            .any(|x| x.sets.contains_key(&m.id.0))
-                })
-                .map(|m| m.id.clone())
-                .collect(),
+            (Some(r), Some(l)) => {
+                let sets = roster_state::person_sets(config, &r.roster);
+                topo.mixes
+                    .iter()
+                    .filter(|m| l.person_on(&m.id.0).is_none() && sets.contains(&m.id.0))
+                    .map(|m| m.id.clone())
+                    .collect()
+            }
             _ => Vec::new(),
         };
         let view = Self {

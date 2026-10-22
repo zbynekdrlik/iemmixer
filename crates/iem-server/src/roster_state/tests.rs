@@ -70,6 +70,31 @@ fn the_active_lineup_and_its_leaders() {
     assert_eq!(test_roster("gone").lineup().id, "main");
 }
 
+/// #58, the owner's look at the live system: a person's set is one a
+/// lineup lists or one the site's members name, never the engineer's or
+/// the translator's.
+#[test]
+fn person_sets_are_the_lineups_sets_and_the_site_members_sets() {
+    let nine: BTreeSet<String> = (1..=9).map(|n| format!("member{n}")).collect();
+    let cfg = test_config();
+    assert_eq!(person_sets(&cfg, &test_roster("youth").roster), nine);
+    assert_eq!(
+        person_sets(&cfg, &departed_roster("main").roster),
+        nine,
+        "member9 left; the site's members still name their set"
+    );
+    let listed = person_sets(&Config::default(), &departed_roster("main").roster);
+    assert_eq!(listed.len(), 8);
+    assert!(!listed.contains("member9"), "no lineup lists it");
+    let mut no_engineer_set = cfg.clone();
+    no_engineer_set.members.retain(|m| m.id == ENGINEER_ID);
+    assert_eq!(
+        person_sets(&no_engineer_set, &test_roster("main").roster),
+        nine,
+        "the engineer's mix is no person's set"
+    );
+}
+
 #[test]
 fn site_members_are_the_lineups_people_on_their_sets_then_the_engineer() {
     let cfg = test_config();

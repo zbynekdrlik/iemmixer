@@ -5,6 +5,7 @@
 //! plus the site's engineer entry; every person is a login tile, playing or
 //! not.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use iem_core::config::{Config, SiteMember};
@@ -64,6 +65,20 @@ pub fn site_members(cfg: &Config, roster: Option<&RosterState>) -> Vec<SiteMembe
             })
         })
         .chain(cfg.member(ENGINEER_ID).cloned())
+        .collect()
+}
+
+/// Every person's set (#58, the owner's look at the live system): a mix
+/// any lineup places a person on, or one the site's `[[members]]` give a
+/// member other than the engineer. A set only the site's legacy members
+/// name is a person's who left: nobody wears it in any lineup. The
+/// engineer's and the translator's mixes are no person's set.
+pub fn person_sets(cfg: &Config, roster: &Roster) -> BTreeSet<String> {
+    cfg.members
+        .iter()
+        .filter(|m| m.id != ENGINEER_ID)
+        .map(|m| m.mix.clone())
+        .chain(roster.lineups.iter().flat_map(|l| l.sets.keys().cloned()))
         .collect()
 }
 
