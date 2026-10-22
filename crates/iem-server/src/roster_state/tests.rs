@@ -95,6 +95,54 @@ fn person_sets_are_the_lineups_sets_and_the_site_members_sets() {
     );
 }
 
+/// #58, owner option 1: an input is foreign to a lineup that does not list
+/// it when it belongs to someone who does not play there (another lineup's
+/// person, a departed member); the engineer's and the unowned ones never
+/// are, and one the lineup lists is its own, owner or not.
+#[test]
+fn foreign_inputs_belong_to_people_who_do_not_play() {
+    let cfg = test_config();
+    let youth = test_roster("youth");
+    let (r, l) = (&youth.roster, youth.lineup());
+    let owners =
+        |id: &str| -> Vec<String> { input_owners(&cfg, r, id).map(String::from).collect() };
+    assert_eq!(owners("mic1"), ["member1", "member10", "member1"]);
+    assert_eq!(owners("eng_mic"), ["engineer"]);
+    assert!(owners("keys").is_empty());
+    let foreign = |id: &str| foreign_input(&cfg, r, l, id);
+    for id in ["mic2", "mic5", "mic6", "mic10"] {
+        assert!(foreign(id), "{id}");
+    }
+    for id in ["mic1", "mic3", "mic4", "eng_mic", "keys", "hand1", "drums"] {
+        assert!(!foreign(id), "{id}");
+    }
+    // member9 left: the site's member9 is no roster person.
+    let gone = departed_roster("main");
+    assert!(foreign_input(&cfg, &gone.roster, gone.lineup(), "mic10"));
+    assert!(!foreign_input(&cfg, &gone.roster, gone.lineup(), "mic9"));
+    // Youth names main's member4's guitar input for itself, without an owner.
+    let mut listed = test_roster("youth");
+    Arc::make_mut(&mut listed.roster)
+        .lineups
+        .iter_mut()
+        .find(|l| l.id == "youth")
+        .unwrap()
+        .inputs
+        .insert(
+            "mic5".into(),
+            iem_core::roster::LineupInput {
+                name: "SHARED gtr".into(),
+                owner: None,
+            },
+        );
+    assert!(!foreign_input(
+        &cfg,
+        &listed.roster,
+        listed.lineup(),
+        "mic5"
+    ));
+}
+
 #[test]
 fn site_members_are_the_lineups_people_on_their_sets_then_the_engineer() {
     let cfg = test_config();

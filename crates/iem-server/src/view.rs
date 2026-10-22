@@ -91,6 +91,14 @@ pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
         .map(|m| Source::Mix(m.clone()))
 }
 
+/// Whether `viewer` sees and moves the input `id` (#58, owner option 1):
+/// the engineer every input on any page, a person every input but the
+/// active lineup's foreign ones (`SiteView::foreign_inputs`: another
+/// band's people's, a departed person's).
+pub fn shows_input(view: &SiteView, viewer: &Viewer, id: &str) -> bool {
+    view.input(id).is_some() && (viewer.engineer || !view.foreign_inputs.iter().any(|f| f.0 == id))
+}
+
 /// The mixes `page`'s mix hears that `viewer` sees and moves (its Mixes
 /// tab): none but to a leader of the band or the engineer (#58 design §8),
 /// and never a set nobody wears.
@@ -121,14 +129,16 @@ fn channel(mirror: &Mirror, page: &Page, s: &Source) -> (f32, bool, f32) {
     )
 }
 
-/// Every channel of `page` for `viewer`: the inputs in topology order, then
-/// the mixes the page's mix hears that the viewer sees ([`heard`], the
-/// Mixes tab), named by the person on that set.
+/// Every channel of `page` for `viewer`: the inputs the viewer sees
+/// ([`shows_input`]) in topology order, then the mixes the page's mix hears
+/// that the viewer sees ([`heard`], the Mixes tab), named by the person on
+/// that set.
 pub fn channels(view: &SiteView, mirror: &Mirror, page: &Page, viewer: &Viewer) -> Vec<Channel> {
     let own = page.member.as_deref().and_then(|m| view.own_input(m));
     let mut out: Vec<Channel> = view
         .inputs
         .iter()
+        .filter(|i| shows_input(view, viewer, &i.id.0))
         .map(|i| {
             let (level_db, muted, pan) = channel(mirror, page, &Source::Input(i.id.clone()));
             Channel {
@@ -194,7 +204,8 @@ pub fn updates_for(
 
 /// The UI updates `changes` (already applied to `mirror`) produce for
 /// `page` as `viewer` sees it: a heard mix's only where it is on their
-/// Mixes tab ([`heard`]).
+/// Mixes tab ([`heard`]), an input's only where they see it
+/// ([`shows_input`]).
 pub fn updates_seen(
     view: &SiteView,
     mirror: &Mirror,
@@ -205,7 +216,7 @@ pub fn updates_seen(
     let mut out = Vec::new();
     let mixes = heard(view, page, viewer);
     let shown = |s: &Source| match s {
-        Source::Input(id) => view.input(&id.0).is_some(),
+        Source::Input(id) => shows_input(view, viewer, &id.0),
         Source::Mix(id) => mixes.contains(&id),
     };
     for c in changes {
@@ -293,11 +304,15 @@ pub fn command(
     msg: &ClientMsg,
 ) -> Result<Vec<Cmd>, ViewError> {
     // A level of a heard mix (a whole mix or a peer) is a leader's or the
-    // engineer's to move (#58 design §8).
+    // engineer's to move (#58 design §8); an input of someone who does not
+    // play is the engineer's (#58, owner option 1).
     let src = |id: &str| match source(view, page, id) {
         None => Err(ViewError::UnknownId(id.into())),
         Some(Source::Mix(_)) if !viewer.leads(view) => Err(ViewError::Forbidden(
             "the mixes a set hears are its leader's",
+        )),
+        Some(Source::Input(_)) if !shows_input(view, viewer, id) => Err(ViewError::Forbidden(
+            "the inputs of people who do not play are the engineer's",
         )),
         Some(s) => Ok(s),
     };

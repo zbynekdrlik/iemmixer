@@ -62,6 +62,11 @@ pub struct SiteView {
     /// (`roster_state::person_sets`: a departed person's too): no page, no
     /// Mixes channel (legacy: none).
     pub vacant: Vec<MixId>,
+    /// Inputs of people who do not play in the active lineup, which it does
+    /// not list (`roster_state::foreign_input`: another lineup's people's,
+    /// a departed person's): no person's page shows or moves them, the
+    /// engineer's every page does (`view::shows_input`; legacy: none).
+    pub foreign_inputs: Vec<InputId>,
 }
 
 /// "translator" → "Translator".
@@ -192,6 +197,15 @@ impl SiteView {
             }
             _ => Vec::new(),
         };
+        let foreign_inputs = match (roster, lineup) {
+            (Some(r), Some(l)) => topo
+                .inputs
+                .iter()
+                .filter(|i| roster_state::foreign_input(config, &r.roster, l, &i.id.0))
+                .map(|i| i.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
         let view = Self {
             members,
             inputs,
@@ -201,6 +215,7 @@ impl SiteView {
             leaders,
             people: roster_state::people(config, roster),
             vacant,
+            foreign_inputs,
         };
         (view, problems)
     }

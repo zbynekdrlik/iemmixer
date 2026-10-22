@@ -82,6 +82,37 @@ pub fn person_sets(cfg: &Config, roster: &Roster) -> BTreeSet<String> {
         .collect()
 }
 
+/// Whom the input `id` belongs to (#58, owner option 1): the owner each
+/// lineup gives it, then the site's `[[inputs]]` owner (a member id of the
+/// legacy layout, a departed person's when no roster person has it).
+pub fn input_owners<'a>(
+    cfg: &'a Config,
+    roster: &'a Roster,
+    id: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    roster
+        .lineups
+        .iter()
+        .filter_map(move |l| l.inputs.get(id)?.owner.as_deref())
+        .chain(
+            cfg.inputs
+                .iter()
+                .filter(move |m| m.id == id)
+                .filter_map(|m| m.owner.as_deref()),
+        )
+}
+
+/// Whether a person's page leaves the input `id` out while `lineup` plays
+/// (#58, owner option 1): `lineup` does not list it, and it belongs to
+/// someone who does not play in `lineup` (another lineup's person, a
+/// departed member), never the engineer. The inputs of the playing
+/// people and the shared ones (hand mics, stems, tech, the engineer's
+/// mic) stay; an input `lineup` lists is its own, owner or not.
+pub fn foreign_input(cfg: &Config, roster: &Roster, lineup: &Lineup, id: &str) -> bool {
+    !lineup.inputs.contains_key(id)
+        && input_owners(cfg, roster, id).any(|o| o != ENGINEER_ID && !lineup.plays(o))
+}
+
 /// Every login tile: legacy, the site's members in their order, all
 /// playing; roster mode, the active lineup's people in set order, then the
 /// other people in roster order (not playing), then the site's engineer.
