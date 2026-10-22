@@ -362,9 +362,11 @@ impl LineupView {
     }
 
     /// Whether the reconnect tick reads the band before it opens a new socket
-    /// after a failed close.
+    /// after a failed close: in roster mode (#61 review I1), so a switch
+    /// missed while the socket was down (a close of 1006 or 4002, never
+    /// 4003) shows the notice instead of a socket the server refuses.
     pub(super) fn reads_before_reconnect(&self) -> bool {
-        false
+        matches!(self, Self::Roster(_))
     }
 
     /// Whether the page reads the band again at `now_ms`, after the last

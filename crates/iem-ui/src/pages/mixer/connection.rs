@@ -233,6 +233,16 @@ pub(super) fn setup_connection(
             }
 
             last_reconnect_attempt_at_tick.set(now_ms);
+            // #61 review I1: in roster mode the band is read first, so a
+            // switch missed while the socket was down shows the notice
+            // instead of a socket the server refuses; the connect effect
+            // opens the socket once the answer says the bearer plays. The
+            // backoff still paces it: this runs only when a reconnect is due.
+            if lineup.try_with_untracked(LineupView::reads_before_reconnect) == Some(true) {
+                let _ = state.lineup.1.try_update(LineupView::reread);
+                read_lineup(state);
+                return;
+            }
             connect_websocket(
                 &member,
                 last_frame_at_tick.clone(),
