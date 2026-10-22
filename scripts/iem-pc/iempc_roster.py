@@ -54,7 +54,11 @@ In this order (dev time: the EVENT-NOW flag at the start refuses it, design
    way, or roster.toml is removed when there was none, so a refused roster
    never waits in roster.toml for the server's next start (which a roster
    with no roster applied before it would fail). `restored: true`, or
-   `restore_failed` naming why.
+   `restore_failed` naming why. Right before the replace or the remove it
+   reads the applied roster and the status again: when either names the
+   upload as applied (a deferred roster the server applied after the wait
+   ran out), it changes nothing and the install counts as applied
+   (`late: true`, exit 0).
 
 It prints one JSON object `{"roster_install": {sha256, ok, problems,
 applied, added, removed}}` (`dry_run`, `unchanged`, `restored`,
@@ -63,8 +67,10 @@ server's problems name ids only, P6). Exit 0 applied, or a dry run that
 checked ok; 1 refused or not applied.
 
 Known limit: a flag that appears during the wait runs the event path at
-once, before any restore: a refused roster then stays until the next
-roster-install (the event path's budget comes first).
+once, before any restore (the event path's budget comes first), so a
+refused roster may stay in roster.toml. Never silently: one OWNER ALARM line
+on stderr (`cut_alarm`) names it and the way back by hand, the kept
+`roster.toml.prev` or the removal of roster.toml.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
@@ -72,6 +78,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import time
 import tomllib
 from pathlib import Path
@@ -221,8 +228,7 @@ def seen(text) -> str:
 def late(sha: str, text, reads: int) -> dict:
     return {"sha256": sha, "ok": False, "applied": False, "added": [], "removed": [], "problems": [
         f"not applied within {WAIT_S:g} s: {STATUS} {seen(text)} after {reads} reads; the server writes none for a "
-        "roster it defers (an engine not synced, a switch a restart cut short) and reads it again every 2 s: "
-        f"read {STATUS} again later"]}
+        "roster it defers (an engine not synced, a switch a restart cut short) and reads it again every 2 s"]}
 
 
 def read_shared(ip, path: str, var: str) -> str:
@@ -275,20 +281,32 @@ def install_body(ip, upload: str, config_dir: str, sha: str) -> str:
 
 def restore_body(ip, config_dir: str, sha: str, prev: str | None) -> str:
     """Step 7's PowerShell: while roster.toml still holds the upload, the kept
-    previous file back by the same atomic replace, or roster.toml removed."""
+    previous file back by the same atomic replace, or roster.toml removed;
+    unless, right before that, the applied roster or the status names the
+    upload as applied (the server applied it after the wait ran out): then
+    nothing changes and the answer is `{late, status}`."""
     q = ip.ps_quote
-    new, dst, kept = (ip.pc_join(config_dir, n) for n in (NEW, ROSTER, PREV))
-    steps = [ip.hash_check(dst, sha)]
+    new, dst, kept, status, applied = (ip.pc_join(config_dir, n) for n in (NEW, ROSTER, PREV, STATUS, APPLIED))
+    prepare = [ip.hash_check(dst, sha)]
     if prev is None:
-        steps += [f"Remove-Item -LiteralPath {q(dst)}",
-                  f"if (Test-Path -LiteralPath {q(dst)}) {{ throw ('still there: ' + {q(dst)}) }}"]
+        act = [f"Remove-Item -LiteralPath {q(dst)}",
+               f"if (Test-Path -LiteralPath {q(dst)}) {{ throw ('still there: ' + {q(dst)}) }}"]
     else:
-        steps += [ip.hash_check(kept, prev),
-                  f"Copy-Item -LiteralPath {q(kept)} -Destination {q(new)} -Force",
-                  ip.hash_check(new, prev),
-                  f"[IO.File]::Replace({q(new)}, {q(dst)}, [NullString]::Value)",
-                  ip.hash_check(dst, prev)]
-    return " ; ".join([*steps, RESTORED])
+        prepare += [ip.hash_check(kept, prev),
+                    f"Copy-Item -LiteralPath {q(kept)} -Destination {q(new)} -Force",
+                    ip.hash_check(new, prev)]
+        act = [f"[IO.File]::Replace({q(new)}, {q(dst)}, [NullString]::Value)",
+               ip.hash_check(dst, prev)]
+    late_check = [
+        sha_shared(ip, applied, "$iemApplied"),
+        read_shared(ip, status, "$iemNow"),
+        f"$iemLate = ($iemApplied -eq '{sha}')",
+        "if (-not $iemLate -and $iemNow) { try { $iemDoc = ConvertFrom-Json -InputObject $iemNow ; "
+        f"$iemLate = ($iemDoc.sha256 -eq '{sha}' -and $iemDoc.applied -eq $true) }} catch {{ $iemLate = $false }} }}",
+    ]
+    tail = (f"if ($iemLate) {{ [pscustomobject]@{{ late = $true; status = $iemNow }} }} "
+            f"else {{ {' ; '.join(act)} ; {RESTORED} }}")
+    return " ; ".join([*prepare, *late_check, tail])
 
 
 def status_body(ip, config_dir: str) -> str:
@@ -340,21 +358,51 @@ def await_status(ctx, ip, config_dir: str, sha: str, before: dict | None) -> dic
         ip.pause(ctx, ip.POLL_S)
 
 
-def restore(ctx, ip, config_dir: str, sha: str, prev) -> dict:
-    """Step 7 (a change): `restored`, or `restore_failed` naming why. `prev`
-    is the install's answer: None (there was no roster.toml), a sha256, or
-    anything else, which leaves roster.toml as it is (removing it would lose
-    a previous file the answer failed to name)."""
+def applied_late(sha: str, status_text) -> dict:
+    """The restore found the upload applied after all (pure): the status's
+    fields when it names the upload as applied, else only that it is."""
+    got = outcome(parse_status(status_text), None, sha)
+    base = got if got is not None and got["applied"] else {
+        "sha256": sha, "ok": True, "problems": [], "applied": True, "added": [], "removed": []}
+    return {**base, "late": True}
+
+
+def restore(ctx, ip, config_dir: str, sha: str, prev, out: dict) -> dict:
+    """Step 7 (a change) after the outcome `out` that is not applied: `out`
+    with `restored`, or `restore_failed` naming why, or the late apply the
+    restore found instead (`applied_late`). `prev` is the install's answer:
+    None (there was no roster.toml), a sha256, or anything else, which leaves
+    roster.toml as it is (removing it would lose a previous file the answer
+    failed to name)."""
     if prev is not None and not (isinstance(prev, str) and HEX64.fullmatch(prev)):
-        return {"restore_failed": f"{ROSTER} was not put back: the PC named the previous file as {str(prev)[-80:]!r}, "
-                                  "no sha256"}
+        return {**out, "restore_failed": f"{ROSTER} was not put back: the PC named the previous file as "
+                                         f"{str(prev)[-80:]!r}, no sha256"}
     try:
         r = ip.run_module(ctx.env, restore_body(ip, config_dir, sha, prev), ip.STATUS_S, ctx.watch(abandon=False))
     except ip.StepError as e:
-        return {"restore_failed": f"{ROSTER} was not put back: {str(e)[-400:]}"}
+        return {**out, "restore_failed": f"{ROSTER} was not put back: {str(e)[-400:]}"}
+    if isinstance(r, dict) and r.get("late") is True:
+        return applied_late(sha, r.get("status"))
     if r != "restored":
-        return {"restore_failed": f"{ROSTER} was not put back: the PC answered {str(r)[-200:]!r}"}
-    return {"restored": True}
+        return {**out, "restore_failed": f"{ROSTER} was not put back: the PC answered {str(r)[-200:]!r}"}
+    return {**out, "restored": True}
+
+
+def cut_alarm(config_dir: str, sha: str, prev, why: str) -> str:
+    """The OWNER ALARM line when `why` cut the wait before any restore (a
+    documented limit, never silent): the upload may still be in roster.toml,
+    and the way back by hand."""
+    dst, kept, status = (f"{config_dir}\\{n}" for n in (ROSTER, PREV, STATUS))
+    if prev is None:
+        back = f"remove {dst} (there was none before)"
+    elif isinstance(prev, str) and HEX64.fullmatch(prev):
+        back = f"put {kept} back as {dst} (sha256 {prev[:12]})"
+    else:
+        back = f"put {kept} back as {dst} if the install kept one, else remove {dst}"
+    return (f"iempc: OWNER ALARM: {why} cut roster-install's wait, so nothing was put back: the new roster "
+            f"({sha[:12]}) may still be in {dst} on the PC, applied or not ({status} names the last one the server "
+            f"read). If it is not applied, the way back in dev time: {back}, or 'iempc roster-install' with the "
+            "previous roster.")
 
 
 def run(ctx, ip) -> int:
@@ -397,8 +445,13 @@ def run(ctx, ip) -> int:
     if r.get("applied") == sha:
         out = unchanged(sha)
     else:
-        out = await_status(ctx, ip, config_dir, sha, parse_status(r.get("before")))
+        try:
+            out = await_status(ctx, ip, config_dir, sha, parse_status(r.get("before")))
+        except ip.EventNow:
+            # The event path comes first, so no restore; but never silently.
+            print(cut_alarm(config_dir, sha, r.get("prev"), "'ide event'"), file=sys.stderr, flush=True)
+            raise
     if not out["applied"]:
-        out.update(restore(ctx, ip, config_dir, sha, r.get("prev")))
+        out = restore(ctx, ip, config_dir, sha, r.get("prev"), out)
     ip.emit({"roster_install": out})
     return 0 if out["applied"] else 1

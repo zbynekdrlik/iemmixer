@@ -305,7 +305,10 @@ class RosterInstallTests(RosterBase):
                          script.index(f"[IO.File]::Open({q(STATUS_FILE)}, {SHARED}")]
                 self.assertLess(script.index(before), min(reads), prev)
                 self.assertLess(max(reads), script.index(action), prev)
-                self.assertIn(f"'{FILE_SHA}'", script[min(reads):script.index(action)], prev)
+                # Either names the upload: the applied roster's sha256, or the status's sha256 with applied.
+                between = script[min(reads):script.index(action)]
+                self.assertIn(f"($iemApplied -eq '{FILE_SHA}')", between, prev)
+                self.assertIn(f"$iemDoc.sha256 -eq '{FILE_SHA}' -and $iemDoc.applied -eq $true", between, prev)
 
     def test_a_restore_that_fails_is_named(self) -> None:
         def fails():
@@ -436,7 +439,8 @@ class RosterInstallTests(RosterBase):
         limit), but never silently: one OWNER ALARM line names the upload
         that may still be in roster.toml and the way back."""
         self.pc.texts[STATUS_READ] = lambda: (self.flag(), status(OTHER_SHA))[1]
-        for prev, way_back in ((PREV_SHA, f"put {PREV} back as {DST}"), (None, f"remove {DST}")):
+        for prev, way_back in ((PREV_SHA, f"put {PREV} back as {DST}"), (None, f"remove {DST} (there was none before)"),
+                               ("not a sha256", f"put {PREV} back as {DST} if the install kept one, else remove {DST}")):
             self.prev = prev
             ip.EVENT_NOW.unlink(missing_ok=True)
             self.pc.modules.clear()
