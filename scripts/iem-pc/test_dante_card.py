@@ -45,7 +45,7 @@ class Card:
         self.raise_on: dict[tuple[str, int], Exception] = {}   # writes whose command raises, unsent
         self.silent = False                           # answers nothing: no name, no channels
         self.partial = False                          # one TX channel missing from the read
-        self.before_write = None                      # called before each write
+        self.after_write = None                       # called after each write that returned
         self.reads = 0
 
     def device(self, ip: str):
@@ -87,14 +87,14 @@ class Device:
         await self._write(kind, number, None)
 
     async def _write(self, kind: str, number: int, label: str | None) -> None:
-        if self.card.before_write is not None:
-            self.card.before_write()
         self.card.calls.append(("set_channel_name", kind, number, label) if label is not None
                                else ("reset_channel_name", kind, number))
         if (kind, number) in self.card.raise_on:
             raise self.card.raise_on[(kind, number)]
         if (kind, number) not in self.card.deaf_to:
             self.card.labels[kind][number] = label
+        if self.card.after_write is not None:
+            self.card.after_write()
 
 
 class HelperTests(unittest.TestCase):
@@ -171,10 +171,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(doc["tx"]["3"], "3")   # never sent
 
     def test_a_read_back_that_fails_still_reports_what_was_sent(self) -> None:
-        def silent_after_first_write():
-            self.card.silent = bool(self.writes())
-
-        self.card.before_write = silent_after_first_write
+        self.card.after_write = lambda: setattr(self.card, "silent", True)
         changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"}]
         code, doc, err = self.write(changes)
         self.assertEqual(code, 0, err)
@@ -182,11 +179,7 @@ class HelperTests(unittest.TestCase):
         self.assertIn("not read back: the card did not answer", doc["error"])
 
     def test_the_event_flag_stops_the_writes_and_the_rest_is_read_back(self) -> None:
-        def flag_after_first_write():
-            if self.writes():
-                self.flag.write_text("ide event\n", encoding="utf-8")
-
-        self.card.before_write = flag_after_first_write
+        self.card.after_write = lambda: self.flag.write_text("ide event\n", encoding="utf-8")
         changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},
                    {"type": "tx", "channel": 2, "label": "ZYXQW inear R 02"}]
         code, doc, err = self.write(changes)
