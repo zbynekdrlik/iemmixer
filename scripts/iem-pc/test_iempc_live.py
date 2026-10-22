@@ -232,6 +232,43 @@ class DispatchLiveTests(LiveBase):
         code, _, err = self.live()
         self.assertEqual(code, 0, err)
 
+    def test_a_hil_run_of_this_entry_that_may_still_run_refuses(self) -> None:
+        """Both begin a HIL job on the PC (hil.yml's pc job, live.yml's
+        pc-begin), so the second to reach it is cancelled (#58 Part D, build
+        90a7b89: a live run dispatched 5 s after a HIL run began first). A HIL
+        run of this dev entry may still run for hil.yml's verify and pc job
+        bounds, 10 + 30 min, after its dispatch; the operator waits for it."""
+        path = ip.state_dir() / "dispatch.json"
+
+        def write_hil(*records) -> None:
+            ip.write_json(path, {"dispatches": [{"sha": SHA, "branch": "dev", "run": RUN, "digest": "sha256:" + "0" * 64,
+                                                 "entry": 0, "at": ago(60), **r} for r in records]})
+
+        write_hil({"at": ago(40 * 60 - 60)})
+        err = self.refused_before_any_call("no live run: a HIL run dispatched in this dev entry may still run")
+        self.assertIn(SHA, err)
+        self.assertIn("wait for it to end", err)
+        self.assertIn(NOTHING, err)
+        self.assertNotIn("cannot be read", err)
+        # Fail safe: a time or a dev entry that cannot be read counts, and says to check the file.
+        for bad in ({"at": "later"}, {"at": "2026-10-09T10:00:00"}, {"entry": None}):
+            write_hil(bad)
+            err = self.refused_before_any_call("a HIL run dispatched in this dev entry may still run", bad)
+            self.assertIn(f"check {path} by hand", err, bad)
+        for text in ("not json", json.dumps({"dispatches": {"sha": SHA}})):
+            path.write_text(text, encoding="utf-8")
+            self.pc.calls.clear()
+            code, _, err = self.live()
+            self.assertEqual((code, self.pc.calls, self.dispatched()), (1, [], []), text)
+            self.assertIn("dispatch.json", err, text)
+            self.assertIn("check it by hand", err, text)
+        # Past its window, or of another dev entry, it does not.
+        write_hil({"at": ago(40 * 60 + 60)}, {"entry": 1})
+        code, _, err = self.live()
+        self.assertEqual(code, 0, err)
+        self.assertEqual((live.HIL_JOB_MINUTES, live.HIL_WINDOW_S, ip.HIL_RECORD),
+                         ({"verify": 10, "pc": 30}, 2400, "dispatch.json"))
+
     def test_an_unreadable_live_record_counts_as_running(self) -> None:
         """Fail safe: a record whose time cannot be read may still run, one
         whose dev entry cannot be read may be of this entry (its window still
