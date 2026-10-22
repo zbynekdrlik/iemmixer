@@ -12,3 +12,7 @@ The `view!` macro tokenizes `>` / `>=` / `<` as tag boundaries. An inline compar
 ## Signal writes after an await or in a JS callback use `try_*`
 
 `scripts/check_disposal_safety.py` (the `integrity` CI job) rejects `.set()` / `.update()` inside `spawn_local` blocks and `Closure::wrap` callbacks — the component may already be disposed. Use `try_set` / `try_update`.
+
+## Write `connected` before a view change that unmounts the mixer
+
+Effects run after the turn, in the order they were woken. A write that unmounts a subtree (the notice's view takes the mixer's place, `<Show>` drops its children) followed in the same turn by a write the subtree reads (`connected`) wakes the subtree's render effects after the unmount was scheduled: they run on disposed locals (`is_fader_active`) and panic, "Tried to access a reactive value that has already been disposed", then "RefCell already borrowed" (#61 second review C1, CI run 39700306928). So write `connected` before the view (`pages/mixer/helpers.rs` `lineup_writes`, pinned by its test), and make no write that changes nothing: `try_set` notifies even when the value is the same.

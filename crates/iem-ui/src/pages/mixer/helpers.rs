@@ -254,19 +254,25 @@ pub(super) enum LineupWrite {
 }
 
 /// The writes an answer makes, in their order, for a page whose view is
-/// `current` and whose connection shows `connected`.
+/// `current` and whose connection shows `connected` (#61 second review
+/// C1). A view the page does not connect in (the notice) unmounts the
+/// mixer, so `connected = false` goes first: written in the same turn after
+/// the view, it woke the mixer's render effects, which then ran after the
+/// unmount on their disposed signals and panicked. A write that changes
+/// nothing is not made: it wakes them too.
 pub(super) fn lineup_writes(
     current: &LineupView,
     answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>,
     connected: bool,
 ) -> Vec<LineupWrite> {
-    let _ = connected;
     let mut next = current.clone();
     next.apply(answer);
-    let connects = next.connects();
-    let mut writes = vec![LineupWrite::View(next)];
-    if !connects {
+    let mut writes = Vec::new();
+    if connected && !next.connects() {
         writes.push(LineupWrite::Disconnected);
+    }
+    if next != *current {
+        writes.push(LineupWrite::View(next));
     }
     writes
 }
