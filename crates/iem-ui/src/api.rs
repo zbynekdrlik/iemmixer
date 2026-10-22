@@ -82,6 +82,12 @@ pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupI
     }
 }
 
+/// The URL that reads the band for the page `page`.
+pub fn lineup_url(page: &str) -> String {
+    let _ = page;
+    format!("{API_BASE}/lineup")
+}
+
 /// `GET /api/lineup` (#58): which band plays and what the signed-in person
 /// may do; `None` on a site without a roster. A read that has not answered
 /// after [`NETWORK_TIMEOUT_MS`] is aborted, an error (#61 review C2: a read
@@ -593,6 +599,20 @@ mod tests {
             }
         );
         assert_eq!(lineup_answer(200, "{}").unwrap_err().code, "UNREADABLE");
+    }
+
+    /// #61 review I2: the page asks whether ITS person plays (the engineer
+    /// on a person's page gets the notice when that person does not).
+    #[test]
+    fn the_band_is_read_for_the_page() {
+        assert_eq!(lineup_url("member2"), "/api/lineup?page=member2");
+        assert_eq!(lineup_url("engineer"), "/api/lineup?page=engineer");
+        assert_eq!(lineup_url("team_a-1"), "/api/lineup?page=team_a-1");
+        // A route somebody typed: anything but an id's characters is escaped.
+        assert_eq!(
+            lineup_url("a b&c=d/e?"),
+            "/api/lineup?page=a%20b%26c%3Dd%2Fe%3F"
+        );
     }
 
     #[test]

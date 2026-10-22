@@ -358,5 +358,30 @@ test.describe("Bands (#58)", () => {
       await page.locator(".settings-modal .modal-close").click();
       await expect(page.getByTestId("global-volume-fader")).toBeVisible();
     });
+
+    test("the engineer on the page of a person who does not play sees the notice (#61 I2)", async ({ page }) => {
+      await openMixer(page, "engineer", { engineer: true });
+      await page.locator(".settings-btn").click();
+      await switchTo(page, page.getByTestId("lineup-section"), "youth", confirmation(MAIN, YOUTH));
+      await expect(page.getByTestId("lineup-badge")).toHaveText(YOUTH);
+
+      // The engineer opens member2's dimmed tile: member2 plays no part of
+      // youth, so the page shows the notice and opens no socket.
+      const sockets = socketsTo(page, "member2");
+      await page.goto("/");
+      await page.locator('.member-card.not-playing[href="/member2"]').click();
+      const shown = page.getByTestId("lineup-notice");
+      await expect(shown).toBeVisible({ timeout: 5_000 });
+      await expect(shown.locator(".lineup-notice-text")).toHaveText(notice(YOUTH));
+      await expect(page.getByTestId("global-volume-fader")).toHaveCount(0);
+      expect(sockets).toHaveLength(0);
+
+      // The engineer may switch: back to main from the notice, and member2's
+      // mixer opens on the same page.
+      await switchTo(page, shown, "main", confirmation(YOUTH, MAIN));
+      await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByTestId("lineup-badge")).toHaveText(MAIN);
+      expect(sockets).toHaveLength(1);
+    });
   });
 });
