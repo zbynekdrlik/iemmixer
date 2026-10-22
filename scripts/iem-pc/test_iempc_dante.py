@@ -11,7 +11,9 @@ import gc
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import unittest
@@ -683,6 +685,24 @@ class HelperRunTests(Base):
             self.assertEqual(json.loads(dante.helper(ip, self.cmd("read"), ""))["verb"], "read")
         # A recorded process that is not the helper (its pid reused) does not hold a run back.
         ip.write_json(ip.STATE_DIR / dante.RECORD, {"pid": os.getpid()})
+        self.assertEqual(json.loads(dante.helper(ip, self.cmd("read"), ""))["verb"], "read")
+
+    def test_a_helper_run_from_another_checkout_also_holds_a_run_back(self) -> None:
+        # The event checkout and the dev checkout share the state dir and its
+        # lock: a helper started from either one's copy of dante_card.py is a
+        # run (the final review on #62), whatever the folder it runs from.
+        with tempfile.TemporaryDirectory() as other:
+            copy = Path(other) / "dante_card.py"
+            copy.write_text("import time\ntime.sleep(1.5)\n", encoding="ascii")
+            proc = subprocess.Popen([sys.executable, "-I", str(copy)])
+            try:
+                ip.STATE_DIR.mkdir(parents=True, exist_ok=True)
+                ip.write_json(ip.STATE_DIR / dante.RECORD, {"pid": proc.pid})
+                with self.assertRaises(ip.Refused) as e:
+                    dante.helper(ip, self.cmd("read"), "")
+                self.assertIn("still runs on this box", str(e.exception))
+            finally:
+                proc.wait(timeout=10)
         self.assertEqual(json.loads(dante.helper(ip, self.cmd("read"), ""))["verb"], "read")
 
 

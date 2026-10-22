@@ -332,13 +332,14 @@ def card_env(ip, env: dict[str, str], need: bool) -> Card | None:
 
 
 def running(pid: int) -> bool:
-    """Whether `pid` is a run of dante_card.py on this box (a pid reused by
-    another program, or one that has ended, is not)."""
+    """Whether `pid` is a run of dante_card.py on this box, from any checkout
+    (the event checkout shares this state dir and lock); a pid reused by
+    another program, or one that has ended, is not."""
     try:
         args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
     except (FileNotFoundError, ProcessLookupError):
         return False
-    return str(HELPER).encode() in args
+    return any(a.rsplit(b"/", 1)[-1] == HELPER.name.encode() for a in args)
 
 
 def helper(ip, cmd: list[str], stdin: str) -> str:

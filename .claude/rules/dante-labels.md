@@ -27,7 +27,7 @@ paths:
   - netaudio prints its own errors on stdout; the helper sends them to stderr, so stdout holds one JSON line.
   - A refusal never prints the device name the card answered with.
 - **The run** (`iempc_dante.helper`): its own process on the dev box, stdout and stderr to `dante-helper.out` / `.err` in iempc's state dir, bounded by `CARD_S` (120 s) and never ended by force.
-  - A run past the bound goes on by itself: `StillRunning` names its pid and where its answer goes. Its pid is in `dante-helper.json`, and no other run starts while that pid is still a run of `dante_card.py` (`/proc/<pid>/cmdline`; a reused pid does not count).
+  - A run past the bound goes on by itself: `StillRunning` names its pid and where its answer goes. Its pid is in `dante-helper.json`, and no other run starts while that pid is still a run of `dante_card.py` from any checkout (`/proc/<pid>/cmdline`, matched by the file name: the event checkout shares the state dir and lock; a reused pid does not count).
   - An OSError at start is a StepError that does not name the path.
 - **The private env** (`~/.config/iemmixer/iem-pc.env`; none of the values is in this repo):
   - `DANTE_IEM_HOST`: the card's IP, a unicast IPv4 address (no host name, IPv6, multicast, broadcast, loopback or unspecified address; a link-local one is allowed, Dante uses it without DHCP).
