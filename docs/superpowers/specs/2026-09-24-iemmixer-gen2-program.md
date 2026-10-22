@@ -316,6 +316,7 @@ Proof codes: **M** mock E2E, **L** live E2E/HIL, **S** server tests, **E** engin
 - **Secrets never enter git:** JWT, VAPID and TLS secrets are generated or imported on the PC; PINs are argon2id hashes with a DPAPI pepper never backed up; test PINs and the denylist are CI or ops secrets.
 - **Login protection:** backoff, never lockout, capped at 60 s. Per-client budgets count **failures only**, separately for LAN and tunnel (client IP trusted only from a loopback peer); engineer-PIN failures from any member login also hit an **engineer budget**. Limits apply before hashing (bounded concurrency, else 429). Issued JWTs are untouched; the edge rate-limits too.
 - **Talk lock:** held by the mixer *session*; the talkback socket must bind to the 128-bit talk id within 1 s or is closed; released on stop, disconnect or 2 s of silence.
+  - *Note 2026-10-22 (#63 finding):* the bind window now follows the lock's own 2 s unbound life instead of 1 s: through the public tunnel the upgrade came 1–1.8 s after the press and was refused while the lock still waited for it.
 - **Handshake:** `ServerHello{proto, build, min_client_proto}`; out of range the UI reloads (≤ once per 60 s), as it does once without a hello in 3 s; the server closes `/ws` without a proto.
 
 ---

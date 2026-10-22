@@ -1,4 +1,5 @@
 import { test, expect } from "./support/fixtures";
+import { MixerSocket } from "./support/mixer-socket";
 import { login } from "./support/session";
 import { probeListen, soundInput, upgradeStatus, wsBase } from "./support/wire";
 
@@ -101,6 +102,31 @@ test.describe("Talkback binding (X6)", () => {
     expect(result.without).toBe(false);
     expect(result.withId).toBe(true);
     expect(result.idLength).toBe(32);
+  });
+
+  // #63: through the public tunnel the upgrade came 1–1.8 s after the press,
+  // and a 1 s window refused it while the lock still waited for its socket.
+  // The socket binds while the unbound lock lives (2 s without frames).
+  // Opened from the test runner, which sees the upgrade's status.
+  test("a talkback socket 1.5 s after the press still binds (#63)", async ({ page, baseURL }) => {
+    await page.goto("/");
+    const auth = await login(page, "engineer", true);
+    const mixer = await MixerSocket.open(baseURL, "engineer", auth.token);
+    try {
+      const got = await mixer.request(
+        { cmd: "TalkStart" },
+        (e) => e.event === "TalkAcquired" || e.event === "TalkBusy",
+        "TalkAcquired",
+      );
+      expect(got.event).toBe("TalkAcquired");
+      const talkId = (got.data as { talk_id: string }).talk_id;
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      const url = `${wsBase(baseURL)}/ws/talkback?token=${auth.token}&talk=${talkId}`;
+      expect(await upgradeStatus(url)).toBe(101);
+    } finally {
+      mixer.send({ cmd: "TalkStop" });
+      await mixer.close();
+    }
   });
 });
 

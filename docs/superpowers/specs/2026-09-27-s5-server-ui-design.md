@@ -47,6 +47,7 @@ owner = "member1"                      # X7: may edit this input's EQ; its first
 - **Solo** (F6, X2) is the engine's transient mask; the server shows the mask as the channel's mute (`muted = level.muted || masked`), exactly as the predecessor's REAPER mutes looked, and restores nothing (the engine never touched the level mutes). **Solo clean-up:** 10 s after the member's last WS closed the server sends `SetSolo{sources: []}`.
 - **Handshake (§5.3):** the WS URL carries `proto=2`; the first message is `Hello{proto, build, min_client_proto}`. Out of range → the UI reloads (≤ once per 60 s); no hello within 3 s → one reload; `/ws/{page}` without `proto` is closed with code 4001. The new service worker also reloads open tabs when it activates.
 - **Talk (X6, §5.3):** `TalkStart` on the mixer WS (engineer) → `TalkAcquired{talk_id}` (128-bit hex); the talkback socket binds by presenting the held id at its upgrade (`/ws/talkback?token=…&talk=<id>`); a socket without the held id is refused (403), one that binds after the 1 s window is closed. The lock is released on `TalkStop`, the holder's mixer WS closing, or 2 s without talkback frames (which also ends a lock whose socket never came).
+  - *Note (2026-10-22, #63):* the bind window now follows the lock's 2 s unbound life (`talk::SILENCE`); over the public tunnel a talkback upgrade took 1–1.8 s, and a 1 s window lost the press (`.claude/rules/server-engine.md`, Talk lock).
 
 ## 6. Pages, permissions and the server's own logic
 
