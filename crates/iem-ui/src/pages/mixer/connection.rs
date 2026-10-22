@@ -27,17 +27,21 @@ use super::helpers::{
 };
 use super::state::MixerState;
 
-/// Reads `/api/lineup` into the page's view of the band (#58). A page that
-/// does not connect now (its bearer does not play) shows no connection.
+/// Reads `/api/lineup` into the page's view of the band (#58); a failed read
+/// keeps what the page knew (`LineupView::apply`). A page that does not
+/// connect now (its bearer does not play) shows no connection.
 pub(super) fn read_lineup(state: MixerState) {
     let set_lineup = state.lineup.1;
     let set_connected = state.connected.1;
     wasm_bindgen_futures::spawn_local(async move {
-        let view = LineupView::read(crate::api::get_lineup().await);
-        if !view.connects() {
+        let answer = crate::api::get_lineup().await;
+        let connects = set_lineup.try_update(|view| {
+            view.apply(answer);
+            view.connects()
+        });
+        if connects == Some(false) {
             let _ = set_connected.try_set(false);
         }
-        let _ = set_lineup.try_set(view);
     });
 }
 

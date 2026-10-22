@@ -206,7 +206,8 @@ pub(super) fn on_close(code: u16) -> OnClose {
 }
 
 /// How long a page whose bearer does not play waits before it reads
-/// `/api/lineup` again: it has no socket to hear a switch on (#58).
+/// `/api/lineup` again: it has no socket to hear a switch on (#58). A page
+/// that does not know the band reads it again as often (#61 review C2).
 pub(super) const LINEUP_RECHECK_MS: f64 = 5_000.0;
 
 /// What the mixer page knows of the band that plays (#58), from
@@ -219,9 +220,9 @@ pub(super) enum LineupView {
     /// A site without a roster: the page as it was before #58 (no badge,
     /// no notice, no switch).
     Legacy,
-    /// The answer could not be read (no network, a server error, a refused
-    /// token): the page connects as before, and its own retries and token
-    /// check take over; no badge.
+    /// No answer could be read yet (no network, a server error, a refused
+    /// token, a read that timed out): the page connects as before, and its
+    /// own retries and token check take over; no badge. It reads again.
     Unknown,
     /// The band that plays and what the bearer may do.
     Roster(iem_core::LineupInfo),
@@ -241,12 +242,21 @@ impl LineupView {
         }
     }
 
-    /// The view after an answer of `GET /api/lineup`.
+    /// The view after an answer of `GET /api/lineup`. A read that failed
+    /// (#61 review C2: a phone waking, a Wi-Fi handover, a 502 while the
+    /// server restarts) keeps the band the page knew, a page reading again
+    /// falls back to it; with nothing known the page connects as before
+    /// ([`LineupView::Unknown`]) and reads again ([`LineupView::recheck_due`]).
     pub(super) fn apply(
         &mut self,
         answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>,
     ) {
-        *self = Self::read(answer);
+        *self = match (std::mem::replace(self, Self::Reading), answer) {
+            (_, Ok(known)) => Self::read(Ok(known)),
+            (Self::Roster(info) | Self::Rereading(info), Err(_)) => Self::Roster(info),
+            (Self::Legacy, Err(_)) => Self::Legacy,
+            (_, Err(_)) => Self::Unknown,
+        };
     }
 
     /// The view while `/api/lineup` is read again after a
@@ -318,11 +328,15 @@ impl LineupView {
         }
     }
 
-    /// Whether a page whose bearer does not play reads the band again at
-    /// `now_ms`, after the last read at `last_ms` (#58): the notice follows
-    /// a switch back to a band the bearer plays in.
+    /// Whether the page reads the band again at `now_ms`, after the last
+    /// read at `last_ms` (#58): a page whose bearer does not play, so the
+    /// notice follows a switch back to a band the bearer plays in; and one
+    /// that does not know the band (the first read, one after a 4003 close,
+    /// an answer it could not read), so a read that hung or failed never
+    /// leaves it so (#61 review C2).
     pub(super) fn recheck_due(&self, now_ms: f64, last_ms: f64) -> bool {
-        self.notice().is_some() && now_ms - last_ms >= LINEUP_RECHECK_MS
+        let unsure = matches!(self, Self::Reading | Self::Rereading(_) | Self::Unknown);
+        (unsure || self.notice().is_some()) && now_ms - last_ms >= LINEUP_RECHECK_MS
     }
 }
 

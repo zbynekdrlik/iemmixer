@@ -83,20 +83,32 @@ pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupI
 }
 
 /// `GET /api/lineup` (#58): which band plays and what the signed-in person
-/// may do; `None` on a site without a roster.
+/// may do; `None` on a site without a roster. A read that has not answered
+/// after [`NETWORK_TIMEOUT_MS`] is aborted, an error (#61 review C2: a read
+/// that hangs never leaves the page without a band).
 pub async fn get_lineup() -> Result<Option<iem_core::LineupInfo>, ApiError> {
-    let token = crate::auth::get_token().ok_or_else(|| ApiError {
-        code: "NO_TOKEN".to_string(),
-        message: "Not authenticated".to_string(),
-    })?;
+    let failed = |code: &str, message: String| ApiError {
+        code: code.to_string(),
+        message,
+    };
+    let token = crate::auth::get_token()
+        .ok_or_else(|| failed("NO_TOKEN", "Not authenticated".to_string()))?;
+    let controller =
+        AbortController::new().map_err(|_| failed("NETWORK", "no AbortController".to_string()))?;
+    let abort = controller.clone();
+    let timeout = Closure::once_into_js(move || abort.abort());
+    if let Some(window) = web_sys::window() {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            timeout.unchecked_ref(),
+            NETWORK_TIMEOUT_MS,
+        );
+    }
     let resp = Request::get(&format!("{API_BASE}/lineup"))
         .header("Authorization", &format!("Bearer {token}"))
+        .abort_signal(Some(&controller.signal()))
         .send()
         .await
-        .map_err(|e| ApiError {
-            code: "NETWORK".to_string(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| failed("NETWORK", e.to_string()))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     lineup_answer(status, &body)
