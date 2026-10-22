@@ -230,10 +230,16 @@ impl LineupReads {
         self.issued
     }
 
-    /// Whether the view takes the answer of read `seq`.
+    /// Whether the view takes the answer of read `seq`: only one newer than
+    /// the answer it took last (#61 review M3), so a slow read started
+    /// before a switch never puts the band before back.
     pub(super) fn take(&mut self, seq: u64) -> bool {
-        self.applied = seq;
-        true
+        if seq > self.applied {
+            self.applied = seq;
+            true
+        } else {
+            false
+        }
     }
 }
 

@@ -28,13 +28,21 @@ use super::helpers::{
 use super::state::MixerState;
 
 /// Reads `/api/lineup` into the page's view of the band (#58); a failed read
-/// keeps what the page knew (`LineupView::apply`). A page that does not
+/// keeps what the page knew (`LineupView::apply`), and an answer older than
+/// one the view took is dropped (`LineupReads`). A page that does not
 /// connect now (its bearer does not play) shows no connection.
 pub(super) fn read_lineup(state: MixerState) {
     let set_lineup = state.lineup.1;
     let set_connected = state.connected.1;
+    let reads = state.lineup_reads;
+    let Some(seq) = reads.try_update_value(|r| r.start(js_sys::Date::now())) else {
+        return;
+    };
     wasm_bindgen_futures::spawn_local(async move {
         let answer = crate::api::get_lineup().await;
+        if reads.try_update_value(|r| r.take(seq)) != Some(true) {
+            return;
+        }
         let connects = set_lineup.try_update(|view| {
             view.apply(answer);
             view.connects()
@@ -111,9 +119,9 @@ pub(super) fn setup_connection(
     // without a roster connects as before. `connects` changes only when an
     // answer changes whether the page connects, so a new band's name (the
     // engineer's page) never reconnects.
-    let lineup_read_at = std::rc::Rc::new(std::cell::Cell::new(js_sys::Date::now()));
     read_lineup(state);
     let lineup = state.lineup.0;
+    let lineup_reads = state.lineup_reads;
     let connects = Memo::new(move |_| lineup.with(LineupView::connects));
 
     // --- Initial connect Effect ---
@@ -165,15 +173,18 @@ pub(super) fn setup_connection(
 
         // #58: no socket while the band is being read or the bearer does not
         // play in it (the connect effect opens it once they do); a page
-        // showing the notice reads the band again now and then.
+        // showing the notice, or not knowing the band, reads it again now
+        // and then (counted from the last read, whoever started it).
         let now_ms = js_sys::Date::now();
-        let Some((recheck, page_connects)) = lineup
-            .try_with_untracked(|v| (v.recheck_due(now_ms, lineup_read_at.get()), v.connects()))
+        let Some(last_read) = lineup_reads.try_with_value(|r| r.last_at) else {
+            return;
+        };
+        let Some((recheck, page_connects)) =
+            lineup.try_with_untracked(|v| (v.recheck_due(now_ms, last_read), v.connects()))
         else {
             return;
         };
         if recheck {
-            lineup_read_at.set(now_ms);
             read_lineup(state);
         }
         if !page_connects {
