@@ -57,22 +57,33 @@ pub fn switch_error_message(failure: &SwitchFailure) -> String {
 pub enum SwitchState {
     Idle,
     Sending,
-    /// `.0`: the sentence saying which band plays.
-    Done(String),
-    /// `.0`: [`PENDING`].
-    Pending(String),
-    /// `.0`: why it did not happen.
-    Failed(String),
+    /// The switch to this band is done.
+    Done(LineupRef),
+    /// The switch to this band finishes once the mixer is back ([`PENDING`]).
+    Pending(LineupRef),
+    /// Why the switch did not happen, while the band `active` (its id)
+    /// played.
+    Failed {
+        text: String,
+        active: String,
+    },
 }
 
 impl SwitchState {
-    /// The state after the server's answer to a switch to `target` (its
-    /// name).
-    pub fn after(outcome: &Result<Switched, SwitchFailure>, target: &str) -> Self {
+    /// The state after the server's answer to a switch to `target`, asked
+    /// while the band `active` (its id) played.
+    pub fn after(
+        outcome: &Result<Switched, SwitchFailure>,
+        target: &LineupRef,
+        active: &str,
+    ) -> Self {
         match outcome {
-            Ok(Switched::Now) => Self::Done(format!("Hrá {target}.")),
-            Ok(Switched::Pending) => Self::Pending(PENDING.to_string()),
-            Err(failure) => Self::Failed(switch_error_message(failure)),
+            Ok(Switched::Now) => Self::Done(target.clone()),
+            Ok(Switched::Pending) => Self::Pending(target.clone()),
+            Err(failure) => Self::Failed {
+                text: switch_error_message(failure),
+                active: active.to_string(),
+            },
         }
     }
 
@@ -81,9 +92,17 @@ impl SwitchState {
     pub fn message(&self) -> Option<(String, &'static str)> {
         match self {
             Self::Idle | Self::Sending => None,
-            Self::Done(text) | Self::Pending(text) => Some((text.clone(), "lineup-switch-message")),
-            Self::Failed(text) => Some((text.clone(), "lineup-switch-message pin-error")),
+            Self::Done(target) => Some((format!("Hrá {}.", target.name), "lineup-switch-message")),
+            Self::Pending(_) => Some((PENDING.to_string(), "lineup-switch-message")),
+            Self::Failed { text, .. } => Some((text.clone(), "lineup-switch-message pin-error")),
         }
+    }
+
+    /// What the line becomes once the band `active` (its id) plays: `None`
+    /// while it stays true.
+    pub fn follow(&self, active: &str) -> Option<Self> {
+        let _ = active;
+        None
     }
 }
 
@@ -117,16 +136,17 @@ pub fn LineupSwitch(
 
     let confirm = Callback::new(move |_: ()| {
         let _ = set_asking.try_set(false);
-        let Some(to) = info.with_untracked(|i| {
-            i.as_ref()
-                .and_then(|i| target_of(i, &picked.get_untracked()))
+        let Some((to, active)) = info.with_untracked(|i| {
+            i.as_ref().and_then(|i| {
+                target_of(i, &picked.get_untracked()).map(|to| (to, i.active.id.clone()))
+            })
         }) else {
             return;
         };
         let _ = set_state.try_set(SwitchState::Sending);
         wasm_bindgen_futures::spawn_local(async move {
             let outcome = crate::api::switch_lineup(&to.id).await;
-            let next = SwitchState::after(&outcome, &to.name);
+            let next = SwitchState::after(&outcome, &to, &active);
             // Only while this control is shown: its page is then alive.
             if set_state.try_set(next).is_none() && outcome.is_ok() {
                 on_switched.run(());
@@ -236,23 +256,37 @@ mod tests {
         );
     }
 
+    fn youth() -> LineupRef {
+        LineupRef {
+            id: "youth".into(),
+            name: "Youth band".into(),
+        }
+    }
+
     #[test]
     fn a_switch_answer_reads_as_a_sentence_and_pending_is_no_failure() {
-        let done = SwitchState::after(&Ok(Switched::Now), "Youth band");
-        assert_eq!(done, SwitchState::Done("Hrá Youth band.".into()));
+        let done = SwitchState::after(&Ok(Switched::Now), &youth(), "main");
+        assert_eq!(done, SwitchState::Done(youth()));
         assert_eq!(
             done.message(),
             Some(("Hrá Youth band.".to_string(), "lineup-switch-message"))
         );
-        let pending = SwitchState::after(&Ok(Switched::Pending), "Youth band");
-        assert_eq!(pending, SwitchState::Pending(PENDING.into()));
+        let pending = SwitchState::after(&Ok(Switched::Pending), &youth(), "main");
+        assert_eq!(pending, SwitchState::Pending(youth()));
         assert_eq!(PENDING, "Prepnutie sa dokončí, keď sa mixér znova pripojí.");
         assert_eq!(
             pending.message(),
             Some((PENDING.to_string(), "lineup-switch-message")),
             "pending reads as no error"
         );
-        let failed = SwitchState::after(&Err(failure(409, "BUSY")), "Youth band");
+        let failed = SwitchState::after(&Err(failure(409, "BUSY")), &youth(), "main");
+        assert_eq!(
+            failed,
+            SwitchState::Failed {
+                text: "Práve sa prepína, skús to o chvíľu.".into(),
+                active: "main".into()
+            }
+        );
         assert_eq!(
             failed.message(),
             Some((
@@ -262,6 +296,40 @@ mod tests {
         );
         assert_eq!(SwitchState::Idle.message(), None);
         assert_eq!(SwitchState::Sending.message(), None);
+    }
+
+    /// #61 review M2: the line under the control follows the band that
+    /// plays: "Hrá …" goes once another band plays, a pending switch reads
+    /// done once its band plays, a refusal goes once the band it was about
+    /// no longer plays. Here `follow` still keeps every line.
+    #[test]
+    fn the_switch_message_follows_the_band_that_plays() {
+        let done = SwitchState::Done(youth());
+        assert_eq!(done.follow("youth"), None, "still true");
+        assert_eq!(
+            done.follow("main"),
+            Some(SwitchState::Idle),
+            "another switch since"
+        );
+        let pending = SwitchState::Pending(youth());
+        assert_eq!(pending.follow("main"), None, "not finished yet");
+        assert_eq!(
+            pending.follow("youth"),
+            Some(SwitchState::Done(youth())),
+            "finished"
+        );
+        let failed = SwitchState::Failed {
+            text: "Táto kapela už hrá.".into(),
+            active: "main".into(),
+        };
+        assert_eq!(failed.follow("main"), None);
+        assert_eq!(failed.follow("youth"), Some(SwitchState::Idle));
+        assert_eq!(SwitchState::Idle.follow("youth"), None);
+        assert_eq!(
+            SwitchState::Sending.follow("youth"),
+            None,
+            "its own answer decides"
+        );
     }
 
     #[test]
