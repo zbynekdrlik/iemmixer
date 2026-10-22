@@ -238,6 +238,44 @@ test.describe("Bands (#58)", () => {
     await expect(page.getByTestId("global-volume-fader")).toHaveCount(0);
   });
 
+  test.describe("a read that fails", () => {
+    // The notice page's next read of the band is answered 502 once, as
+    // cloudflared answers while the server restarts; Chrome logs that answer.
+    test.use({ allowedConsole: [/status of 502/] });
+
+    test("a failed read keeps the notice: no socket, no Reconnecting (#61 C2)", async ({ page }) => {
+      const sockets = socketsTo(page, "member2");
+      await openPage(page, "member2");
+      const shown = page.getByTestId("lineup-notice");
+      await expect(shown).toBeVisible();
+      let failures = 0;
+      await page.route(
+        (url) => url.pathname === "/api/lineup",
+        async (route) => {
+          if (failures === 0) {
+            failures += 1;
+            await route.fulfill({ status: 502, body: "Bad Gateway" });
+          } else {
+            await route.continue();
+          }
+        },
+      );
+      const lineupAnswer = (status: number) =>
+        page.waitForResponse((r) => new URL(r.url()).pathname === "/api/lineup" && r.status() === status, {
+          timeout: 12_000,
+        });
+      await lineupAnswer(502);
+      await expect(shown).toBeVisible();
+      // The page reads again and the server answers: still the notice.
+      await lineupAnswer(200);
+      await expect(shown).toBeVisible();
+      await expect(shown.locator(".lineup-notice-text")).toHaveText(notice(YOUTH));
+      await expect(page.getByTestId("global-volume-fader")).toHaveCount(0);
+      await expect(page.locator(".disconnected-banner")).toHaveCount(0);
+      expect(sockets, "no socket the server would refuse").toHaveLength(0);
+    });
+  });
+
   test("while youth plays, its people come first on the login tiles", async ({ page }) => {
     await page.goto("/");
     const others = [1, 2, 4, 5, 6, 7, 8, 9].map((n) => `/member${n}`);

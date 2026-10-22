@@ -241,6 +241,14 @@ impl LineupView {
         }
     }
 
+    /// The view after an answer of `GET /api/lineup`.
+    pub(super) fn apply(
+        &mut self,
+        answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>,
+    ) {
+        *self = Self::read(answer);
+    }
+
     /// The view while `/api/lineup` is read again after a
     /// [`CLOSE_LINEUP`] close.
     pub(super) fn reread(&mut self) {
@@ -673,7 +681,67 @@ mod tests {
         assert!(away.recheck_due(15_000.0, 10_000.0));
         let playing = LineupView::Roster(info("youth", true, false));
         assert!(!playing.recheck_due(1e12, 0.0), "its socket hears a switch");
-        assert!(!LineupView::Reading.recheck_due(1e12, 0.0));
+        assert!(
+            !LineupView::Legacy.recheck_due(1e12, 0.0),
+            "no band to read"
+        );
+    }
+
+    /// #61 review C2: a page that does not know the band (the first read,
+    /// one after a 4003 close, an answer it could not read) reads it again
+    /// every five seconds: a read that hangs or fails never leaves it so.
+    #[test]
+    fn a_page_that_does_not_know_the_band_reads_it_again_every_five_seconds() {
+        for view in [
+            LineupView::Reading,
+            LineupView::Rereading(info("youth", true, false)),
+            LineupView::Unknown,
+        ] {
+            assert!(!view.recheck_due(14_999.0, 10_000.0), "{view:?}");
+            assert!(view.recheck_due(15_000.0, 10_000.0), "{view:?}");
+        }
+    }
+
+    fn failed() -> Result<Option<iem_core::LineupInfo>, crate::api::ApiError> {
+        Err(crate::api::ApiError {
+            code: "HTTP_502".into(),
+            message: "Server error: 502".into(),
+        })
+    }
+
+    /// #61 review C2: a read that fails (a phone waking, a Wi-Fi handover, a
+    /// 502 while the server restarts) keeps the band the page knew: a notice
+    /// page stays the notice with no socket, a page reading again after a
+    /// 4003 close falls back to the band it knew.
+    #[test]
+    fn a_failed_read_keeps_the_band_the_page_knew() {
+        let mut away = LineupView::Roster(info("youth", false, false));
+        away.apply(failed());
+        assert_eq!(away, LineupView::Roster(info("youth", false, false)));
+        assert!(!away.connects(), "no socket the server would refuse");
+        assert!(away.notice().is_some());
+        let mut rereading = LineupView::Rereading(info("youth", true, true));
+        rereading.apply(failed());
+        assert_eq!(rereading, LineupView::Roster(info("youth", true, true)));
+        let mut legacy = LineupView::Legacy;
+        legacy.apply(failed());
+        assert_eq!(legacy, LineupView::Legacy);
+        // Nothing known yet: the page connects as before and reads again.
+        let mut first = LineupView::Reading;
+        first.apply(failed());
+        assert_eq!(first, LineupView::Unknown);
+        let mut unknown = LineupView::Unknown;
+        unknown.apply(failed());
+        assert_eq!(unknown, LineupView::Unknown);
+        // An answer replaces whatever the page knew.
+        let mut known = LineupView::Unknown;
+        known.apply(Ok(Some(info("main", true, false))));
+        assert_eq!(known, LineupView::Roster(info("main", true, false)));
+        known.apply(Ok(None));
+        assert_eq!(known, LineupView::Legacy);
+        let mut back = LineupView::Rereading(info("main", true, false));
+        back.apply(Ok(Some(info("youth", false, true))));
+        assert_eq!(back, LineupView::Roster(info("youth", false, true)));
     }
 
     #[test]
