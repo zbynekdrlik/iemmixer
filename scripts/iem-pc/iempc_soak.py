@@ -16,6 +16,9 @@ this order, nothing dispatched on any refusal:
    the guard answers ok, in dev, no switch, no HIL job; the active bundle and
    the running engine's build are both the SHA; the engine plays (neither
    parked nor faulted). `soak_refusal` judges the reply (pure).
+2b. No HIL run that may still hold the PC (`iempc_live.refuse_while_hil`,
+   dispatch-live's guard): a HIL run restarts the engine in its own job,
+   which the soak would meet red.
 3. A green push run of ci.yml for the SHA on dev or main, with its bundle and
    attest jobs (`green_run`, P5); the run's id and branch are what soak.yml
    gets.
@@ -175,6 +178,8 @@ def dispatch(ctx, ip) -> int:
     why = f"iemmode status failed (exit {code})" if code != 0 else soak_refusal(reply, sha)
     if why:
         raise ip.Refused(f"no soak: {why} (nothing was dispatched)")
+    import iempc_live   # here: iempc_live imports this module
+    iempc_live.refuse_while_hil(ip, "dispatch-soak", entry)   # a HIL run restarts the engine the soak measures
     run, branch = ip.green_run(sha, ip.BRANCHES)
     if ip.event_now():   # "ide event" during the gh waits above: the soak is dev-time work
         raise ip.Refused(f"{ip.EVENT_NOW} appeared: no soak dispatch during an event (nothing was dispatched)")

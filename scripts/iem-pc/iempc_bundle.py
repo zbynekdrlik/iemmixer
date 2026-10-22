@@ -34,6 +34,9 @@ from iempc_core import (BRANCHES, INSTALL_S, OPS_REPO, REPO, SHA, STATUS_S, SWIT
 
 CI_WORKFLOW = "ci.yml"
 HIL_WORKFLOW = "hil.yml"
+# dispatch-hil's record ({"dispatches": [{sha, branch, run, digest, entry, at}]}),
+# also read by dispatch-live's guard (iempc_live.running_hil).
+HIL_RECORD = "dispatch.json"
 # The bundle job's files (plan Task 12); the guard's install checks the same set.
 BUNDLE_REQUIRED = (
     "iem-engine.exe", "iem-server.exe", "iemmixer-guard.exe", "iemmode.exe", "iem-tray.exe", "iem-migrate.exe",
@@ -567,7 +570,7 @@ def cmd_activate(ctx: Ctx, ip) -> int:
 
 
 def load_dispatches() -> list[dict]:
-    return list(read_json(state_dir() / "dispatch.json", {}).get("dispatches", []))
+    return list(read_json(state_dir() / HIL_RECORD, {}).get("dispatches", []))
 
 
 def cmd_dispatch_hil(ctx: Ctx, ip) -> int:
@@ -595,6 +598,6 @@ def cmd_dispatch_hil(ctx: Ctx, ip) -> int:
     core.gh(["workflow", "run", HIL_WORKFLOW, "-R", OPS_REPO, "-f", f"sha={sha}", "-f", f"branch={branch}",
         "-f", f"run={run}", "-f", f"digest={rec['digest']}"])
     record = {"sha": sha, "branch": branch, "run": run, "digest": rec["digest"], "entry": entry, "at": core.now_iso()}
-    write_json(state_dir() / "dispatch.json", {"dispatches": (done + [record])[-200:]})
+    write_json(state_dir() / HIL_RECORD, {"dispatches": (done + [record])[-200:]})
     emit({"dispatched": record})
     return 0

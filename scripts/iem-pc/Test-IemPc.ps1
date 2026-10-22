@@ -905,4 +905,7 @@ if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemTuningInstall.ps1 (exit $LASTE
 # The bootstrap's admin-only stage (#15), the script iempc.py composes, in a process of its own.
 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemStage.ps1')
 if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemStage.ps1 (exit $LASTEXITCODE)" }
+# iempc roster-install's PC bodies (#58), the scripts iempc_roster.py composes, in a process of its own.
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here 'Test-IemRoster.ps1')
+if ($LASTEXITCODE -ne 0) { throw "FAILED: Test-IemRoster.ps1 (exit $LASTEXITCODE)" }
 Write-Host 'Test-IemPc: all passed'

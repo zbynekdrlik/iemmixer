@@ -357,13 +357,13 @@
 - Modify: `scripts/iem-pc/iempc.py` (command table: `Spec(cmd_roster_install, pc=True, dev_time=True, locked=True)`; parser `roster-install --file PATH [--dry-run]`)
 
 **Interfaces:**
-- Consumes: `iempc_core.{load_env, ssh_ps, scp, remote, pc_mkdir, hash_check, run_module}`; new optional env key `PC_SERVER_CONFIG` (the server config's path on the PC; private).
-- `run(ctx, ip) -> int`: read the file and its sha256 → scp to `PC_ROOT\incoming\roster-<sha12>.toml` → on the PC (one `ssh_ps`, the upload's `hash_check` first): `iem-server.exe roster check <upload>` with `IEMMIXER_CONFIG` = `PC_SERVER_CONFIG` from the active bundle → if ok and not `--dry-run`: copy beside the server config as `roster.toml.new`, `Move-Item -Force` onto `roster.toml` → poll `roster.status.json` (every `POLL_S`, ≤ 20 s) until its `sha256` is the file's → print one JSON object `{"roster_install": {"ok", "problems", "applied", "added", "removed"}}` with ids and counts only.
+- Consumes: `iempc_core.{load_env, ssh_ps, scp, remote, pc_mkdir, hash_check, run_module}`; the server config is the guard's own (`pc.toml`'s `server_config`; the review on #62 dropped the env key `PC_SERVER_CONFIG`).
+- `run(ctx, ip) -> int`: read the file and its sha256 → scp to `PC_ROOT\incoming\roster-<sha12>.toml` → on the PC (the upload's `hash_check` first): `iem-server.exe roster check <upload>` with `IEMMIXER_CONFIG` = pc.toml's `server_config`, the active bundle's server → if ok and not `--dry-run`: copy beside the server config as `roster.toml.new`, put it onto `roster.toml` (`[IO.File]::Replace`, a move when there is none), the previous file kept → poll `roster.status.json` (every `POLL_S`, ≤ 20 s) until its `sha256` is the file's → not applied: the previous file back, or `roster.toml` removed when there was none → print one JSON object `{"roster_install": {"ok", "problems", "applied", "added", "removed"}}` with ids and counts only (`restored`, `unchanged` when so). As built: `.claude/rules/roster-install.md`.
 - Exit 0 applied (or dry-run ok), 1 refused or not applied in time.
 
-- [ ] **Step 1: Failing tests** on `iempc_test_support.Base` (`FakePc.replies`): `refused_while_event_now`; `a_check_with_problems_installs_nothing`; `dry_run_checks_only`; `install_waits_for_the_status_sha`; `a_status_that_never_matches_fails_naming_the_wait`.
-- [ ] **Step 2: Run** `python3 -m unittest scripts/iem-pc/test_iempc_roster.py` locally: fails. **Step 3: Implement. Step 4: Run: passes.**
-- [ ] **Step 5: Commit** `feat(iempc): roster-install (#58)`.
+- [x] **Step 1: Failing tests** on `iempc_test_support.Base` (`FakePc.replies`): `refused_while_event_now`; `a_check_with_problems_installs_nothing`; `dry_run_checks_only`; `install_waits_for_the_status_sha`; `a_status_that_never_matches_fails_naming_the_wait`.
+- [x] **Step 2: Run** `python3 -m unittest scripts/iem-pc/test_iempc_roster.py` locally: fails. **Step 3: Implement. Step 4: Run: passes.** (As built, `.claude/rules/roster-install.md`: the server runs from the admin-only stage (#15), the check and the install are two ssh calls, `applied` must be true, and an install waits for no soak or live run of the dev entry.)
+- [x] **Step 5: Commit** `feat(iempc): roster-install (#58)`.
 
 ### Task 15: Dante labels: decide the writer, then the tool
 
@@ -371,9 +371,9 @@
 - Create: `scripts/iem-pc/iempc_dante.py`, `scripts/iem-pc/test_iempc_dante.py`
 - Modify: `scripts/iem-pc/iempc.py` (`dante-labels --roster PATH [--apply]`), `.claude/rules/pc-tuning.md` or a new `.claude/rules/dante-labels.md` (what was learned)
 
-- [ ] **Step 1: Spike (dev time, record on #58):** whether `netaudio` (the predecessor's tool) can run on the IEM PC or another host on the Dante network, read the IEM card's channel labels, and set one label of a channel nothing subscribes (the HIL spare TX from `[guard] hil_tx`) and set it back. Never touch another device, never a subscription. Outcome A: it works → Step 2 with `--apply`. Outcome B: it does not → Step 2 prints the sheet only, and the owner types the labels in Dante Controller.
-- [ ] **Step 2: Failing tests:** `labels_follow_the_main_lineup_and_the_convention` (TX `NAME inear L NN` / `R NN`, RX `NN NAME mic`, ≤ 31 characters, the main lineup's person per set and input, from a synthetic roster and site); `renamed_tx_channels_are_listed_for_resubscription`; `apply_refuses_while_event_now`; with outcome A, `apply_touches_only_the_iem_card`.
-- [ ] **Step 3: Implement. Step 4: Tests pass.** The sheet holds site values: printed on the dev box only, never committed or posted.
+- [x] **Step 1: Spike (dev time, record on #58):** outcome A (see #62, the final comment; it replaces an earlier outcome B): netaudio's library reaches the card by its IP across the routed subnet, reads it, and sets and resets one spare label. Whether `netaudio` (the predecessor's tool) can run on the IEM PC or another host on the Dante network, read the IEM card's channel labels, and set one label of a channel nothing subscribes (the HIL spare TX from `[guard] hil_tx`) and set it back. Never touch another device, never a subscription. Outcome A: it works → Step 2 with `--apply`. Outcome B: it does not → Step 2 prints the sheet only, and the owner types the labels in Dante Controller.
+- [x] **Step 2: Failing tests:** `labels_follow_the_main_lineup_and_the_convention` (TX `NAME inear L NN` / `R NN`, RX `NN NAME mic`, ≤ 31 characters, the main lineup's person per set and input, from a synthetic roster and site); `renamed_tx_channels_are_listed_for_resubscription`; `apply_refuses_while_event_now`; with outcome A, `apply_touches_only_the_iem_card`. (Outcome A: `--apply` through `scripts/iem-pc/dante_card.py`, the one module that imports netaudio, with `apply_touches_only_the_iem_card`. A set or input the main lineup leaves empty takes its single wearer or owner in the other lineups. The RX type word follows the input's own label, folded like NAME, `mic` otherwise: `.claude/rules/dante-labels.md`.)
+- [x] **Step 3: Implement. Step 4: Tests pass.** The sheet holds site values: printed on the dev box only, never committed or posted.
 - [ ] **Step 5: Commit** `feat(iempc): Dante labels for the main lineup (#58)`. Open PR 4, gates green, merge.
 
 ---
@@ -392,7 +392,7 @@
 - [ ] **Step 2:** deploy a second build X′ of this plan (the next `main` merge, at least a version bump), so `iemmode status` reads `pin X′, previous X`. Only then the data may change (spec §12).
 - [ ] **Step 3 (maintenance):** `iemmode install-site` with the ops site's `peers` (F30); the engine restarts; `iemmode status` healthy at 32. Then a 1 h `iempc dispatch-soak` on the PC with the peers site: zero missed periods and `process` p99.9 within the S7 budget, before any roster change (spec §12, CPU).
 - [ ] **Step 4:** `iempc roster-install --file <ops>/site/roster.toml`: the server migrates the legacy files into the main lineup, archives the people who left; verify the status sha, `/api/members`, and log in as a main and a youth person (PINs for new people: the engineer's PIN reset in the UI, or `iem-server pin set-member` on the PC with the PIN on stdin).
-- [ ] **Step 5 (with the owner):** `iempc dante-labels --apply` (or the sheet), then the owner remakes the listed stagebox subscriptions in Dante Controller; check every in-ear output carries its mix.
+- [ ] **Step 5 (with the owner):** `iempc dante-labels --roster <ops>/site/roster.toml` (the sheet, the card read now) and then `--apply` (outcome A, #62: only the labels that differ are written, each read back); the owner then remakes the stagebox subscriptions to the TX channels its `resubscribe` lists, in Dante Controller; check every in-ear output carries its mix.
 - [ ] **Step 6:** the FOH note (the main lineup's renamed and removed people) goes to the owner for the fohmixer side.
 - [ ] **Step 7:** on the PC, a leader switches main → youth → main from a phone; `iempc switch-test`-style evidence: no silence on the outputs, the active lineup and both states survive a graceful reboot. Report on #58.
 

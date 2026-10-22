@@ -24,6 +24,8 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Guard, iemmode, PC install → `.claude/rules/guard.md`
 - Soak harness, verdict, dispatch-soak → `.claude/rules/soak.md`
 - Live E2E on the PC, live verdict, dispatch-live → `.claude/rules/live.md`
+- Roster onto the PC (`iempc roster-install`) → `.claude/rules/roster-install.md`
+- Dante labels of the IEM card (`iempc dante-labels`, the sheet and `--apply`, `dante_card.py`) → `.claude/rules/dante-labels.md`
 
 ## Always-apply rules
 
