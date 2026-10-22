@@ -11,9 +11,10 @@ So the three never overlap within a dev entry:
   restart would end it red: another engine, frames lost), or another live
   run of it (a second run would queue behind the first, live.yml's
   concurrency group, and outlive the window its record promises), or a HIL
-  run of it (`running_hil`, dispatch-hil's record: hil.yml's pc job and
+  run that may still hold the PC (`refuse_while_hil`: hil.yml's pc job and
   live.yml's pc-begin each begin a HIL job, so the second to reach the PC is
-  cancelled; #58, build 90a7b89);
+  cancelled; #58, build 90a7b89); `dispatch-soak` waits for such a HIL run
+  too (it restarts the engine the soak measures);
 - `dispatch-soak` and `switch-test` refuse while a live run of this dev entry
   may still run (`refuse_while_live`, their call sites in iempc.py): a soak
   would meet the run's engine restart, a switch would end the run.
@@ -29,13 +30,17 @@ In this order, nothing dispatched on any refusal:
    a full SHA, no live run of this SHA in this dev entry yet (RECORD in the
    state dir; the entry is the count of `iempc dev` and switch-test's dev
    leg, `current_entry`), no live run of this entry that may still run, no
-   soak of this entry that may still run (`iempc_soak.running_soak`), no HIL
-   run of this entry that may still run (HIL_WINDOW_S after its dispatch).
+   soak of this entry that may still run (`iempc_soak.running_soak`).
 2. `iemmode status` (a new flag abandons the read and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job; the active bundle and
    the running engine's build are both the SHA; the engine plays (neither
    parked nor faulted). `live_refusal` judges the reply (pure), the soak's
    rule (`iempc_soak.runs_refusal`): pc-begin checks the same again.
+2b. No HIL run that may still hold the PC (`refuse_while_hil`): the ops
+   repo lists no hil.yml run that is not completed (the PC has one runner,
+   so a HIL run may wait for it, or be rerun), and no HIL dispatch of this
+   entry from the last LIST_GRACE_S that gh does not list yet; when gh
+   fails, dispatch-hil's record (HIL_WINDOW_S after its dispatch) decides.
 3. A green push run of ci.yml for the SHA on dev or main, with its bundle and
    attest jobs (`green_run`, P5); the run's id and branch are what live.yml
    gets.
@@ -70,6 +75,7 @@ iempc.py is over its size budget)."""
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import iempc_soak
 
@@ -90,6 +96,14 @@ WINDOW_S = sum(JOB_MINUTES.values()) * 60   # 5400 s after its dispatch a live r
 # change of those bounds in hil.yml changes these.
 HIL_JOB_MINUTES = {"verify": 10, "pc": 30}
 HIL_WINDOW_S = sum(HIL_JOB_MINUTES.values()) * 60   # 2400 s after its dispatch a HIL run may still hold the PC
+# GitHub lists a dispatched run a moment after the dispatch: while gh answers, a
+# HIL dispatch of this dev entry this recent counts even though gh lists none.
+LIST_GRACE_S = 120
+# The dispatches that wait for a HIL run (`refuse_while_hil`): (head, what is
+# dispatched once it ended and why it must wait).
+HIL_WAIT = {"dispatch-live": ("no live run", "the live run: both begin a HIL job on the PC, and the second to reach "
+                                             "it is cancelled"),
+            "dispatch-soak": ("no soak", "the soak: a HIL run restarts the engine the soak measures")}
 NOTHING = {"dispatch-soak": ("no soak", "(nothing was dispatched)"),
            "switch-test": ("no switch test", "a switch would end it (nothing was switched)")}
 # The commands refused while a live run or a soak of this dev entry may still
@@ -162,14 +176,64 @@ def running_hil(ip, entry: int, now: dt.datetime) -> dict | None:
     return next((d for d in reversed(load_hil_runs(ip)) if may_run(d, entry, now, HIL_WINDOW_S)), None)
 
 
-def hil_described(ip, d: dict) -> str:
-    """A refusal's words for a HIL run record that may still run; one that
-    cannot be read names the file to check by hand."""
-    text = (f"a HIL run dispatched in this dev entry may still run ({d.get('sha')}, dispatched {d.get('at')}; "
-            f"hil.yml's jobs hold the PC up to {HIL_WINDOW_S // 60} min")
+def unreadable_hil(ip, d: dict) -> str:
+    """The hint for a HIL record whose time or dev entry cannot be read (it
+    may otherwise refuse until fixed), else nothing."""
     if type(d.get("entry")) is not int or dispatched_at(d) is None:
-        text += f"; its time or dev entry cannot be read: check {ip.state_dir() / ip.HIL_RECORD} by hand"
-    return text + ")"
+        return f"; its time or dev entry cannot be read: check {ip.state_dir() / ip.HIL_RECORD} by hand"
+    return ""
+
+
+def hil_described(ip, d: dict) -> str:
+    """A refusal's words for a HIL run record that may still run."""
+    return (f"a HIL run dispatched in this dev entry may still run ({d.get('sha')}, dispatched {d.get('at')}; "
+            f"hil.yml's jobs hold the PC up to {HIL_WINDOW_S // 60} min{unreadable_hil(ip, d)})")
+
+
+def active_hil_runs(ip) -> list[dict]:
+    """The ops repo's hil.yml runs that have not completed (queued, waiting,
+    in progress: gh's `status` is anything but `completed`). StepError when
+    gh fails, ValueError when its answer is no list of runs."""
+    out = ip.gh(["run", "list", "-R", ip.OPS_REPO, "-w", ip.HIL_WORKFLOW, "--json", "databaseId,status,createdAt",
+                 "--limit", "20"])
+    runs = json.loads(out)
+    if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+        raise ValueError("gh run list gave no list of runs")
+    return [r for r in runs if r.get("status") != "completed"]
+
+
+def hil_refusal(ip, entry: int, now: dt.datetime) -> str | None:
+    """Why a HIL run may still hold the PC, or None. The ops repo's listing
+    first (the PC has one runner: a HIL run may wait for it, or be rerun),
+    with this box's HIL dispatches of the entry from the last LIST_GRACE_S
+    (not listed yet); when gh fails, dispatch-hil's record window."""
+    try:
+        active = active_hil_runs(ip)
+    except (ip.StepError, ValueError) as e:
+        d = running_hil(ip, entry, now)
+        if d is None:
+            return None
+        return f"{hil_described(ip, d)}; gh could not list {ip.HIL_WORKFLOW}'s runs ({str(e)[-200:]})"
+    if active:
+        r = active[0]
+        return (f"a {ip.HIL_WORKFLOW} run is {r.get('status')} in {ip.OPS_REPO} (run {r.get('databaseId')}, created "
+                f"{r.get('createdAt')})")
+    d = next((d for d in reversed(load_hil_runs(ip)) if may_run(d, entry, now, LIST_GRACE_S)), None)
+    if d is not None:
+        return (f"a HIL run dispatched in this dev entry ({d.get('sha')}, dispatched {d.get('at')}) is not listed by "
+                f"gh yet{unreadable_hil(ip, d)}")
+    return None
+
+
+def refuse_while_hil(ip, command: str, entry: int) -> None:
+    """`dispatch-live` and `dispatch-soak`, after their status read and before
+    the green run's lookup: refused while a HIL run may still hold the PC
+    (`hil_refusal`); the operator waits for its result."""
+    why = hil_refusal(ip, entry, dt.datetime.now().astimezone())
+    if why:
+        head, what = HIL_WAIT[command]
+        raise ip.Refused(f"{head}: {why}: wait for it to end (its hil/iem-pc result), then dispatch {what} (nothing "
+                         "was dispatched)")
 
 
 def described(ip, d: dict) -> str:
@@ -228,8 +292,9 @@ def refuse_while_running(ip, command: str) -> None:
 
 
 def refuse_overlap(ip, entry: int) -> None:
-    """dispatch-live: refused while another live run, a soak or a HIL run of
-    this dev entry may still run."""
+    """dispatch-live, before any call: refused while another live run or a
+    soak of this dev entry may still run (a HIL run: `refuse_while_hil`,
+    after the status read)."""
     now = dt.datetime.now().astimezone()
     d = running_live(ip, entry, now)
     if d is not None:
@@ -238,11 +303,6 @@ def refuse_overlap(ip, entry: int) -> None:
     if soak is not None:
         raise ip.Refused(f"no live run: {soak_described(ip, soak)}: the live run restarts the engine in a HIL job "
                          f"(nothing was dispatched)")
-    hil = running_hil(ip, entry, now)
-    if hil is not None:
-        raise ip.Refused(f"no live run: {hil_described(ip, hil)}: wait for it to end (its hil/iem-pc result) and "
-                         "dispatch the live run then: both begin a HIL job on the PC, and the second to reach it "
-                         "is cancelled (nothing was dispatched)")
 
 
 def dispatch(ctx, ip) -> int:
@@ -258,6 +318,7 @@ def dispatch(ctx, ip) -> int:
     why = f"iemmode status failed (exit {code})" if code != 0 else live_refusal(reply, sha)
     if why:
         raise ip.Refused(f"no live run: {why} (nothing was dispatched)")
+    refuse_while_hil(ip, "dispatch-live", entry)
     run, branch = ip.green_run(sha, ip.BRANCHES)
     if ip.event_now():   # "ide event" during the gh waits above: the live run is dev-time work
         raise ip.Refused(f"{ip.EVENT_NOW} appeared: no live run dispatch during an event (nothing was dispatched)")

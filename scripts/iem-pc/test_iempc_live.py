@@ -297,6 +297,12 @@ class DispatchLiveTests(LiveBase):
         self.assertIn("HTTP 502", err)
         self.assertIn("wait for it to end", err)
         self.assertNotIn("cannot be read", err)
+        # An answer that is no list of runs is no answer either.
+        self.gh.workflow_list_error = None
+        self.gh.workflow_runs["hil.yml"] = {"total_count": 1}
+        self.assertIn("gh could not list hil.yml's runs (gh run list gave no list of runs)",
+                      self.refused("a HIL run dispatched in this dev entry may still run"))
+        self.gh.workflow_list_error = "gh run list failed (exit 1): HTTP 502"
         for bad in ({"at": "later"}, {"at": "2026-10-09T10:00:00"}, {"entry": None}):
             self.write_hil(hil_record(**bad))
             err = self.refused("a HIL run dispatched in this dev entry may still run", bad)
