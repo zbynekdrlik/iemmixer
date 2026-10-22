@@ -361,6 +361,12 @@ impl LineupView {
         }
     }
 
+    /// Whether the reconnect tick reads the band before it opens a new socket
+    /// after a failed close.
+    pub(super) fn reads_before_reconnect(&self) -> bool {
+        false
+    }
+
     /// Whether the page reads the band again at `now_ms`, after the last
     /// read at `last_ms` (#58): a page whose bearer does not play, so the
     /// notice follows a switch back to a band the bearer plays in; and one
@@ -747,6 +753,19 @@ mod tests {
             assert!(!view.recheck_due(14_999.0, 10_000.0), "{view:?}");
             assert!(view.recheck_due(15_000.0, 10_000.0), "{view:?}");
         }
+    }
+
+    /// #61 review I1: a switch missed while the socket was down (a phone
+    /// locked during it: the close is 1006 or 4002, never 4003) is seen at
+    /// the reconnect: in roster mode the tick reads the band first, so a
+    /// person who no longer plays gets the notice, not a refused socket.
+    #[test]
+    fn a_failed_close_in_roster_mode_reads_the_band_before_reconnecting() {
+        assert!(LineupView::Roster(info("main", true, false)).reads_before_reconnect());
+        assert!(LineupView::Roster(info("main", true, true)).reads_before_reconnect());
+        // No band to read: as before.
+        assert!(!LineupView::Legacy.reads_before_reconnect());
+        assert!(!LineupView::Unknown.reads_before_reconnect());
     }
 
     /// #61 review M3: the page's reads are numbered, so an older answer

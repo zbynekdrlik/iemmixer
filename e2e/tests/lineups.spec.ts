@@ -283,7 +283,29 @@ test.describe("Bands (#58)", () => {
     await expect(page.locator(".member-card.not-playing")).toHaveCount(8);
   });
 
-  test("a leader switches back from the notice, and the page turns into the mixer", async ({ page }) => {
+  test("a leader switches back from the notice, and the page turns into the mixer", async ({ page, browser }) => {
+    // member10's page, open while youth plays, misses the switch (#61 I1):
+    // its socket's LineupChanged is dropped and the server's 4003 close
+    // reaches the page as a plain close, as for a phone locked during the
+    // switch. Later sockets pass through untouched.
+    const missed = await otherPage(browser);
+    let first = true;
+    await missed.page.routeWebSocket(
+      (url) => url.pathname === "/ws/member10",
+      (ws) => {
+        const server = ws.connectToServer();
+        if (!first) return;
+        first = false;
+        server.onMessage((message) => {
+          if (typeof message === "string" && message.includes('"LineupChanged"')) return;
+          ws.send(message);
+        });
+        server.onClose(() => ws.close({ code: 1000 }));
+      },
+    );
+    await openMixer(missed.page, "member10");
+    await expect(missed.page.getByTestId("lineup-badge")).toHaveText(YOUTH);
+
     const sockets = socketsTo(page, "member1");
     await openPage(page, "member1");
     const shown = page.getByTestId("lineup-notice");
@@ -298,6 +320,14 @@ test.describe("Bands (#58)", () => {
     await expect(page.locator(".category-tab.mixes")).not.toHaveClass(/tab-hidden/);
     expect(sockets).toHaveLength(1);
     expect(await notReloaded(page)).toBe(true);
+
+    // member10 plays no part of main: the page that missed the switch reads
+    // the band before it reconnects, and shows the notice.
+    const missedNotice = missed.page.getByTestId("lineup-notice");
+    await expect(missedNotice).toBeVisible({ timeout: 15_000 });
+    await expect(missedNotice.locator(".lineup-notice-text")).toHaveText(notice(MAIN));
+    await expect(missed.page.getByTestId("global-volume-fader")).toHaveCount(0);
+    await missed.close();
   });
 
   test.describe("the engineer", () => {
