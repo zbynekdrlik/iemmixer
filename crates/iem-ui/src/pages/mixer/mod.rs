@@ -290,16 +290,20 @@ pub fn MixerPage() -> impl IntoView {
                         {move || if network_mode.get() == "local" { "LAN" } else { "WAN" }}
                     </div>
                 </Show>
-                <div class=move || {
-                    let base = if connected.get() { "status-dot connected" } else { "status-dot disconnected" };
-                    if connected.get() && data_pulse.get() {
-                        format!("{} pulse-a", base)
-                    } else if connected.get() {
-                        format!("{} pulse-b", base)
-                    } else {
-                        base.to_string()
-                    }
-                }/>
+                // No connection dot on the notice (#61 M1): that page has no
+                // socket on purpose.
+                <Show when=mixer_shown fallback=|| ()>
+                    <div class=move || {
+                        let base = if connected.get() { "status-dot connected" } else { "status-dot disconnected" };
+                        if connected.get() && data_pulse.get() {
+                            format!("{} pulse-a", base)
+                        } else if connected.get() {
+                            format!("{} pulse-b", base)
+                        } else {
+                            base.to_string()
+                        }
+                    }/>
+                </Show>
             </header>
 
             // A person who does not play in the band that plays sees which
