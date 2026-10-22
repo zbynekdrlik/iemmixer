@@ -1,6 +1,7 @@
 //! `/ws/talkback` — the engineer's push-to-talk audio (F18; X5, X6, §5.3):
 //! the socket binds to the talk id the mixer session holds (`&talk=<id>` at
-//! the upgrade, within 1 s of acquiring); its Opus frames are decoded and
+//! the upgrade, while the unbound lock lives: 2 s from acquiring, #63;
+//! `TalkLock::bind` logs the outcome); its Opus frames are decoded and
 //! played out every 20 ms into the engine's talkback stream. The wire format
 //! (one Opus packet per binary message) is the predecessor's.
 
@@ -43,8 +44,8 @@ pub async fn ws_talkback(
         ));
     }
     let id = query.talk.unwrap_or_default();
+    // `bind` logs the refusal with its reason and delay (never the id).
     if lock(&state.talk).bind(&id, Instant::now()).is_none() {
-        tracing::warn!("talkback socket without the held talk id refused");
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError::new("TALK_NOT_HELD", "Press Talk first")),

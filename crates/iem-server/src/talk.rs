@@ -1,12 +1,21 @@
 //! The talkback lock (F18, X6, program spec §5.3): one talker at a time,
 //! held by a mixer session. Acquiring hands out a 128-bit talk id; the
-//! talkback socket binds by presenting it within 1 s; the lock is released
-//! on stop, when the holder's mixer socket closes, or after 2 s without
-//! talkback frames (which also ends a lock whose socket never came).
+//! talkback socket binds by presenting it while the unbound lock lives; the
+//! lock is released on stop, when the holder's mixer socket closes, or after
+//! 2 s without talkback frames (which also ends a lock whose socket never
+//! came).
+//!
+//! The bind window is that unbound life, not a shorter one (#63): through
+//! the public tunnel the upgrade came 1–1.8 s after the press, and a 1 s
+//! window refused a socket the lock still waited for, so the press was
+//! lost. Every bind and refusal is logged with its delay since the press;
+//! the talk id is a credential-like token and never logged.
 
 use std::time::{Duration, Instant};
 
-pub const BIND_WINDOW: Duration = Duration::from_secs(1);
+/// A lock without talkback frames for longer than this is over: a bound
+/// one is ended by `expire`, an unbound one (no frame since the press) also
+/// takes no socket any more (`bind`).
 pub const SILENCE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
@@ -17,6 +26,15 @@ struct Held {
     since: Instant,
     bound: bool,
     last_frame: Instant,
+}
+
+impl Held {
+    /// No talkback frame for longer than `SILENCE` (an unbound lock: since
+    /// the press, where `last_frame` starts): the lock is over, whether or
+    /// not `expire` has ended it yet.
+    fn silent(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_frame) > SILENCE
+    }
 }
 
 #[derive(Debug, Default)]
@@ -60,15 +78,44 @@ impl TalkLock {
     }
 
     /// A talkback socket presents `id` at `now`: the holder's session when
-    /// it may bind (right id, not bound yet, inside the window).
+    /// it may bind (the held id, not bound yet, the unbound lock still
+    /// alive). Logs the bind (info) or the refusal and its reason (warn),
+    /// with the delay since the press when `id` is the held one; never `id`.
     pub fn bind(&mut self, id: &str, now: Instant) -> Option<u64> {
-        let h = self.held.as_mut()?;
-        if h.id != id || h.bound || now.saturating_duration_since(h.since) > BIND_WINDOW {
-            return None;
+        let after_ms = self
+            .held
+            .as_ref()
+            .filter(|h| h.id == id)
+            .map(|h| now.saturating_duration_since(h.since).as_millis() as u64);
+        match self.admit(id, now) {
+            Ok(session) => {
+                tracing::info!(session, after_ms, "talkback socket bound to the held talk");
+                Some(session)
+            }
+            Err(reason) => {
+                tracing::warn!(reason, after_ms, "talkback socket refused");
+                None
+            }
+        }
+    }
+
+    /// Binds `id` at `now`, or why not.
+    fn admit(&mut self, id: &str, now: Instant) -> Result<u64, &'static str> {
+        let Some(h) = self.held.as_mut() else {
+            return Err("no lock");
+        };
+        if h.id != id {
+            return Err("wrong id");
+        }
+        if h.bound {
+            return Err("already bound");
+        }
+        if h.silent(now) {
+            return Err("too late");
         }
         h.bound = true;
         h.last_frame = now;
-        Some(h.session)
+        Ok(h.session)
     }
 
     /// A talkback frame arrived for the bound id.
@@ -90,10 +137,7 @@ impl TalkLock {
 
     /// Ends a lock without frames for 2 s; the session that held it.
     pub fn expire(&mut self, now: Instant) -> Option<u64> {
-        let quiet = self
-            .held
-            .as_ref()
-            .is_some_and(|h| now.saturating_duration_since(h.last_frame) > SILENCE);
+        let quiet = self.held.as_ref().is_some_and(|h| h.silent(now));
         if quiet {
             self.held.take().map(|h| h.session)
         } else {
