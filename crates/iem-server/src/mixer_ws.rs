@@ -289,14 +289,18 @@ pub fn on_lineup(state: &AppState, page: &Page, viewer: &Viewer) -> OnLineup {
     }
 }
 
-/// What a session on `page` sends first after the hello: the page's state,
+/// What a session on `page` sends first after the hello: in roster mode
+/// the band that plays (#61 second review m2: the page's badge and switch
+/// follow its socket's band, even when its read of the band failed or a
+/// switch came between that read and the socket), then the page's state,
 /// pins and hides, solo, and its alert catch-up.
 pub fn opening(state: &AppState, page: &Page, viewer: &Viewer) -> Vec<ServerMsg> {
-    let mut first = vec![
+    let mut first: Vec<ServerMsg> = lineup_msg(state).into_iter().collect();
+    first.extend([
         full_state(state, page, viewer),
         customization_msg(state, page),
         solo_msg(state, page),
-    ];
+    ]);
     if let Some(m) = alert_catchup(&lock(&state.alerts), &page.id) {
         first.push(m);
     }
