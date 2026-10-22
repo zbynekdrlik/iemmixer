@@ -210,6 +210,33 @@ pub(super) fn on_close(code: u16) -> OnClose {
 /// that does not know the band reads it again as often (#61 review C2).
 pub(super) const LINEUP_RECHECK_MS: f64 = 5_000.0;
 
+/// The page's reads of `/api/lineup` (#58): each gets a number, and when
+/// the last one started (the tick's [`LineupView::recheck_due`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct LineupReads {
+    /// The number of the read started last.
+    pub issued: u64,
+    /// The number of the answer the view took last.
+    pub applied: u64,
+    /// When the read started last (ms).
+    pub last_at: f64,
+}
+
+impl LineupReads {
+    /// A read starts at `now_ms`: its number.
+    pub(super) fn start(&mut self, now_ms: f64) -> u64 {
+        self.issued += 1;
+        self.last_at = now_ms;
+        self.issued
+    }
+
+    /// Whether the view takes the answer of read `seq`.
+    pub(super) fn take(&mut self, seq: u64) -> bool {
+        self.applied = seq;
+        true
+    }
+}
+
 /// What the mixer page knows of the band that plays (#58), from
 /// `GET /api/lineup`: read before the page connects, again after the server
 /// closed a person's page with [`CLOSE_LINEUP`] or told it of a new band.
@@ -714,6 +741,26 @@ mod tests {
             assert!(!view.recheck_due(14_999.0, 10_000.0), "{view:?}");
             assert!(view.recheck_due(15_000.0, 10_000.0), "{view:?}");
         }
+    }
+
+    /// #61 review M3: the page's reads are numbered, so an older answer
+    /// (a slow read started before a switch) never overwrites a newer one.
+    #[test]
+    fn an_older_answer_never_overwrites_a_newer_one() {
+        let mut reads = LineupReads::default();
+        let first = reads.start(1_000.0);
+        let second = reads.start(2_000.0);
+        assert_eq!(reads.last_at, 2_000.0, "the tick counts from the last read");
+        assert!(second > first);
+        assert!(reads.take(second), "the newest answer is taken");
+        assert!(!reads.take(first), "an older one that comes later is not");
+        // In order, each is taken.
+        let third = reads.start(3_000.0);
+        let fourth = reads.start(4_000.0);
+        assert!(reads.take(third));
+        assert!(reads.take(fourth));
+        assert!(!reads.take(third));
+        assert_eq!(reads.applied, fourth);
     }
 
     fn failed() -> Result<Option<iem_core::LineupInfo>, crate::api::ApiError> {
