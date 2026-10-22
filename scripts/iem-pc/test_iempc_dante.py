@@ -7,6 +7,7 @@ stays ASCII. No card exists in CI: a fake stands in for dante_card.py's
 subprocess, and a stand-in program for the netaudio python."""
 from __future__ import annotations
 
+import gc
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ import sys
 import time
 import tomllib
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -325,10 +327,14 @@ class ApplyTests(Base):
         ip.env_path().write_text(self.env_text + f"DANTE_IEM_HOST={HOST}\nDANTE_IEM_NAME={NAME}\n"
                                  f"NETAUDIO_PYTHON={self.python}\n", encoding="utf-8")
         self.fake = FakeHelper(self)
+        self.patch_helper()
+        self.rows = rows()
+
+    def patch_helper(self) -> None:
+        """dante_card.py's subprocess is self.fake for the rest of the test."""
         patcher = mock.patch.object(dante, "helper", self.fake)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.rows = rows()
 
     def apply(self, *extra: str) -> tuple[int, list[dict], str]:
         return self.run_main("dante-labels", "--roster", str(self.roster), "--apply", *extra)
@@ -463,6 +469,24 @@ class ApplyTests(Base):
                              (False, self.planned(self.rows)))
             self.fake.card = {"tx": {str(n): str(n) for n in range(1, 129)}, "rx": {str(n): str(n) for n in range(1, 129)}}
 
+    def test_any_shortfall_of_the_write_exits_1(self) -> None:
+        """Every label taken and read back with no error is the only exit 0:
+        an error alone, labels unsent, or no read back, each exits 1 (even
+        in an answer that leaves out the others)."""
+        shortfalls = [(lambda: None, lambda d: d.update(error="writing tx 88 failed (TimeoutError: synthetic)")),
+                      (lambda: setattr(self.fake, "after_write", self.flag), lambda d: d.update(error=None)),
+                      (lambda: setattr(self.fake, "no_read_back", True), lambda d: d.update(error=None))]
+        for setup, tamper in shortfalls:
+            setup()
+            self.fake.tamper = tamper
+            code, docs, err = self.apply()
+            self.assertEqual(code, 1, docs)
+            self.assertEqual(docs[-1]["dante_apply"]["mismatches"] or [], [])
+            self.fake = FakeHelper(self)
+            self.patch_helper()
+            if ip.EVENT_NOW.exists():
+                ip.EVENT_NOW.unlink()
+
     def test_another_device_at_the_host_writes_nothing(self) -> None:
         self.fake.refuse = ("python failed (exit 1): dante_card: the device answering at the configured host is not "
                             "the expected one: nothing was written")
@@ -559,6 +583,12 @@ class ApplyTests(Base):
         self.assertEqual(code, 0, err)
         self.assertIn("every TX row is listed", err)
         self.assertIsNone(docs[-1]["dante_labels"]["compared"])
+        # A read whose counts are not its labels' is no read of the card either.
+        self.fake.refuse, self.fake.counts = None, {"tx": 129}
+        code, docs, err = self.run_main("dante-labels", "--roster", str(self.roster))
+        self.assertEqual(code, 0, err)
+        self.assertIn("dante_card.py gave no tx labels", err)
+        self.assertIsNone(docs[-1]["dante_labels"]["compared"])
 
 
 class HelperRunTests(Base):
@@ -623,12 +653,25 @@ class HelperRunTests(Base):
             self.assertIn("could not be started", str(e.exception))
         self.assertEqual(self.runs(), [])
 
+    def outlive(self) -> str:
+        """A write run past its bound: StillRunning's words (the exception
+        itself is dropped here, so nothing of it holds the process handle)."""
+        try:
+            dante.helper(ip, self.cmd("write"), '[{"type": "tx", "channel": 71, "label": "x"}]')
+        except ip.StillRunning as e:
+            return str(e)
+        self.fail("the run past its bound raised no StillRunning")
+
     def test_a_run_past_its_bound_is_left_to_end_and_no_second_run_overlaps_it(self) -> None:
         with mock.patch.object(dante, "CARD_S", 0.3):
-            with self.assertRaises(ip.StillRunning) as e:
-                dante.helper(ip, self.cmd("write"), '[{"type": "tx", "channel": 71, "label": "x"}]')
-            self.assertIn("here on this box (pid ", str(e.exception))
-            self.assertIn("never force-ended", str(e.exception))
+            with warnings.catch_warnings(record=True) as seen:
+                warnings.simplefilter("always")
+                words = self.outlive()
+                gc.collect()
+            # Its process handle is held while it runs on, not dropped as a "still running" leak.
+            self.assertEqual([str(w.message) for w in seen if issubclass(w.category, ResourceWarning)], [])
+            self.assertIn("here on this box (pid ", words)
+            self.assertIn("never force-ended", words)
             # While it runs, no other run of the helper starts.
             with self.assertRaises(ip.Refused) as e:
                 dante.helper(ip, self.cmd("read"), "")

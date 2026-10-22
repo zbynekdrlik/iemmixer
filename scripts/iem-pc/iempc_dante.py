@@ -40,14 +40,21 @@ Without `--apply` it prints the sheet, one JSON object `{"dante_labels":
 label differs from what the card holds, read now when the private env
 names the card (`compared: "card"`; a read that fails is a warning), else
 from the `--before` roster (`"before"`, the offline fallback), else every
-TX row (null). With `--apply` (the env's DANTE_IEM_HOST, DANTE_IEM_NAME and
-NETAUDIO_PYTHON, all three) it reads the card, writes only the labels that
-differ from what it holds (the flag read again right before), reads every
-one back, and prints `{"dante_apply": {changed, unchanged, mismatches,
-written, resubscribe}}`; exit 1 on a mismatch. The device at the IP must
-name itself DANTE_IEM_NAME before anything is written (dante_card.py). Both
-hold people's names and the site's channels: printed on this box only,
-never committed, never posted (P6).
+TX row (null). With `--apply` (the env's DANTE_IEM_HOST, a unicast IPv4
+address, DANTE_IEM_NAME and NETAUDIO_PYTHON, an executable file: all three)
+it reads the card, writes only the labels that differ from what it holds
+(the flag read again right before, and by the helper before each label),
+reads them back, and prints `{"dante_apply": {changed, unchanged,
+confirmed, written, unsent, mismatches, resubscribe, error}}`: what the
+card took and the TX labels it changed, from the read back. When the write
+run fails, outlives its bound or answers no report, the planned labels come
+out unconfirmed (`confirmed: false`) and it fails; exit 1 on anything but
+every label taken. The device at the IP must name itself DANTE_IEM_NAME
+before anything is written (dante_card.py). The helper runs here, on the
+dev box, never ended by force: a run past CARD_S goes on by itself, and no
+other run starts while its recorded pid lives. Both hold people's names and
+the site's channels: printed on this box only, never committed, never
+posted (P6).
 
 Dev time and locked (iempc's Spec): refused while the EVENT-NOW flag exists,
 since renames happen only in dev time with the owner ready to remake the
@@ -56,20 +63,28 @@ listed subscriptions.
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
 
-import ipaddress
 import json
+import os
 import re
+import subprocess
 import sys
 import tomllib
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+import dante_card   # its checks only (unicast_ipv4, MAX_CHANNEL); it imports netaudio only when it runs a card
+
 LIMIT = 31                 # characters in a Dante channel label
 # The private env's keys of the card (none of their values is in this repo, P6).
 CARD_KEYS = ("DANTE_IEM_HOST", "DANTE_IEM_NAME", "NETAUDIO_PYTHON")
 HELPER = Path(__file__).resolve().parent / "dante_card.py"
 CARD_S = 120.0             # one run of the helper: a read, or a write with its read before and after
+# In the dev box's state dir: the last run of the helper (its pid), its stdout and its stderr.
+RECORD, OUT, ERR = "dante-helper.json", "dante-helper.out", "dante-helper.err"
+# Runs that outlived CARD_S: held, never ended by force, so they end by themselves.
+OUTLIVED: list[subprocess.Popen] = []
+NO_REPORT = "dante_card.py write answered no report of its writes"
 FORBIDDEN = frozenset("=.@")
 DEFAULT_TYPE = "mic"
 TYPE = re.compile(r"[a-z]{1,8}")
@@ -138,9 +153,10 @@ def _rows(doc, key: str, what: str) -> list[dict]:
 
 
 def _channels(value, what: str) -> list[int]:
-    """One or two card channels."""
+    """One or two card channels, as Dante numbers them (1 to 255); whether
+    the card has them is the card's count to say (`apply`)."""
     ok = (isinstance(value, list) and 1 <= len(value) <= 2
-          and all(type(c) is int and 1 <= c <= 9999 for c in value))
+          and all(type(c) is int and 1 <= c <= dante_card.MAX_CHANNEL for c in value))
     if not ok:
         raise SheetError(f"{what}: its channels are not one or two card channels")
     return value
@@ -306,28 +322,64 @@ def card_env(ip, env: dict[str, str], need: bool) -> Card | None:
         raise ip.Refused(f"dante-labels: {', '.join(missing)} missing in the private env (DANTE_IEM_HOST: the card's "
                          "IP, DANTE_IEM_NAME: its expected device name, NETAUDIO_PYTHON: the netaudio venv's python)")
     host, name, python = (env[k] for k in CARD_KEYS)
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        raise ip.Refused("dante-labels: DANTE_IEM_HOST is not an IP address") from None
+    if not dante_card.unicast_ipv4(host):
+        raise ip.Refused("dante-labels: DANTE_IEM_HOST is not a unicast IPv4 address")
     if not name.isprintable():
         raise ip.Refused("dante-labels: DANTE_IEM_NAME is not printable")
-    if not Path(python).is_absolute() or not Path(python).is_file():
-        raise ip.Refused("dante-labels: NETAUDIO_PYTHON is not the full path of a file")
+    if not (Path(python).is_absolute() and Path(python).is_file() and os.access(python, os.X_OK)):
+        raise ip.Refused("dante-labels: NETAUDIO_PYTHON is not the full path of an executable file")
     return Card(host, name, python)
 
 
+def running(pid: int) -> bool:
+    """Whether `pid` is a run of dante_card.py on this box (a pid reused by
+    another program, or one that has ended, is not)."""
+    try:
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return str(HELPER).encode() in args
+
+
 def helper(ip, cmd: list[str], stdin: str) -> str:
-    """One run of dante_card.py (tests replace it): bounded by CARD_S, never
-    ended by force; its stdout. The flag is the caller's to read."""
-    return ip.guarded(cmd, stdin, CARD_S, "ignore")
+    """One run of dante_card.py, here on the dev box, in its own process
+    (tests replace it): its stdout. Its stdout and stderr go to files in the
+    state dir, so a run that outlives CARD_S goes on and ends by itself,
+    never ended by force; its pid is recorded, and no other run starts
+    while it lives. The flag is the caller's to read before a write, and
+    the helper's before each label."""
+    state = ip.state_dir()
+    pid = ip.read_json(state / RECORD, {}).get("pid")
+    if type(pid) is int and running(pid):
+        raise ip.Refused(f"dante-labels: dante_card.py of an earlier run still runs on this box (pid {pid}); wait "
+                         f"for it to end by itself (never force-end it); its answer goes to {state / OUT}")
+    verb = cmd[3]
+    with open(state / OUT, "w", encoding="utf-8") as out, open(state / ERR, "w", encoding="utf-8") as err:
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out, stderr=err, text=True, encoding="utf-8",
+                                    errors="replace")
+        except OSError as e:   # the path stays out of the words (it is a value of the private env)
+            raise ip.StepError(f"dante-labels: the netaudio python could not be started "
+                               f"({e.strerror or type(e).__name__})") from None
+        ip.write_json(state / RECORD, {"pid": proc.pid, "verb": verb})
+        try:
+            proc.communicate(stdin, timeout=CARD_S)
+        except subprocess.TimeoutExpired:
+            OUTLIVED.append(proc)
+            raise ip.StillRunning(f"dante_card.py {verb} still running after {CARD_S:g} s here on this box (pid "
+                                  f"{proc.pid}): left to end by itself, never force-ended; its answer goes to "
+                                  f"{state / OUT}, and no other run of it starts while it runs") from None
+    if proc.returncode != 0:
+        tail = (state / ERR).read_text(encoding="utf-8", errors="replace").strip()[-1500:]
+        raise ip.StepError(f"dante_card.py {verb} failed (exit {proc.returncode}): {tail}")
+    return (state / OUT).read_text(encoding="utf-8", errors="replace")
 
 
-def ask_card(ip, card: Card, verb: str, stdin: str = "") -> dict:
+def ask_card(ip, card: Card, verb: str, stdin: str = "", extra: tuple[str, ...] = ()) -> dict:
     """dante_card.py `verb` on the configured card: its one JSON object.
     A refusal of its own (another device, no answer) is its exit 1, which
-    guarded raises as a StepError naming its words."""
-    out = helper(ip, [card.python, "-I", str(HELPER), verb, card.host, card.name], stdin)
+    `helper` raises as a StepError naming its words."""
+    out = helper(ip, [card.python, "-I", str(HELPER), verb, card.host, card.name, *extra], stdin)
     lines = [line for line in out.splitlines() if line.strip()]
     try:
         doc = json.loads(lines[-1]) if lines else None
@@ -338,46 +390,99 @@ def ask_card(ip, card: Card, verb: str, stdin: str = "") -> dict:
     return doc
 
 
-def held(ip, doc: dict) -> dict[str, dict[int, str]]:
-    """The labels in one of dante_card.py's answers: {"tx": {n: label}, "rx": ...}."""
+def held(ip, doc: dict, counted: bool = False) -> dict[str, dict[int, str]]:
+    """The labels in one of dante_card.py's answers: {"tx": {n: label}, "rx": ...}.
+    `counted` (a read): each kind's count is the number of its labels (the
+    helper refuses a read of none)."""
     out = {}
     for kind in ("tx", "rx"):
         part = doc.get(kind)
-        if not isinstance(part, dict) or not all(isinstance(k, str) and k.isdigit() and isinstance(v, str)
-                                                 for k, v in part.items()):
+        ok = isinstance(part, dict) and all(isinstance(k, str) and k.isdigit() and isinstance(v, str)
+                                            for k, v in part.items())
+        if ok and counted:
+            count = doc.get(f"{kind}_count")
+            ok = type(count) is int and count == len(part)
+        if not ok:
             raise ip.StepError(f"dante_card.py gave no {kind} labels")
         out[kind] = {int(k): v for k, v in part.items()}
     return out
 
 
+def took(ip, doc: dict, asked: list[dict]) -> tuple[int, str | None, dict | None]:
+    """The write's answer (dante_card.py's report of its writes): how many of
+    `asked` it touched (each it sent, and the one whose command raised), its
+    error, and the labels read back after (None: not read back). A StepError
+    when it is not such a report."""
+    sent, failed, error, back = (doc.get(k) for k in ("sent", "failed", "error", "read_back"))
+    ok = (isinstance(sent, list) and sent == asked[:len(sent)]
+          and (failed is None or (len(sent) < len(asked) and failed == asked[len(sent)]))
+          and (error is None or isinstance(error, str)) and type(back) is bool
+          and isinstance(doc.get("mismatches"), list))
+    if not ok:
+        raise ip.StepError(NO_REPORT)
+    try:
+        labels = held(ip, doc) if back else None
+    except ip.StepError:
+        raise ip.StepError(NO_REPORT) from None
+    return len(sent) + (failed is not None), error, labels
+
+
 def apply(ip, after: list[Label], card: Card) -> int:
     """`--apply`: the card read, only the labels that differ from what it
-    holds written (the flag read again right before), every one read back;
-    one JSON object. Exit 1 on a mismatch."""
-    now = held(ip, ask_card(ip, card, "read"))
-    lacking = [r for r in after if r.channel not in now[r.kind]]
+    holds written (the flag read again right before, and by the helper
+    before each label), then read back; one JSON object
+    `{"dante_apply": {changed, unchanged, confirmed, written, unsent,
+    mismatches, resubscribe, error}}`. `written` and `resubscribe` come from
+    the labels read back: what the card took, and the TX labels it changed.
+    A write run that fails, outlives its bound or answers no report prints
+    the planned labels unconfirmed (`confirmed: false`), then fails. Exit 1
+    on anything but every label taken."""
+    answer = ask_card(ip, card, "read")
+    now = held(ip, answer, counted=True)
+    lacking = [r for r in after if r.channel > answer[f"{r.kind}_count"] or r.channel not in now[r.kind]]
     if lacking:
         raise ip.Refused(f"dante-labels: the card has no {lacking[0].kind} channel {lacking[0].channel} (nothing was "
                          "written)")
     changes = [r for r in after if now[r.kind][r.channel] != r.label]
-    report = {"changed": len(changes), "unchanged": len(after) - len(changes), "mismatches": [],
-              "written": [{"type": r.kind, "channel": r.channel, "label": r.label, "before": now[r.kind][r.channel]}
-                          for r in changes],
-              "resubscribe": [{"channel": r.channel, "label": r.label, "before": now["tx"][r.channel]}
-                              for r in changes if r.kind == "tx"]}
+    counts = {"changed": len(changes), "unchanged": len(after) - len(changes)}
+
+    def entry(r: Label) -> dict:
+        return {"type": r.kind, "channel": r.channel, "label": r.label, "before": now[r.kind][r.channel]}
+
+    def subscription(r: Label, label: str) -> dict:
+        out = {"channel": r.channel, "label": label, "before": now["tx"][r.channel]}
+        return out if label == r.label else {**out, "mismatch": True}
+
     if not changes:
-        ip.emit({"dante_apply": {**report, "note": "the card holds every label already: nothing to change"}})
+        ip.emit({"dante_apply": {**counts, "confirmed": True, "written": [], "unsent": [], "mismatches": [],
+                                 "resubscribe": [], "error": None,
+                                 "note": "the card holds every label already: nothing to change"}})
         return 0
     if ip.event_now():   # "ide event" since the start: no label is written during an event
         raise ip.Refused(f"{ip.EVENT_NOW} appeared: no label is written during an event (nothing was written)")
-    doc = ask_card(ip, card, "write", json.dumps([{"type": r.kind, "channel": r.channel, "label": r.label}
-                                                  for r in changes]))
-    mismatches = doc.get("mismatches")
-    if doc.get("written") != len(changes) or not isinstance(mismatches, list):
-        raise ip.StepError(f"dante_card.py write answered no count of {len(changes)} written labels and mismatches")
-    report["mismatches"] = mismatches
-    ip.emit({"dante_apply": report})
-    return 1 if mismatches else 0
+    asked = [{"type": r.kind, "channel": r.channel, "label": r.label} for r in changes]
+    try:
+        touched, error, labels = took(ip, ask_card(ip, card, "write", json.dumps(asked), (str(ip.EVENT_NOW),)),
+                                      asked)
+    except ip.StepError as e:   # failed, outlived CARD_S (StillRunning), or no report: what it took is not known
+        ip.emit({"dante_apply": {**counts, "confirmed": False, "written": [entry(r) for r in changes],
+                                 "unsent": None, "mismatches": None,
+                                 "resubscribe": [subscription(r, r.label) for r in changes if r.kind == "tx"],
+                                 "error": str(e)[-300:]}})
+        raise
+    tried, unsent = changes[:touched], [entry(r) for r in changes[touched:]]
+    if labels is None:   # sent, not read back: unconfirmed
+        report = {"confirmed": False, "written": [entry(r) for r in tried], "mismatches": None,
+                  "resubscribe": [subscription(r, r.label) for r in tried if r.kind == "tx"]}
+    else:
+        got = {(r.kind, r.channel): labels[r.kind].get(r.channel) for r in tried}
+        report = {"confirmed": True, "written": [entry(r) for r in tried if got[(r.kind, r.channel)] == r.label],
+                  "mismatches": [{"type": r.kind, "channel": r.channel, "want": r.label, "got": got[(r.kind, r.channel)]}
+                                 for r in tried if got[(r.kind, r.channel)] != r.label],
+                  "resubscribe": [subscription(r, got[("tx", r.channel)]) for r in tried
+                                  if r.kind == "tx" and got[("tx", r.channel)] != now["tx"][r.channel]]}
+    ip.emit({"dante_apply": {**counts, **report, "unsent": unsent, "error": error}})
+    return 0 if report["confirmed"] and not (report["mismatches"] or unsent or error) else 1
 
 
 def load(path: Path) -> dict:
@@ -411,7 +516,7 @@ def run(ctx, ip) -> int:
     known, against = None, None
     if card is not None:
         try:
-            known, against = held(ip, ask_card(ip, card, "read"))["tx"], "card"
+            known, against = held(ip, ask_card(ip, card, "read"), counted=True)["tx"], "card"
         except ip.StepError as e:
             print(f"iempc: WARNING: the card's labels could not be read ({str(e)[-300:]}); "
                   f"{'compared with --before' if before is not None else 'every TX row is listed'}",
