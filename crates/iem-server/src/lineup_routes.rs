@@ -93,15 +93,15 @@ pub struct LineupQuery {
 /// a person's page while that person plays in the band that plays; a page
 /// the site has without a person (`exists`: `/engineer`, the translator's)
 /// always. The bearer's own page answers as without a page; another page is
-/// asked about by the engineer and the leaders only (anyone else: 403, as
-/// the page itself). A page the site lacks: 404.
+/// asked about by the engineer only, who alone may open it (#61 second
+/// review m1; anyone else: 403). A page the site lacks: 404.
 pub fn page_plays(
     roster: &RosterState,
     by: &AuthClaims,
     page: &str,
     exists: bool,
 ) -> Result<bool, Reject> {
-    if page != by.sub && !may_switch(&roster.roster, by) {
+    if !(by.engineer || page == by.sub) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError::new("FORBIDDEN", "not a page this token may open")),
