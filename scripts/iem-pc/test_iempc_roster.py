@@ -233,6 +233,7 @@ class RosterInstallTests(RosterBase):
         self.assertIn("not applied within 0.3 s", why)
         self.assertIn(f"names {OTHER_SHA[:12]}", why)
         self.assertIn("defers", why)
+        self.assertNotIn("again later", why)   # the tool restores now: nothing to read again
         self.assertGreater(self.reads, 1)
         self.assertEqual((len(self.installs()), len(self.restores())), (1, 1))
 
@@ -271,6 +272,40 @@ class RosterInstallTests(RosterBase):
                         script.index(f"Remove-Item -LiteralPath {ip.ps_quote(DST)}"))
         self.assertNotIn("Replace(", script)
         self.assertNotIn(PREV, script)
+
+    def test_a_roster_the_server_applies_during_the_restore_is_kept(self) -> None:
+        """The wait ran out (a roster the server deferred), and the server
+        applied it during the restore call: the restore reads the applied
+        roster and the status right before it would replace or remove
+        roster.toml, and keeps the upload; the install counts as applied."""
+        self.statuses = [status(OTHER_SHA)]
+        self.restore = lambda: {"late": True, "status": status(added=["member10"], removed=["member2"])}
+        with mock.patch.object(roster, "WAIT_S", 0.3):
+            code, docs, err = self.install()
+            self.assertEqual(code, 0, err)
+            self.assertEqual(docs[-1]["roster_install"], {"sha256": FILE_SHA, "ok": True, "problems": [],
+                                                          "applied": True, "added": ["member10"],
+                                                          "removed": ["member2"], "late": True})
+            # Only the applied roster named it (the status names another file): applied, nothing more known.
+            self.restore = lambda: {"late": True, "status": status(OTHER_SHA)}
+            code, docs, err = self.install()
+            self.assertEqual(code, 0, err)
+            self.assertEqual(docs[-1]["roster_install"], {"sha256": FILE_SHA, "ok": True, "problems": [],
+                                                          "applied": True, "added": [], "removed": [], "late": True})
+            # The reads come right before the replace, or the remove when there was no previous file.
+            q = ip.ps_quote
+            for prev, action, before in ((PREV_SHA, f"[IO.File]::Replace({q(NEW)}, {q(DST)}",
+                                          f"Copy-Item -LiteralPath {q(PREV)} -Destination {q(NEW)} -Force"),
+                                         (None, f"Remove-Item -LiteralPath {q(DST)}", ip.hash_check(DST, FILE_SHA))):
+                self.prev = prev
+                self.pc.modules.clear()
+                self.install()
+                (script, _), = self.restores()
+                reads = [script.index(f"[IO.File]::Open({q(APPLIED_FILE)}, {SHARED}"),
+                         script.index(f"[IO.File]::Open({q(STATUS_FILE)}, {SHARED}")]
+                self.assertLess(script.index(before), min(reads), prev)
+                self.assertLess(max(reads), script.index(action), prev)
+                self.assertIn(f"'{FILE_SHA}'", script[min(reads):script.index(action)], prev)
 
     def test_a_restore_that_fails_is_named(self) -> None:
         def fails():
@@ -395,6 +430,25 @@ class RosterInstallTests(RosterBase):
         self.assertEqual((code, docs), (1, []))
         self.assertIn("did not confirm the install", err)
         self.assertEqual(self.status_reads(), [])
+
+    def test_ide_event_during_the_wait_names_the_way_back(self) -> None:
+        """The event path comes first and skips the restore (a documented
+        limit), but never silently: one OWNER ALARM line names the upload
+        that may still be in roster.toml and the way back."""
+        self.pc.texts[STATUS_READ] = lambda: (self.flag(), status(OTHER_SHA))[1]
+        for prev, way_back in ((PREV_SHA, f"put {PREV} back as {DST}"), (None, f"remove {DST}")):
+            self.prev = prev
+            ip.EVENT_NOW.unlink(missing_ok=True)
+            self.pc.modules.clear()
+            code, _, err = self.install()
+            self.assertEqual(code, ip.PREEMPTED, err)
+            self.assertEqual(self.restores(), [], prev)
+            alarms = [line for line in err.splitlines() if line.startswith("iempc: OWNER ALARM: ")]
+            self.assertEqual(len(alarms), 1, err)
+            self.assertIn(FILE_SHA[:12], alarms[0])
+            self.assertIn(way_back, alarms[0])
+            self.assertIn(STATUS_FILE, alarms[0])
+            self.assertEqual(self.pc.calls[-1][:2], ("iemmode.exe", ["event", "--signal"]))
 
     def test_a_flag_during_the_wait_runs_the_event_path(self) -> None:
         self.pc.texts[STATUS_READ] = lambda: (self.flag(), status(OTHER_SHA))[1]

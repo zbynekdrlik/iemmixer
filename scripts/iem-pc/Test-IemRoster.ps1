@@ -8,8 +8,9 @@
 # keeps the previous roster.toml and its sha256, puts the upload in place by
 # a move (none there) or [IO.File]::Replace (one there), checked by sha256,
 # and refuses an upload of other bytes with nothing changed; the restore puts
-# the kept file back, or removes roster.toml when there was none, and refuses
-# while roster.toml holds anything but the upload.
+# the kept file back, or removes roster.toml when there was none, refuses
+# while roster.toml holds anything but the upload, and keeps a roster the
+# server applied meanwhile (the applied roster or the status names it).
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -98,6 +99,17 @@ try {
     $doc = Invoke-Composed @($composeRestore, $here, $cfg, $shaB, $shaA)
     Assert ((Get-IemProp $doc 'ok') -eq $true -and (Get-IemProp $doc 'r') -ceq 'restored') "restore-puts-the-previous-file-back ($(Get-Answer $doc))"
     Assert ((FileSha $dst) -ceq $shaA -and -not (Test-Path -LiteralPath $new)) 'restore-roster-toml-holds-the-previous-bytes'
+    # ---- a roster the server applied meanwhile stays: by the applied roster, or by the status ----
+    $doc = Invoke-Composed @($composeRestore, $here, $cfg, $shaA, '-')
+    Assert ((Get-IemProp $doc 'ok') -eq $true -and (Get-IemProp (Get-IemProp $doc 'r') 'late') -eq $true) "restore-skips-a-roster-the-server-applied ($(Get-Answer $doc))"
+    Assert ((FileSha $dst) -ceq $shaA) 'restore-skipped-keeps-roster-toml'
+    Remove-Item -LiteralPath $applied
+    Write-Text $statusFile ('{"sha256":"' + $shaA + '","ok":true,"applied":true}')
+    $doc = Invoke-Composed @($composeRestore, $here, $cfg, $shaA, '-')
+    Assert ((Get-IemProp $doc 'ok') -eq $true -and (Get-IemProp (Get-IemProp $doc 'r') 'late') -eq $true) "restore-skips-a-roster-the-status-names-applied ($(Get-Answer $doc))"
+    Assert ((FileSha $dst) -ceq $shaA) 'restore-skipped-by-the-status-keeps-roster-toml'
+    # ---- refused: no previous file, so roster.toml goes ----
+    Write-Text $statusFile ('{"sha256":"' + $shaA + '","ok":false,"applied":false}')
     $doc = Invoke-Composed @($composeRestore, $here, $cfg, $shaA, '-')
     Assert ((Get-IemProp $doc 'ok') -eq $true -and (Get-IemProp $doc 'r') -ceq 'restored') "restore-without-a-previous-file ($(Get-Answer $doc))"
     Assert (-not (Test-Path -LiteralPath $dst)) 'restore-without-a-previous-file-removes-roster-toml'
