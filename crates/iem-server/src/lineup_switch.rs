@@ -27,7 +27,6 @@ use std::time::Duration;
 
 use iem_core::AuthClaims;
 use iem_core::backup::MixerBackup;
-use iem_core::config::Config;
 use iem_core::roster::{Lineup, Roster};
 use iem_engine_proto::{Cmd, MixState};
 
@@ -84,13 +83,11 @@ pub fn may_switch(roster: &Roster, by: &AuthClaims) -> bool {
 /// state completed with the running values it lacks (`keep_running`,
 /// FG-1), or the first time a copy of the running one; then the lineup's
 /// rules (`roster_watch::fit_recorded`: heard mixes only on a leader's set,
-/// a person's set nobody wears silent, a departed person's too: `site`'s
-/// members name it), keeping `silenced`, the record of the sets the rules
-/// silenced in the state it starts from. Pure.
+/// a set nobody wears silent), keeping `silenced`, the record of the sets
+/// the rules silenced in the state it starts from. Pure.
 pub fn target_state_recorded(
     target: Option<MixState>,
     current: &MixState,
-    site: &Config,
     roster: &Roster,
     lineup: &Lineup,
     silenced: &mut BTreeSet<String>,
@@ -99,7 +96,7 @@ pub fn target_state_recorded(
         Some(stored) => keep_running(&stored, current),
         None => current.clone(),
     };
-    fit_recorded(&mut state, site, roster, lineup, silenced);
+    fit_recorded(&mut state, roster, lineup, silenced);
     state
 }
 
@@ -291,7 +288,6 @@ fn target_of(
     stored: Option<MixerBackup>,
     current: &MixState,
     running: (Option<String>, BTreeSet<String>),
-    site: &Config,
     roster: &Roster,
     lineup: &Lineup,
 ) -> (MixState, Running) {
@@ -299,7 +295,7 @@ fn target_of(
         Some(b) => (Some(b.state), b.follows, b.silenced),
         None => (None, running.0, running.1),
     };
-    let target = target_state_recorded(from, current, site, roster, lineup, &mut silenced);
+    let target = target_state_recorded(from, current, roster, lineup, &mut silenced);
     let running = Running {
         lineup: lineup.id.clone(),
         follows,
@@ -323,7 +319,7 @@ async fn forward(
         .state(&to.id)
         .map_err(|e| io("the band's stored state is unreadable", e))?;
     let running = (live.follows.clone(), live.silenced.clone());
-    let (target, running) = target_of(stored, &live.state, running, &state.site_config, roster, to);
+    let (target, running) = target_of(stored, &live.state, running, roster, to);
     // The engine keeps solos across the import: each set whose wearer
     // changes loses its solo (the pages are frozen still).
     let soloed = match roster.lineup(from) {
@@ -367,14 +363,7 @@ async fn play(
     };
     let running = running_of(store, &state_digest(&current))
         .map_or_else(Default::default, |r| (r.follows, r.silenced));
-    let (target, running) = target_of(
-        stored,
-        &current,
-        running,
-        &state.site_config,
-        roster,
-        lineup,
-    );
+    let (target, running) = target_of(stored, &current, running, roster, lineup);
     state
         .engine
         .request_applied(import(target), None)

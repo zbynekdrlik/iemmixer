@@ -51,7 +51,7 @@ use crate::lineup_store::{
 };
 use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
-use crate::roster_state::{RosterState, person_sets};
+use crate::roster_state::RosterState;
 
 /// What became of the latest roster file, beside it.
 pub const STATUS_FILE: &str = "roster.status.json";
@@ -526,24 +526,20 @@ fn roster_sets(roster: &Roster) -> BTreeSet<String> {
 
 /// `lineup`'s rules on a state (#58 design §7): on a set whose wearer is
 /// not one of `lineup`'s leaders every mix it hears, whole or as a peer, is
-/// muted, so only a leader hears another person's mix; a person's set
-/// nobody wears in `lineup` is muted (`roster_state::person_sets`: a set
-/// the roster lists, or one the site's members give a member, a departed
-/// person's too; the owner's look at the live system), as it is vacant on
-/// every page. Only mixes the state holds are touched. `silenced` is the
-/// lineup's record of the sets its rules muted because nobody wore them
-/// (#58 review): such a set is recorded when the rules mute it, and
-/// unmuted and forgotten once someone wears it. A set that was muted
-/// already (its wearer's choice) is never recorded, so the rules never
-/// unmute it.
+/// muted, so only a leader hears another person's mix; a set of the roster
+/// nobody wears in `lineup` is muted. Only mixes the state holds are
+/// touched. `silenced` is the lineup's record of the sets its rules muted
+/// because nobody wore them (#58 review): such a set is recorded when the
+/// rules mute it, and unmuted and forgotten once someone wears it. A set
+/// that was muted already (its wearer's choice) is never recorded, so the
+/// rules never unmute it.
 pub fn fit_recorded(
     state: &mut MixState,
-    site: &Config,
     roster: &Roster,
     lineup: &Lineup,
     silenced: &mut BTreeSet<String>,
 ) {
-    fit_sets(state, &person_sets(site, roster), lineup, silenced);
+    fit_sets(state, &roster_sets(roster), lineup, silenced);
 }
 
 /// [`fit_recorded`] over `sets`: a reload passes the old roster's sets too,
@@ -954,8 +950,7 @@ struct Transition {
 /// than in `new` takes their mix along (nobody when that roster is not
 /// known, or the state follows `new` already), and `new`'s rules hold on
 /// every set either lists ([`fit_sets`]: a set only the old one lists is
-/// worn by nobody now) and on every person's set the site's members name
-/// (a departed person's). A state is written with its marker and record in
+/// worn by nobody now). A state is written with its marker and record in
 /// one file (the running one's in `running.json`, right after the import),
 /// so a transition cut short (a stop, a crash) never moves anyone twice.
 ///
@@ -991,14 +986,9 @@ async fn transition(
     let topology: &TopologyInfo = &topology;
     let store = LineupStore::new(&state.config_dir);
     // The rules hold on the sets the roster before (or the unsettled base)
-    // and the new one list, and on every other person's set the site's
-    // members name (a departed person's); a roster learned from a marker
-    // below only moves people (#58 fourth review).
-    let sets: BTreeSet<String> = follows
-        .sets()
-        .into_iter()
-        .chain(person_sets(&state.site_config, new))
-        .collect();
+    // and the new one list; a roster learned from a marker below only moves
+    // people (#58 fourth review).
+    let sets: BTreeSet<String> = follows.sets().into_iter().chain(roster_sets(new)).collect();
     // What the running state follows, first: reading it resolves and saves
     // a pending import against the synced engine's state, whatever fails
     // after (#58 fifth review).

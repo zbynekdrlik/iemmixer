@@ -899,14 +899,7 @@ async fn nothing_to_replay_ends_at_once() {
 fn heard_mixes_go_off_on_a_non_leaders_set() {
     let r = test_roster("youth");
     let youth = r.roster.lineup("youth").unwrap();
-    let s = target_state_recorded(
-        None,
-        &running(),
-        &test_config(),
-        &r.roster,
-        youth,
-        &mut BTreeSet::new(),
-    );
+    let s = target_state_recorded(None, &running(), &r.roster, youth, &mut BTreeSet::new());
     let set1 = &s.mixes[&mix_id("member1")];
     assert_eq!(set1.mixes.len(), 8);
     assert!(set1.mixes.values().all(|l| l.muted), "member10's set");
@@ -915,7 +908,6 @@ fn heard_mixes_go_off_on_a_non_leaders_set() {
     let s = target_state_recorded(
         Some(running()),
         &MixState::default(),
-        &test_config(),
         &r.roster,
         youth,
         &mut BTreeSet::new(),
@@ -929,7 +921,6 @@ fn an_empty_set_is_muted() {
     let s = target_state_recorded(
         None,
         &running(),
-        &test_config(),
         &r.roster,
         r.roster.lineup("youth").unwrap(),
         &mut BTreeSet::new(),
@@ -944,45 +935,12 @@ fn an_empty_set_is_muted() {
     }
 }
 
-/// #58, the owner's look at the live system: a switch silences a departed
-/// person's set (member9: no lineup lists it, the site's legacy members
-/// still name it) as any set nobody wears in the band that plays next, and
-/// records it; the engineer's and the translator's mixes stay as they were.
-#[tokio::test]
-async fn a_switch_silences_a_departed_persons_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut state = AppState::new(test_config(), dir.path());
-    state.set_roster(Some(crate::roster_state::tests::departed_roster("main")));
-    let store = LineupStore::new(dir.path());
-    store.set_active("main", 1).unwrap();
-    let mut peer = synced(&mut state, running()).await;
-    let task = spawn_switch(&state, "youth", claims("member3", false));
-    let imported = fake::imports(&mut peer, 2).await;
-    assert_eq!(within(task).await, Ok(()));
-    let muted = |id: &str| imported.mixes[&mix_id(id)].out.muted;
-    assert!(muted("member9"), "member9 left: nobody wears their set");
-    assert!(muted("member2"), "nobody wears set member2 in youth");
-    for kept in ["member1", "member3", "member4", "engineer", "translator"] {
-        assert!(!muted(kept), "{kept}");
-    }
-    let running = store.running().unwrap().unwrap();
-    assert_eq!(running.lineup, "youth");
-    assert!(running.silenced.contains("member9"), "{running:?}");
-}
-
 #[test]
 fn a_lineup_without_state_starts_from_the_current_one() {
     let r = test_roster("main");
     let main = r.roster.lineup("main").unwrap();
     assert_eq!(
-        target_state_recorded(
-            None,
-            &running(),
-            &test_config(),
-            &r.roster,
-            main,
-            &mut BTreeSet::new()
-        ),
+        target_state_recorded(None, &running(), &r.roster, main, &mut BTreeSet::new()),
         running()
     );
     // A stored state keeps its own values and takes the running ones it
@@ -996,7 +954,6 @@ fn a_lineup_without_state_starts_from_the_current_one() {
     let s = target_state_recorded(
         Some(stored),
         &running(),
-        &test_config(),
         &r.roster,
         main,
         &mut BTreeSet::new(),
