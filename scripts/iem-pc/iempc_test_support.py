@@ -129,12 +129,20 @@ class FakeGh:
         self.runner_reply = "A" * 29
         self.on_list = None
         self.on_download = None
+        # `gh run list -R <ops> -w <workflow>` (the HIL guard, iempc_live): the runs per
+        # workflow file, or the error such a listing fails with.
+        self.workflow_runs: dict[str, list[dict]] = {}
+        self.workflow_list_error: str | None = None
 
     def __call__(self, args, timeout=ip.GH_S):
         args = list(args)
         self.calls.append(args)
         if args[0] == "api" and args[1].startswith(f"repos/{ip.REPO}/git/ref/heads/"):
             return self.heads[args[1].rsplit("/", 1)[1]] + "\n"
+        if args[:2] == ["run", "list"] and "-w" in args:
+            if self.workflow_list_error is not None:
+                raise ip.StepError(self.workflow_list_error)
+            return json.dumps(self.workflow_runs.get(args[args.index("-w") + 1], []))
         if args[:2] == ["run", "list"]:
             if self.on_list:
                 self.on_list()

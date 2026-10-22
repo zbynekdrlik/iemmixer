@@ -35,6 +35,22 @@ def run_record(sha: str = SHA, entry: int = 0, seconds_ago: float = 60, **kw) ->
     return {"sha": sha, "branch": "dev", "run": RUN, "entry": entry, "at": ago(seconds_ago), **kw}
 
 
+def hil_record(entry: int = 0, seconds_ago: float = 60, **kw) -> dict:
+    """One dispatch.json record as `dispatch-hil` writes it."""
+    return {"sha": SHA, "branch": "dev", "run": RUN, "digest": "sha256:" + "0" * 64, "entry": entry,
+            "at": ago(seconds_ago), **kw}
+
+
+def hil_run(run_id: int, state: str) -> dict:
+    """One row of `gh run list --json databaseId,status,createdAt`."""
+    return {"databaseId": run_id, "status": state, "createdAt": "2026-10-22T05:00:00Z"}
+
+
+# The HIL guard's question to the ops repo (iempc_live.active_hil_runs).
+HIL_LISTING = ["run", "list", "-R", ip.OPS_REPO, "-w", "hil.yml", "--json", "databaseId,status,createdAt",
+               "--limit", "20"]
+
+
 def soak_record(entry: int = 0, hours: int = 8, seconds_ago: float = 60) -> dict:
     return {"sha": SHA, "branch": "dev", "run": RUN, "hours": hours, "entry": entry, "at": ago(seconds_ago)}
 
@@ -58,6 +74,9 @@ class LiveBase(Base):
 
     def write_soaks(self, soaks) -> None:
         ip.write_json(ip.state_dir() / "soak.json", {"soaks": soaks})
+
+    def write_hil(self, *records) -> None:
+        ip.write_json(ip.state_dir() / "dispatch.json", {"dispatches": list(records)})
 
     def soaks(self) -> list[dict]:
         return ip.read_json(ip.STATE_DIR / "soak.json", {}).get("soaks", [])
@@ -100,7 +119,8 @@ class DispatchLiveTests(LiveBase):
         self.assertIsNotNone(dt.datetime.fromisoformat(at).tzinfo)
         self.assertEqual(docs, [{"dispatched_live": {**rec, "at": at}}])
         # The green run is looked up for this SHA, push runs of ci.yml only (P5).
-        [listing] = self.gh.named("run", "list")
+        [listing] = [c for c in self.gh.named("run", "list") if "--commit" in c]
+        self.assertIn(HIL_LISTING, self.gh.calls)   # the HIL guard asked the ops repo too
         self.assertEqual(listing[listing.index("--commit") + 1], SHA)
         self.assertEqual(listing[listing.index("--event") + 1], "push")
         # The command's spec: a PC command, dev time, one at a time.
@@ -232,42 +252,67 @@ class DispatchLiveTests(LiveBase):
         code, _, err = self.live()
         self.assertEqual(code, 0, err)
 
-    def test_a_hil_run_of_this_entry_that_may_still_run_refuses(self) -> None:
+    def test_a_queued_or_running_hil_run_refuses_the_live_dispatch(self) -> None:
         """Both begin a HIL job on the PC (hil.yml's pc job, live.yml's
         pc-begin), so the second to reach it is cancelled (#58 Part D, build
-        90a7b89: a live run dispatched 5 s after a HIL run began first). A HIL
-        run of this dev entry may still run for hil.yml's verify and pc job
-        bounds, 10 + 30 min, after its dispatch; the operator waits for it."""
-        path = ip.state_dir() / "dispatch.json"
+        90a7b89: a live run dispatched 5 s after a HIL run began first). The
+        PC has one runner and a HIL run may wait for it, or be rerun: any
+        hil.yml run the ops repo lists as not completed refuses the dispatch,
+        after the status read and before the green run's lookup."""
+        for state in ("queued", "in_progress", "waiting"):
+            self.gh.workflow_runs["hil.yml"] = [hil_run(4242, state), hil_run(4241, "completed")]
+            self.gh.calls.clear()
+            err = self.refused(f"no live run: a hil.yml run is {state} in {ip.OPS_REPO} (run 4242", state)
+            self.assertIn("wait for it to end", err)
+            self.assertIn(NOTHING, err)
+            self.assertEqual(self.gh.calls, [HIL_LISTING], state)
+        # Only completed runs: a HIL dispatch of this entry past the listing's grace no longer counts.
+        self.gh.workflow_runs["hil.yml"] = [hil_run(4241, "completed")]
+        self.write_hil(hil_record(seconds_ago=live.LIST_GRACE_S + 60))
+        code, _, err = self.live()
+        self.assertEqual(code, 0, err)
 
-        def write_hil(*records) -> None:
-            ip.write_json(path, {"dispatches": [{"sha": SHA, "branch": "dev", "run": RUN, "digest": "sha256:" + "0" * 64,
-                                                 "entry": 0, "at": ago(60), **r} for r in records]})
-
-        write_hil({"at": ago(40 * 60 - 60)})
-        err = self.refused_before_any_call("no live run: a HIL run dispatched in this dev entry may still run")
+    def test_a_hil_dispatch_gh_does_not_list_yet_refuses(self) -> None:
+        """GitHub lists a dispatched run a moment after the dispatch: a HIL run
+        this box dispatched in this dev entry within LIST_GRACE_S counts while
+        gh lists none (the incident's 5 s)."""
+        self.write_hil(hil_record(seconds_ago=5))
+        err = self.refused("no live run: a HIL run dispatched in this dev entry")
+        self.assertIn("is not listed by gh yet", err)
         self.assertIn(SHA, err)
         self.assertIn("wait for it to end", err)
-        self.assertIn(NOTHING, err)
+        self.write_hil(hil_record(entry=1, seconds_ago=5))
+        code, _, err = self.live()
+        self.assertEqual(code, 0, err)
+
+    def test_without_gh_the_hil_record_window_decides(self) -> None:
+        """gh fails: dispatch-hil's record decides, hil.yml's verify and pc
+        job bounds (10 + 30 min) after its dispatch; an unreadable record
+        counts as running and names the file to check by hand."""
+        path = ip.state_dir() / "dispatch.json"
+        self.gh.workflow_list_error = "gh run list failed (exit 1): HTTP 502"
+        self.write_hil(hil_record(seconds_ago=40 * 60 - 60))
+        err = self.refused("no live run: a HIL run dispatched in this dev entry may still run")
+        self.assertIn("gh could not list hil.yml's runs", err)
+        self.assertIn("HTTP 502", err)
+        self.assertIn("wait for it to end", err)
         self.assertNotIn("cannot be read", err)
-        # Fail safe: a time or a dev entry that cannot be read counts, and says to check the file.
         for bad in ({"at": "later"}, {"at": "2026-10-09T10:00:00"}, {"entry": None}):
-            write_hil(bad)
-            err = self.refused_before_any_call("a HIL run dispatched in this dev entry may still run", bad)
+            self.write_hil(hil_record(**bad))
+            err = self.refused("a HIL run dispatched in this dev entry may still run", bad)
             self.assertIn(f"check {path} by hand", err, bad)
         for text in ("not json", json.dumps({"dispatches": {"sha": SHA}})):
             path.write_text(text, encoding="utf-8")
-            self.pc.calls.clear()
             code, _, err = self.live()
-            self.assertEqual((code, self.pc.calls, self.dispatched()), (1, [], []), text)
+            self.assertEqual((code, self.dispatched()), (1, []), text)
             self.assertIn("dispatch.json", err, text)
             self.assertIn("check it by hand", err, text)
         # Past its window, or of another dev entry, it does not.
-        write_hil({"at": ago(40 * 60 + 60)}, {"entry": 1})
+        self.write_hil(hil_record(seconds_ago=40 * 60 + 60), hil_record(entry=1))
         code, _, err = self.live()
         self.assertEqual(code, 0, err)
-        self.assertEqual((live.HIL_JOB_MINUTES, live.HIL_WINDOW_S, ip.HIL_RECORD),
-                         ({"verify": 10, "pc": 30}, 2400, "dispatch.json"))
+        self.assertEqual((live.HIL_JOB_MINUTES, live.HIL_WINDOW_S, live.LIST_GRACE_S, ip.HIL_RECORD),
+                         ({"verify": 10, "pc": 30}, 2400, 120, "dispatch.json"))
 
     def test_an_unreadable_live_record_counts_as_running(self) -> None:
         """Fail safe: a record whose time cannot be read may still run, one

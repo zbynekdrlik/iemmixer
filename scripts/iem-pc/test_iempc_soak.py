@@ -89,7 +89,8 @@ class DispatchSoakTests(SoakBase):
         self.assertIsNotNone(dt.datetime.fromisoformat(at).tzinfo)
         self.assertEqual(docs, [{"dispatched_soak": {**rec, "at": at}}])
         # The green run is looked up for this SHA, push runs of ci.yml only (P5).
-        [listing] = self.gh.named("run", "list")
+        [listing] = [c for c in self.gh.named("run", "list") if "--commit" in c]
+        self.assertIn("hil.yml", [c[c.index("-w") + 1] for c in self.gh.named("run", "list") if "-w" in c])
         self.assertEqual(listing[listing.index("--commit") + 1], SHA)
         self.assertEqual(listing[listing.index("--event") + 1], "push")
 
@@ -202,6 +203,29 @@ class DispatchSoakTests(SoakBase):
         self.refused("with its 'bundle' and 'attest' jobs succeeded")
         self.gh.jobs[RUN] = [{"name": "attest", "conclusion": "success"}]
         self.refused("with its 'bundle' and 'attest' jobs succeeded")
+
+    def test_a_hil_run_that_may_still_run_refuses_the_soak(self) -> None:
+        """A HIL run restarts the engine in its own job, which a soak of
+        that engine would meet red: the soak waits for it, with dispatch-live's
+        guard (#58 Part D review): a hil.yml run the ops repo lists as not
+        completed, a HIL dispatch of this entry gh does not list yet, or,
+        when gh fails, one within hil.yml's job bounds."""
+        record = ip.state_dir() / "dispatch.json"
+        self.gh.workflow_runs["hil.yml"] = [{"databaseId": 4242, "status": "in_progress", "createdAt": "x"}]
+        err = self.refused(f"no soak: a hil.yml run is in_progress in {ip.OPS_REPO} (run 4242")
+        self.assertIn("wait for it to end", err)
+        self.assertIn(NOTHING, err)
+        self.gh.workflow_runs = {}
+        now = dt.datetime.now().astimezone()
+        rec = {"sha": SHA, "branch": "dev", "run": RUN, "digest": "sha256:" + "0" * 64, "entry": 0}
+        ip.write_json(record, {"dispatches": [{**rec, "at": now.isoformat()}]})
+        self.refused("no soak: a HIL run dispatched in this dev entry")
+        self.gh.workflow_list_error = "gh run list failed (exit 1): HTTP 502"
+        ip.write_json(record, {"dispatches": [{**rec, "at": (now - dt.timedelta(minutes=30)).isoformat()}]})
+        self.assertIn("gh could not list", self.refused("no soak: a HIL run dispatched in this dev entry may still run"))
+        ip.write_json(record, {"dispatches": [{**rec, "at": (now - dt.timedelta(minutes=41)).isoformat()}]})
+        code, _, err = self.soak()
+        self.assertEqual(code, 0, err)
 
     def test_one_soak_per_sha_per_dev_entry(self) -> None:
         self.assertEqual(self.soak()[0], 0)
