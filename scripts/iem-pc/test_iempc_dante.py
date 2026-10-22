@@ -85,24 +85,27 @@ class LabelTests(unittest.TestCase):
         self.assertEqual((tx[81].label, tx[81].shortened), ("ZYXQW DQXWZY inear L 81", False))
         self.assertEqual(rx[107].label, "107 ZYXQW DQXWZY mic")
 
-    def test_a_stereo_input_gets_l_and_r_and_an_odd_label_reads_mic(self) -> None:
+    def test_a_stereo_input_gets_l_and_r_and_the_type_word_is_folded_like_name(self) -> None:
+        guitar = "Git" + chr(0xE1) + "RA"   # capitals and a diacritic: folded like NAME, then lower-cased
         roster = changed(ROSTER, ('mic10 = { name = "MEMBER9 mic", owner = "member9" }',
                                   'mic10 = { name = "MEMBER9 mic", owner = "member9" }\n'
                                   'keys = { name = "MEMBER9 keys", owner = "member9" }\n'
                                   'iemonly = { name = "IEMONLY" }'),
                          ('mic2 = { name = "MEMBER2 mic"', 'mic2 = { name = "MEMBER2 Vocals"'),
-                         ('mic3 = { name = "MEMBER3 mic"', 'mic3 = { name = "MEMBER3 microphone"'),
+                         ('mic3 = { name = "MEMBER3 mic"', f'mic3 = {{ name = "MEMBER3 {guitar}"'),
                          ('mic4 = { name = "MEMBER4 mic"', 'mic4 = { name = "MEMBER4"'),
                          ('mic5 = { name = "MEMBER4 gtr"', 'mic5 = { name = "gtr"'),
                          ('mic6 = { name = "MEMBER5 mic"', 'mic6 = { name = "MEMBER5 backing vox"'),
+                         ('mic7 = { name = "MEMBER6 mic"', 'mic7 = { name = "MEMBER6 microphone"'),
                          ('member1 = "member1"\nmember2 = "member2"', 'member2 = "member2"\nmember1 = "member1"'))
         labels = rows(roster)
         rx = by_channel(labels, "rx")
         self.assertEqual((rx[115].label, rx[116].label), ("115 MEMBER 9 keys L", "116 MEMBER 9 keys R"))
-        # A last word that is no short lower-case word, or no second word: mic.
-        self.assertEqual([rx[c].label for c in (102, 103, 104, 105, 106)],
-                         ["102 MEMBER 2 mic", "103 MEMBER 3 mic", "104 MEMBER 4 mic", "105 MEMBER 4 mic",
-                          "106 MEMBER 5 vox"])
+        # The last word folded (ASCII, lower case) when it is then a short word; no second word, or a
+        # longer one: mic.
+        self.assertEqual([rx[c].label for c in (102, 103, 104, 105, 106, 107)],
+                         ["102 MEMBER 2 vocals", "103 MEMBER 3 gitara", "104 MEMBER 4 mic", "105 MEMBER 4 mic",
+                          "106 MEMBER 5 vox", "107 MEMBER 6 mic"])
         # The rows go by channel whatever order the roster lists its sets and inputs in.
         self.assertEqual([r.channel for r in labels], sorted(r.channel for r in labels))
         self.assertEqual([r.kind for r in labels], ["tx"] * 18 + ["rx"] * 12)
