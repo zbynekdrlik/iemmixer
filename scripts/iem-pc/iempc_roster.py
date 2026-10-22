@@ -1,51 +1,70 @@
 """`iempc roster-install --file PATH [--dry-run]` (#58 plan Task 14, design
-§9): a roster file from this box onto the IEM PC, checked there by the
-active bundle's own server, put beside the server config and followed until
-the server applied it. The server polls `roster.toml` every 2 s and applies
-a valid change live (`roster_watch.rs`), so no restart and no maintenance.
+§9; the review of Part D on #62): a roster file from this box onto the IEM
+PC, checked there by the active bundle's own server, put beside the server
+config and followed until the server applied it; a roster the server does
+not apply is taken back out. The server polls `roster.toml` every 2 s and
+applies a valid change live (`roster_watch.rs`), so no restart and no
+maintenance.
 
 In this order (dev time: the EVENT-NOW flag at the start refuses it, design
 §9 "a roster install is refused while EVENT-NOW exists"; locked):
 
-0. Before any call: PC_SERVER_CONFIG (an optional key of the private env:
-   the server config's full Windows path on the PC) and the file. An install
-   (not a dry run) also refuses while a live run or a soak of this dev entry
-   may still run (`iempc_live.refuse_while_running`): a reload closes every
-   person's mixer socket with 4003, the soak's and the live run's included.
-1. `iemmode status` (a read): the active bundle (the detail's `bundle
-   <sha>`), whose fetch record on this box holds iem-server.exe's sha256.
-2. The file by scp into PC_ROOT\\incoming\\roster-<sha12>.toml (a change).
-3. One ssh call (a read): the upload's sha256 checked first; the active
+0. Before any call: the file (its absolute path). An install (not a dry run)
+   also refuses while a live run or a soak of this dev entry may still run
+   (`iempc_live.refuse_while_running`): a reload closes every person's mixer
+   socket with 4003, the soak's and the live run's included.
+1. `iemmode status` (a read): the guard answers ok, in dev or live (a server
+   runs), with no switch and no HIL job (`guard_refusal`); the active bundle
+   (the detail's `bundle <sha>`), whose fetch record on this box holds
+   iem-server.exe's sha256.
+2. The guard's pc.toml (`PC_ROOT\\guard\\pc.toml`, a read): its
+   `server_config`, the config the guard starts the server with, is the one
+   source of the server's folder (`server_config`).
+3. The file by scp into PC_ROOT\\incoming\\roster-<sha12>.toml (a change).
+4. One ssh call (a read): the upload's sha256 checked first; the active
    bundle's iem-server.exe read once from bundles\\<sha>, checked by the
    fetch record, staged admin-only and run from there (#15: the elevated
    session runs only admin-only copies of our programs, iempc_bin); then
-   `iem-server roster check <upload>` with IEMMIXER_CONFIG = PC_SERVER_CONFIG.
+   `iem-server roster check <upload>` with IEMMIXER_CONFIG = server_config.
    Its one JSON line `{ok, problems, sha256}` decides (`check_result`):
    problems install nothing (exit 1); `--dry-run` ends here (exit 0 when ok).
-4. The flag again, then one ssh call (a change: a new flag lets it finish):
-   the upload checked again, `roster.status.json` read as it stands
-   (`before`), the upload copied beside the server config as
-   `roster.toml.new`, checked, `Move-Item -Force` onto `roster.toml`,
-   checked. Windows PowerShell's move deletes the old file first, so for an
-   instant there is none: the server keeps the roster in use and reads the
-   file at its next poll.
-5. `roster.status.json` every POLL_S, at most WAIT_S, until it names the
-   file's sha256 (`outcome`). `applied` true: in use (exit 0; `ok` false and
-   `problems` name what failed after it went into use, an archive move). Else
-   refused (exit 1), with the server's problems, among them its fallback
-   line "in use instead: the roster applied last" while it runs on that one.
-   The server writes no status for a roster it defers (an engine not synced,
-   a switch a restart cut short) or for the roster it already uses, and none
-   runs while the guard is in event: a wait that runs out is "not applied"
-   (exit 1) and says what the status named. The same refusal as `before`
-   (the same bytes refused earlier) is waited out, since the server reads
-   the new file again; the same applied status as `before` is the roster in
-   use already (`unchanged`).
+5. The flag again, then one ssh call (a change: a new flag lets it finish):
+   the upload checked again; `roster.status.json` as it stands (`before`)
+   and the sha256 of `lineups\\applied-roster.toml` (the roster the server
+   applied last), both read with read, write and delete sharing so the
+   server's own replace of them never fails on this read; the roster.toml
+   there kept as `roster.toml.prev` and its sha256 noted (none when there is
+   none); the upload copied as `roster.toml.new`, checked, and put in place
+   by `[IO.File]::Replace` when roster.toml exists (no moment without one),
+   else by a move; checked again.
+6. The applied roster is the upload already: `unchanged`, the server writes
+   no status for it. Else `roster.status.json` every POLL_S, at most WAIT_S,
+   until it names the file's sha256 (`outcome`). `applied` true: in use
+   (exit 0; `ok` false and `problems` name what failed after it went into
+   use, an archive move). Else refused (exit 1), with the server's problems,
+   among them its fallback line "in use instead: the roster applied last"
+   while it runs on that one. The server writes no status for a roster it
+   defers (an engine not synced, a switch a restart cut short): a wait that
+   runs out is "not applied" (exit 1) and says what the status named. The
+   same refusal as `before` (the same bytes refused earlier) is waited out,
+   since the server reads the new file again; the same applied status as
+   `before` is the roster in use already (`unchanged`).
+7. Not applied: one more change call (`restore_body`) while roster.toml
+   still holds the upload: the kept previous file goes back the same atomic
+   way, or roster.toml is removed when there was none, so a refused roster
+   never waits in roster.toml for the server's next start (which a roster
+   with no roster applied before it would fail). `restored: true`, or
+   `restore_failed` naming why.
 
 It prints one JSON object `{"roster_install": {sha256, ok, problems,
-applied, added, removed}}` (`dry_run`, `unchanged` when so): ids and counts
-only, never a person's name (the server's problems name ids only, P6).
-Exit 0 applied, or a dry run that checked ok; 1 refused or not applied.
+applied, added, removed}}` (`dry_run`, `unchanged`, `restored`,
+`restore_failed` when so): ids and counts only, never a person's name (the
+server's problems name ids only, P6). Exit 0 applied, or a dry run that
+checked ok; 1 refused or not applied.
+
+Known limit: a flag that appears during the wait runs the event path at
+once, before any restore: a refused roster then stays until the next
+roster-install (the event path's budget comes first).
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
@@ -54,6 +73,7 @@ import hashlib
 import json
 import re
 import time
+import tomllib
 from pathlib import Path
 
 import iempc_bin
@@ -63,29 +83,61 @@ import iempc_soak
 SERVER = "iem-server.exe"
 ROSTER = "roster.toml"
 NEW = "roster.toml.new"
+PREV = "roster.toml.prev"
 STATUS = "roster.status.json"
+APPLIED = "lineups/applied-roster.toml"   # the server's LineupStore::applied_roster
+PC_TOML = "guard/pc.toml"                 # iem-guard site::pc_toml_path, below the root PC_ROOT names
 WAIT_S = 20.0
+# Each PC body's own marker, in its text and nowhere else.
+TOML_READ, INSTALLED, RESTORED, STATUS_READ = "$iemToml", "installed = $true", "'restored'", "$iemStatus"
 # A full Windows path of a file on a drive: no UNC, nothing a PowerShell
 # string or a file name could not hold.
 CONFIG_PATH = re.compile(r"[A-Za-z]:(?:\\[^\\/:*?\"<>|\x00-\x1f]+)+")
+HEX64 = re.compile(r"[0-9a-f]{64}")
 ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 PROBLEM_CHARS = 400
 
 
-def server_config(ip, env: dict[str, str]) -> tuple[str, str]:
-    """PC_SERVER_CONFIG and its folder (the server's config directory)."""
-    path = env.get("PC_SERVER_CONFIG", "")
-    if not path:
-        raise ip.Refused("roster-install: PC_SERVER_CONFIG missing in the private env (the server config's full "
-                         "path on the PC)")
-    if not CONFIG_PATH.fullmatch(path):
-        raise ip.Refused("roster-install: PC_SERVER_CONFIG is not a full Windows path of a file on a drive")
-    return path, path.rsplit("\\", 1)[0]
-
-
 class CheckError(Exception):
-    """An answer of the server's check that is not one (check_result, pure);
-    run turns it into iempc's StepError."""
+    """An answer that is not what was asked for (pure); run turns it into
+    iempc's StepError or Refused."""
+
+
+def server_config(text) -> str:
+    """The guard's pc.toml (`text`, None when there is none) → its
+    `server_config` (pure; CheckError says why not)."""
+    if text is None:
+        raise CheckError(f"no pc.toml (PC_ROOT\\{PC_TOML.replace('/', chr(92))}) on the PC: the guard is not set up")
+    if not isinstance(text, str) or not text.strip():
+        raise CheckError("the guard's pc.toml could not be read now; try again")
+    try:
+        doc = tomllib.loads(text.lstrip("\ufeff"))
+    except tomllib.TOMLDecodeError as e:
+        raise CheckError(f"the guard's pc.toml is not TOML ({e})") from None
+    path = doc.get("server_config")
+    if not isinstance(path, str):
+        raise CheckError("the guard's pc.toml names no server_config")
+    if not CONFIG_PATH.fullmatch(path):
+        raise CheckError("the guard's pc.toml server_config is not a full Windows path of a file on a drive")
+    return path
+
+
+def guard_refusal(reply) -> str | None:
+    """Why the guard does not run a server that could apply a roster now,
+    from one `iemmode status` reply (pure): ok, dev or live, no switch, no
+    HIL job; None when it does."""
+    if not isinstance(reply, dict):
+        return "iemmode status gave no reply"
+    if reply.get("ok") is not True:
+        return "the guard's status did not answer ok"
+    if reply.get("mode") not in ("dev", "live"):
+        return f"the guard is in mode {reply.get('mode')}: no server runs to apply it (dev or live only)"
+    if reply.get("switching") is not None:
+        return f"a switch runs ({json.dumps(reply['switching'])})"
+    job = iempc_soak.hil_job(reply)
+    if job is not None:
+        return f"a HIL job runs ({job})"
+    return None
 
 
 def check_result(code: int, out: str, sha: str) -> list[str]:
@@ -138,21 +190,21 @@ def _texts(value) -> list[str]:
     return [v[:PROBLEM_CHARS] if isinstance(v, str) else "?" for v in value]
 
 
+def unchanged(sha: str) -> dict:
+    """The roster in use installed again: the server writes no status for it."""
+    return {"sha256": sha, "ok": True, "problems": [], "applied": True, "added": [], "removed": [], "unchanged": True}
+
+
 def outcome(doc: dict | None, before: dict | None, sha: str) -> dict | None:
     """What the status says of the file with `sha` (pure; see the module
-    docs, step 5); None while it says nothing of it yet."""
+    docs, step 6); None while it says nothing of it yet."""
     if not isinstance(doc, dict) or doc.get("sha256") != sha:
         return None
     applied = doc.get("applied") is True
-    unchanged = doc == before
-    if unchanged and not applied:
-        return None
-    out = {"sha256": sha, "ok": applied and doc.get("ok") is True, "problems": _texts(doc.get("problems")),
-           "applied": applied, "added": [] if unchanged else _ids(doc.get("added")),
-           "removed": [] if unchanged else _ids(doc.get("removed"))}
-    if unchanged:
-        out["unchanged"] = True
-    return out
+    if doc == before:
+        return unchanged(sha) if applied else None
+    return {"sha256": sha, "ok": applied and doc.get("ok") is True, "problems": _texts(doc.get("problems")),
+            "applied": applied, "added": _ids(doc.get("added")), "removed": _ids(doc.get("removed"))}
 
 
 def seen(text) -> str:
@@ -163,57 +215,117 @@ def seen(text) -> str:
     if doc is None:
         return "cannot be read"
     other = doc.get("sha256")
-    return f"names {other[:12]}" if isinstance(other, str) and re.fullmatch(r"[0-9a-f]{64}", other) else "names no file"
+    return f"names {other[:12]}" if isinstance(other, str) and HEX64.fullmatch(other) else "names no file"
 
 
 def late(sha: str, text, reads: int) -> dict:
     return {"sha256": sha, "ok": False, "applied": False, "added": [], "removed": [], "problems": [
         f"not applied within {WAIT_S:g} s: {STATUS} {seen(text)} after {reads} reads; the server writes none for a "
-        "roster it defers (an engine not synced, a switch a restart cut short) and reads it again every 2 s, and no "
-        f"server runs while the guard is in event: read {STATUS} again later"]}
+        "roster it defers (an engine not synced, a switch a restart cut short) and reads it again every 2 s: "
+        f"read {STATUS} again later"]}
+
+
+def read_shared(ip, path: str, var: str) -> str:
+    """Statements that set `var` to the text of `path`: $null when there is
+    no such file, '' when it cannot be read now. Opened with read, write and
+    delete sharing: the server replaces its files by a rename (lib.rs
+    atomic_write), which a handle without delete sharing makes fail."""
+    p = ip.ps_quote(path)
+    return (f"{var} = $null ; if (Test-Path -LiteralPath {p} -PathType Leaf) {{ try {{ "
+            f"$iemS = [IO.File]::Open({p}, 'Open', 'Read', 'ReadWrite, Delete') ; "
+            f"try {{ {var} = (New-Object IO.StreamReader($iemS)).ReadToEnd() }} finally {{ $iemS.Dispose() }} "
+            f"}} catch {{ {var} = '' }} }}")
+
+
+def sha_shared(ip, path: str, var: str) -> str:
+    """Statements that set `var` to the sha256 of `path` (lower-case hex), $null
+    when there is none or it cannot be read now; shared as read_shared."""
+    p = ip.ps_quote(path)
+    return (f"{var} = $null ; if (Test-Path -LiteralPath {p} -PathType Leaf) {{ try {{ "
+            f"$iemS = [IO.File]::Open({p}, 'Open', 'Read', 'ReadWrite, Delete') ; "
+            "try { $iemX = [Security.Cryptography.SHA256]::Create() ; "
+            f"{var} = -join @($iemX.ComputeHash($iemS) | ForEach-Object {{ $_.ToString('x2') }}) ; $iemX.Dispose() }} "
+            f"finally {{ $iemS.Dispose() }} }} catch {{ {var} = $null }} }}")
+
+
+def toml_body(ip, root: str) -> str:
+    """One read of the guard's pc.toml: its text, or $null without one."""
+    return f"{read_shared(ip, ip.pc_join(root, PC_TOML), TOML_READ)} ; {TOML_READ}"
 
 
 def install_body(ip, upload: str, config_dir: str, sha: str) -> str:
-    """Step 4's PowerShell (module_script's body)."""
+    """Step 5's PowerShell (module_script's body)."""
     q = ip.ps_quote
-    new, dst, status = (ip.pc_join(config_dir, name) for name in (NEW, ROSTER, STATUS))
+    new, dst, prev, status, applied = (ip.pc_join(config_dir, n) for n in (NEW, ROSTER, PREV, STATUS, APPLIED))
     return " ; ".join([
         ip.hash_check(upload, sha),
-        "$iemBefore = $null",
-        f"if (Test-Path -LiteralPath {q(status)} -PathType Leaf) {{ $iemBefore = [IO.File]::ReadAllText({q(status)}) }}",
+        read_shared(ip, status, "$iemBefore"),
+        sha_shared(ip, applied, "$iemApplied"),
+        f"$iemPrev = $null ; if (Test-Path -LiteralPath {q(dst)} -PathType Leaf) {{ "
+        f"Copy-Item -LiteralPath {q(dst)} -Destination {q(prev)} -Force ; "
+        f"$iemPrev = (Get-FileHash -LiteralPath {q(prev)} -Algorithm SHA256).Hash.ToLowerInvariant() }}",
         f"Copy-Item -LiteralPath {q(upload)} -Destination {q(new)} -Force",
         ip.hash_check(new, sha),
-        f"Move-Item -LiteralPath {q(new)} -Destination {q(dst)} -Force",
+        f"if (Test-Path -LiteralPath {q(dst)} -PathType Leaf) {{ [IO.File]::Replace({q(new)}, {q(dst)}, $null) }} "
+        f"else {{ Move-Item -LiteralPath {q(new)} -Destination {q(dst)} }}",
         ip.hash_check(dst, sha),
-        "[pscustomobject]@{ installed = $true; before = $iemBefore }",
+        f"[pscustomobject]@{{ {INSTALLED}; before = $iemBefore; prev = $iemPrev; applied = $iemApplied }}",
     ])
+
+
+def restore_body(ip, config_dir: str, sha: str, prev: str | None) -> str:
+    """Step 7's PowerShell: while roster.toml still holds the upload, the kept
+    previous file back by the same atomic replace, or roster.toml removed."""
+    q = ip.ps_quote
+    new, dst, kept = (ip.pc_join(config_dir, n) for n in (NEW, ROSTER, PREV))
+    steps = [ip.hash_check(dst, sha)]
+    if prev is None:
+        steps += [f"Remove-Item -LiteralPath {q(dst)}",
+                  f"if (Test-Path -LiteralPath {q(dst)}) {{ throw ('still there: ' + {q(dst)}) }}"]
+    else:
+        steps += [ip.hash_check(kept, prev),
+                  f"Copy-Item -LiteralPath {q(kept)} -Destination {q(new)} -Force",
+                  ip.hash_check(new, prev),
+                  f"[IO.File]::Replace({q(new)}, {q(dst)}, $null)",
+                  ip.hash_check(dst, prev)]
+    return " ; ".join([*steps, RESTORED])
 
 
 def status_body(ip, config_dir: str) -> str:
     """One read of the status file: its text, '' while it cannot be read (the
     server replaces it whole), $null when there is none."""
-    p = ip.ps_quote(ip.pc_join(config_dir, STATUS))
-    return (f"if (Test-Path -LiteralPath {p} -PathType Leaf) {{ try {{ [IO.File]::ReadAllText({p}) }} catch {{ '' }} }} "
-            "else { $null }")
+    return f"{read_shared(ip, ip.pc_join(config_dir, STATUS), STATUS_READ)} ; {STATUS_READ}"
 
 
 def active_server(ctx, ip) -> tuple[str, str]:
     """The active bundle's iem-server.exe on the PC and its sha256 from this
-    box's fetch record (step 1)."""
+    box's fetch record, once the guard runs a server that can apply it (step 1)."""
     code, reply, _ = ip.iemmode(ctx.env, ["status"], ip.STATUS_S, ctx.watch(abandon=True))
     if code != 0:
         raise ip.Refused(f"no roster install: iemmode status failed (exit {code}) (nothing was installed)")
+    why = guard_refusal(reply)
+    if why:
+        raise ip.Refused(f"no roster install: {why} (nothing was installed)")
     sha = iempc_soak.active_bundle(reply)
     if sha is None:
         raise ip.Refused("no roster install: the guard names no active bundle (nothing was installed)")
     want = (ip.need_record(sha).get("sums") or {}).get(SERVER)
-    if not isinstance(want, str) or not ip.HEX64.fullmatch(want):
+    if not isinstance(want, str) or not HEX64.fullmatch(want):
         raise ip.StepError(f"bundle {sha}'s fetch record lists no {SERVER}: fetch it again")
     return ip.pc_join(ctx.env["PC_ROOT"], f"bundles/{sha}/{SERVER}"), want
 
 
+def guard_config(ctx, ip) -> str:
+    """The guard's server_config (step 2; a read)."""
+    text = ip.run_module(ctx.env, toml_body(ip, ctx.env["PC_ROOT"]), ip.STATUS_S, ctx.watch(abandon=True))
+    try:
+        return server_config(text)
+    except CheckError as e:
+        raise ip.Refused(f"no roster install: {e} (nothing was installed)") from None
+
+
 def await_status(ctx, ip, config_dir: str, sha: str, before: dict | None) -> dict:
-    """Step 5: the status every POLL_S until it names the file, at most
+    """Step 6: the status every POLL_S until it names the file, at most
     WAIT_S; the reads only read, so a new flag abandons them."""
     deadline = time.monotonic() + WAIT_S
     reads = 0
@@ -228,19 +340,37 @@ def await_status(ctx, ip, config_dir: str, sha: str, before: dict | None) -> dic
         ip.pause(ctx, ip.POLL_S)
 
 
+def restore(ctx, ip, config_dir: str, sha: str, prev) -> dict:
+    """Step 7 (a change): `restored`, or `restore_failed` naming why. `prev`
+    is the install's answer: None (there was no roster.toml), a sha256, or
+    anything else, which leaves roster.toml as it is (removing it would lose
+    a previous file the answer failed to name)."""
+    if prev is not None and not (isinstance(prev, str) and HEX64.fullmatch(prev)):
+        return {"restore_failed": f"{ROSTER} was not put back: the PC named the previous file as {str(prev)[-80:]!r}, "
+                                  "no sha256"}
+    try:
+        r = ip.run_module(ctx.env, restore_body(ip, config_dir, sha, prev), ip.STATUS_S, ctx.watch(abandon=False))
+    except ip.StepError as e:
+        return {"restore_failed": f"{ROSTER} was not put back: {str(e)[-400:]}"}
+    if r != "restored":
+        return {"restore_failed": f"{ROSTER} was not put back: the PC answered {str(r)[-200:]!r}"}
+    return {"restored": True}
+
+
 def run(ctx, ip) -> int:
     """`iempc roster-install` (dev time, locked)."""
     env, dry = ctx.env, bool(ctx.args.dry_run)
     if not dry:
         iempc_live.refuse_while_running(ip, "roster-install")
-    config, config_dir = server_config(ip, env)
-    path = Path(ctx.args.file)
+    path = Path(ctx.args.file).resolve()
     try:
         data = path.read_bytes()
     except OSError as e:
         raise ip.Refused(f"roster-install: {path}: {e.strerror or type(e).__name__}") from None
     sha = hashlib.sha256(data).hexdigest()
     exe, want = active_server(ctx, ip)
+    config = guard_config(ctx, ip)
+    config_dir = config.rsplit("\\", 1)[0]
     change = ctx.watch(abandon=False)
     rel = f"incoming/roster-{sha[:12]}.toml"
     upload = ip.pc_join(env["PC_ROOT"], rel)
@@ -264,6 +394,11 @@ def run(ctx, ip) -> int:
     if not isinstance(r, dict) or r.get("installed") is not True:
         raise ip.StepError(f"the PC did not confirm the install of {ROSTER} (it answered {str(r)[-200:]!r}); "
                            f"read {STATUS} on the PC")
-    out = await_status(ctx, ip, config_dir, sha, parse_status(r.get("before")))
+    if r.get("applied") == sha:
+        out = unchanged(sha)
+    else:
+        out = await_status(ctx, ip, config_dir, sha, parse_status(r.get("before")))
+    if not out["applied"]:
+        out.update(restore(ctx, ip, config_dir, sha, r.get("prev")))
     ip.emit({"roster_install": out})
     return 0 if out["applied"] else 1

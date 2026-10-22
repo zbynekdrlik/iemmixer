@@ -284,6 +284,21 @@ class RosterInstallTests(RosterBase):
         self.assertNotIn("restored", out)
         self.assertIn("sha256 mismatch", out["restore_failed"])
         self.assertIn("roster.toml", out["restore_failed"])
+        # An answer that is not the restore's own is no restore either.
+        self.restore = lambda: "ok"
+        code, docs, err = self.install()
+        self.assertEqual(code, 1, err)
+        self.assertIn("the PC answered 'ok'", docs[-1]["roster_install"]["restore_failed"])
+
+    def test_a_previous_file_the_pc_did_not_name_is_never_removed(self) -> None:
+        """An install answer whose `prev` is no sha256 cannot tell "none was
+        there" from "one was": roster.toml is left as it is, never removed."""
+        self.prev = "not a sha256"
+        self.statuses = [status(applied=False, problems=["x"])]
+        code, docs, err = self.install()
+        self.assertEqual(code, 1, err)
+        self.assertIn("no sha256", docs[-1]["roster_install"]["restore_failed"])
+        self.assertEqual(self.restores(), [])
 
     def test_applied_with_problems_counts_as_applied(self) -> None:
         why = "person 'member2' was not archived: PermissionDenied"

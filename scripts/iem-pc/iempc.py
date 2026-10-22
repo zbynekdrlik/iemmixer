@@ -13,8 +13,8 @@ iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 (`cutover`: iempc_cutover.py, PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and
 PC_AUTOSTART_STARTUP below),
 the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), a
-roster file onto the PC (`roster-install`: iempc_roster.py, PC_SERVER_CONFIG
-below), the IEM card's Dante labels for the main lineup as a sheet
+roster file onto the PC (`roster-install`: iempc_roster.py, the server config
+from the guard's own pc.toml), the IEM card's Dante labels for the main lineup as a sheet
 (`dante-labels`: iempc_dante.py, no PC call), and the hand-over of an open
 S1a window.
 
@@ -74,9 +74,8 @@ and the guard last seen runs its build, iempc_bin) and PC_XPERF
 PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and PC_AUTOSTART_STARTUP (the
 predecessor's autostarts the cutover disables: `;`-separated task paths, Run
 values and shortcut names `name.lnk` in the desktop user's Startup folder;
-`cutover` refuses when all three are empty) and PC_SERVER_CONFIG (optional,
-the server config's full path on the PC; `roster-install` refuses without
-it). Nothing is ever ended by force.
+`cutover` refuses when all three are empty).
+Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
 the ssh session, so a session cut before it ends (a Bash timeout) stops it
