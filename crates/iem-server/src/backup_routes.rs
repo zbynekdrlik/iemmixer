@@ -196,7 +196,13 @@ async fn restore(state: AppState, filename: String) -> Result<Json<RestoreResult
     let running = state.roster().map(|r| {
         let id = r.lineup().id.clone();
         let (_, mut silenced) = crate::roster_watch::running_for(&store, &id, &held);
-        crate::roster_watch::fit_recorded(&mut import, &r.roster, r.lineup(), &mut silenced);
+        crate::roster_watch::fit_recorded(
+            &mut import,
+            &state.site_config,
+            &r.roster,
+            r.lineup(),
+            &mut silenced,
+        );
         crate::lineup_store::Running {
             lineup: id,
             follows: None,

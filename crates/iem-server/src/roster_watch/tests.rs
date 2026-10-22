@@ -299,6 +299,7 @@ fn fit_mutes_heard_mixes_off_a_leaders_set_and_silences_empty_sets() {
         .insert(MixId::new("member1"), level(-3.0));
     fit_recorded(
         &mut s,
+        &test_config(),
         &r.roster,
         r.roster.lineup("youth").unwrap(),
         &mut BTreeSet::new(),
@@ -321,6 +322,7 @@ fn fit_mutes_heard_mixes_off_a_leaders_set_and_silences_empty_sets() {
     let mut main = running();
     fit_recorded(
         &mut main,
+        &test_config(),
         &r.roster,
         r.roster.lineup("main").unwrap(),
         &mut BTreeSet::new(),
@@ -330,6 +332,7 @@ fn fit_mutes_heard_mixes_off_a_leaders_set_and_silences_empty_sets() {
     let mut empty = MixState::default();
     fit_recorded(
         &mut empty,
+        &test_config(),
         &r.roster,
         r.roster.lineup("youth").unwrap(),
         &mut BTreeSet::new(),
@@ -347,7 +350,7 @@ fn the_rules_record_what_they_silenced() {
     let mut s = running();
     mix_mut(&mut s, "member5").out.muted = true;
     let mut silenced = BTreeSet::new();
-    fit_recorded(&mut s, &r.roster, youth, &mut silenced);
+    fit_recorded(&mut s, &test_config(), &r.roster, youth, &mut silenced);
     let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
     assert_eq!(
         silenced,
@@ -355,7 +358,7 @@ fn the_rules_record_what_they_silenced() {
         "member5 was muted already"
     );
     let main = r.roster.lineup("main").unwrap();
-    fit_recorded(&mut s, &r.roster, main, &mut silenced);
+    fit_recorded(&mut s, &test_config(), &r.roster, main, &mut silenced);
     assert!(silenced.is_empty());
     for id in ["member2", "member6", "member7", "member8", "member9"] {
         assert!(!s.mixes[&MixId::new(id)].out.muted, "{id}");
@@ -968,6 +971,7 @@ async fn an_inactive_lineups_stored_state_follows_the_roster() {
     let lineup = test_roster("youth");
     fit_recorded(
         &mut youth,
+        &test_config(),
         &lineup.roster,
         lineup.lineup(),
         &mut BTreeSet::new(),
@@ -1168,7 +1172,13 @@ async fn a_set_its_wearer_muted_stays_muted() {
 fn youth_running() -> MixState {
     let mut live = shape::reconcile(&test_topology(), &running()).0;
     let r = test_roster("youth");
-    fit_recorded(&mut live, &r.roster, r.lineup(), &mut BTreeSet::new());
+    fit_recorded(
+        &mut live,
+        &test_config(),
+        &r.roster,
+        r.lineup(),
+        &mut BTreeSet::new(),
+    );
     live
 }
 
