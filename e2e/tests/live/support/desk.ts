@@ -77,7 +77,7 @@ export const pause = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
 /**
- * A mixer page's socket (`/ws/<page>`, UI protocol 2) held by the runner: it
+ * A mixer page's socket (`/ws/<page>`, UI protocol 3) held by the runner: it
  * opens after the build check, records every JSON event with its arrival time
  * and sends commands; one request at a time, so each answer is its own. Its
  * errors name it by `label`, never by its page.
@@ -111,7 +111,7 @@ export class LiveMixer {
     const url = new URL(`/ws/${encodeURIComponent(page)}`, baseURL);
     url.protocol = "wss:";
     url.searchParams.set("token", tokens[who]);
-    url.searchParams.set("proto", "2");
+    url.searchParams.set("proto", "3");
     const { ws, opened } = liveSocket(url.toString(), label);
     // Listening before the open: the hello and the state follow the upgrade at once.
     const mixer = new LiveMixer(ws, label);

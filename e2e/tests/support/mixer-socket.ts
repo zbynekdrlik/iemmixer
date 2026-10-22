@@ -3,7 +3,7 @@ import NodeWebSocket from "ws";
 
 /**
  * A second device on a mixer page: the page's socket (`/ws/<page>`, UI
- * protocol 2) opened from the test process. Specs use it to set the engine
+ * protocol 3) opened from the test process. Specs use it to set the engine
  * up and to read the server's state back independently of the page under
  * test. The server handles one socket's commands in order, so a request's
  * answer comes after every command sent before it.
@@ -31,6 +31,8 @@ export type PageState = {
   /** The page mix's volume (IEM VOL); absent on a page without a mix. */
   global_level_db?: number;
   global_muted?: boolean;
+  /** The page's mix: the set a person wears in the band that plays (#58). */
+  mix?: string;
 };
 
 /** One input on the engineer's console (`iem_core::ws::ConsoleInput`). */
@@ -63,7 +65,7 @@ export class MixerSocket {
     const url = new URL(`/ws/${page}`, baseURL);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("token", token);
-    url.searchParams.set("proto", "2");
+    url.searchParams.set("proto", "3");
     const socket = new MixerSocket(new NodeWebSocket(url.toString()));
     await socket.after(0, (m) => m.event === "Hello", "Hello");
     return socket;

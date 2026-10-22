@@ -14,13 +14,21 @@ const API_BASE: &str = "/api";
 /// Network timeout in milliseconds
 const NETWORK_TIMEOUT_MS: i32 = 5000;
 
+fn yes() -> bool {
+    true
+}
+
 /// Member info from server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberInfo {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub has_photo: bool,
+    /// Plays in the band that plays (#58); a server that does not say:
+    /// everyone plays.
+    #[serde(default = "yes")]
+    pub playing: bool,
 }
 
 /// Re-export Channel from iem_core to avoid duplicate type
@@ -36,10 +44,107 @@ pub struct LoginResponse {
 }
 
 /// API error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
+}
+
+impl ApiError {
+    /// The error a refused answer carries: the server's `{code, message}`
+    /// when its body is one, else `HTTP_<status>`.
+    pub fn of(status: u16, body: &str) -> Self {
+        serde_json::from_str(body).unwrap_or_else(|_| Self {
+            code: format!("HTTP_{status}"),
+            message: format!("Server error: {status}"),
+        })
+    }
+}
+
+/// A read of the band that gave none: the answer's status (0: none came, a
+/// timeout, no token) and the server's code (`HTTP_<status>` without one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineupError {
+    pub status: u16,
+    pub code: String,
+}
+
+impl LineupError {
+    /// No answer (no network, a timeout, no token).
+    pub fn unanswered(code: &str) -> Self {
+        Self {
+            status: 0,
+            code: code.to_string(),
+        }
+    }
+}
+
+/// `GET /api/lineup`'s answer (#58) by its status and body: the band that
+/// plays and what the bearer may do, or `None` on a site without a roster
+/// (204, or the 404 `NOT_CONFIGURED` of a server from before Part C).
+pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupInfo>, LineupError> {
+    match status {
+        200 => serde_json::from_str(body)
+            .map(Some)
+            .map_err(|_| LineupError {
+                status,
+                code: "UNREADABLE".to_string(),
+            }),
+        204 => Ok(None),
+        _ => {
+            let code = ApiError::of(status, body).code;
+            if status == 404 && code == "NOT_CONFIGURED" {
+                Ok(None)
+            } else {
+                Err(LineupError { status, code })
+            }
+        }
+    }
+}
+
+/// The URL that reads the band for the page `page` (#61 review I2: whether
+/// THAT page's person plays, so the engineer on a person's page gets the
+/// notice when that person does not). Anything but an id's characters is
+/// percent-encoded (the page comes from the route, which anyone can type).
+pub fn lineup_url(page: &str) -> String {
+    use std::fmt::Write as _;
+    let mut query = String::with_capacity(page.len());
+    for b in page.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            query.push(char::from(b));
+        } else {
+            let _ = write!(query, "%{b:02X}");
+        }
+    }
+    format!("{API_BASE}/lineup?page={query}")
+}
+
+/// `GET /api/lineup?page=<page>` (#58): which band plays, whether the page
+/// `page` plays in it, and what the signed-in person may do; `None` on a
+/// site without a roster. A read that has not answered after
+/// [`NETWORK_TIMEOUT_MS`] is aborted, an error (#61 review C2: a read that
+/// hangs never leaves the page without a band).
+pub async fn get_lineup(page: &str) -> Result<Option<iem_core::LineupInfo>, LineupError> {
+    let token = crate::auth::get_token().ok_or_else(|| LineupError::unanswered("NO_TOKEN"))?;
+    let controller =
+        AbortController::new().map_err(|_| LineupError::unanswered("NO_ABORT_CONTROLLER"))?;
+    let abort = controller.clone();
+    let timeout = Closure::once_into_js(move || abort.abort());
+    if let Some(window) = web_sys::window() {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            timeout.unchecked_ref(),
+            NETWORK_TIMEOUT_MS,
+        );
+    }
+    let resp = Request::get(&lineup_url(page))
+        .header("Authorization", &format!("Bearer {token}"))
+        .abort_signal(Some(&controller.signal()))
+        .send()
+        .await
+        .map_err(|_| LineupError::unanswered("NETWORK"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    lineup_answer(status, &body)
 }
 
 /// Get list of band members
@@ -211,6 +316,55 @@ pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
             resp.status(),
         ))
     }
+}
+
+/// What a band switch came to (#58).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switched {
+    /// The band plays now (204).
+    Now,
+    /// The mixer dropped in the middle: the switch finishes once it is back
+    /// (202 `SWITCH_PENDING`). Not a failure.
+    Pending,
+}
+
+/// A switch that did not happen: the answer's status (0: no answer) and
+/// the server's code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchFailure {
+    pub status: u16,
+    pub code: String,
+}
+
+/// `POST /api/lineup/switch`'s answer by its status and body.
+pub fn switch_answer(status: u16, body: &str) -> Result<Switched, SwitchFailure> {
+    match status {
+        202 => Ok(Switched::Pending),
+        200..=299 => Ok(Switched::Now),
+        _ => Err(SwitchFailure {
+            status,
+            code: ApiError::of(status, body).code,
+        }),
+    }
+}
+
+/// `POST /api/lineup/switch` (#58): band `to` plays from now on.
+pub async fn switch_lineup(to: &str) -> Result<Switched, SwitchFailure> {
+    let no_answer = |code: &str| SwitchFailure {
+        status: 0,
+        code: code.to_string(),
+    };
+    let token = crate::auth::get_token().ok_or_else(|| no_answer("NO_TOKEN"))?;
+    let resp = Request::post(&format!("{API_BASE}/lineup/switch"))
+        .header("Authorization", &format!("Bearer {token}"))
+        .json(&iem_core::SwitchRequest { to: to.to_string() })
+        .map_err(|_| no_answer("REQUEST"))?
+        .send()
+        .await
+        .map_err(|_| no_answer("NETWORK"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    switch_answer(status, &body)
 }
 
 /// Whether the answer to the token check (`GET /api/mixer/<page>`) is the
@@ -409,6 +563,128 @@ mod tests {
         for status in [404, 500, 502, 503, 504, 530] {
             assert!(!token_refused(status), "{status} is no verdict");
         }
+    }
+
+    #[test]
+    fn lineup_info_reads_and_a_missing_playing_means_playing() {
+        let member: MemberInfo =
+            serde_json::from_str(r#"{"id":"member1","name":"Member 1"}"#).unwrap();
+        assert!(member.playing, "a server without rosters: everyone plays");
+        assert!(!member.has_photo);
+        let away: MemberInfo = serde_json::from_str(
+            r#"{"id":"member10","name":"Member 10","has_photo":true,"playing":false}"#,
+        )
+        .unwrap();
+        assert!(!away.playing && away.has_photo);
+        let info: iem_core::LineupInfo = serde_json::from_str(concat!(
+            r#"{"active":{"id":"main","name":"Main band"},"#,
+            r#""lineups":[{"id":"main","name":"Main band"},{"id":"youth","name":"Youth band"}],"#,
+            r#""playing":true,"leader":true,"can_switch":true}"#
+        ))
+        .unwrap();
+        assert_eq!(info.active.id, "main");
+        assert_eq!(info.lineups[1].name, "Youth band");
+        assert!(info.playing && info.leader && info.can_switch);
+    }
+
+    #[test]
+    fn the_lineup_answer_reads_the_band_or_no_roster() {
+        let json = concat!(
+            r#"{"active":{"id":"youth","name":"Youth band"},"#,
+            r#""lineups":[{"id":"main","name":"Main band"},{"id":"youth","name":"Youth band"}],"#,
+            r#""playing":false,"leader":false,"can_switch":true}"#
+        );
+        let info = lineup_answer(200, json).unwrap().unwrap();
+        assert_eq!(info.active.name, "Youth band");
+        assert_eq!(info.lineups.len(), 2);
+        assert!(!info.playing && !info.leader && info.can_switch);
+        // A site without a roster: 204, or a server from before Part C.
+        assert_eq!(lineup_answer(204, ""), Ok(None));
+        let legacy = r#"{"code":"NOT_CONFIGURED","message":"this site has no roster"}"#;
+        assert_eq!(lineup_answer(404, legacy), Ok(None));
+        // Anything else is no answer on the band: its status and code.
+        let gone = r#"{"code":"UNAUTHORIZED","message":"gone"}"#;
+        assert_eq!(
+            lineup_answer(401, gone),
+            Err(LineupError {
+                status: 401,
+                code: "UNAUTHORIZED".into()
+            })
+        );
+        assert_eq!(
+            lineup_answer(404, ""),
+            Err(LineupError {
+                status: 404,
+                code: "HTTP_404".into()
+            })
+        );
+        assert_eq!(
+            lineup_answer(500, r#"{"code":"NOT_CONFIGURED","message":"x"}"#),
+            Err(LineupError {
+                status: 500,
+                code: "NOT_CONFIGURED".into()
+            })
+        );
+        assert_eq!(
+            lineup_answer(502, "<html>"),
+            Err(LineupError {
+                status: 502,
+                code: "HTTP_502".into()
+            })
+        );
+        assert_eq!(
+            lineup_answer(200, "{}"),
+            Err(LineupError {
+                status: 200,
+                code: "UNREADABLE".into()
+            })
+        );
+        assert_eq!(
+            LineupError::unanswered("NETWORK"),
+            LineupError {
+                status: 0,
+                code: "NETWORK".into()
+            }
+        );
+    }
+
+    /// #61 review I2: the page asks whether ITS person plays (the engineer
+    /// on a person's page gets the notice when that person does not).
+    #[test]
+    fn the_band_is_read_for_the_page() {
+        assert_eq!(lineup_url("member2"), "/api/lineup?page=member2");
+        assert_eq!(lineup_url("engineer"), "/api/lineup?page=engineer");
+        assert_eq!(lineup_url("team_a-1"), "/api/lineup?page=team_a-1");
+        // A route somebody typed: anything but an id's characters is escaped.
+        assert_eq!(
+            lineup_url("a b&c=d/e?"),
+            "/api/lineup?page=a%20b%26c%3Dd%2Fe%3F"
+        );
+    }
+
+    #[test]
+    fn a_switch_answer_is_done_pending_or_refused() {
+        assert_eq!(switch_answer(204, ""), Ok(Switched::Now));
+        // The mixer dropped mid-switch: it finishes later, no failure.
+        let pending = r#"{"code":"SWITCH_PENDING","message":"the engine went away"}"#;
+        assert_eq!(switch_answer(202, pending), Ok(Switched::Pending));
+        let busy = r#"{"code":"BUSY","message":"a switch runs"}"#;
+        assert_eq!(
+            switch_answer(409, busy),
+            Err(SwitchFailure {
+                status: 409,
+                code: "BUSY".into()
+            })
+        );
+        assert_eq!(
+            switch_answer(502, "Bad Gateway"),
+            Err(SwitchFailure {
+                status: 502,
+                code: "HTTP_502".into()
+            })
+        );
+        assert_eq!(switch_answer(199, "").unwrap_err().status, 199);
+        assert_eq!(switch_answer(300, "").unwrap_err().status, 300);
     }
 
     #[test]

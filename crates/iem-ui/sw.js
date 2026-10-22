@@ -124,6 +124,15 @@ self.addEventListener("push", (event) => {
         vibrate: [500, 200, 500, 200, 500],
       }),
     );
+  } else if (data.type === "LINEUP") {
+    // A band switch (#58): which band plays now. It asks for nothing, so it
+    // does not wait for a tap, and the next switch replaces it (one tag).
+    event.waitUntil(
+      self.registration.showNotification("Zmena kapely", {
+        body: `Teraz hrá ${data.name || "iná kapela"}.`,
+        tag: "iem-lineup",
+      }),
+    );
   } else {
     // Generic fallback for unknown push types
     event.waitUntil(

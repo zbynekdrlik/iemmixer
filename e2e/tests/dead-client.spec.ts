@@ -64,7 +64,7 @@ test.describe("A client that answers nothing (#10)", () => {
     const member = await login(page, "member2");
     const engineer = await login(page, "engineer", true);
     const base = wsBase(baseURL);
-    const mixer = `${base}/ws/member2?token=${member.token}&proto=2`;
+    const mixer = `${base}/ws/member2?token=${member.token}&proto=3`;
     const audio = `${base}/ws/audio?token=${engineer.token}`;
     const silent = [held(mixer, false), held(audio, false)];
     const answering = [held(mixer, true), held(audio, true)];

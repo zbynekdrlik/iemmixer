@@ -255,7 +255,7 @@
   pub async fn switch_lineup(state: &AppState, to: &str, by: &AuthClaims) -> Result<(), SwitchError>;
   pub fn target_state(target: Option<MixState>, current: &MixState, lineup: &Lineup) -> MixState; // pure
   pub async fn replay_intent(state: &AppState) -> Result<(), String>; // once the mirror first syncs; mix changes stay refused (frozen) until it ends
-  // routes: GET /api/lineup → LineupInfo; POST /api/lineup/switch {to} → 204 | 403 | 404 | 409 BUSY | 502
+  // routes: GET /api/lineup[?page=<id>] → LineupInfo, or 204 on a site without a roster (legacy mode; never a 4xx, which a browser logs on every page load, #61); POST /api/lineup/switch {to} → 204 | 202 SWITCH_PENDING | 403 | 404 | 409 BUSY | 502
   pub struct LineupInfo { pub active: LineupRef, pub lineups: Vec<LineupRef>, pub playing: bool, pub leader: bool, pub can_switch: bool }
   pub struct LineupRef { pub id: String, pub name: String }
   ```
@@ -273,7 +273,7 @@
   - `…an_engine_refusal_keeps_the_old_lineup` (the fake refuses `ImportState`: `active.json` unchanged, no intent, the `from` state re-imported).
   - `…a_restart_mid_switch_replays_the_intent` (intent present, `active == from`: `replay_intent` imports `to` and records it; with `active == to` it only clears).
   - `target_state` (pure): `heard_mixes_go_off_on_a_non_leaders_set` (youth: `member10` on set `member1` gets every peer level muted though main had them open); `…an_empty_set_is_muted`; `…a_lineup_without_state_starts_from_the_current_one`.
-  - `lineup_routes` (`api_tests` style): `GET /api/lineup` for `member2` while youth plays → `playing: false, leader: false, can_switch: false`; for `member3` → `playing: true, leader: true, can_switch: true`; legacy mode → 404 `NOT_CONFIGURED`.
+  - `lineup_routes` (`api_tests` style): `GET /api/lineup` for `member2` while youth plays → `playing: false, leader: false, can_switch: false`; for `member3` → `playing: true, leader: true, can_switch: true`; legacy mode → 204 No Content (changed from 404 `NOT_CONFIGURED` in Part C, #61; the switch still answers 404 `NOT_CONFIGURED` there).
 - [ ] **Step 2: Push; fail. Step 3: Implement. Step 4: Push; pass.**
 - [ ] **Step 5: Commit** `feat(server): switch the active lineup (#58)`.
 

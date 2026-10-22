@@ -63,7 +63,7 @@ pub const BUILD: &str = match option_env!("GITHUB_SHA") {
 };
 /// The UI protocol the mixer socket speaks (`iem_core::ws::UI_PROTO`; the
 /// tests check that the server serves it).
-pub const UI_PROTO: u16 = 2;
+pub const UI_PROTO: u16 = 3;
 /// `--seconds` at most: 10 h (the soak job's 600 min).
 pub const MAX_SECONDS: u64 = 36_000;
 /// Where `/api/site` is read without `--base`: the server on this PC.

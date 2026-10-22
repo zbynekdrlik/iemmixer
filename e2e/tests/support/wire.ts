@@ -54,7 +54,7 @@ export function upgradeStatus(url: string): Promise<number> {
 
 type Received = { event: string; data: any; at: number };
 
-/** A mixer page socket (UI protocol v2) held by the test runner. */
+/** A mixer page socket (UI protocol v3) held by the test runner. */
 export class PageSocket {
   /** Every JSON event received, in order, with its arrival time (ms). */
   readonly events: Received[] = [];
@@ -69,7 +69,7 @@ export class PageSocket {
 
   /** Opens `/ws/<page>` with `token` and waits for the page's state. */
   static async open(baseURL: string | undefined, page: string, token: string): Promise<PageSocket> {
-    const url = `${wsBase(baseURL)}/ws/${page}?token=${token}&proto=2`;
+    const url = `${wsBase(baseURL)}/ws/${page}?token=${token}&proto=3`;
     const socket = new NodeWebSocket(url);
     // Listening from the start: the hello and the state follow the upgrade at once.
     const s = new PageSocket(socket);

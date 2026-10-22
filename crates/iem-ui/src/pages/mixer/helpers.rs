@@ -169,6 +169,273 @@ pub(super) fn reconnect_step(
     }
 }
 
+/// Close code of a person's page after the band was switched or the roster
+/// changed (#58; the server's `mixer_ws::CLOSE_LINEUP`). 4001 is
+/// `handshake::CLOSE_RELOAD`, 4002 the server's close of a silent client.
+pub(super) const CLOSE_LINEUP: u16 = 4003;
+
+/// What the page does when its mixer socket closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OnClose {
+    /// The server serves no protocol this page speaks (4001): the handshake
+    /// decides on a reload; until one, a failed socket.
+    Reload,
+    /// The band changed (4003, #58): the page reads `/api/lineup` again,
+    /// then connects again or shows the notice. Never a reload, never a
+    /// failed socket, never "Reconnecting".
+    Lineup,
+    /// Any other close: a failed socket, which the reconnect tick retries.
+    Failed,
+}
+
+impl OnClose {
+    /// Whether the close counts as a failed socket (the backoff, and the
+    /// token check after [`MAX_WS_FAILURES`]).
+    pub(super) fn counts(self) -> bool {
+        self != Self::Lineup
+    }
+}
+
+/// [`OnClose`] for a close with `code`.
+pub(super) fn on_close(code: u16) -> OnClose {
+    match code {
+        crate::handshake::CLOSE_RELOAD => OnClose::Reload,
+        CLOSE_LINEUP => OnClose::Lineup,
+        _ => OnClose::Failed,
+    }
+}
+
+/// How long a page whose bearer does not play waits before it reads
+/// `/api/lineup` again: it has no socket to hear a switch on (#58). A page
+/// that does not know the band reads it again as often (#61 review C2).
+pub(super) const LINEUP_RECHECK_MS: f64 = 5_000.0;
+
+/// The page's reads of `/api/lineup` (#58): each gets a number, and when
+/// the last one started (the tick's [`LineupView::recheck_due`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct LineupReads {
+    /// The number of the read started last.
+    pub issued: u64,
+    /// The number of the answer the view took last.
+    pub applied: u64,
+    /// When the read started last (ms).
+    pub last_at: f64,
+}
+
+impl LineupReads {
+    /// A read starts at `now_ms`: its number.
+    pub(super) fn start(&mut self, now_ms: f64) -> u64 {
+        self.issued += 1;
+        self.last_at = now_ms;
+        self.issued
+    }
+
+    /// Whether the view takes the answer of read `seq`: only one newer than
+    /// the answer it took last (#61 review M3), so a slow read started
+    /// before a switch never puts the band before back.
+    pub(super) fn take(&mut self, seq: u64) -> bool {
+        if seq > self.applied {
+            self.applied = seq;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// An answer of `GET /api/lineup` as the page gets it (`Ok(None)`: no
+/// roster).
+pub(super) type LineupAnswer = Result<Option<iem_core::LineupInfo>, crate::api::LineupError>;
+
+/// One write of the page's state after an answer of `/api/lineup`, in the
+/// order [`lineup_writes`] gives them.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum LineupWrite {
+    /// `connected = false`.
+    Disconnected,
+    /// The page's new view of the band.
+    View(LineupView),
+}
+
+/// The writes an answer makes, in their order, for a page whose view is
+/// `current` and whose connection shows `connected` (#61 second review
+/// C1). A view the page does not connect in (the notice) unmounts the
+/// mixer, so `connected = false` goes first: written in the same turn after
+/// the view, it woke the mixer's render effects, which then ran after the
+/// unmount on their disposed signals and panicked. A write that changes
+/// nothing is not made: it wakes them too.
+pub(super) fn lineup_writes(
+    current: &LineupView,
+    answer: LineupAnswer,
+    connected: bool,
+) -> Vec<LineupWrite> {
+    let mut next = current.clone();
+    next.apply(answer);
+    let mut writes = Vec::new();
+    if connected && !next.connects() {
+        writes.push(LineupWrite::Disconnected);
+    }
+    if next != *current {
+        writes.push(LineupWrite::View(next));
+    }
+    writes
+}
+
+/// What the mixer page knows of the band that plays (#58), from
+/// `GET /api/lineup`: read before the page connects, again after the server
+/// closed a person's page with [`CLOSE_LINEUP`] or told it of a new band.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum LineupView {
+    /// The first read is under way: no socket yet.
+    Reading,
+    /// A site without a roster: the page as it was before #58 (no badge,
+    /// no notice, no switch).
+    Legacy,
+    /// No answer could be read yet (no network, a server error, a refused
+    /// token, a read that timed out): the page connects as before, and its
+    /// own retries and token check take over; no badge. It reads again.
+    Unknown,
+    /// The band that plays and what the bearer may do.
+    Roster(iem_core::LineupInfo),
+    /// Read again after a [`CLOSE_LINEUP`] close: no socket until the
+    /// answer; the band last known stays on the badge.
+    Rereading(iem_core::LineupInfo),
+    /// The server refused the token (401): the page goes to the login.
+    SignedOut,
+    /// The page is not one this token may open, or the site lacks it (403,
+    /// 404): a page saying so, with no socket and no reconnect.
+    NoPage,
+}
+
+impl LineupView {
+    /// The page's view of `GET /api/lineup`'s answer (`Ok(None)`: no
+    /// roster).
+    pub(super) fn read(answer: LineupAnswer) -> Self {
+        match answer {
+            Ok(Some(info)) => Self::Roster(info),
+            Ok(None) => Self::Legacy,
+            Err(_) => Self::Unknown,
+        }
+    }
+
+    /// The view after an answer of `GET /api/lineup`. A read that failed
+    /// (#61 review C2: a phone waking, a Wi-Fi handover, a 502 while the
+    /// server restarts) keeps the band the page knew, a page reading again
+    /// falls back to it; with nothing known the page connects as before
+    /// ([`LineupView::Unknown`]) and reads again ([`LineupView::recheck_due`]).
+    /// A definitive refusal is no failure to wait out (#61 second review
+    /// m3): a refused token (401) is [`LineupView::SignedOut`], a page the
+    /// token may not open or the site lacks (403, 404) [`LineupView::NoPage`].
+    pub(super) fn apply(&mut self, answer: LineupAnswer) {
+        *self = match (std::mem::replace(self, Self::Reading), answer) {
+            (_, Ok(known)) => Self::read(Ok(known)),
+            (_, Err(e)) if e.status == 401 => Self::SignedOut,
+            (_, Err(e)) if e.status == 403 || e.status == 404 => Self::NoPage,
+            (Self::Roster(info) | Self::Rereading(info), Err(_)) => Self::Roster(info),
+            (kept @ (Self::Legacy | Self::SignedOut | Self::NoPage), Err(_)) => kept,
+            (_, Err(_)) => Self::Unknown,
+        };
+    }
+
+    /// The view while `/api/lineup` is read again after a
+    /// [`CLOSE_LINEUP`] close.
+    pub(super) fn reread(&mut self) {
+        *self = match std::mem::replace(self, Self::Reading) {
+            Self::Roster(info) | Self::Rereading(info) => Self::Rereading(info),
+            _ => Self::Reading,
+        };
+    }
+
+    /// Whether the page opens its mixer socket: once the band is known,
+    /// unless the bearer does not play in it (the server would refuse the
+    /// socket; the page shows the notice instead).
+    pub(super) fn connects(&self) -> bool {
+        match self {
+            Self::Reading | Self::Rereading(_) | Self::SignedOut | Self::NoPage => false,
+            Self::Legacy | Self::Unknown => true,
+            Self::Roster(info) => info.playing,
+        }
+    }
+
+    /// Whether the token was refused: the page goes to the login.
+    pub(super) fn signed_out(&self) -> bool {
+        matches!(self, Self::SignedOut)
+    }
+
+    /// Whether the page shows that it is in no band, with no socket.
+    pub(super) fn no_page(&self) -> bool {
+        matches!(self, Self::NoPage)
+    }
+
+    /// The band the notice names, when the bearer does not play in it.
+    pub(super) fn notice(&self) -> Option<&iem_core::LineupInfo> {
+        match self {
+            Self::Roster(info) if !info.playing => Some(info),
+            _ => None,
+        }
+    }
+
+    /// The name on the header badge (a site with a roster only).
+    pub(super) fn badge(&self) -> Option<&str> {
+        match self {
+            Self::Roster(info) | Self::Rereading(info) => Some(info.active.name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// After the server's `LineupChanged`: `active` plays now.
+    pub(super) fn now_plays(&mut self, active: iem_core::LineupRef) {
+        if let Self::Roster(info) | Self::Rereading(info) = self {
+            info.active = active;
+        }
+    }
+
+    /// The band switch in the settings on `page`, for the bearer `bearer`
+    /// (`engineer`: the engineer's token): a bearer who may switch and
+    /// plays (one who does not has it on the notice), on their own page; the
+    /// engineer on `/engineer` only. It stays while the band is read again
+    /// after the switch it made (the 4003 close), so it keeps its answer.
+    pub(super) fn switch_here(
+        &self,
+        page: &str,
+        bearer: &str,
+        engineer: bool,
+    ) -> Option<&iem_core::LineupInfo> {
+        let own = if engineer {
+            page == "engineer"
+        } else {
+            page == bearer
+        };
+        match self {
+            Self::Roster(info) | Self::Rereading(info)
+                if info.can_switch && info.playing && own =>
+            {
+                Some(info)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the reconnect tick reads the band before it opens a new socket
+    /// after a failed close: in roster mode (#61 review I1), so a switch
+    /// missed while the socket was down (a close of 1006 or 4002, never
+    /// 4003) shows the notice instead of a socket the server refuses.
+    pub(super) fn reads_before_reconnect(&self) -> bool {
+        matches!(self, Self::Roster(_))
+    }
+
+    /// Whether the page reads the band again at `now_ms`, after the last
+    /// read at `last_ms` (#58): a page whose bearer does not play, so the
+    /// notice follows a switch back to a band the bearer plays in; and one
+    /// that does not know the band (the first read, one after a 4003 close,
+    /// an answer it could not read), so a read that hung or failed never
+    /// leaves it so (#61 review C2).
+    pub(super) fn recheck_due(&self, now_ms: f64, last_ms: f64) -> bool {
+        let unsure = matches!(self, Self::Reading | Self::Rereading(_) | Self::Unknown);
+        (unsure || self.notice().is_some()) && now_ms - last_ms >= LINEUP_RECHECK_MS
+    }
+}
+
 /// What a mixer page that is left does with its socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LeaveClose {
@@ -383,6 +650,326 @@ mod tests {
             reconnect_step(40_000.0, 10_000.0, 9, MAX_WS_FAILURES - 1),
             ReconnectStep::Connect
         );
+    }
+
+    #[test]
+    fn a_lineup_close_is_neither_a_failure_nor_a_reload() {
+        assert_eq!(CLOSE_LINEUP, 4003);
+        let lineup = on_close(CLOSE_LINEUP);
+        assert_eq!(lineup, OnClose::Lineup);
+        assert_ne!(lineup, OnClose::Reload, "never a reload");
+        assert!(
+            !lineup.counts(),
+            "never a failed socket: no backoff, no token check"
+        );
+        // The others as before: 4001 asks for a reload (as the handshake
+        // allows) and counts until one; a silent client's close (4002), a
+        // dropped connection (1006) and a plain close count.
+        assert_eq!(on_close(crate::handshake::CLOSE_RELOAD), OnClose::Reload);
+        assert!(OnClose::Reload.counts());
+        for code in [1000, 1006, 4002] {
+            assert_eq!(on_close(code), OnClose::Failed, "{code}");
+            assert!(on_close(code).counts(), "{code}");
+        }
+    }
+
+    fn lineup(id: &str) -> iem_core::LineupRef {
+        iem_core::LineupRef {
+            id: id.into(),
+            name: format!("{id} band"),
+        }
+    }
+
+    fn info(active: &str, playing: bool, can_switch: bool) -> iem_core::LineupInfo {
+        iem_core::LineupInfo {
+            active: lineup(active),
+            lineups: vec![lineup("main"), lineup("youth")],
+            playing,
+            leader: false,
+            can_switch,
+        }
+    }
+
+    #[test]
+    fn a_site_without_a_roster_keeps_the_page_as_it_was() {
+        let legacy = LineupView::read(Ok(None));
+        assert_eq!(legacy, LineupView::Legacy);
+        assert!(legacy.connects());
+        assert_eq!(legacy.badge(), None);
+        assert_eq!(legacy.notice(), None);
+        assert_eq!(legacy.switch_here("engineer", "engineer", true), None);
+        assert!(!legacy.recheck_due(1e12, 0.0));
+        // A band change never reaches it; if one did, nothing changes.
+        let mut told = legacy.clone();
+        told.now_plays(lineup("youth"));
+        assert_eq!(told, LineupView::Legacy);
+        // An answer that could not be read: the page as before too.
+        let unknown = LineupView::read(Err(crate::api::LineupError::unanswered("NETWORK")));
+        assert_eq!(unknown, LineupView::Unknown);
+        assert!(unknown.connects());
+        assert_eq!(unknown.badge(), None);
+        assert_eq!(unknown.notice(), None);
+    }
+
+    #[test]
+    fn the_page_connects_once_it_knows_the_bearer_plays() {
+        assert!(!LineupView::Reading.connects(), "not before the answer");
+        assert_eq!(LineupView::Reading.badge(), None);
+        let playing = LineupView::read(Ok(Some(info("youth", true, false))));
+        assert_eq!(playing, LineupView::Roster(info("youth", true, false)));
+        assert!(playing.connects());
+        assert_eq!(playing.badge(), Some("youth band"));
+        assert_eq!(playing.notice(), None);
+        // Not in the band: the notice, never a socket the server refuses.
+        let away = LineupView::read(Ok(Some(info("youth", false, true))));
+        assert!(!away.connects());
+        assert_eq!(away.notice(), Some(&info("youth", false, true)));
+        assert_eq!(away.badge(), Some("youth band"));
+    }
+
+    #[test]
+    fn a_band_change_is_read_again_with_the_last_band_on_the_badge() {
+        let mut v = LineupView::read(Ok(Some(info("main", true, false))));
+        v.now_plays(lineup("youth"));
+        assert_eq!(v, LineupView::Roster(info("youth", true, false)));
+        assert_eq!(v.badge(), Some("youth band"));
+        // The 4003 close: no socket and no notice until the answer.
+        v.reread();
+        assert_eq!(v, LineupView::Rereading(info("youth", true, false)));
+        assert!(!v.connects());
+        assert_eq!(v.notice(), None);
+        assert_eq!(v.badge(), Some("youth band"));
+        v.now_plays(lineup("main"));
+        assert_eq!(v.badge(), Some("main band"));
+        v.reread();
+        assert_eq!(v, LineupView::Rereading(info("main", true, false)));
+        let mut first = LineupView::Reading;
+        first.reread();
+        assert_eq!(first, LineupView::Reading);
+        let mut unknown = LineupView::Unknown;
+        unknown.reread();
+        assert_eq!(unknown, LineupView::Reading);
+    }
+
+    #[test]
+    fn the_switch_is_in_the_settings_of_a_playing_leaders_page_and_of_engineer() {
+        let leader = LineupView::Roster(info("main", true, true));
+        assert_eq!(
+            leader.switch_here("member3", "member3", false),
+            Some(&info("main", true, true))
+        );
+        assert_eq!(leader.switch_here("member1", "member3", false), None);
+        // The engineer: on /engineer, not on a person's page they opened.
+        assert!(leader.switch_here("engineer", "engineer", true).is_some());
+        assert_eq!(leader.switch_here("member3", "engineer", true), None);
+        let no_right = LineupView::Roster(info("main", true, false));
+        assert_eq!(no_right.switch_here("member4", "member4", false), None);
+        // A leader who does not play has it on the notice instead.
+        let away = LineupView::Roster(info("youth", false, true));
+        assert_eq!(away.switch_here("member1", "member1", false), None);
+        // Read again after the 4003 close its own switch caused: it stays,
+        // with its answer.
+        let rereading = LineupView::Rereading(info("youth", true, true));
+        assert_eq!(
+            rereading.switch_here("member3", "member3", false),
+            Some(&info("youth", true, true))
+        );
+        assert_eq!(rereading.switch_here("member1", "member3", false), None);
+        assert_eq!(
+            LineupView::Reading.switch_here("engineer", "engineer", true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_page_that_does_not_play_reads_the_band_again_every_five_seconds() {
+        let away = LineupView::Roster(info("youth", false, false));
+        assert!(!away.recheck_due(14_999.0, 10_000.0));
+        assert!(away.recheck_due(15_000.0, 10_000.0));
+        let playing = LineupView::Roster(info("youth", true, false));
+        assert!(!playing.recheck_due(1e12, 0.0), "its socket hears a switch");
+        assert!(
+            !LineupView::Legacy.recheck_due(1e12, 0.0),
+            "no band to read"
+        );
+    }
+
+    /// #61 review C2: a page that does not know the band (the first read,
+    /// one after a 4003 close, an answer it could not read) reads it again
+    /// every five seconds: a read that hangs or fails never leaves it so.
+    #[test]
+    fn a_page_that_does_not_know_the_band_reads_it_again_every_five_seconds() {
+        for view in [
+            LineupView::Reading,
+            LineupView::Rereading(info("youth", true, false)),
+            LineupView::Unknown,
+        ] {
+            assert!(!view.recheck_due(14_999.0, 10_000.0), "{view:?}");
+            assert!(view.recheck_due(15_000.0, 10_000.0), "{view:?}");
+        }
+    }
+
+    /// #61 second review C1: an answer that unmounts the mixer (the notice
+    /// takes its place) writes `connected` first, while the mixer's effects
+    /// still live; written after, it woke the effects the unmount had just
+    /// dropped, which read their disposed signals and panicked (CI run
+    /// 39700306928, member1's page). A write that changes nothing is not
+    /// made: it would wake them too.
+    #[test]
+    fn connected_is_written_before_a_view_that_unmounts_the_mixer() {
+        let rereading = LineupView::Rereading(info("main", true, true));
+        let away = LineupView::Roster(info("youth", false, true));
+        assert_eq!(
+            lineup_writes(&rereading, Ok(Some(info("youth", false, true))), true),
+            [LineupWrite::Disconnected, LineupWrite::View(away.clone())]
+        );
+        // Shown as disconnected already: only the view.
+        assert_eq!(
+            lineup_writes(&rereading, Ok(Some(info("youth", false, true))), false),
+            [LineupWrite::View(away.clone())]
+        );
+        // A view that connects: only the view.
+        assert_eq!(
+            lineup_writes(&LineupView::Reading, Ok(None), false),
+            [LineupWrite::View(LineupView::Legacy)]
+        );
+        assert_eq!(
+            lineup_writes(&away, Ok(Some(info("main", true, true))), false),
+            [LineupWrite::View(LineupView::Roster(info(
+                "main", true, true
+            )))]
+        );
+        // The notice page reads the same band again, or fails to: nothing.
+        assert!(lineup_writes(&away, Ok(Some(info("youth", false, true))), false).is_empty());
+        assert!(lineup_writes(&away, failed(), false).is_empty());
+    }
+
+    /// #61 second review m3: a definitive refusal of the read is no failure
+    /// to wait out. A refused token (401) goes to the login; a page the
+    /// token may not open or the site lacks (403, 404: the engineer on the
+    /// page of a person the roster dropped) shows that it is in no band,
+    /// with no socket, no read again and no reconnect.
+    #[test]
+    fn a_refused_read_is_no_failure_to_wait_out() {
+        let refused = |status: u16| -> LineupAnswer {
+            Err(crate::api::LineupError {
+                status,
+                code: "REFUSED".into(),
+            })
+        };
+        for start in [
+            LineupView::Reading,
+            LineupView::Unknown,
+            LineupView::Roster(info("youth", true, true)),
+            LineupView::Rereading(info("youth", true, true)),
+            LineupView::Roster(info("youth", false, false)),
+        ] {
+            let mut gone = start.clone();
+            gone.apply(refused(401));
+            assert_eq!(gone, LineupView::SignedOut, "{start:?}");
+            assert!(gone.signed_out() && !gone.no_page());
+            for status in [403, 404] {
+                let mut none = start.clone();
+                none.apply(refused(status));
+                assert_eq!(none, LineupView::NoPage, "{start:?} {status}");
+                assert!(none.no_page() && !none.signed_out());
+            }
+        }
+        for view in [LineupView::SignedOut, LineupView::NoPage] {
+            assert!(!view.connects(), "{view:?}: no socket");
+            assert!(!view.recheck_due(1e12, 0.0), "{view:?}: no read again");
+            assert!(!view.reads_before_reconnect(), "{view:?}");
+            assert_eq!(view.notice(), None, "{view:?}");
+            assert_eq!(view.badge(), None, "{view:?}");
+        }
+        // Not a refusal: the band the page knew stays (C2).
+        for status in [0, 500, 502, 503] {
+            let mut known = LineupView::Roster(info("youth", false, false));
+            known.apply(refused(status));
+            assert_eq!(
+                known,
+                LineupView::Roster(info("youth", false, false)),
+                "{status}"
+            );
+        }
+        assert!(!LineupView::Roster(info("youth", true, true)).signed_out());
+        assert!(!LineupView::Legacy.no_page());
+    }
+
+    /// #61 review I1: a switch missed while the socket was down (a phone
+    /// locked during it: the close is 1006 or 4002, never 4003) is seen at
+    /// the reconnect: in roster mode the tick reads the band first, so a
+    /// person who no longer plays gets the notice, not a refused socket.
+    #[test]
+    fn a_failed_close_in_roster_mode_reads_the_band_before_reconnecting() {
+        assert!(LineupView::Roster(info("main", true, false)).reads_before_reconnect());
+        assert!(LineupView::Roster(info("main", true, true)).reads_before_reconnect());
+        // No band to read: as before.
+        assert!(!LineupView::Legacy.reads_before_reconnect());
+        assert!(!LineupView::Unknown.reads_before_reconnect());
+    }
+
+    /// #61 review M3: the page's reads are numbered, so an older answer
+    /// (a slow read started before a switch) never overwrites a newer one.
+    #[test]
+    fn an_older_answer_never_overwrites_a_newer_one() {
+        let mut reads = LineupReads::default();
+        let first = reads.start(1_000.0);
+        let second = reads.start(2_000.0);
+        assert_eq!(reads.last_at, 2_000.0, "the tick counts from the last read");
+        assert!(second > first);
+        assert!(reads.take(second), "the newest answer is taken");
+        assert!(!reads.take(first), "an older one that comes later is not");
+        // In order, each is taken.
+        let third = reads.start(3_000.0);
+        let fourth = reads.start(4_000.0);
+        assert!(reads.take(third));
+        assert!(reads.take(fourth));
+        assert!(!reads.take(third));
+        assert!(!reads.take(fourth), "an answer is taken once");
+        assert_eq!(reads.applied, fourth);
+    }
+
+    fn failed() -> LineupAnswer {
+        Err(crate::api::LineupError {
+            status: 502,
+            code: "HTTP_502".into(),
+        })
+    }
+
+    /// #61 review C2: a read that fails (a phone waking, a Wi-Fi handover, a
+    /// 502 while the server restarts) keeps the band the page knew: a notice
+    /// page stays the notice with no socket, a page reading again after a
+    /// 4003 close falls back to the band it knew.
+    #[test]
+    fn a_failed_read_keeps_the_band_the_page_knew() {
+        let mut away = LineupView::Roster(info("youth", false, false));
+        away.apply(failed());
+        assert_eq!(away, LineupView::Roster(info("youth", false, false)));
+        assert!(!away.connects(), "no socket the server would refuse");
+        assert!(away.notice().is_some());
+        let mut rereading = LineupView::Rereading(info("youth", true, true));
+        rereading.apply(failed());
+        assert_eq!(rereading, LineupView::Roster(info("youth", true, true)));
+        let mut legacy = LineupView::Legacy;
+        legacy.apply(failed());
+        assert_eq!(legacy, LineupView::Legacy);
+        // Nothing known yet: the page connects as before and reads again.
+        let mut first = LineupView::Reading;
+        first.apply(failed());
+        assert_eq!(first, LineupView::Unknown);
+        let mut unknown = LineupView::Unknown;
+        unknown.apply(failed());
+        assert_eq!(unknown, LineupView::Unknown);
+        // An answer replaces whatever the page knew.
+        let mut known = LineupView::Unknown;
+        known.apply(Ok(Some(info("main", true, false))));
+        assert_eq!(known, LineupView::Roster(info("main", true, false)));
+        known.apply(Ok(None));
+        assert_eq!(known, LineupView::Legacy);
+        let mut back = LineupView::Rereading(info("main", true, false));
+        back.apply(Ok(Some(info("youth", false, true))));
+        assert_eq!(back, LineupView::Roster(info("youth", false, true)));
     }
 
     #[test]

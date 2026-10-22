@@ -124,6 +124,24 @@ body {
   white-space: nowrap;
 }
 
+/* The band that plays (#58), next to the page's name; a long name ends in
+   an ellipsis rather than pushing the header's buttons off a phone. */
+.lineup-badge {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 40%;
+  margin-right: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-active);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.7em;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Solo active indicator in header (replaces version when solo is active) */
 .header-solo-btn {
   background: #f59e0b;
@@ -1523,6 +1541,74 @@ body {
 .member-card .name {
   font-size: 1rem;
   font-weight: 500;
+}
+
+/* #58: the people of the band that plays first, then the others. */
+.member-divider {
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.75em;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+}
+
+.member-card.not-playing {
+  opacity: 0.55;
+}
+
+/* #58: a person who does not play in the band that plays. */
+.lineup-notice {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 32px 24px;
+  text-align: center;
+  overflow-y: auto;
+}
+
+.lineup-notice-icon {
+  font-size: 3rem;
+}
+
+.lineup-notice-text {
+  max-width: 320px;
+  font-size: 1.1em;
+  color: var(--text-primary);
+}
+
+/* #58: the band switch (settings "Kapela", and a leader's notice). */
+.lineup-switch {
+  width: 100%;
+  max-width: 340px;
+}
+
+.lineup-switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lineup-target {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--touch-min);
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-channel);
+  color: var(--text-primary);
+  font-size: 0.9em;
+}
+
+.lineup-switch-message {
+  margin-top: 8px;
+  font-size: 0.85em;
+  color: var(--text-secondary);
 }
 
 /* Empty state */

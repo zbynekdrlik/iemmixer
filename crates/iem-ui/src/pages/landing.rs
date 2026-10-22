@@ -135,7 +135,24 @@ fn NetworkError(error: String, on_retry: impl Fn(()) + 'static) -> impl IntoView
     }
 }
 
-/// Grid of member cards
+/// The tiles in their order (#58): the people who play in the band that
+/// plays (the engineer among them) first, then the others; each part in the
+/// server's order. A site without a roster: everyone plays, no others.
+fn tiles(members: Vec<MemberInfo>) -> (Vec<MemberInfo>, Vec<MemberInfo>) {
+    members.into_iter().partition(|m| m.playing)
+}
+
+/// A tile's class: dimmed for a person who plays in another band.
+fn card_class(member: &MemberInfo) -> &'static str {
+    if member.playing {
+        "member-card"
+    } else {
+        "member-card not-playing"
+    }
+}
+
+/// Grid of member cards: the band that plays, then "Iná kapela" and the
+/// others (#58).
 #[component]
 fn MemberGrid(members: Vec<MemberInfo>) -> impl IntoView {
     if members.is_empty() {
@@ -149,46 +166,106 @@ fn MemberGrid(members: Vec<MemberInfo>) -> impl IntoView {
         }
         .into_any()
     } else {
+        let (playing, others) = tiles(members);
+        let divider = (!others.is_empty()).then(|| {
+            view! { <div class="member-divider" data-testid="other-band">"Iná kapela"</div> }
+        });
         view! {
             <div class="member-grid">
-                {members.into_iter().map(|member| {
-                    let initial = member.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                    let href = format!("/{}", member.id);
-                    let has_photo = member.has_photo;
-                    let photo_url = format!("/api/members/{}/photo", member.id);
-                    let initial_fallback = initial.clone();
-                    view! {
-                        <a href=href class="member-card">
-                            <div class="avatar">
-                                {if has_photo {
-                                    let fb = initial_fallback.clone();
-                                    view! {
-                                        <img
-                                            class="avatar-photo"
-                                            src=photo_url
-                                            alt=fb.clone()
-                                            on:error=move |e| {
-                                                // Fallback: hide broken img, show initial text
-                                                if let Some(el) = e.target() {
-                                                    let el: web_sys::HtmlElement = el.unchecked_into();
-                                                    el.set_hidden(true);
-                                                    if let Some(parent) = el.parent_element() {
-                                                        parent.set_text_content(Some(&fb));
-                                                    }
-                                                }
-                                            }
-                                        />
-                                    }.into_any()
-                                } else {
-                                    view! { {initial} }.into_any()
-                                }}
-                            </div>
-                            <div class="name">{member.name}</div>
-                        </a>
-                    }
-                }).collect::<Vec<_>>()}
+                {playing.into_iter().map(|member| view! { <MemberCard member=member /> }).collect::<Vec<_>>()}
+                {divider}
+                {others.into_iter().map(|member| view! { <MemberCard member=member /> }).collect::<Vec<_>>()}
             </div>
         }
         .into_any()
+    }
+}
+
+/// One member's tile: their photo (or initial) and name, a link to their page.
+#[component]
+fn MemberCard(member: MemberInfo) -> impl IntoView {
+    let class = card_class(&member);
+    let initial = member
+        .name
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    let href = format!("/{}", member.id);
+    let has_photo = member.has_photo;
+    let photo_url = format!("/api/members/{}/photo", member.id);
+    let initial_fallback = initial.clone();
+    view! {
+        <a href=href class=class>
+            <div class="avatar">
+                {if has_photo {
+                    let fb = initial_fallback.clone();
+                    view! {
+                        <img
+                            class="avatar-photo"
+                            src=photo_url
+                            alt=fb.clone()
+                            on:error=move |e| {
+                                // Fallback: hide broken img, show initial text
+                                if let Some(el) = e.target() {
+                                    let el: web_sys::HtmlElement = el.unchecked_into();
+                                    el.set_hidden(true);
+                                    if let Some(parent) = el.parent_element() {
+                                        parent.set_text_content(Some(&fb));
+                                    }
+                                }
+                            }
+                        />
+                    }.into_any()
+                } else {
+                    view! { {initial} }.into_any()
+                }}
+            </div>
+            <div class="name">{member.name}</div>
+        </a>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(id: &str, playing: bool) -> MemberInfo {
+        MemberInfo {
+            id: id.into(),
+            name: id.into(),
+            has_photo: false,
+            playing,
+        }
+    }
+
+    fn ids(list: &[MemberInfo]) -> Vec<&str> {
+        list.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn playing_people_come_first() {
+        // As the server lists them while youth plays: its people, the
+        // others, then the engineer (who always plays).
+        let (playing, others) = tiles(vec![
+            member("member10", true),
+            member("member3", true),
+            member("member1", false),
+            member("member2", false),
+            member("member11", true),
+            member("engineer", true),
+        ]);
+        assert_eq!(
+            ids(&playing),
+            ["member10", "member3", "member11", "engineer"]
+        );
+        assert_eq!(ids(&others), ["member1", "member2"]);
+        assert_eq!(card_class(&playing[0]), "member-card");
+        assert_eq!(card_class(&others[0]), "member-card not-playing");
+        // A site without a roster: everyone plays, so no "Iná kapela".
+        let (all, none) = tiles(vec![member("member1", true), member("engineer", true)]);
+        assert_eq!(ids(&all), ["member1", "engineer"]);
+        assert!(none.is_empty());
     }
 }

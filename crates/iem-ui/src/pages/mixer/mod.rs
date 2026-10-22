@@ -1,12 +1,13 @@
 //! Mixer page with faders, meters, categories, and presets
 //!
 //! Uses WebSocket for real-time bidirectional communication with the server
-//! (UI protocol v2: channels keyed by engine ids).
+//! (UI protocol v3: channels keyed by engine ids, the band's changes).
 
 use crate::components::alert_toast::AlertToast;
 use crate::components::category_tabs::{Category, CategoryTabs};
 use crate::components::eq_modal::EQModal;
 use crate::components::limiter_modal::LimiterModal;
+use crate::components::lineup_notice::{LineupNotice, NO_PAGE, notice_switch, notice_text};
 use crate::components::pin_change_modal::PinChangeModal;
 use crate::components::preset_modal::PresetModal;
 use crate::components::settings_modal::SettingsModal;
@@ -142,6 +143,29 @@ pub fn MixerPage() -> impl IntoView {
     let console = state.console.0;
     let tunnel = state.tunnel.0;
     let ws = state.ws.0;
+    let lineup = state.lineup.0;
+
+    // The band that plays (#58): its name on the header badge, and the
+    // notice in place of the mixer when the bearer does not play in it. A
+    // read with the same answer redraws neither.
+    let badge = Memo::new(move |_| lineup.with(|v| v.badge().map(str::to_owned)));
+    let notice = Memo::new(move |_| lineup.with(|v| v.notice().cloned()));
+    // A page in no band now (#61 second review m3): the same page, no socket.
+    let no_page = Memo::new(move |_| lineup.with(LineupView::no_page));
+    let mixer_shown = move || notice.with(Option::is_none) && !no_page.get();
+    // The band switch in the settings: a leader who plays, on their own
+    // page; the engineer on /engineer. After a switch the page reads the
+    // band again (from the notice it has no socket to hear it on).
+    let (bearer, bearer_engineer) = crate::auth::get_auth()
+        .map(|a| (a.member, a.engineer))
+        .unwrap_or_default();
+    let switch_info = Memo::new(move |_| {
+        lineup.with(|v| {
+            v.switch_here(&member_id(), &bearer, bearer_engineer)
+                .cloned()
+        })
+    });
+    let on_switched = Callback::new(move |_: ()| connection::read_lineup(state, member_id()));
 
     // Check if member has photo on mount (reaperiem#16)
     // Use try_set (via state method) to guard against disposal race — if the
@@ -221,6 +245,9 @@ pub fn MixerPage() -> impl IntoView {
                         Some(c) => c.to_uppercase().chain(chars).collect(),
                     }
                 }}</h1>
+                {move || badge.get().map(|name| view! {
+                    <span class="lineup-badge" data-testid="lineup-badge">{name}</span>
+                })}
                 <Show
                     when=move || !soloed.get().is_empty()
                     fallback=|| view! {
@@ -265,156 +292,176 @@ pub fn MixerPage() -> impl IntoView {
                         {move || if network_mode.get() == "local" { "LAN" } else { "WAN" }}
                     </div>
                 </Show>
-                <div class=move || {
-                    let base = if connected.get() { "status-dot connected" } else { "status-dot disconnected" };
-                    if connected.get() && data_pulse.get() {
-                        format!("{} pulse-a", base)
-                    } else if connected.get() {
-                        format!("{} pulse-b", base)
-                    } else {
-                        base.to_string()
-                    }
-                }/>
+                // No connection dot on the notice (#61 M1): that page has no
+                // socket on purpose.
+                <Show when=mixer_shown fallback=|| ()>
+                    <div class=move || {
+                        let base = if connected.get() { "status-dot connected" } else { "status-dot disconnected" };
+                        if connected.get() && data_pulse.get() {
+                            format!("{} pulse-a", base)
+                        } else if connected.get() {
+                            format!("{} pulse-b", base)
+                        } else {
+                            base.to_string()
+                        }
+                    }/>
+                </Show>
             </header>
 
-            // Internet access (Cloudflare tunnel) status (reaperiem#202): indicator for
-            // the engineer, "use the LAN address" banner for band members.
-            {is_engineer.then(|| view! { <TunnelIndicator status=tunnel /> })}
-            {(!is_engineer).then(|| view! { <TunnelBanner status=tunnel /> })}
-
-            <CategoryTabs
-                active=active_category
-                on_select=move |cat| { state.select_category(cat); }
-                show_hidden=Signal::derive(move || !hidden_channels.get().is_empty())
-                show_mixes=Signal::derive(move || channels.get().iter().any(|ch| ch.category == "mixes"))
-            />
-
-            <Show
-                when=move || show_reconnecting.get() && !loading.get()
-                fallback=|| ()
-            >
-                <div class="disconnected-banner">
-                    "Reconnecting..."
-                    <LanHint />
-                </div>
-            </Show>
-
-            <Show
-                when=move || !loading.get()
-                fallback=|| view! {
-                    <div class="loading">
-                        <div class="spinner"></div>
-                    </div>
-                }
-            >
-                <div class="channels-scroll">
-                    <div class="channels-grid">
-                        <Show
-                            when=move || active_category.get() == Category::Main
-                            fallback=|| ()
-                        >
-                            <GlobalVolumeFader
-                                level=global_level
-                                set_level=set_global_level
-                                muted=global_muted
-                                set_muted=set_global_muted
-                                set_global_touched=set_global_touched
-                                connected=connected
-                                ws=ws
-                                meters=meters
-                                page_mix=page_mix
-                                set_eq_open=set_eq_open
-                                set_eq_bands=set_eq_bands
-                                set_eq_loading=set_eq_loading
-                                set_limiter_open=set_limiter_open
-                                set_limiter_loading=set_limiter_loading
-                            />
-                        </Show>
-                        <Show
-                            when=move || active_category.get() == Category::Stems
-                            fallback=|| ()
-                        >
-                            <StemsVolumeFader
-                                level=stems_level
-                                set_level=set_stems_level
-                                muted=stems_muted
-                                set_muted=set_stems_muted
-                                set_stems_touched=set_stems_touched
-                                connected=connected
-                                ws=ws
-                                meters=meters
-                                stems_group=stems_group
-                                set_eq_open=set_eq_open
-                                set_eq_bands=set_eq_bands
-                                set_eq_loading=set_eq_loading
-                            />
-                        </Show>
-                        <ChannelList
-                            display_channels=display_channels.into()
-                            meters=meters
-                            channels=channels
-                            set_channels=set_channels
-                            set_fader_touched=set_fader_touched
-                            soloed=soloed
-                            set_soloed=set_soloed
-                            pre_solo_mutes=pre_solo_mutes
-                            set_pre_solo_mutes=set_pre_solo_mutes
-                            connected=connected
-                            ws=ws
-                            double_tap_fader=double_tap_fader
-                            pinned_channels=pinned_channels
-                            set_pinned_channels=set_pinned_channels
-                            hidden_channels=hidden_channels
-                            set_hidden_channels=set_hidden_channels
-                            active_category=active_category
-                            set_eq_open=set_eq_open
-                            set_eq_bands=set_eq_bands
-                            set_eq_loading=set_eq_loading
-                        />
-                        <Show
-                            when=move || active_category.get() == Category::Main
-                            fallback=|| ()
-                        >
-                            <StemsVolumeFader
-                                level=stems_level
-                                set_level=set_stems_level
-                                muted=stems_muted
-                                set_muted=set_stems_muted
-                                set_stems_touched=set_stems_touched
-                                connected=connected
-                                ws=ws
-                                meters=meters
-                                stems_group=stems_group
-                                set_eq_open=set_eq_open
-                                set_eq_bands=set_eq_bands
-                                set_eq_loading=set_eq_loading
-                            />
-                        </Show>
-                    </div>
-                </div>
-            </Show>
-
-            <Toolbar
-                on_presets=on_presets
-                on_history=on_history
-                is_engineer=is_engineer
-                on_mute_all=on_mute_all
-                is_engineer_own_mixer=is_engineer_own_mixer
-                member_id=member_id()
-                ws=ws
-                alert_active=alert_active
-                talk_state=talk_state
-                set_talk_state=set_talk_state
-                talk_id=talk_id
-            />
-
-            {is_engineer.then(|| view! {
-                <AlertToast alert=alert_data ws=ws />
+            // A person who does not play in the band that plays sees which
+            // band plays instead of the mixer (#58); a page in no band now
+            // says so (#61 second review m3).
+            {move || notice.get().map(|info| view! {
+                <LineupNotice
+                    text=notice_text(&info)
+                    switch=notice_switch(&info)
+                    on_switched=on_switched
+                />
+            })}
+            {move || no_page.get().then(|| view! {
+                <LineupNotice text=NO_PAGE.to_string() on_switched=on_switched />
             })}
 
-            // "ENGINEER SPEAKING" banner for band members (reaperiem#123)
-            <Show when=move || engineer_talking.get()>
-                <div class="engineer-speaking-banner">"ENGINEER SPEAKING"</div>
+            <Show when=mixer_shown fallback=|| ()>
+                // Internet access (Cloudflare tunnel) status (reaperiem#202): indicator for
+                // the engineer, "use the LAN address" banner for band members.
+                {is_engineer.then(|| view! { <TunnelIndicator status=tunnel /> })}
+                {(!is_engineer).then(|| view! { <TunnelBanner status=tunnel /> })}
+
+                <CategoryTabs
+                    active=active_category
+                    on_select=move |cat| { state.select_category(cat); }
+                    show_hidden=Signal::derive(move || !hidden_channels.get().is_empty())
+                    show_mixes=Signal::derive(move || channels.get().iter().any(|ch| ch.category == "mixes"))
+                />
+
+                <Show
+                    when=move || show_reconnecting.get() && !loading.get()
+                    fallback=|| ()
+                >
+                    <div class="disconnected-banner">
+                        "Reconnecting..."
+                        <LanHint />
+                    </div>
+                </Show>
+
+                <Show
+                    when=move || !loading.get()
+                    fallback=|| view! {
+                        <div class="loading">
+                            <div class="spinner"></div>
+                        </div>
+                    }
+                >
+                    <div class="channels-scroll">
+                        <div class="channels-grid">
+                            <Show
+                                when=move || active_category.get() == Category::Main
+                                fallback=|| ()
+                            >
+                                <GlobalVolumeFader
+                                    level=global_level
+                                    set_level=set_global_level
+                                    muted=global_muted
+                                    set_muted=set_global_muted
+                                    set_global_touched=set_global_touched
+                                    connected=connected
+                                    ws=ws
+                                    meters=meters
+                                    page_mix=page_mix
+                                    set_eq_open=set_eq_open
+                                    set_eq_bands=set_eq_bands
+                                    set_eq_loading=set_eq_loading
+                                    set_limiter_open=set_limiter_open
+                                    set_limiter_loading=set_limiter_loading
+                                />
+                            </Show>
+                            <Show
+                                when=move || active_category.get() == Category::Stems
+                                fallback=|| ()
+                            >
+                                <StemsVolumeFader
+                                    level=stems_level
+                                    set_level=set_stems_level
+                                    muted=stems_muted
+                                    set_muted=set_stems_muted
+                                    set_stems_touched=set_stems_touched
+                                    connected=connected
+                                    ws=ws
+                                    meters=meters
+                                    stems_group=stems_group
+                                    set_eq_open=set_eq_open
+                                    set_eq_bands=set_eq_bands
+                                    set_eq_loading=set_eq_loading
+                                />
+                            </Show>
+                            <ChannelList
+                                display_channels=display_channels.into()
+                                meters=meters
+                                channels=channels
+                                set_channels=set_channels
+                                set_fader_touched=set_fader_touched
+                                soloed=soloed
+                                set_soloed=set_soloed
+                                pre_solo_mutes=pre_solo_mutes
+                                set_pre_solo_mutes=set_pre_solo_mutes
+                                connected=connected
+                                ws=ws
+                                double_tap_fader=double_tap_fader
+                                pinned_channels=pinned_channels
+                                set_pinned_channels=set_pinned_channels
+                                hidden_channels=hidden_channels
+                                set_hidden_channels=set_hidden_channels
+                                active_category=active_category
+                                set_eq_open=set_eq_open
+                                set_eq_bands=set_eq_bands
+                                set_eq_loading=set_eq_loading
+                            />
+                            <Show
+                                when=move || active_category.get() == Category::Main
+                                fallback=|| ()
+                            >
+                                <StemsVolumeFader
+                                    level=stems_level
+                                    set_level=set_stems_level
+                                    muted=stems_muted
+                                    set_muted=set_stems_muted
+                                    set_stems_touched=set_stems_touched
+                                    connected=connected
+                                    ws=ws
+                                    meters=meters
+                                    stems_group=stems_group
+                                    set_eq_open=set_eq_open
+                                    set_eq_bands=set_eq_bands
+                                    set_eq_loading=set_eq_loading
+                                />
+                            </Show>
+                        </div>
+                    </div>
+                </Show>
+
+                <Toolbar
+                    on_presets=on_presets
+                    on_history=on_history
+                    is_engineer=is_engineer
+                    on_mute_all=on_mute_all
+                    is_engineer_own_mixer=is_engineer_own_mixer
+                    member_id=member_id()
+                    ws=ws
+                    alert_active=alert_active
+                    talk_state=talk_state
+                    set_talk_state=set_talk_state
+                    talk_id=talk_id
+                />
+
+                {is_engineer.then(|| view! {
+                    <AlertToast alert=alert_data ws=ws />
+                })}
+
+                // "ENGINEER SPEAKING" banner for band members (reaperiem#123)
+                <Show when=move || engineer_talking.get()>
+                    <div class="engineer-speaking-banner">"ENGINEER SPEAKING"</div>
+                </Show>
             </Show>
 
             <PresetModal
@@ -436,6 +483,8 @@ pub fn MixerPage() -> impl IntoView {
                 set_has_photo=set_has_photo
                 console=console
                 ws=ws
+                lineup=Signal::from(switch_info)
+                on_switched=on_switched
             />
 
             <PinChangeModal
@@ -549,6 +598,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_uppercase(),
             has_photo,
+            playing: true,
         }
     }
 

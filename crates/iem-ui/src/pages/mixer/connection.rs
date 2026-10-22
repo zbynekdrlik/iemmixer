@@ -4,6 +4,12 @@
 //! token-expiry intervals) and tears them down via `on_cleanup`. Background
 //! closures check `disposal_guard` (an `Arc<AtomicBool>`) before touching
 //! reactive state.
+//!
+//! The band that plays (#58): the page reads `/api/lineup` before its first
+//! socket and connects only when its bearer plays (a site without a roster:
+//! always, as before). The server's `LineupChanged` updates the band; a
+//! close with `CLOSE_LINEUP` (4003) reads it again, then the page connects
+//! again or shows the notice: never a reload, never a failed socket.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -16,9 +22,46 @@ use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
 
 use super::helpers::{
-    LeaveClose, ReconnectStep, WsClosureStore, WsFailCounter, leave_close, reconnect_step,
+    LeaveClose, LineupView, LineupWrite, OnClose, ReconnectStep, WsClosureStore, WsFailCounter,
+    leave_close, lineup_writes, on_close, reconnect_step,
 };
 use super::state::MixerState;
+
+/// Reads `/api/lineup` into the page's view of the band (#58); a failed read
+/// keeps what the page knew (`LineupView::apply`), and an answer older than
+/// one the view took is dropped (`LineupReads`). It asks whether the page
+/// `page` plays (#61 review I2: the engineer on a person's page). A page
+/// that does not connect now (its person does not play) shows no
+/// connection.
+pub(super) fn read_lineup(state: MixerState, page: String) {
+    let (lineup, set_lineup) = state.lineup;
+    let (connected, set_connected) = state.connected;
+    let reads = state.lineup_reads;
+    let Some(seq) = reads.try_update_value(|r| r.start(js_sys::Date::now())) else {
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        let answer = crate::api::get_lineup(&page).await;
+        if reads.try_update_value(|r| r.take(seq)) != Some(true) {
+            return;
+        }
+        let (Some(current), Some(shown)) =
+            (lineup.try_get_untracked(), connected.try_get_untracked())
+        else {
+            return;
+        };
+        for write in lineup_writes(&current, answer, shown) {
+            match write {
+                LineupWrite::Disconnected => {
+                    let _ = set_connected.try_set(false);
+                }
+                LineupWrite::View(view) => {
+                    let _ = set_lineup.try_set(view);
+                }
+            }
+        }
+    });
+}
 
 /// Set up all background tasks (WS connect, reconnect, watchdog, token-expiry)
 /// and register an `on_cleanup` callback that tears them all down, and closes
@@ -79,8 +122,37 @@ pub(super) fn setup_connection(
     let reconnect_attempt = std::rc::Rc::new(std::cell::Cell::new(0u32));
     let last_reconnect_attempt_at = std::rc::Rc::new(std::cell::Cell::new(0.0_f64));
 
+    // --- The band that plays (#58) ---
+
+    // Read before the first socket: a person who does not play in it gets
+    // the notice instead (the server would refuse their socket), and a site
+    // without a roster connects as before. `connects` changes only when an
+    // answer changes whether the page connects, so a new band's name (the
+    // engineer's page) never reconnects.
+    read_lineup(state, member_id());
+    let lineup = state.lineup.0;
+    let lineup_reads = state.lineup_reads;
+    let connects = Memo::new(move |_| lineup.with(LineupView::connects));
+
+    // A refused token (401 to the read, #61 second review m3) goes to the
+    // login, as the token check after failed sockets does.
+    let signed_out = Memo::new(move |_| lineup.with(LineupView::signed_out));
+    let navigate_signed_out = use_navigate();
+    let signed_out_member = member_id.clone();
+    Effect::new(move |_| {
+        if !signed_out.get() {
+            return;
+        }
+        crate::auth::clear_auth();
+        let m = signed_out_member();
+        navigate_signed_out(&format!("/login?member={m}&next=/{m}"), Default::default());
+    });
+
     // --- Initial connect Effect ---
 
+    // Also the connect after a band change (a 4003 close read again, a
+    // notice whose bearer plays again): the reconnect tick leaves a page
+    // alone while it does not connect.
     let ws_member_id = member_id.clone();
     let ws_closures_effect = ws_closures.clone();
     let ws_fail_count_effect = ws_fail_count.clone();
@@ -90,7 +162,7 @@ pub(super) fn setup_connection(
     let disposal_guard_effect = disposal_guard.clone();
     Effect::new(move |_| {
         let member = ws_member_id();
-        if member.is_empty() {
+        if member.is_empty() || !connects.get() {
             return;
         }
 
@@ -123,9 +195,28 @@ pub(super) fn setup_connection(
             return;
         }
 
+        // #58: no socket while the band is being read or the bearer does not
+        // play in it (the connect effect opens it once they do); a page
+        // showing the notice, or not knowing the band, reads it again now
+        // and then (counted from the last read, whoever started it).
+        let now_ms = js_sys::Date::now();
+        let Some(last_read) = lineup_reads.try_with_value(|r| r.last_at) else {
+            return;
+        };
+        let Some((recheck, page_connects)) =
+            lineup.try_with_untracked(|v| (v.recheck_due(now_ms, last_read), v.connects()))
+        else {
+            return;
+        };
+        if recheck {
+            read_lineup(state, reconnect_member_id());
+        }
+        if !page_connects {
+            return;
+        }
+
         // Exponential backoff gate (reaperiem#153) and the token check after
         // MAX_WS_FAILURES failed sockets in a row: `reconnect_step`.
-        let now_ms = js_sys::Date::now();
         let step = reconnect_step(
             now_ms,
             last_reconnect_attempt_at_tick.get(),
@@ -166,6 +257,16 @@ pub(super) fn setup_connection(
             }
 
             last_reconnect_attempt_at_tick.set(now_ms);
+            // #61 review I1: in roster mode the band is read first, so a
+            // switch missed while the socket was down shows the notice
+            // instead of a socket the server refuses; the connect effect
+            // opens the socket once the answer says the bearer plays. The
+            // backoff still paces it: this runs only when a reconnect is due.
+            if lineup.try_with_untracked(LineupView::reads_before_reconnect) == Some(true) {
+                let _ = state.lineup.1.try_update(LineupView::reread);
+                read_lineup(state, member);
+                return;
+            }
             connect_websocket(
                 &member,
                 last_frame_at_tick.clone(),
@@ -439,6 +540,10 @@ fn connect_websocket(
     let set_engineer_talking = state.engineer_talking.1;
     let set_talk_id = state.talk_id.1;
     let set_console = state.console.1;
+    let set_lineup = state.lineup.1;
+    let page_state = *state;
+    let page_id = member.to_string();
+    let page_id_close = page_id.clone();
     // Without a valid token the page is on its way to the login (the auth
     // guard redirects); a socket now would only be refused.
     if crate::auth::is_token_expired() {
@@ -771,6 +876,14 @@ fn connect_websocket(
                     let _ = set_limiter_active_seconds.try_set(active_seconds);
                     let _ = set_limiter_loading.try_set(false);
                 }
+                iem_core::ServerMsg::LineupChanged(active) => {
+                    // #58: the badge names the new band at once; what the
+                    // bearer may do in it (and the bands a roster change
+                    // brought) is read again. A person's page closes with
+                    // 4003 right after this.
+                    let _ = set_lineup.try_update(|v| v.now_plays(active));
+                    read_lineup(page_state, page_id.clone());
+                }
             }
         }
     }) as Box<dyn FnMut(web_sys::MessageEvent)>);
@@ -784,21 +897,40 @@ fn connect_websocket(
     ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
     let reconnect_attempt_close = reconnect_attempt.clone();
+    let disposal_guard_close = disposal_guard.clone();
 
     // Handle close — mark disconnected and increment failure counter
     let onclose = Closure::wrap(Box::new(move |e: web_sys::CloseEvent| {
-        let _ = set_connected.try_set(false);
-        // The server refuses a page that does not speak a served protocol.
-        if e.code() == crate::handshake::CLOSE_RELOAD {
-            let now = js_sys::Date::now();
-            if crate::handshake::on_missing_hello(now, crate::handshake::last_reload())
-                == crate::handshake::Decision::Reload
-            {
-                crate::handshake::reload(now, "the server closed the socket for a reload");
+        if disposal_guard_close.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let close = on_close(e.code());
+        match close {
+            // The server refuses a page that does not speak a served protocol.
+            OnClose::Reload => {
+                let _ = set_connected.try_set(false);
+                let now = js_sys::Date::now();
+                if crate::handshake::on_missing_hello(now, crate::handshake::last_reload())
+                    == crate::handshake::Decision::Reload
+                {
+                    crate::handshake::reload(now, "the server closed the socket for a reload");
+                }
+            }
+            // #58: the band changed. The page reads it again, then connects
+            // (the connect effect) or shows the notice; it stays as it is
+            // meanwhile: no "Reconnecting", no reload, no failed socket.
+            OnClose::Lineup => {
+                let _ = set_lineup.try_update(LineupView::reread);
+                read_lineup(page_state, page_id_close.clone());
+            }
+            OnClose::Failed => {
+                let _ = set_connected.try_set(false);
             }
         }
-        fail_count_close.set(fail_count_close.get() + 1);
-        reconnect_attempt_close.set(reconnect_attempt_close.get() + 1);
+        if close.counts() {
+            fail_count_close.set(fail_count_close.get() + 1);
+            reconnect_attempt_close.set(reconnect_attempt_close.get() + 1);
+        }
     }) as Box<dyn FnMut(web_sys::CloseEvent)>);
     ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
 

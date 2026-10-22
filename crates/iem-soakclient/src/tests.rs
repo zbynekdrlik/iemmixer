@@ -439,7 +439,7 @@ fn the_origin_is_the_named_lan_url_or_with_direct_the_base() {
 fn the_socket_urls_and_the_listen_start() {
     let audio = ws_url("http://10.0.0.10:8080", "/ws/audio?token=t");
     assert_eq!(audio, "ws://10.0.0.10:8080/ws/audio?token=t");
-    assert_eq!(mixer_path("member9", "t"), "/ws/member9?token=t&proto=2");
+    assert_eq!(mixer_path("member9", "t"), "/ws/member9?token=t&proto=3");
     assert_eq!(listen_path("t"), "/ws/audio?token=t");
     let start = listen_start("member9");
     assert_eq!(start, r#"{"cmd":"ListenStart","member_id":"member9"}"#);
@@ -527,7 +527,7 @@ fn events_are_meters_audio_status_or_other() {
         assert_eq!(classify(text), Event::AudioStatus(status.to_owned()));
     }
     for other in [
-        r#"{"event":"Hello","data":{"proto":2,"build":"local","min_client_proto":2}}"#,
+        r#"{"event":"Hello","data":{"proto":3,"build":"local","min_client_proto":3}}"#,
         r#"{"event":"State","data":{"channels":[],"connected":true}}"#,
         r#"{"event":"AudioStatus","data":{}}"#,
         r#"{"event":"meters","data":{"meters":{}}}"#,

@@ -38,7 +38,7 @@ const BUILD: &str = "0123456789abcdef0123456789abcdef01234567";
 const SHORT: &str = "0123456";
 const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
 /// The two sockets, as the client must ask for them.
-const MIXER: &str = "/ws/member9?token=T&proto=2";
+const MIXER: &str = "/ws/member9?token=T&proto=3";
 const LISTEN: &str = "/ws/audio?token=T";
 const START: &str = r#"{"cmd":"ListenStart","member_id":"member9"}"#;
 const STOP: &str = r#"{"cmd":"ListenStop"}"#;
@@ -280,7 +280,7 @@ fn upgrade(stream: TcpStream, target: &str, script: &Script, report: &Report) {
 fn socket(target: &str) -> Option<(bool, &str)> {
     let mixer = target
         .strip_prefix("/ws/member9?token=")
-        .and_then(|rest| rest.strip_suffix("&proto=2"));
+        .and_then(|rest| rest.strip_suffix("&proto=3"));
     match mixer {
         Some(token) => Some((false, token)),
         None => target.strip_prefix("/ws/audio?token=").map(|t| (true, t)),
@@ -365,7 +365,7 @@ fn stream(
 /// is gone. A stalled socket sends nothing more and stays open, reading,
 /// until the client leaves (or 5 s).
 fn mixer_stream(ws: &mut Ws, stall: bool, report: &Report) {
-    let hello = r#"{"event":"Hello","data":{"proto":2,"build":"local","min_client_proto":2}}"#;
+    let hello = r#"{"event":"Hello","data":{"proto":3,"build":"local","min_client_proto":3}}"#;
     let state = r#"{"event":"State","data":{"channels":[],"connected":true}}"#;
     for text in [hello, state] {
         if ws.send(Message::text(text)).is_err() {

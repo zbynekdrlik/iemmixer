@@ -14,7 +14,7 @@
  * Current approach only caches immutable hashed files — safe across deploys.
  */
 
-import { test, expect } from "./support/fixtures";
+import { test, expect, type Page } from "./support/fixtures";
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:8080";
 
@@ -214,21 +214,62 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
 
   // The guard's and the server's alarms reach the same engineer devices (#9
   // 2026-09-28): the served worker shows each different notice on its own
-  // (the payload's tag), and a payload without one keeps the old tag.
+  // (the payload's tag), and a payload without one keeps the old tag. An
+  // alarm stays until it is tapped.
   test("push: each alarm keeps its own notification by its tag", async ({
     page,
     request,
   }) => {
     const source = await (await request.get(`${BASE_URL}/sw.js`)).text();
-    await page.goto("about:blank");
-    const shown = await page.evaluate(async (src: string) => {
-      type Shown = { title: string; body: string; tag: string };
+    const shown = await servedNotices(page, source, [
+      { type: "ALARM", title: "Guard", body: "one", tag: "iem-alarm-0000000000000001" },
+      { type: "ALARM", title: "Guard", body: "two", tag: "iem-alarm-0000000000000002" },
+      { type: "ALARM", title: "Old server", body: "no tag" },
+    ]);
+    expect(shown).toEqual([
+      { title: "Guard", body: "one", tag: "iem-alarm-0000000000000001", requireInteraction: true },
+      { title: "Guard", body: "two", tag: "iem-alarm-0000000000000002", requireInteraction: true },
+      { title: "Old server", body: "no tag", tag: "iem-alarm", requireInteraction: true },
+    ]);
+  });
+
+  // A band switch (#58): the server pushes {"type":"LINEUP","name":…} to the
+  // engineer's devices. The worker names the band that plays now, in Slovak,
+  // instead of the generic "New alert"; it asks for nothing, so it does not
+  // wait for a tap, and the next switch replaces it (one tag).
+  test("push: a band switch names the band that plays now", async ({ page, request }) => {
+    const source = await (await request.get(`${BASE_URL}/sw.js`)).text();
+    const shown = await servedNotices(page, source, [
+      { type: "LINEUP", name: "Youth band" },
+      { type: "LINEUP", name: "Main band" },
+      { type: "LINEUP" },
+    ]);
+    expect(shown).toEqual([
+      { title: "Zmena kapely", body: "Teraz hrá Youth band.", tag: "iem-lineup", requireInteraction: false },
+      { title: "Zmena kapely", body: "Teraz hrá Main band.", tag: "iem-lineup", requireInteraction: false },
+      { title: "Zmena kapely", body: "Teraz hrá iná kapela.", tag: "iem-lineup", requireInteraction: false },
+    ]);
+  });
+});
+
+/** A notification as the served worker shows it. */
+type Notice = { title: string; body: string; tag: string; requireInteraction: boolean };
+
+/**
+ * Runs the served worker's push handler for each payload in turn (on a
+ * blank page, with a stand-in for its registration) and returns what it
+ * shows.
+ */
+async function servedNotices(page: Page, source: string, payloads: unknown[]): Promise<Notice[]> {
+  await page.goto("about:blank");
+  return page.evaluate(
+    async ({ src, pushes }) => {
       type PushEvent = {
         data: { json: () => unknown };
         waitUntil: (p: Promise<unknown>) => void;
       };
       const handlers: Record<string, (e: PushEvent) => void> = {};
-      const out: Shown[] = [];
+      const out: { title: string; body: string; tag: string; requireInteraction: boolean }[] = [];
       const worker = {
         addEventListener: (type: string, fn: (e: PushEvent) => void) => {
           handlers[type] = fn;
@@ -236,30 +277,23 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
         registration: {
           showNotification: async (
             title: string,
-            opts: { body: string; tag: string },
+            opts: { body: string; tag: string; requireInteraction?: boolean },
           ) => {
-            out.push({ title, body: opts.body, tag: opts.tag });
+            out.push({ title, body: opts.body, tag: opts.tag, requireInteraction: opts.requireInteraction === true });
           },
         },
       };
       new Function("self", src)(worker);
-      const push = async (payload: unknown) => {
+      for (const payload of pushes) {
         const waits: Promise<unknown>[] = [];
         handlers["push"]({
           data: { json: () => payload },
           waitUntil: (p) => waits.push(p),
         });
         await Promise.all(waits);
-      };
-      await push({ type: "ALARM", title: "Guard", body: "one", tag: "iem-alarm-0000000000000001" });
-      await push({ type: "ALARM", title: "Guard", body: "two", tag: "iem-alarm-0000000000000002" });
-      await push({ type: "ALARM", title: "Old server", body: "no tag" });
+      }
       return out;
-    }, source);
-    expect(shown).toEqual([
-      { title: "Guard", body: "one", tag: "iem-alarm-0000000000000001" },
-      { title: "Guard", body: "two", tag: "iem-alarm-0000000000000002" },
-      { title: "Old server", body: "no tag", tag: "iem-alarm" },
-    ]);
-  });
-});
+    },
+    { src: source, pushes: payloads },
+  );
+}

@@ -185,7 +185,7 @@ pub(super) fn GlobalVolumeFader(
                 let mut classes = vec!["channel", "global-volume"];
                 if muted.get() { classes.push("muted"); }
                 if !connected.get() { classes.push("disconnected"); }
-                if is_fader_active.get() { classes.push("fader-active"); }
+                if is_fader_active.try_get().unwrap_or(false) { classes.push("fader-active"); }
                 classes.join(" ")
             }
             data-testid="global-volume-fader"
@@ -417,7 +417,7 @@ pub(super) fn StemsVolumeFader(
                     let mut classes = vec!["channel", "stems-volume"];
                     if muted.get() { classes.push("muted"); }
                     if !connected.get() { classes.push("disconnected"); }
-                    if is_fader_active.get() { classes.push("fader-active"); }
+                    if is_fader_active.try_get().unwrap_or(false) { classes.push("fader-active"); }
                     classes.join(" ")
                 }
                 data-testid="stems-volume-fader"
@@ -858,7 +858,7 @@ pub(super) fn ChannelList(
                                 if muted_signal.get() { classes.push("muted"); }
                                 if is_my { classes.push("more-me"); }
                                 if !is_connected() { classes.push("disconnected"); }
-                                if is_fader_active.get() { classes.push("fader-active"); }
+                                if is_fader_active.try_get().unwrap_or(false) { classes.push("fader-active"); }
                                 if open_menu.get() == Some(id) { classes.push("menu-open"); }
                                 classes.join(" ")
                             }

@@ -120,9 +120,9 @@ mod tests {
     fn the_mixer_url_carries_the_protocol() {
         assert_eq!(
             mixer_ws_url("wss", "mixer.example.org", "member3", "tok"),
-            "wss://mixer.example.org/ws/member3?token=tok&proto=2"
+            "wss://mixer.example.org/ws/member3?token=tok&proto=3"
         );
-        assert_eq!(OUR_PROTO, 2);
+        assert_eq!(OUR_PROTO, iem_core::UI_PROTO);
         assert_eq!(HELLO_TIMEOUT_MS, 3_000.0);
     }
 }

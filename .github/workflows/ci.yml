@@ -301,13 +301,19 @@ jobs:
           set -euo pipefail
           npm ci
           npx playwright install --with-deps chromium
-      - name: Provision the synthetic site and per-run PINs
+      - name: Provision the synthetic site, its roster and per-run PINs
+        # Roster mode (#58): the test roster beside the site file, so every
+        # spec runs with the lineups `main` (playing at the start) and
+        # `youth`; lineups.spec.ts switches and switches back. Every roster
+        # person gets the member PIN, the engineer the engineer PIN.
         run: |
           set -euo pipefail
           site_dir="$RUNNER_TEMP/site"
           mkdir -p "$site_dir"
           cp config/test-site.toml "$site_dir/iemmixer.toml"
+          cp config/test-roster.toml "$site_dir/roster.toml"
           export IEMMIXER_CONFIG="$site_dir/iemmixer.toml"
+          ./target/release/iem-server roster check "$site_dir/roster.toml"
           read -r eng mem < <(python3 -c 'import random; a, b = random.SystemRandom().sample(range(10000), 2); print(f"{a:04d} {b:04d}")')
           echo "::add-mask::$eng"
           echo "::add-mask::$mem"
@@ -317,9 +323,9 @@ jobs:
             echo "E2E_MEMBER_PIN=$mem"
           } >> "$GITHUB_ENV"
           printf '%s\n' "$eng" | ./target/release/iem-server pin set-engineer
-          members="$(python3 -c 'import sys, tomllib; site = tomllib.load(open(sys.argv[1], "rb")); print(" ".join(m["id"] for m in site["members"] if m["id"] != "engineer"))' "$IEMMIXER_CONFIG")"
-          for member in $members; do
-            printf '%s\n' "$mem" | ./target/release/iem-server pin set-member "$member"
+          people="$(python3 -c 'import sys, tomllib; roster = tomllib.load(open(sys.argv[1], "rb")); print(" ".join(m["id"] for m in roster["people"]))' "$site_dir/roster.toml")"
+          for person in $people; do
+            printf '%s\n' "$mem" | ./target/release/iem-server pin set-member "$person"
           done
       - name: Start the engine (NullRt, 1 kHz test sine) and the server
         env:
@@ -339,7 +345,14 @@ jobs:
           done
           IEMMIXER_ENGINE_PIPE="$pipe" nohup ./target/release/iem-server > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8080/api/version > /dev/null; then echo "server ready after ${i}s"; exit 0; fi
+            if curl -sf http://127.0.0.1:8080/api/version > /dev/null; then echo "server ready after ${i}s"; break; fi
+            if [ "$i" -eq 30 ]; then cat "$RUNNER_TEMP/engine.log" "$RUNNER_TEMP/server.log"; exit 1; fi
+            sleep 1
+          done
+          # Roster mode: page changes are refused until the roster reached
+          # the engine's states (roster_watch::settle, once the engine synced).
+          for i in $(seq 1 30); do
+            if grep -q "the roster reached the states" "$RUNNER_TEMP/server.log"; then echo "roster settled after ${i}s"; exit 0; fi
             sleep 1
           done
           cat "$RUNNER_TEMP/engine.log" "$RUNNER_TEMP/server.log"

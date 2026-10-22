@@ -12,6 +12,8 @@ use crate::components::talk_button::TalkState;
 use leptos::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+use super::helpers::{LineupReads, LineupView};
+
 /// A read/write signal pair as returned by `signal()`. Named so the fields
 /// below stay readable (and under clippy's `type_complexity` threshold).
 pub(super) type SignalPair<T> = (ReadSignal<T>, WriteSignal<T>);
@@ -70,6 +72,11 @@ pub(super) struct MixerState {
     /// Internet access (Cloudflare tunnel) status from the server (reaperiem#202);
     /// `None` until the first `TunnelStatus` message arrives.
     pub tunnel: SignalPair<Option<iem_core::TunnelStatusInfo>>,
+    /// The band that plays and what the bearer may do (#58), from
+    /// `/api/lineup`: the page connects only once it is known.
+    pub lineup: SignalPair<LineupView>,
+    /// The page's numbered reads of `/api/lineup` (#61 review M3).
+    pub lineup_reads: StoredValue<LineupReads>,
     pub ws: SignalPair<Option<web_sys::WebSocket>>,
 }
 
@@ -220,6 +227,8 @@ impl MixerState {
             console: signal(None),
             engineer_talking: signal(false),
             tunnel: signal(None),
+            lineup: signal(LineupView::Reading),
+            lineup_reads: StoredValue::new(LineupReads::default()),
             ws: signal(None),
         }
     }

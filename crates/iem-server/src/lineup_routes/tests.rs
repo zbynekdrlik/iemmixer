@@ -40,10 +40,12 @@ async fn the_lineup_tells_the_bearer_what_they_may_do() {
     let dir = tempfile::tempdir().unwrap();
     let (state, api) = app(dir.path());
     assert_eq!(get(&api, None).await.0, StatusCode::UNAUTHORIZED);
+    // Legacy mode: no band to tell of, and no error status (a browser
+    // logs every 4xx answer in its console, on every page load).
     let (status, json) = get(&api, Some(&token("member1", false))).await;
     assert_eq!(
-        (status, json["code"].as_str()),
-        (StatusCode::NOT_FOUND, Some("NOT_CONFIGURED")),
+        (status, json),
+        (StatusCode::NO_CONTENT, serde_json::Value::Null),
         "legacy mode"
     );
     state.set_roster(Some(test_roster("youth")));
@@ -77,6 +79,79 @@ async fn the_lineup_tells_the_bearer_what_they_may_do() {
         assert_eq!(flags(&json), want, "{who}");
         assert_eq!(json["lineups"], lineups(), "{who}");
     }
+}
+
+async fn get_page(api: &Router, bearer: &str, page: &str) -> (StatusCode, serde_json::Value) {
+    let uri = format!("/api/lineup?page={page}");
+    call(api, Method::GET, &uri, Some(bearer), None).await
+}
+
+/// #61 review I2: `?page=<id>` asks whether that page's person plays now,
+/// so the engineer on a person's page (a dimmed tile, or `/member1` kept
+/// open across a switch) gets the notice, not a socket the server refuses.
+/// `/engineer` and a page without a person always play; a person's own
+/// page answers as without `page`. Only the engineer may ask about another
+/// page, as only the engineer may open it (#61 second review m1; anyone
+/// else: 403); a page the site lacks is 404.
+#[tokio::test]
+async fn the_lineup_of_a_page_says_whether_its_person_plays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, legacy) = app(dir.path());
+    let eng = token("engineer", true);
+    assert_eq!(
+        get_page(&legacy, &eng, "member2").await,
+        (StatusCode::NO_CONTENT, serde_json::Value::Null),
+        "legacy mode: no band, whatever the page"
+    );
+    state.set_roster(Some(test_roster("youth")));
+    let (engine, mut peer) = fake::announced(test_topology()).await;
+    state.engine = engine;
+    fake::sync(&state.engine, &mut peer, 1, MixState::default()).await;
+    let api = router(state.clone());
+    let playing = |json: &serde_json::Value| json["playing"].as_bool().unwrap();
+    for (page, plays) in [
+        ("member2", false),
+        ("member1", false),
+        ("member10", true),
+        ("member3", true),
+        ("engineer", true),
+        ("translator", true),
+    ] {
+        let (status, json) = get_page(&api, &eng, page).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(playing(&json), plays, "{page}");
+        // What the bearer may do stays the bearer's.
+        assert!(json["can_switch"].as_bool().unwrap(), "{page}");
+        assert!(!json["leader"].as_bool().unwrap(), "{page}");
+        assert_eq!(json["active"]["id"], "youth", "{page}");
+    }
+    // A person's own page: as without `page`.
+    let (status, json) = get_page(&api, &token("member2", false), "member2").await;
+    assert_eq!((status, playing(&json)), (StatusCode::OK, false));
+    let (status, json) = get_page(&api, &token("member10", false), "member10").await;
+    assert_eq!((status, playing(&json)), (StatusCode::OK, true));
+    // Anyone but the engineer asking about another page: 403, as opening
+    // that page (#61 second review m1), leaders too (member1 leads main,
+    // member3 leads youth).
+    for (who, page) in [
+        ("member1", "member10"),
+        ("member3", "member2"),
+        ("member10", "member2"),
+        ("member2", "engineer"),
+    ] {
+        let (status, json) = get_page(&api, &token(who, false), page).await;
+        assert_eq!(
+            (status, json["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("FORBIDDEN")),
+            "{who} on {page}"
+        );
+    }
+    // A page the site does not have.
+    let (status, _) = get_page(&api, &eng, "ghost").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Without `page`: the bearer's, as before.
+    let (status, json) = get(&api, Some(&eng)).await;
+    assert_eq!((status, playing(&json)), (StatusCode::OK, true));
 }
 
 #[test]
