@@ -1,7 +1,9 @@
 """`iempc dante-labels --roster PATH [--site PATH] [--before PATH]` (#58
 plan Task 15, design §10): the IEM card's Dante channel labels for the main
-lineup, as a sheet the owner types into Dante Controller. Outcome B of the
-plan's Step 1 spike: nothing here talks to the PC or to a Dante device.
+lineup, as a sheet the owner types into Dante Controller on the PC. Outcome
+B of the plan's Step 1 spike (#62): the IEM card cannot be reached from the
+dev box, so nothing here talks to the PC or to a Dante device, and there is
+no `--apply`.
 
 The labels that name a person, and only those (the engineer's and the
 translator's outputs, HIL's spare outputs and the inputs nobody owns keep
@@ -12,8 +14,9 @@ so Dante Controller's matrix lines up):
   `NAME inear L NN` and `NAME inear R NN`;
 - each input the main lineup gives an owner: its RX channel `NN NAME type`,
   a stereo input's two `NN NAME type L|R`; `type` is the last word of the
-  lineup's own label for the input when that is a short lower-case word
-  (`gtr` in `MEMBER4 gtr`), else `mic`.
+  lineup's own label for the input, folded like NAME and lower-cased, when
+  that is then a short word (`gtr` in `MEMBER4 gtr`, `vocals` in `MEMBER2
+  Vocals`), else `mic`.
 
 NAME is the person's name in ASCII capitals: diacritics dropped, other
 letters outside ASCII and Dante's `= . @` left out, spaces collapsed. NN is
@@ -37,9 +40,7 @@ printed on this box only, never committed, never posted (P6).
 
 Dev time and locked (iempc's Spec): refused while the EVENT-NOW flag exists,
 since the renames it is for happen only in dev time with the owner ready to
-remake the listed subscriptions. `write_labels` is the seam a `--apply`
-writer plugs into if the spike shows a tool can write the card (outcome A);
-none is built.
+remake the listed subscriptions.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
@@ -71,20 +72,17 @@ class Label:
     shortened: bool = False
 
 
-def write_labels(labels: list[Label]) -> None:
-    """The seam of `dante-labels --apply` (outcome A of plan Task 15's Step 1
-    spike): writes `labels` onto the IEM card's own channels, touching no
-    other device and no subscription. Not built: the spike decides whether a
-    tool can write the card at all."""
-    raise NotImplementedError("dante-labels --apply is not built: plan Task 15's Step 1 spike decides it")
+def plain(text: str) -> str:
+    """`text` in what a Dante label holds: NFKD splits a letter from its
+    diacritics, which the ASCII filter then drops with every other letter
+    outside ASCII, a control character and Dante's `= . @`."""
+    return "".join(c for c in unicodedata.normalize("NFKD", text)
+                   if c.isascii() and c.isprintable() and c not in FORBIDDEN)
 
 
 def caps(name: str, person: str) -> str:
-    """NAME: the person's name in ASCII capitals (see the module docs). NFKD
-    splits a letter from its diacritics, which the ASCII filter then drops."""
-    plain = unicodedata.normalize("NFKD", name)
-    kept = "".join(c for c in plain if c.isascii() and c.isprintable() and c not in FORBIDDEN)
-    out = " ".join(kept.upper().split())
+    """NAME: the person's name in ASCII capitals, spaces collapsed."""
+    out = " ".join(plain(name).upper().split())
     if not out:
         raise SheetError(f"person '{person}': the name holds no letter a Dante label can hold")
     return out
@@ -99,8 +97,11 @@ def fit(head: str, name: str, tail: str) -> tuple[str, bool]:
 
 
 def type_word(label: str) -> str:
+    """The input's type: its label's last word folded like NAME and lower-cased,
+    when the label has two words or more and the word is then a short one."""
     words = label.split()
-    return words[-1] if len(words) > 1 and TYPE.fullmatch(words[-1]) else DEFAULT_TYPE
+    last = plain(words[-1]).lower() if words else ""
+    return last if len(words) > 1 and TYPE.fullmatch(last) else DEFAULT_TYPE
 
 
 def _table(doc, key: str, what: str) -> dict:

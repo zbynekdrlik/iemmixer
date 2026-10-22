@@ -165,8 +165,8 @@ class DanteLabelsCommandTests(Base):
         shutil.copy(CONFIG / "test-site.toml", self.site_dir / "site.toml")
 
     def test_apply_refuses_while_event_now(self) -> None:
-        # --apply (outcome A of the Step 1 spike) is not built; the command's event lock it
-        # would sit behind is: dev time and locked, so no label is written during an event.
+        # The plan's name; outcome B (#62) built no --apply. The sheet is what the owner applies by
+        # hand, so the command is dev time and locked: no sheet, and no rename, during an event.
         spec = ip.COMMANDS["dante-labels"]
         self.assertEqual((spec.fn, spec.pc, spec.dev_time, spec.locked), (ip.cmd_dante_labels, False, True, True))
         self.flag()
