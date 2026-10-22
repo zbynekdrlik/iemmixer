@@ -82,17 +82,29 @@ pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupI
     }
 }
 
-/// The URL that reads the band for the page `page`.
+/// The URL that reads the band for the page `page` (#61 review I2: whether
+/// THAT page's person plays, so the engineer on a person's page gets the
+/// notice when that person does not). Anything but an id's characters is
+/// percent-encoded (the page comes from the route, which anyone can type).
 pub fn lineup_url(page: &str) -> String {
-    let _ = page;
-    format!("{API_BASE}/lineup")
+    use std::fmt::Write as _;
+    let mut query = String::with_capacity(page.len());
+    for b in page.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+            query.push(char::from(b));
+        } else {
+            let _ = write!(query, "%{b:02X}");
+        }
+    }
+    format!("{API_BASE}/lineup?page={query}")
 }
 
-/// `GET /api/lineup` (#58): which band plays and what the signed-in person
-/// may do; `None` on a site without a roster. A read that has not answered
-/// after [`NETWORK_TIMEOUT_MS`] is aborted, an error (#61 review C2: a read
-/// that hangs never leaves the page without a band).
-pub async fn get_lineup() -> Result<Option<iem_core::LineupInfo>, ApiError> {
+/// `GET /api/lineup?page=<page>` (#58): which band plays, whether the page
+/// `page` plays in it, and what the signed-in person may do; `None` on a
+/// site without a roster. A read that has not answered after
+/// [`NETWORK_TIMEOUT_MS`] is aborted, an error (#61 review C2: a read that
+/// hangs never leaves the page without a band).
+pub async fn get_lineup(page: &str) -> Result<Option<iem_core::LineupInfo>, ApiError> {
     let failed = |code: &str, message: String| ApiError {
         code: code.to_string(),
         message,
@@ -109,7 +121,7 @@ pub async fn get_lineup() -> Result<Option<iem_core::LineupInfo>, ApiError> {
             NETWORK_TIMEOUT_MS,
         );
     }
-    let resp = Request::get(&format!("{API_BASE}/lineup"))
+    let resp = Request::get(&lineup_url(page))
         .header("Authorization", &format!("Bearer {token}"))
         .abort_signal(Some(&controller.signal()))
         .send()

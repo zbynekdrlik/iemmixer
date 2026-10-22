@@ -163,7 +163,7 @@ pub fn MixerPage() -> impl IntoView {
                 .cloned()
         })
     });
-    let on_switched = Callback::new(move |_: ()| connection::read_lineup(state));
+    let on_switched = Callback::new(move |_: ()| connection::read_lineup(state, member_id()));
 
     // Check if member has photo on mount (reaperiem#16)
     // Use try_set (via state method) to guard against disposal race — if the

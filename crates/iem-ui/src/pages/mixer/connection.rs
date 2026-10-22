@@ -29,9 +29,11 @@ use super::state::MixerState;
 
 /// Reads `/api/lineup` into the page's view of the band (#58); a failed read
 /// keeps what the page knew (`LineupView::apply`), and an answer older than
-/// one the view took is dropped (`LineupReads`). A page that does not
-/// connect now (its bearer does not play) shows no connection.
-pub(super) fn read_lineup(state: MixerState) {
+/// one the view took is dropped (`LineupReads`). It asks whether the page
+/// `page` plays (#61 review I2: the engineer on a person's page). A page
+/// that does not connect now (its person does not play) shows no
+/// connection.
+pub(super) fn read_lineup(state: MixerState, page: String) {
     let set_lineup = state.lineup.1;
     let set_connected = state.connected.1;
     let reads = state.lineup_reads;
@@ -39,7 +41,7 @@ pub(super) fn read_lineup(state: MixerState) {
         return;
     };
     wasm_bindgen_futures::spawn_local(async move {
-        let answer = crate::api::get_lineup().await;
+        let answer = crate::api::get_lineup(&page).await;
         if reads.try_update_value(|r| r.take(seq)) != Some(true) {
             return;
         }
@@ -119,7 +121,7 @@ pub(super) fn setup_connection(
     // without a roster connects as before. `connects` changes only when an
     // answer changes whether the page connects, so a new band's name (the
     // engineer's page) never reconnects.
-    read_lineup(state);
+    read_lineup(state, member_id());
     let lineup = state.lineup.0;
     let lineup_reads = state.lineup_reads;
     let connects = Memo::new(move |_| lineup.with(LineupView::connects));
@@ -185,7 +187,7 @@ pub(super) fn setup_connection(
             return;
         };
         if recheck {
-            read_lineup(state);
+            read_lineup(state, reconnect_member_id());
         }
         if !page_connects {
             return;
@@ -240,7 +242,7 @@ pub(super) fn setup_connection(
             // backoff still paces it: this runs only when a reconnect is due.
             if lineup.try_with_untracked(LineupView::reads_before_reconnect) == Some(true) {
                 let _ = state.lineup.1.try_update(LineupView::reread);
-                read_lineup(state);
+                read_lineup(state, member);
                 return;
             }
             connect_websocket(
@@ -518,6 +520,8 @@ fn connect_websocket(
     let set_console = state.console.1;
     let set_lineup = state.lineup.1;
     let page_state = *state;
+    let page_id = member.to_string();
+    let page_id_close = page_id.clone();
     // Without a valid token the page is on its way to the login (the auth
     // guard redirects); a socket now would only be refused.
     if crate::auth::is_token_expired() {
@@ -856,7 +860,7 @@ fn connect_websocket(
                     // brought) is read again. A person's page closes with
                     // 4003 right after this.
                     let _ = set_lineup.try_update(|v| v.now_plays(active));
-                    read_lineup(page_state);
+                    read_lineup(page_state, page_id.clone());
                 }
             }
         }
@@ -895,7 +899,7 @@ fn connect_websocket(
             // meanwhile: no "Reconnecting", no reload, no failed socket.
             OnClose::Lineup => {
                 let _ = set_lineup.try_update(LineupView::reread);
-                read_lineup(page_state);
+                read_lineup(page_state, page_id_close.clone());
             }
             OnClose::Failed => {
                 let _ = set_connected.try_set(false);
