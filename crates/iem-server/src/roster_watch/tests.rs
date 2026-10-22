@@ -837,6 +837,38 @@ async fn the_rules_reach_the_running_state_after_the_start() {
     );
 }
 
+/// #58, the owner's look at the live system: the rules silence a departed
+/// person's set (member9: no lineup lists it, the site's legacy members
+/// still name it) as any set nobody wears, and record it, so it sounds
+/// again only once a roster puts someone on it. The engineer's and the
+/// translator's mixes are no person's set and stay as they were.
+#[tokio::test]
+async fn the_rules_silence_a_departed_persons_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(
+        d.join(ROSTER_FILE),
+        crate::roster_state::tests::departed_text(),
+    )
+    .unwrap();
+    LineupStore::new(d).set_active("youth", 1).unwrap();
+    let mut state = AppState::new(test_config(), d);
+    let mut peer = synced(&mut state, running()).await;
+    let settle = tokio::spawn(settle_when_synced(state.clone()));
+    let imported = imports(&mut peer).await;
+    within(settle).await;
+    let muted = |id: &str| imported.mixes[&MixId::new(id)].out.muted;
+    assert!(muted("member9"), "member9 left: nobody wears their set");
+    assert!(muted("member2"), "nobody wears set member2 in youth");
+    for kept in ["member1", "member3", "member4", "engineer", "translator"] {
+        assert!(!muted(kept), "{kept}");
+    }
+    let running = LineupStore::new(d).running().unwrap().unwrap();
+    assert!(running.silenced.contains("member9"), "{running:?}");
+    assert!(!running.silenced.contains("engineer"));
+    assert!(!running.silenced.contains("translator"));
+}
+
 /// #58 review: a legacy server that adopts its first roster with the
 /// engine synced puts the main lineup's rules into the running state.
 #[tokio::test]
