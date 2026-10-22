@@ -590,7 +590,11 @@ fn only_a_leader_sees_and_moves_heard_mixes() {
     let m = Mirror::default();
     let p10 = page(&v, "member10");
     let me = member("member10");
-    assert_eq!(channels(&v, &m, &p10, &me).len(), 24, "no Mixes tab");
+    assert_eq!(
+        channels(&v, &m, &p10, &me).len(),
+        24 - 7,
+        "no Mixes tab, no other band's people's inputs"
+    );
     let set = |id: &str| ClientMsg::SetLevel {
         id: id.into(),
         level_db: -6.0,
@@ -757,6 +761,191 @@ fn a_departed_persons_set_is_no_mixes_channel() {
     assert_eq!(on_eng.len(), 9);
     assert!(on_eng.contains(&"member9".to_string()));
     assert!(command(&legacy, &m, &p1, &member("member1"), &set9).is_ok());
+}
+
+/// #58, owner option 1: a person's page shows the inputs of the playing
+/// lineup's people and the shared ones (hand mics, stems, tech, the
+/// engineer's mic); another lineup's people's inputs and a departed
+/// person's are not on it, and no level, mute, pan, solo or EQ reaches
+/// them from it (they are the engineer's, as a heard mix is a leader's).
+/// The engineer sees every input on any page. Youth plays: main's people
+/// member2, member4 (mic5, their guitar) and member5 … member9 do not.
+#[test]
+fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
+    let m = Mirror::default();
+    let build = |r: &crate::roster_state::RosterState| {
+        let (v, problems) = SiteView::build_with(
+            &crate::site_view::tests::test_config(),
+            Some(r),
+            &crate::site_view::tests::test_topology(),
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        v
+    };
+    let inputs = |v: &SiteView, p: &Page, viewer: &Viewer| -> Vec<String> {
+        channels(v, &m, p, viewer)
+            .into_iter()
+            .filter(|c| c.category != "mixes")
+            .map(|c| c.id)
+            .collect()
+    };
+    let every = |v: &SiteView| -> Vec<String> { v.inputs.iter().map(|i| i.id.0.clone()).collect() };
+    let but = |v: &SiteView, hidden: &[&str]| -> Vec<String> {
+        every(v)
+            .into_iter()
+            .filter(|i| !hidden.contains(&i.as_str()))
+            .collect()
+    };
+    let youth = build(&crate::roster_state::tests::test_roster("youth"));
+    let shown = but(
+        &youth,
+        &["mic2", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10"],
+    );
+    assert_eq!(shown.len(), 17);
+    for id in [
+        "mic1", "mic3", "mic4", "hand1", "hand3", "eng_mic", "keys", "content", "drums", "bgvs",
+    ] {
+        assert!(shown.contains(&id.to_string()), "{id}");
+    }
+    let p10 = page(&youth, "member10");
+    let me = member("member10");
+    assert_eq!(inputs(&youth, &p10, &me), shown);
+    assert_eq!(
+        inputs(&youth, &page(&youth, "member3"), &member("member3")),
+        shown,
+        "a leader's page too"
+    );
+    // member10's own channel (first on Main) is youth's mic1.
+    let own: Vec<String> = channels(&youth, &m, &p10, &me)
+        .into_iter()
+        .filter(|c| c.own)
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(own, ["mic1"]);
+    // The engineer sees every input, on their page and on a person's.
+    for p in ["engineer", "member10", "translator"] {
+        assert_eq!(
+            inputs(&youth, &page(&youth, p), &engineer()),
+            every(&youth),
+            "{p}"
+        );
+    }
+    // Nothing reaches another band's person's input from a person's page.
+    let not_here = Err(ViewError::Forbidden(
+        "the inputs of people who do not play are the engineer's",
+    ));
+    let level = |id: &str| ClientMsg::SetLevel {
+        id: id.into(),
+        level_db: 0.0,
+    };
+    for msg in [
+        level("mic2"),
+        ClientMsg::SetMute {
+            id: "mic5".into(),
+            muted: false,
+        },
+        ClientMsg::SetPan {
+            id: "mic10".into(),
+            pan: 0.5,
+        },
+        ClientMsg::SetSolo {
+            soloed: vec!["mic1".into(), "mic2".into()],
+        },
+    ] {
+        assert_eq!(command(&youth, &m, &p10, &me, &msg), not_here, "{msg:?}");
+    }
+    assert!(matches!(
+        eq_target(&youth, &p10, &me, "mic2"),
+        Err(ViewError::Forbidden(_))
+    ));
+    assert!(
+        command(&youth, &m, &p10, &me, &level("keys")).is_ok(),
+        "shared"
+    );
+    assert!(
+        command(&youth, &m, &p10, &me, &level("mic3")).is_ok(),
+        "member3 plays in youth"
+    );
+    assert!(
+        command(&youth, &m, &p10, &engineer(), &level("mic2")).is_ok(),
+        "the engineer's"
+    );
+    // A change of a hidden input reaches only the engineer's view.
+    let change = [Change::Level {
+        mix: mix("member1"),
+        source: input("mic2"),
+        level: Level {
+            gain_db: -3.0,
+            pan: 0.0,
+            muted: false,
+        },
+    }];
+    assert!(updates_seen(&youth, &m, &p10, &me, &change).is_empty());
+    assert!(updates_for(&youth, &m, &p10, &change).is_empty());
+    assert_eq!(
+        updates_seen(&youth, &m, &p10, &engineer(), &change).len(),
+        1
+    );
+    // A solo sends again the channels the page shows, no other.
+    let solo = [Change::Solo {
+        mix: mix("member1"),
+        sources: vec![input("mic1")],
+    }];
+    let resent: Vec<String> = updates_seen(&youth, &m, &p10, &me, &solo)
+        .into_iter()
+        .filter_map(|u| match u {
+            ServerMsg::ChannelUpdate { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resent, shown);
+    // Main plays: each of main's people's inputs is on every person's page.
+    let main = build(&crate::roster_state::tests::test_roster("main"));
+    assert_eq!(
+        inputs(&main, &page(&main, "member2"), &member("member2")),
+        every(&main)
+    );
+    // member9 left: their mic10 (the site's member9's, no lineup's) is on
+    // no person's page, whichever lineup plays; the engineer still has it.
+    for active in ["main", "youth"] {
+        let gone = build(&crate::roster_state::tests::departed_roster(active));
+        let (p, who) = if active == "main" {
+            ("member2", "member2")
+        } else {
+            ("member10", "member10")
+        };
+        let on = page(&gone, p);
+        let seen = inputs(&gone, &on, &member(who));
+        assert!(!seen.contains(&"mic10".to_string()), "{active}");
+        assert!(seen.contains(&"keys".to_string()), "{active}");
+        assert_eq!(inputs(&gone, &on, &engineer()), every(&gone), "{active}");
+        assert_eq!(
+            command(&gone, &m, &on, &member(who), &level("mic10")),
+            not_here,
+            "{active}"
+        );
+    }
+    let gone = build(&crate::roster_state::tests::departed_roster("main"));
+    assert_eq!(
+        inputs(&gone, &page(&gone, "member2"), &member("member2")),
+        but(&gone, &["mic10"])
+    );
+    // Legacy: every input on every page.
+    let legacy = test_view();
+    assert_eq!(
+        inputs(&legacy, &page(&legacy, "member2"), &member("member2")),
+        every(&legacy)
+    );
+    assert!(
+        command(
+            &legacy,
+            &m,
+            &page(&legacy, "member2"),
+            &member("member2"),
+            &level("mic10")
+        )
+        .is_ok()
+    );
 }
 
 /// #58: without a roster the rule is today's: a member whose mix hears

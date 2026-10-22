@@ -275,6 +275,15 @@ test.describe("Bands (#58)", () => {
     await expect(strip(page, "member1")).toBeVisible();
     await expect(strip(page, "member4")).toBeVisible();
     await expect(strip(page, "member2")).toHaveCount(0);
+    // Its Mics tab shows youth's people's inputs and the shared ones, never
+    // main's people's who do not play in youth (#58, owner option 1).
+    await tab(page, "Mics");
+    await expect(strip(page, "mic3")).toBeVisible();
+    await expect(strip(page, "mic1")).toBeVisible();
+    await expect(strip(page, "keys")).toBeVisible();
+    await expect(strip(page, "mic2")).toHaveCount(0);
+    await expect(strip(page, "mic5")).toHaveCount(0);
+    await expect(strip(page, "mic10")).toHaveCount(0);
 
     // member1's open page shows the notice in place of the mixer, without a
     // reload, a spinner, "Reconnecting..." or an error in its console.
