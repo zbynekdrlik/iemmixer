@@ -1,7 +1,11 @@
-//! The UI ↔ server WebSocket protocol, version 2 (S5 design note §5): the
+//! The UI ↔ server WebSocket protocol, version 3 (S5 design note §5): the
 //! mixer page's messages keyed by engine ids (an input or a heard mix; one
 //! namespace) instead of REAPER track numbers. Client commands carry a `cmd`
 //! tag, server events an `event` tag with their fields under `data`.
+//! Version 3 (#58) adds [`ServerMsg::LineupChanged`] and the close 4003
+//! (the band changed: read `/api/lineup` again, never reload); a page of
+//! version 2 knows neither, so the server serves 3 only and such a page
+//! reloads once, at the deploy (#61 review M4).
 //!
 //! Handshake (program spec §5.3): the page connects with `proto=UI_PROTO`;
 //! the server's first message is [`ServerMsg::Hello`]; a page whose protocol
@@ -15,9 +19,9 @@ use crate::lineup::LineupRef;
 use crate::tunnel::TunnelStatusInfo;
 
 /// The UI protocol this build speaks.
-pub const UI_PROTO: u16 = 2;
+pub const UI_PROTO: u16 = 3;
 /// The oldest UI protocol this server serves.
-pub const MIN_CLIENT_PROTO: u16 = 2;
+pub const MIN_CLIENT_PROTO: u16 = 3;
 
 /// One EQ band in the UI's terms (F11): the engine's values, no REAPER
 /// normalisation. `band_type` is "highpass", "lowshelf", "band" or "highshelf".
@@ -577,7 +581,7 @@ mod tests {
         );
         assert_eq!(
             hello,
-            r#"{"event":"Hello","data":{"proto":2,"build":"2.0.0-dev.7","min_client_proto":2}}"#
+            r#"{"event":"Hello","data":{"proto":3,"build":"2.0.0-dev.7","min_client_proto":3}}"#
         );
         round_trip_server(
             ServerMsg::Meters {
@@ -783,7 +787,7 @@ mod tests {
                     build: "2.0.0-dev.7".into(),
                     min_client_proto: MIN_CLIENT_PROTO,
                 },
-                r#"{"event":"Hello","data":{"proto":2,"build":"2.0.0-dev.7","min_client_proto":2}}"#,
+                r#"{"event":"Hello","data":{"proto":3,"build":"2.0.0-dev.7","min_client_proto":3}}"#,
             ),
             (
                 ServerMsg::State {

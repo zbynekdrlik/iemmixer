@@ -1,7 +1,7 @@
 //! Mixer page with faders, meters, categories, and presets
 //!
 //! Uses WebSocket for real-time bidirectional communication with the server
-//! (UI protocol v2: channels keyed by engine ids).
+//! (UI protocol v3: channels keyed by engine ids, the band's changes).
 
 use crate::components::alert_toast::AlertToast;
 use crate::components::category_tabs::{Category, CategoryTabs};

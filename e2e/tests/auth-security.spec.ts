@@ -253,7 +253,7 @@ test.describe("Cross-member access prevention (#77)", () => {
     expect(engineer).not.toBeNull();
     // Opened from the test runner: it sees the upgrade's status, a page only "failed".
     const socket = (mixerPage: string, token: string) =>
-      `${wsBase(baseURL)}/ws/${mixerPage}?token=${token}&proto=2`;
+      `${wsBase(baseURL)}/ws/${mixerPage}?token=${token}&proto=3`;
 
     expect(await upgradeStatus(socket("member3", member2!.token))).toBe(403);
     // The same token opens its own page, and the engineer's opens member3's:

@@ -1,4 +1,4 @@
-//! `/ws/{page}` — the mixer page's WebSocket (UI protocol v2; S5 design note
+//! `/ws/{page}` — the mixer page's WebSocket (UI protocol v3; S5 design note
 //! §5, §6). The first message is the hello; then the page's state from the
 //! mirror, pins and hides, solo, alerts, network mode and tunnel status.
 //! Commands become engine requests (tagged with this session as their

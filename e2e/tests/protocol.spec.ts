@@ -2,7 +2,7 @@ import { test, expect } from "./support/fixtures";
 import { login } from "./support/session";
 import { probeListen, soundInput, upgradeStatus, wsBase } from "./support/wire";
 
-// The UI protocol v2 on the wire (program spec §5.3): the hello handshake,
+// The UI protocol v3 on the wire (program spec §5.3): the hello handshake,
 // the reload close for a page without a protocol, the talk-id binding of
 // the talkback socket (X6), listening over /ws/audio and who may open it,
 // the listen diagnostics (F28), and the X11 limiter.
@@ -12,7 +12,7 @@ test.describe("Mixer socket handshake (§5.3)", () => {
     await page.goto("/");
     const auth = await login(page, "member2");
     const first = await page.evaluate(async (token) => {
-      const ws = new WebSocket(`ws://${location.host}/ws/member2?token=${token}&proto=2`);
+      const ws = new WebSocket(`ws://${location.host}/ws/member2?token=${token}&proto=3`);
       const msg = await new Promise<string>((resolve, reject) => {
         ws.onmessage = (e) => resolve(String(e.data));
         ws.onerror = () => reject(new Error("socket error"));
@@ -22,8 +22,8 @@ test.describe("Mixer socket handshake (§5.3)", () => {
       return JSON.parse(msg);
     }, auth.token);
     expect(first.event).toBe("Hello");
-    expect(first.data.proto).toBe(2);
-    expect(first.data.min_client_proto).toBeLessThanOrEqual(2);
+    expect(first.data.proto).toBe(3);
+    expect(first.data.min_client_proto).toBeLessThanOrEqual(3);
     expect(typeof first.data.build).toBe("string");
   });
 
@@ -38,6 +38,25 @@ test.describe("Mixer socket handshake (§5.3)", () => {
       });
     }, auth.token);
     expect(code).toBe(4001);
+  });
+
+  // #61 review M4: version 3 added LineupChanged and the close 4003; a page
+  // of version 2 knows neither, so the server closes it with the reload
+  // code after its hello, and the page reloads once, at the deploy.
+  test("a page of the protocol before (2) is closed with the reload code", async ({ page }) => {
+    await page.goto("/");
+    const auth = await login(page, "member2");
+    const seen = await page.evaluate(async (token) => {
+      const ws = new WebSocket(`ws://${location.host}/ws/member2?token=${token}&proto=2`);
+      const events: string[] = [];
+      ws.onmessage = (e) => events.push(JSON.parse(String(e.data)).event);
+      const code = await new Promise<number>((resolve, reject) => {
+        ws.onclose = (e) => resolve(e.code);
+        setTimeout(() => reject(new Error("not closed")), 5000);
+      });
+      return { code, events };
+    }, auth.token);
+    expect(seen).toEqual({ code: 4001, events: ["Hello"] });
   });
 });
 
@@ -64,7 +83,7 @@ test.describe("Talkback binding (X6)", () => {
       const base = `ws://${location.host}`;
       const without = await opens(`${base}/ws/talkback?token=${token}`);
 
-      const mixer = new WebSocket(`${base}/ws/engineer?token=${token}&proto=2`);
+      const mixer = new WebSocket(`${base}/ws/engineer?token=${token}&proto=3`);
       const talkId = await new Promise<string>((resolve, reject) => {
         mixer.onmessage = (e) => {
           const m = JSON.parse(String(e.data));
