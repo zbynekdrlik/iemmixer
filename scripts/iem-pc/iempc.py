@@ -14,9 +14,10 @@ iempc_trace.py, PC_XPERF below), the admin-only OpenSSH default shell
 PC_AUTOSTART_STARTUP below),
 the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), a
 roster file onto the PC (`roster-install`: iempc_roster.py, the server config
-from the guard's own pc.toml), the IEM card's Dante labels for the main lineup as a sheet
-(`dante-labels`: iempc_dante.py, no PC call), and the hand-over of an open
-S1a window.
+from the guard's own pc.toml), the IEM card's Dante labels as a sheet, and
+written onto the card by its IP with `--apply` (`dante-labels`:
+iempc_dante.py and dante_card.py, no PC call; DANTE_IEM_HOST below), and
+the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -74,7 +75,10 @@ and the guard last seen runs its build, iempc_bin) and PC_XPERF
 PC_AUTOSTART_TASKS, PC_AUTOSTART_RUN and PC_AUTOSTART_STARTUP (the
 predecessor's autostarts the cutover disables: `;`-separated task paths, Run
 values and shortcut names `name.lnk` in the desktop user's Startup folder;
-`cutover` refuses when all three are empty).
+`cutover` refuses when all three are empty), and DANTE_IEM_HOST,
+DANTE_IEM_NAME and NETAUDIO_PYTHON (optional: the IEM card's IP, its
+expected Dante device name and the netaudio venv's python; `dante-labels
+--apply` refuses without all three, the sheet reads the card with them).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -342,8 +346,11 @@ def build_parser() -> argparse.ArgumentParser:
     labels = sub.add_parser("dante-labels")
     labels.add_argument("--roster", required=True, help="the roster whose main lineup names the labels")
     labels.add_argument("--site", help="the site file (default: site.toml beside the roster)")
-    labels.add_argument("--before", help="the roster the card's labels follow now: only the TX labels that "
-                                         "differ from its own are listed for resubscription")
+    labels.add_argument("--before", help="the roster the card's labels follow now, the offline fallback when the "
+                                         "card cannot be read: only the TX labels that differ are listed")
+    labels.add_argument("--apply", action="store_true",
+                        help="write the labels that differ onto the IEM card (DANTE_IEM_* and NETAUDIO_PYTHON in the "
+                             "private env), then read them back")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")
