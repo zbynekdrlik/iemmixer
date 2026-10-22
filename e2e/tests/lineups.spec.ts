@@ -54,17 +54,37 @@ async function switchTo(page: Page, scope: Locator, target: string, body: string
 }
 
 /** A page in a browser context of its own, its console guarded like the test's page. */
-async function otherPage(browser: Browser): Promise<{ page: Page; close: () => Promise<void> }> {
+type OtherPage = { page: Page; problems: string[]; close: () => Promise<void> };
+
+async function otherPage(browser: Browser): Promise<OtherPage> {
   const context = await browser.newContext();
   const page = await context.newPage();
   const problems = collectConsole(page, []);
   return {
     page,
+    problems,
     close: async () => {
       await context.close();
       expect(problems, "the other page's console must stay clean").toEqual([]);
     },
   };
+}
+
+/**
+ * The notice on `other`'s page, saying `text`, with a clean console: a page
+ * that panicked when its mixer gave way to the notice (#61 second review C1)
+ * shows its console as the failure, not only a missing notice.
+ */
+async function expectNotice(other: OtherPage, text: string, timeout = 10_000): Promise<void> {
+  const shown = other.page.getByTestId("lineup-notice");
+  try {
+    await expect(shown).toBeVisible({ timeout });
+  } catch (missing) {
+    expect(other.problems, "the console of the page without its notice").toEqual([]);
+    throw missing;
+  }
+  await expect(shown.locator(".lineup-notice-text")).toHaveText(text);
+  expect(other.problems, "the console once the notice shows").toEqual([]);
 }
 
 /** The mixer sockets `page` opens to `/ws/<member>` from now on. */
@@ -208,10 +228,9 @@ test.describe("Bands (#58)", () => {
     await expect(strip(page, "member2")).toHaveCount(0);
 
     // member1's open page shows the notice in place of the mixer, without a
-    // reload, a spinner or "Reconnecting...".
+    // reload, a spinner, "Reconnecting..." or an error in its console.
+    await expectNotice(away, notice(YOUTH));
     const shown = away.page.getByTestId("lineup-notice");
-    await expect(shown).toBeVisible({ timeout: 10_000 });
-    await expect(shown.locator(".lineup-notice-text")).toHaveText(notice(YOUTH));
     await expect(away.page.getByTestId("lineup-badge")).toHaveText(YOUTH);
     await expect(away.page.getByTestId("global-volume-fader")).toHaveCount(0);
     await expect(away.page.locator(".spinner")).toHaveCount(0);
@@ -343,9 +362,7 @@ test.describe("Bands (#58)", () => {
 
     // member10 plays no part of main: the page that missed the switch reads
     // the band before it reconnects, and shows the notice.
-    const missedNotice = missed.page.getByTestId("lineup-notice");
-    await expect(missedNotice).toBeVisible({ timeout: 15_000 });
-    await expect(missedNotice.locator(".lineup-notice-text")).toHaveText(notice(MAIN));
+    await expectNotice(missed, notice(MAIN), 15_000);
     await expect(missed.page.getByTestId("global-volume-fader")).toHaveCount(0);
     await missed.close();
   });

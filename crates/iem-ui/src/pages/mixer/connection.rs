@@ -22,8 +22,8 @@ use crate::components::eq_modal::EqBandState;
 use crate::components::talk_button::TalkState;
 
 use super::helpers::{
-    LeaveClose, LineupView, OnClose, ReconnectStep, WsClosureStore, WsFailCounter, leave_close,
-    on_close, reconnect_step,
+    LeaveClose, LineupView, LineupWrite, OnClose, ReconnectStep, WsClosureStore, WsFailCounter,
+    leave_close, lineup_writes, on_close, reconnect_step,
 };
 use super::state::MixerState;
 
@@ -34,8 +34,8 @@ use super::state::MixerState;
 /// that does not connect now (its person does not play) shows no
 /// connection.
 pub(super) fn read_lineup(state: MixerState, page: String) {
-    let set_lineup = state.lineup.1;
-    let set_connected = state.connected.1;
+    let (lineup, set_lineup) = state.lineup;
+    let (connected, set_connected) = state.connected;
     let reads = state.lineup_reads;
     let Some(seq) = reads.try_update_value(|r| r.start(js_sys::Date::now())) else {
         return;
@@ -45,12 +45,20 @@ pub(super) fn read_lineup(state: MixerState, page: String) {
         if reads.try_update_value(|r| r.take(seq)) != Some(true) {
             return;
         }
-        let connects = set_lineup.try_update(|view| {
-            view.apply(answer);
-            view.connects()
-        });
-        if connects == Some(false) {
-            let _ = set_connected.try_set(false);
+        let (Some(current), Some(shown)) =
+            (lineup.try_get_untracked(), connected.try_get_untracked())
+        else {
+            return;
+        };
+        for write in lineup_writes(&current, answer, shown) {
+            match write {
+                LineupWrite::Disconnected => {
+                    let _ = set_connected.try_set(false);
+                }
+                LineupWrite::View(view) => {
+                    let _ = set_lineup.try_set(view);
+                }
+            }
         }
     });
 }

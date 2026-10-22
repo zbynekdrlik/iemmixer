@@ -243,6 +243,34 @@ impl LineupReads {
     }
 }
 
+/// One write of the page's state after an answer of `/api/lineup`, in the
+/// order [`lineup_writes`] gives them.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum LineupWrite {
+    /// `connected = false`.
+    Disconnected,
+    /// The page's new view of the band.
+    View(LineupView),
+}
+
+/// The writes an answer makes, in their order, for a page whose view is
+/// `current` and whose connection shows `connected`.
+pub(super) fn lineup_writes(
+    current: &LineupView,
+    answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>,
+    connected: bool,
+) -> Vec<LineupWrite> {
+    let _ = connected;
+    let mut next = current.clone();
+    next.apply(answer);
+    let connects = next.connects();
+    let mut writes = vec![LineupWrite::View(next)];
+    if !connects {
+        writes.push(LineupWrite::Disconnected);
+    }
+    writes
+}
+
 /// What the mixer page knows of the band that plays (#58), from
 /// `GET /api/lineup`: read before the page connects, again after the server
 /// closed a person's page with [`CLOSE_LINEUP`] or told it of a new band.
@@ -755,6 +783,41 @@ mod tests {
             assert!(!view.recheck_due(14_999.0, 10_000.0), "{view:?}");
             assert!(view.recheck_due(15_000.0, 10_000.0), "{view:?}");
         }
+    }
+
+    /// #61 second review C1: an answer that unmounts the mixer (the notice
+    /// takes its place) writes `connected` first, while the mixer's effects
+    /// still live; written after, it woke the effects the unmount had just
+    /// dropped, which read their disposed signals and panicked (CI run
+    /// 39700306928, member1's page). A write that changes nothing is not
+    /// made: it would wake them too.
+    #[test]
+    fn connected_is_written_before_a_view_that_unmounts_the_mixer() {
+        let rereading = LineupView::Rereading(info("main", true, true));
+        let away = LineupView::Roster(info("youth", false, true));
+        assert_eq!(
+            lineup_writes(&rereading, Ok(Some(info("youth", false, true))), true),
+            [LineupWrite::Disconnected, LineupWrite::View(away.clone())]
+        );
+        // Shown as disconnected already: only the view.
+        assert_eq!(
+            lineup_writes(&rereading, Ok(Some(info("youth", false, true))), false),
+            [LineupWrite::View(away.clone())]
+        );
+        // A view that connects: only the view.
+        assert_eq!(
+            lineup_writes(&LineupView::Reading, Ok(None), false),
+            [LineupWrite::View(LineupView::Legacy)]
+        );
+        assert_eq!(
+            lineup_writes(&away, Ok(Some(info("main", true, true))), false),
+            [LineupWrite::View(LineupView::Roster(info(
+                "main", true, true
+            )))]
+        );
+        // The notice page reads the same band again, or fails to: nothing.
+        assert!(lineup_writes(&away, Ok(Some(info("youth", false, true))), false).is_empty());
+        assert!(lineup_writes(&away, failed(), false).is_empty());
     }
 
     /// #61 review I1: a switch missed while the socket was down (a phone
