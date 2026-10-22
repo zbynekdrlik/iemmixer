@@ -7,7 +7,7 @@ use crate::components::alert_toast::AlertToast;
 use crate::components::category_tabs::{Category, CategoryTabs};
 use crate::components::eq_modal::EQModal;
 use crate::components::limiter_modal::LimiterModal;
-use crate::components::lineup_notice::LineupNotice;
+use crate::components::lineup_notice::{LineupNotice, NO_PAGE, notice_switch, notice_text};
 use crate::components::pin_change_modal::PinChangeModal;
 use crate::components::preset_modal::PresetModal;
 use crate::components::settings_modal::SettingsModal;
@@ -150,7 +150,9 @@ pub fn MixerPage() -> impl IntoView {
     // read with the same answer redraws neither.
     let badge = Memo::new(move |_| lineup.with(|v| v.badge().map(str::to_owned)));
     let notice = Memo::new(move |_| lineup.with(|v| v.notice().cloned()));
-    let mixer_shown = move || notice.with(Option::is_none);
+    // A page in no band now (#61 second review m3): the same page, no socket.
+    let no_page = Memo::new(move |_| lineup.with(LineupView::no_page));
+    let mixer_shown = move || notice.with(Option::is_none) && !no_page.get();
     // The band switch in the settings: a leader who plays, on their own
     // page; the engineer on /engineer. After a switch the page reads the
     // band again (from the notice it has no socket to hear it on).
@@ -307,9 +309,17 @@ pub fn MixerPage() -> impl IntoView {
             </header>
 
             // A person who does not play in the band that plays sees which
-            // band plays instead of the mixer (#58).
+            // band plays instead of the mixer (#58); a page in no band now
+            // says so (#61 second review m3).
             {move || notice.get().map(|info| view! {
-                <LineupNotice info=info on_switched=on_switched />
+                <LineupNotice
+                    text=notice_text(&info)
+                    switch=notice_switch(&info)
+                    on_switched=on_switched
+                />
+            })}
+            {move || no_page.get().then(|| view! {
+                <LineupNotice text=NO_PAGE.to_string() on_switched=on_switched />
             })}
 
             <Show when=mixer_shown fallback=|| ()>

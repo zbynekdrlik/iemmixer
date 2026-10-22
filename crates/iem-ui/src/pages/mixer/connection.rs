@@ -134,6 +134,20 @@ pub(super) fn setup_connection(
     let lineup_reads = state.lineup_reads;
     let connects = Memo::new(move |_| lineup.with(LineupView::connects));
 
+    // A refused token (401 to the read, #61 second review m3) goes to the
+    // login, as the token check after failed sockets does.
+    let signed_out = Memo::new(move |_| lineup.with(LineupView::signed_out));
+    let navigate_signed_out = use_navigate();
+    let signed_out_member = member_id.clone();
+    Effect::new(move |_| {
+        if !signed_out.get() {
+            return;
+        }
+        crate::auth::clear_auth();
+        let m = signed_out_member();
+        navigate_signed_out(&format!("/login?member={m}&next=/{m}"), Default::default());
+    });
+
     // --- Initial connect Effect ---
 
     // Also the connect after a band change (a 4003 close read again, a

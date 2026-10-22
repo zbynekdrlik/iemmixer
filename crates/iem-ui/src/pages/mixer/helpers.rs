@@ -323,11 +323,16 @@ impl LineupView {
     /// server restarts) keeps the band the page knew, a page reading again
     /// falls back to it; with nothing known the page connects as before
     /// ([`LineupView::Unknown`]) and reads again ([`LineupView::recheck_due`]).
+    /// A definitive refusal is no failure to wait out (#61 second review
+    /// m3): a refused token (401) is [`LineupView::SignedOut`], a page the
+    /// token may not open or the site lacks (403, 404) [`LineupView::NoPage`].
     pub(super) fn apply(&mut self, answer: LineupAnswer) {
         *self = match (std::mem::replace(self, Self::Reading), answer) {
             (_, Ok(known)) => Self::read(Ok(known)),
+            (_, Err(e)) if e.status == 401 => Self::SignedOut,
+            (_, Err(e)) if e.status == 403 || e.status == 404 => Self::NoPage,
             (Self::Roster(info) | Self::Rereading(info), Err(_)) => Self::Roster(info),
-            (Self::Legacy, Err(_)) => Self::Legacy,
+            (kept @ (Self::Legacy | Self::SignedOut | Self::NoPage), Err(_)) => kept,
             (_, Err(_)) => Self::Unknown,
         };
     }
