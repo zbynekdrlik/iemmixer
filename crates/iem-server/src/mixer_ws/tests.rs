@@ -534,7 +534,7 @@ async fn every_page_first_hears_which_band_plays() {
     let m10 = s.page("member10").unwrap();
     match on_lineup(&s, &m10, &viewer("member10", false)) {
         OnLineup::Close(told, frame) => {
-            assert_eq!(told, [youth.clone()]);
+            assert_eq!(told, std::slice::from_ref(&youth));
             assert_eq!(frame.code, CLOSE_LINEUP);
         }
         other => panic!("{other:?}"),
