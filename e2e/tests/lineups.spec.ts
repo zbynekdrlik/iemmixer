@@ -179,6 +179,55 @@ test.describe("Bands (#58)", () => {
     await expect(page.getByTestId("lineup-switch")).toHaveCount(0);
   });
 
+  test.describe("a definitive refusal of the read (#61 m3)", () => {
+    // The page's read of the band is answered 404 or 401 here, as the
+    // server answers the engineer on the page of a person the roster
+    // dropped, or a token it no longer takes; Chrome logs those answers.
+    test.use({ allowedConsole: [[/status of 401/, /status of 404/], { scope: "test" }] });
+
+    test("a page in no band shows so, with no socket and no reconnect loop", async ({ page }) => {
+      const sockets = socketsTo(page, "member4");
+      let reads = 0;
+      await page.route(
+        (url) => url.pathname === "/api/lineup",
+        async (route) => {
+          reads += 1;
+          await route.fulfill({
+            status: 404,
+            contentType: "application/json",
+            body: JSON.stringify({ code: "NOT_FOUND", message: "Member not found" }),
+          });
+        },
+      );
+      await openPage(page, "member4");
+      const shown = page.getByTestId("lineup-notice");
+      await expect(shown).toBeVisible({ timeout: 5_000 });
+      await expect(shown.locator(".lineup-notice-text")).toHaveText("Táto stránka teraz nie je v žiadnej kapele.");
+      await expect(page.getByTestId("global-volume-fader")).toHaveCount(0);
+      await expect(page.getByTestId("lineup-badge")).toHaveCount(0);
+      // Longer than the page's 5 s re-read and its reconnect tick: nothing.
+      await page.waitForTimeout(7_000);
+      expect(reads, "one read, never again").toBe(1);
+      expect(sockets, "no socket").toHaveLength(0);
+      await expect(shown).toBeVisible();
+    });
+
+    test("a refused token goes to the login", async ({ page }) => {
+      await page.route(
+        (url) => url.pathname === "/api/lineup",
+        (route) =>
+          route.fulfill({
+            status: 401,
+            contentType: "application/json",
+            body: JSON.stringify({ code: "UNAUTHORIZED", message: "Invalid token" }),
+          }),
+      );
+      await openPage(page, "member4");
+      await expect(page).toHaveURL(/\/login\?member=member4&next=\/member4$/, { timeout: 5_000 });
+      expect(await page.evaluate(() => localStorage.getItem("iem_token"))).toBeNull();
+    });
+  });
+
   test("the login tiles show the band that plays first, then the others", async ({ page }) => {
     await page.goto("/");
     const nine = Array.from({ length: 9 }, (_, i) => `/member${i + 1}`);

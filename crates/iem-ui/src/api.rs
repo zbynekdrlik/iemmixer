@@ -61,22 +61,42 @@ impl ApiError {
     }
 }
 
+/// A read of the band that gave none: the answer's status (0: none came, a
+/// timeout, no token) and the server's code (`HTTP_<status>` without one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineupError {
+    pub status: u16,
+    pub code: String,
+}
+
+impl LineupError {
+    /// No answer (no network, a timeout, no token).
+    pub fn unanswered(code: &str) -> Self {
+        Self {
+            status: 0,
+            code: code.to_string(),
+        }
+    }
+}
+
 /// `GET /api/lineup`'s answer (#58) by its status and body: the band that
 /// plays and what the bearer may do, or `None` on a site without a roster
 /// (204, or the 404 `NOT_CONFIGURED` of a server from before Part C).
-pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupInfo>, ApiError> {
+pub fn lineup_answer(status: u16, body: &str) -> Result<Option<iem_core::LineupInfo>, LineupError> {
     match status {
-        200 => serde_json::from_str(body).map(Some).map_err(|e| ApiError {
-            code: "UNREADABLE".to_string(),
-            message: e.to_string(),
-        }),
+        200 => serde_json::from_str(body)
+            .map(Some)
+            .map_err(|_| LineupError {
+                status,
+                code: "UNREADABLE".to_string(),
+            }),
         204 => Ok(None),
         _ => {
-            let e = ApiError::of(status, body);
-            if status == 404 && e.code == "NOT_CONFIGURED" {
+            let code = ApiError::of(status, body).code;
+            if status == 404 && code == "NOT_CONFIGURED" {
                 Ok(None)
             } else {
-                Err(e)
+                Err(LineupError { status, code })
             }
         }
     }
@@ -104,15 +124,10 @@ pub fn lineup_url(page: &str) -> String {
 /// site without a roster. A read that has not answered after
 /// [`NETWORK_TIMEOUT_MS`] is aborted, an error (#61 review C2: a read that
 /// hangs never leaves the page without a band).
-pub async fn get_lineup(page: &str) -> Result<Option<iem_core::LineupInfo>, ApiError> {
-    let failed = |code: &str, message: String| ApiError {
-        code: code.to_string(),
-        message,
-    };
-    let token = crate::auth::get_token()
-        .ok_or_else(|| failed("NO_TOKEN", "Not authenticated".to_string()))?;
+pub async fn get_lineup(page: &str) -> Result<Option<iem_core::LineupInfo>, LineupError> {
+    let token = crate::auth::get_token().ok_or_else(|| LineupError::unanswered("NO_TOKEN"))?;
     let controller =
-        AbortController::new().map_err(|_| failed("NETWORK", "no AbortController".to_string()))?;
+        AbortController::new().map_err(|_| LineupError::unanswered("NO_ABORT_CONTROLLER"))?;
     let abort = controller.clone();
     let timeout = Closure::once_into_js(move || abort.abort());
     if let Some(window) = web_sys::window() {
@@ -126,7 +141,7 @@ pub async fn get_lineup(page: &str) -> Result<Option<iem_core::LineupInfo>, ApiE
         .abort_signal(Some(&controller.signal()))
         .send()
         .await
-        .map_err(|e| failed("NETWORK", e.to_string()))?;
+        .map_err(|_| LineupError::unanswered("NETWORK"))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     lineup_answer(status, &body)
@@ -587,30 +602,50 @@ mod tests {
         assert_eq!(lineup_answer(204, ""), Ok(None));
         let legacy = r#"{"code":"NOT_CONFIGURED","message":"this site has no roster"}"#;
         assert_eq!(lineup_answer(404, legacy), Ok(None));
-        // Anything else is no answer on the band.
+        // Anything else is no answer on the band: its status and code.
         let gone = r#"{"code":"UNAUTHORIZED","message":"gone"}"#;
         assert_eq!(
             lineup_answer(401, gone),
-            Err(ApiError {
-                code: "UNAUTHORIZED".into(),
-                message: "gone".into()
+            Err(LineupError {
+                status: 401,
+                code: "UNAUTHORIZED".into()
             })
         );
-        assert_eq!(lineup_answer(404, "").unwrap_err().code, "HTTP_404");
         assert_eq!(
-            lineup_answer(500, r#"{"code":"NOT_CONFIGURED","message":"x"}"#)
-                .unwrap_err()
-                .code,
-            "NOT_CONFIGURED"
+            lineup_answer(404, ""),
+            Err(LineupError {
+                status: 404,
+                code: "HTTP_404".into()
+            })
         );
         assert_eq!(
-            lineup_answer(502, "<html>").unwrap_err(),
-            ApiError {
-                code: "HTTP_502".into(),
-                message: "Server error: 502".into()
+            lineup_answer(500, r#"{"code":"NOT_CONFIGURED","message":"x"}"#),
+            Err(LineupError {
+                status: 500,
+                code: "NOT_CONFIGURED".into()
+            })
+        );
+        assert_eq!(
+            lineup_answer(502, "<html>"),
+            Err(LineupError {
+                status: 502,
+                code: "HTTP_502".into()
+            })
+        );
+        assert_eq!(
+            lineup_answer(200, "{}"),
+            Err(LineupError {
+                status: 200,
+                code: "UNREADABLE".into()
+            })
+        );
+        assert_eq!(
+            LineupError::unanswered("NETWORK"),
+            LineupError {
+                status: 0,
+                code: "NETWORK".into()
             }
         );
-        assert_eq!(lineup_answer(200, "{}").unwrap_err().code, "UNREADABLE");
     }
 
     /// #61 review I2: the page asks whether ITS person plays (the engineer

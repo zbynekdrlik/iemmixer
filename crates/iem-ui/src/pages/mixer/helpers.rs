@@ -243,6 +243,10 @@ impl LineupReads {
     }
 }
 
+/// An answer of `GET /api/lineup` as the page gets it (`Ok(None)`: no
+/// roster).
+pub(super) type LineupAnswer = Result<Option<iem_core::LineupInfo>, crate::api::LineupError>;
+
 /// One write of the page's state after an answer of `/api/lineup`, in the
 /// order [`lineup_writes`] gives them.
 #[derive(Debug, Clone, PartialEq)]
@@ -262,7 +266,7 @@ pub(super) enum LineupWrite {
 /// nothing is not made: it wakes them too.
 pub(super) fn lineup_writes(
     current: &LineupView,
-    answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>,
+    answer: LineupAnswer,
     connected: bool,
 ) -> Vec<LineupWrite> {
     let mut next = current.clone();
@@ -296,12 +300,17 @@ pub(super) enum LineupView {
     /// Read again after a [`CLOSE_LINEUP`] close: no socket until the
     /// answer; the band last known stays on the badge.
     Rereading(iem_core::LineupInfo),
+    /// The server refused the token (401): the page goes to the login.
+    SignedOut,
+    /// The page is not one this token may open, or the site lacks it (403,
+    /// 404): a page saying so, with no socket and no reconnect.
+    NoPage,
 }
 
 impl LineupView {
     /// The page's view of `GET /api/lineup`'s answer (`Ok(None)`: no
     /// roster).
-    pub(super) fn read(answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>) -> Self {
+    pub(super) fn read(answer: LineupAnswer) -> Self {
         match answer {
             Ok(Some(info)) => Self::Roster(info),
             Ok(None) => Self::Legacy,
@@ -314,10 +323,7 @@ impl LineupView {
     /// server restarts) keeps the band the page knew, a page reading again
     /// falls back to it; with nothing known the page connects as before
     /// ([`LineupView::Unknown`]) and reads again ([`LineupView::recheck_due`]).
-    pub(super) fn apply(
-        &mut self,
-        answer: Result<Option<iem_core::LineupInfo>, crate::api::ApiError>,
-    ) {
+    pub(super) fn apply(&mut self, answer: LineupAnswer) {
         *self = match (std::mem::replace(self, Self::Reading), answer) {
             (_, Ok(known)) => Self::read(Ok(known)),
             (Self::Roster(info) | Self::Rereading(info), Err(_)) => Self::Roster(info),
@@ -340,10 +346,20 @@ impl LineupView {
     /// socket; the page shows the notice instead).
     pub(super) fn connects(&self) -> bool {
         match self {
-            Self::Reading | Self::Rereading(_) => false,
+            Self::Reading | Self::Rereading(_) | Self::SignedOut | Self::NoPage => false,
             Self::Legacy | Self::Unknown => true,
             Self::Roster(info) => info.playing,
         }
+    }
+
+    /// Whether the token was refused: the page goes to the login.
+    pub(super) fn signed_out(&self) -> bool {
+        matches!(self, Self::SignedOut)
+    }
+
+    /// Whether the page shows that it is in no band, with no socket.
+    pub(super) fn no_page(&self) -> bool {
+        matches!(self, Self::NoPage)
     }
 
     /// The band the notice names, when the bearer does not play in it.
@@ -683,10 +699,7 @@ mod tests {
         told.now_plays(lineup("youth"));
         assert_eq!(told, LineupView::Legacy);
         // An answer that could not be read: the page as before too.
-        let unknown = LineupView::read(Err(crate::api::ApiError {
-            code: "NETWORK".into(),
-            message: "offline".into(),
-        }));
+        let unknown = LineupView::read(Err(crate::api::LineupError::unanswered("NETWORK")));
         assert_eq!(unknown, LineupView::Unknown);
         assert!(unknown.connects());
         assert_eq!(unknown.badge(), None);
@@ -826,6 +839,58 @@ mod tests {
         assert!(lineup_writes(&away, failed(), false).is_empty());
     }
 
+    /// #61 second review m3: a definitive refusal of the read is no failure
+    /// to wait out. A refused token (401) goes to the login; a page the
+    /// token may not open or the site lacks (403, 404: the engineer on the
+    /// page of a person the roster dropped) shows that it is in no band,
+    /// with no socket, no read again and no reconnect.
+    #[test]
+    fn a_refused_read_is_no_failure_to_wait_out() {
+        let refused = |status: u16| -> LineupAnswer {
+            Err(crate::api::LineupError {
+                status,
+                code: "REFUSED".into(),
+            })
+        };
+        for start in [
+            LineupView::Reading,
+            LineupView::Unknown,
+            LineupView::Roster(info("youth", true, true)),
+            LineupView::Rereading(info("youth", true, true)),
+            LineupView::Roster(info("youth", false, false)),
+        ] {
+            let mut gone = start.clone();
+            gone.apply(refused(401));
+            assert_eq!(gone, LineupView::SignedOut, "{start:?}");
+            assert!(gone.signed_out() && !gone.no_page());
+            for status in [403, 404] {
+                let mut none = start.clone();
+                none.apply(refused(status));
+                assert_eq!(none, LineupView::NoPage, "{start:?} {status}");
+                assert!(none.no_page() && !none.signed_out());
+            }
+        }
+        for view in [LineupView::SignedOut, LineupView::NoPage] {
+            assert!(!view.connects(), "{view:?}: no socket");
+            assert!(!view.recheck_due(1e12, 0.0), "{view:?}: no read again");
+            assert!(!view.reads_before_reconnect(), "{view:?}");
+            assert_eq!(view.notice(), None, "{view:?}");
+            assert_eq!(view.badge(), None, "{view:?}");
+        }
+        // Not a refusal: the band the page knew stays (C2).
+        for status in [0, 500, 502, 503] {
+            let mut known = LineupView::Roster(info("youth", false, false));
+            known.apply(refused(status));
+            assert_eq!(
+                known,
+                LineupView::Roster(info("youth", false, false)),
+                "{status}"
+            );
+        }
+        assert!(!LineupView::Roster(info("youth", true, true)).signed_out());
+        assert!(!LineupView::Legacy.no_page());
+    }
+
     /// #61 review I1: a switch missed while the socket was down (a phone
     /// locked during it: the close is 1006 or 4002, never 4003) is seen at
     /// the reconnect: in roster mode the tick reads the band first, so a
@@ -860,10 +925,10 @@ mod tests {
         assert_eq!(reads.applied, fourth);
     }
 
-    fn failed() -> Result<Option<iem_core::LineupInfo>, crate::api::ApiError> {
-        Err(crate::api::ApiError {
+    fn failed() -> LineupAnswer {
+        Err(crate::api::LineupError {
+            status: 502,
             code: "HTTP_502".into(),
-            message: "Server error: 502".into(),
         })
     }
 
