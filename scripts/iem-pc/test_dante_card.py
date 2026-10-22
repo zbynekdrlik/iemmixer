@@ -1,15 +1,21 @@
 """Tests for scripts/iem-pc/dante_card.py, the one module that imports
-netaudio (#58 plan Task 15, outcome A). No card exists in CI: a fake device
-stands in for netaudio's DanteDevice through `open_device`, and the source
-is read for the calls it may make. Every value is synthetic (P6: a
-documentation IP, an invented device name, the test site's channels)."""
+netaudio (#58 plan Task 15, outcome A; the safety review of --apply). No
+card exists in CI: a fake device stands in for netaudio's DanteDevice
+through `open_device` and behaves as netaudio does (a card that does not
+answer leaves the name and the channels empty, its error None), stub
+netaudio modules run the real `open_device`, and the source is read for the
+calls it may make. Every value is synthetic (P6: a documentation IP, an
+invented device name, the test site's channels)."""
 from __future__ import annotations
 
 import contextlib
 import io
+import ipaddress
 import json
 import re
 import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -35,8 +41,11 @@ class Card:
         self.labels = {"tx": {n: None for n in range(1, tx + 1)}, "rx": {n: None for n in range(1, rx + 1)}}
         self.calls: list[tuple] = []
         self.opened: list[str] = []
-        self.deaf_to: set[tuple[str, int]] = set()   # writes the card ignores
-        self.silent = False                         # answers nothing (get_controls sets error)
+        self.deaf_to: set[tuple[str, int]] = set()      # writes the card ignores
+        self.raise_on: dict[tuple[str, int], Exception] = {}   # writes whose command raises, unsent
+        self.silent = False                           # answers nothing: no name, no channels
+        self.partial = False                          # one TX channel missing from the read
+        self.before_write = None                      # called before each write
         self.reads = 0
 
     def device(self, ip: str):
@@ -46,7 +55,8 @@ class Card:
 
 class Device:
     """A stand-in for netaudio's DanteDevice: the attributes and the three
-    coroutines the helper may use, recording every call."""
+    coroutines the helper may use, recording every call. Like netaudio's
+    get_controls it leaves `error` None whether the card answered or not."""
 
     def __init__(self, card: Card) -> None:
         self.card = card
@@ -60,22 +70,31 @@ class Device:
         self.card.calls.append(("get_controls",))
         self.card.reads += 1
         print("netaudio noise on stdout")
+        self.error = None
         if self.card.silent:
-            self.error = TimeoutError("synthetic")
             return
         self.name = self.card.name
         self.tx_count, self.rx_count = len(self.card.labels["tx"]), len(self.card.labels["rx"])
         self.tx_channels = {n: Channel(n, v) for n, v in self.card.labels["tx"].items()}
         self.rx_channels = {n: Channel(n, v) for n, v in self.card.labels["rx"].items()}
+        if self.card.partial:
+            del self.tx_channels[max(self.tx_channels)]
 
     async def set_channel_name(self, kind: str, number: int, label: str) -> None:
-        self.card.calls.append(("set_channel_name", kind, number, label))
-        if (kind, number) not in self.card.deaf_to:
-            self.card.labels[kind][number] = label
+        await self._write(kind, number, label)
 
     async def reset_channel_name(self, kind: str, number: int) -> None:
-        self.card.calls.append(("reset_channel_name", kind, number))
-        self.card.labels[kind][number] = None
+        await self._write(kind, number, None)
+
+    async def _write(self, kind: str, number: int, label: str | None) -> None:
+        if self.card.before_write is not None:
+            self.card.before_write()
+        self.card.calls.append(("set_channel_name", kind, number, label) if label is not None
+                               else ("reset_channel_name", kind, number))
+        if (kind, number) in self.card.raise_on:
+            raise self.card.raise_on[(kind, number)]
+        if (kind, number) not in self.card.deaf_to:
+            self.card.labels[kind][number] = label
 
 
 class HelperTests(unittest.TestCase):
@@ -84,12 +103,19 @@ class HelperTests(unittest.TestCase):
         patcher = mock.patch.object(dante_card, "open_device", self.card.device)
         patcher.start()
         self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.flag = Path(tmp.name) / "EVENT-NOW"
 
     def run_helper(self, *argv: str, stdin: str = "") -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = dante_card.main(list(argv), io.StringIO(stdin))
         return code, out.getvalue(), err.getvalue()
+
+    def write(self, changes: list[dict]) -> tuple[int, dict | None, str]:
+        code, out, err = self.run_helper("write", IP, NAME, str(self.flag), stdin=json.dumps(changes))
+        return code, (json.loads(out) if out else None), err
 
     def writes(self) -> list[tuple]:
         return [c for c in self.card.calls if c[0] != "get_controls"]
@@ -109,12 +135,12 @@ class HelperTests(unittest.TestCase):
         self.card.labels["rx"][3] = "OLD"
         changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},
                    {"type": "rx", "channel": 3, "label": "3"}]   # its number: the default, a reset
-        code, out, err = self.run_helper("write", IP, NAME, stdin=json.dumps(changes))
+        code, doc, err = self.write(changes)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.writes(), [("set_channel_name", "tx", 1, "ZYXQW inear L 01"),
                                          ("reset_channel_name", "rx", 3)])
-        doc = json.loads(out)
-        self.assertEqual((doc["written"], doc["mismatches"]), (2, []))
+        self.assertEqual((doc["sent"], doc["failed"], doc["error"], doc["read_back"], doc["mismatches"]),
+                         (changes, None, None, True, []))
         self.assertEqual((doc["tx"]["1"], doc["rx"]["3"]), ("ZYXQW inear L 01", "3"))
         self.assertEqual(self.card.reads, 2)   # one read before, one fresh read back after
         self.assertEqual(self.card.opened, [IP, IP])
@@ -123,65 +149,130 @@ class HelperTests(unittest.TestCase):
         self.card.deaf_to.add(("tx", 2))
         changes = [{"type": "tx", "channel": 2, "label": "ZYXQW inear R 02"},
                    {"type": "tx", "channel": 3, "label": "QWXYZ inear L 03"}]
-        code, out, err = self.run_helper("write", IP, NAME, stdin=json.dumps(changes))
+        code, doc, err = self.write(changes)
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out)["mismatches"],
-                         [{"type": "tx", "channel": 2, "want": "ZYXQW inear R 02", "got": "2"}])
+        self.assertEqual(doc["mismatches"], [{"type": "tx", "channel": 2, "want": "ZYXQW inear R 02", "got": "2"}])
 
-    def test_another_device_or_no_answer_writes_nothing(self) -> None:
+    def test_a_write_that_fails_part_way_still_reads_back_and_reports_what_was_sent(self) -> None:
+        """netaudio's commands catch only a timeout: another error (a refused
+        connection) ends the loop. What was sent, the one that failed, and a
+        fresh read back still come out as one JSON line, exit 0."""
+        self.card.raise_on[("tx", 2)] = ConnectionRefusedError(111, "Connection refused")
+        changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},
+                   {"type": "tx", "channel": 2, "label": "ZYXQW inear R 02"},
+                   {"type": "tx", "channel": 3, "label": "QWXYZ inear L 03"}]
+        code, doc, err = self.write(changes)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((doc["sent"], doc["failed"], doc["read_back"]), (changes[:1], changes[1], True))
+        self.assertIn("tx 2", doc["error"])
+        self.assertIn("ConnectionRefusedError", doc["error"])
+        # The one that failed is read back too: here it did not land.
+        self.assertEqual(doc["mismatches"], [{"type": "tx", "channel": 2, "want": "ZYXQW inear R 02", "got": "2"}])
+        self.assertEqual(doc["tx"]["3"], "3")   # never sent
+
+    def test_a_read_back_that_fails_still_reports_what_was_sent(self) -> None:
+        def silent_after_first_write():
+            self.card.silent = bool(self.writes())
+
+        self.card.before_write = silent_after_first_write
+        changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"}]
+        code, doc, err = self.write(changes)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((doc["sent"], doc["read_back"], doc["mismatches"], doc["tx"]), (changes, False, [], None))
+        self.assertIn("not read back: the card did not answer", doc["error"])
+
+    def test_the_event_flag_stops_the_writes_and_the_rest_is_read_back(self) -> None:
+        def flag_after_first_write():
+            if self.writes():
+                self.flag.write_text("ide event\n", encoding="utf-8")
+
+        self.card.before_write = flag_after_first_write
+        changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},
+                   {"type": "tx", "channel": 2, "label": "ZYXQW inear R 02"}]
+        code, doc, err = self.write(changes)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.writes(), [("set_channel_name", "tx", 1, "ZYXQW inear L 01")])
+        self.assertEqual((doc["sent"], doc["failed"], doc["read_back"]), (changes[:1], None, True))
+        self.assertIn("EVENT-NOW appeared", doc["error"])
+
+    def test_another_device_no_answer_or_an_incomplete_read_writes_nothing(self) -> None:
         changes = json.dumps([{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"}])
         self.card.name = "Qwxyz-Other-Card"
-        for verb, stdin in (("read", ""), ("write", changes)):
-            code, out, err = self.run_helper(verb, IP, NAME, stdin=stdin)
+        for verb, argv, stdin in (("read", ("read", IP, NAME), ""),
+                                  ("write", ("write", IP, NAME, str(self.flag)), changes)):
+            code, out, err = self.run_helper(*argv, stdin=stdin)
             self.assertEqual((code, out), (1, ""), verb)
             self.assertIn("not the expected one", err)
             self.assertNotIn("Qwxyz", err)   # the device's own name is never printed in a refusal
         self.assertIn("nothing was written", err)
+        # netaudio's get_controls leaves error None when the card is silent: no name is no answer.
         self.card.name, self.card.silent = NAME, True
-        code, out, err = self.run_helper("write", IP, NAME, stdin=changes)
+        code, out, err = self.run_helper("write", IP, NAME, str(self.flag), stdin=changes)
         self.assertEqual((code, out), (1, ""))
-        self.assertIn("did not answer (TimeoutError): nothing was written", err)
+        self.assertIn("the card did not answer: nothing was written", err)
+        # A read that lost a page of channels is no read.
+        self.card.silent, self.card.partial = False, True
+        code, out, err = self.run_helper("read", IP, NAME)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("incomplete read", err)
         self.assertEqual(self.writes(), [])
 
     def test_a_channel_the_card_lacks_writes_nothing(self) -> None:
         changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},
                    {"type": "rx", "channel": 9, "label": "09 ZYXQW mic"}]
-        code, out, err = self.run_helper("write", IP, NAME, stdin=json.dumps(changes))
-        self.assertEqual((code, out), (1, ""))
+        code, doc, err = self.write(changes)
+        self.assertEqual((code, doc), (1, None))
         self.assertIn("no rx channel 9: nothing was written", err)
         self.assertEqual(self.writes(), [])
 
-    def test_a_read_back_that_fails_says_the_labels_were_written(self) -> None:
-        card = self.card
-        original = Device.set_channel_name
-
-        async def set_then_go_silent(device, kind, number, label):
-            await original(device, kind, number, label)
-            card.silent = True
-
-        with mock.patch.object(Device, "set_channel_name", set_then_go_silent):
-            code, out, err = self.run_helper("write", IP, NAME,
-                                             stdin=json.dumps([{"type": "tx", "channel": 1, "label": "ZYXQW L 01"}]))
-        self.assertEqual((code, out), (1, ""))
-        self.assertIn("1 labels were written, but not read back", err)
-
     def test_usage_is_refused_before_the_card_is_asked(self) -> None:
+        one = json.dumps([{"type": "tx", "channel": 1, "label": "x"}])
+        flag = str(self.flag)
         bad = [((), ""), (("erase", IP, NAME), ""), (("read", "card.example", NAME), ""), (("read", IP, ""), ""),
-               (("write", IP, NAME), "not json"), (("write", IP, NAME), "[]"),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": 1}])),
-               (("write", IP, NAME), json.dumps([{"type": "mix", "channel": 1, "label": "x"}])),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": 0, "label": "x"}])),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": True, "label": "x"}])),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": 1, "label": "X" * 32}])),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": 1, "label": "a.b"}])),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": 1, "label": "Zyx" + chr(0x17D)}])),
-               (("write", IP, NAME), json.dumps([{"type": "tx", "channel": 1, "label": "a"},
-                                                 {"type": "tx", "channel": 1, "label": "b"}]))]
+               (("read", IP, NAME, flag), ""), (("write", IP, NAME), one)]
+        bad += [(("read", host, NAME), "") for host in ("224.0.0.251", "127.0.0.1", "0.0.0.0", "255.255.255.255",
+                                                         "240.0.0.1", "::1", "2001:db8::10")]
+        bad += [(("write", IP, NAME, flag), stdin) for stdin in (
+            "not json", "[]", json.dumps([{"type": "tx", "channel": 1}]),
+            json.dumps([{"type": "mix", "channel": 1, "label": "x"}]),
+            json.dumps([{"type": "tx", "channel": 0, "label": "x"}]),
+            json.dumps([{"type": "tx", "channel": 256, "label": "x"}]),
+            json.dumps([{"type": "tx", "channel": True, "label": "x"}]),
+            json.dumps([{"type": "tx", "channel": 1, "label": "X" * 32}]),
+            json.dumps([{"type": "tx", "channel": 1, "label": "a.b"}]),
+            json.dumps([{"type": "tx", "channel": 1, "label": "Zyx" + chr(0x17D)}]),
+            json.dumps([{"type": "tx", "channel": 1, "label": "a"}, {"type": "tx", "channel": 1, "label": "b"}]))]
         for argv, stdin in bad:
             code, out, err = self.run_helper(*argv, stdin=stdin)
             self.assertEqual((code, out), (2, ""), argv)
             self.assertTrue(err.startswith("dante_card: "), argv)
         self.assertEqual((self.card.opened, self.card.calls), ([], []))
+        # The highest channel Dante numbers is still a channel.
+        self.assertEqual(dante_card.parse_changes(json.dumps([{"type": "rx", "channel": 255, "label": "x"}]))[0]["channel"],
+                         255)
+
+
+class OpenDeviceTests(unittest.TestCase):
+    """The real `open_device` against stub netaudio modules: the card by its
+    IP on the ARC port, nothing discovered."""
+
+    def test_the_device_is_addressed_by_its_ip_on_the_arc_port(self) -> None:
+        class DanteDevice:
+            def __init__(self, server_name: str = "") -> None:
+                self.server_name, self.ipv4, self.services = server_name, None, {}
+
+        const = types.ModuleType("netaudio.dante.const")
+        const.SERVICE_ARC = "_zyxqw-arc._udp.local."
+        device = types.ModuleType("netaudio.dante.device")
+        device.DanteDevice = DanteDevice
+        stubs = {"netaudio": types.ModuleType("netaudio"), "netaudio.dante": types.ModuleType("netaudio.dante"),
+                 "netaudio.dante.const": const, "netaudio.dante.device": device}
+        with mock.patch.dict(sys.modules, stubs):
+            d = dante_card.open_device(IP)
+        self.assertIsInstance(d, DanteDevice)
+        self.assertEqual(d.ipv4, ipaddress.ip_address(IP))
+        self.assertEqual(d.services, {"arc": {"type": const.SERVICE_ARC, "port": 4440}})
+        self.assertEqual(d.server_name, f"iempc-{IP}")
 
 
 class SourceTests(unittest.TestCase):
@@ -192,10 +283,11 @@ class SourceTests(unittest.TestCase):
     def test_the_helper_calls_no_command_but_its_reads_and_its_label_writes(self) -> None:
         forbidden = ("add_subscription", "remove_subscription", "set_latency", "set_sample_rate", "set_encoding",
                      "set_gain_level", "set_name", "reset_name", "identify", "dante_command", "dante_send_command",
-                     "get_volume")
+                     "get_volume", "socket")
         for name in forbidden:
             self.assertIsNone(re.search(rf"\b{name}\b", self.SOURCE), name)
-        self.assertIsNone(re.search(r"\bcommand_\w+", self.SOURCE))
+        for raw in (r"\bcommand_\w+", r"\.sockets\b", r"\.send\("):
+            self.assertIsNone(re.search(raw, self.SOURCE), raw)
         self.assertEqual(set(re.findall(r"await device\.(\w+)\(", self.SOURCE)),
                          {"get_controls", "set_channel_name", "reset_channel_name"})
         self.assertEqual(re.findall(r"device\.(\w+) *=", self.SOURCE), ["ipv4", "services"])
