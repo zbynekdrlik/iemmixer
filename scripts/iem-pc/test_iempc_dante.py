@@ -1,13 +1,17 @@
 """Tests for scripts/iem-pc/iempc_dante.py: `iempc dante-labels` (#58 plan
-Task 15, outcome B: the sheet). The roster and the site are the synthetic
-config/test-roster.toml and config/test-site.toml (P6: synthetic people and
-channel numbers); names with letters a label cannot hold are built from code
-points, so this file stays ASCII."""
+Task 15, outcome A: the sheet and `--apply`, with the safety review's
+fixes). The roster and the site are the synthetic config/test-roster.toml
+and config/test-site.toml (P6: synthetic people and channel numbers); names
+with letters a label cannot hold are built from code points, so this file
+stays ASCII. No card exists in CI: a fake stands in for dante_card.py's
+subprocess, and a stand-in program for the netaudio python."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -183,12 +187,14 @@ class LabelTests(unittest.TestCase):
             (changed(ROSTER, ('owner = "member9"', 'owner = "member12"')), SITE, "person 'member12'"),
             (changed(ROSTER, ("mic10 = {", "mic99 = {")), SITE, "input 'mic99'"),
             (ROSTER, changed(SITE, ("rx = [101]", 'rx = ["101"]')), "input 'mic1'"),
+            (ROSTER, changed(SITE, ("rx = [101]", "rx = [256]")), "input 'mic1'"),   # Dante numbers 1 to 255
             (ROSTER, SITE.split("[engine]")[0], "[engine]"),
         ]
         for roster, site, words in cases:
             with self.assertRaises(dante.SheetError, msg=words) as e:
                 rows(roster, site)
             self.assertIn(words, str(e.exception))
+        self.assertIn(255, by_channel(rows(ROSTER, changed(SITE, ("rx = [101]", "rx = [255]"))), "rx"))
 
 
 class DanteLabelsCommandTests(Base):
@@ -233,16 +239,24 @@ HOST, NAME = "192.0.2.10", "Zyxqw-Iem-Card"   # a documentation IP and an invent
 class FakeHelper:
     """Stands in for dante_card.py's subprocess (no card in CI): records each
     run's argv and stdin and answers as the helper does, from a card of 128
-    TX and 128 RX channels that carry their default labels unless set."""
+    TX and 128 RX channels that carry their default labels unless set. A
+    write checks the flag path it is given before each label, as the helper
+    does."""
 
     def __init__(self, test: Base) -> None:
         self.test = test
         self.calls: list[tuple[list[str], str]] = []
         self.card = {"tx": {str(n): str(n) for n in range(1, 129)}, "rx": {str(n): str(n) for n in range(1, 129)}}
-        self.deaf: set[tuple[str, int]] = set()
-        self.refuse: str | None = None
+        self.counts: dict[str, int] = {}               # a count the read reports instead of the labels'
+        self.deaf: set[tuple[str, int]] = set()        # writes the card ignores
+        self.garbled: dict[tuple[str, int], str] = {}  # writes that land as another label
+        self.raise_at: tuple[str, int] | None = None   # the write whose command raises: the writes stop
+        self.no_read_back = False
+        self.refuse: str | None = None                 # every run fails with these words
+        self.write_error: Exception | None = None      # a write run that fails or outlives its bound
         self.on_read = None
-        self.count_off = 0   # a write answer that counts other than what it was given
+        self.after_write = None
+        self.tamper = None                             # changes a write's answer
 
     def __call__(self, _ip, cmd: list[str], stdin: str) -> str:
         self.calls.append((list(cmd), stdin))
@@ -251,16 +265,42 @@ class FakeHelper:
         if cmd[3] == "read":
             if self.on_read is not None:
                 self.on_read()
-            return "netaudio noise\n" + json.dumps({"name": NAME, "rx_count": len(self.card["rx"]),
-                                                    "tx_count": len(self.card["tx"]), **self.card})
-        changes = json.loads(stdin)
-        for c in changes:
-            if (c["type"], c["channel"]) not in self.deaf:
+            return "netaudio noise\n" + json.dumps({"name": NAME, "rx_count": self.counts.get("rx", len(self.card["rx"])),
+                                                    "tx_count": self.counts.get("tx", len(self.card["tx"])),
+                                                    **self.card})
+        if self.write_error is not None:
+            raise self.write_error
+        flag = Path(cmd[6])
+        sent, failed, errors = [], None, []
+        for c in json.loads(stdin):
+            key = (c["type"], c["channel"])
+            if flag.exists():
+                errors.append(f"{flag} appeared: writing stopped")
+                break
+            if key == self.raise_at:
+                failed = c
+                errors.append(f"writing {c['type']} {c['channel']} failed (ConnectionRefusedError: synthetic)")
+                break
+            if key in self.garbled:
+                self.card[c["type"]][str(c["channel"])] = self.garbled[key]
+            elif key not in self.deaf:
                 self.card[c["type"]][str(c["channel"])] = c["label"]
+            sent.append(c)
+            if self.after_write is not None:
+                self.after_write()
+        if self.no_read_back:
+            errors.append("not read back: the card did not answer")
+        back = not self.no_read_back
         mismatches = [{"type": c["type"], "channel": c["channel"], "want": c["label"],
-                       "got": self.card[c["type"]][str(c["channel"])]} for c in changes
-                      if self.card[c["type"]][str(c["channel"])] != c["label"]]
-        return json.dumps({"written": len(changes) + self.count_off, "mismatches": mismatches, **self.card})
+                       "got": self.card[c["type"]][str(c["channel"])]}
+                      for c in sent + ([failed] if failed else [])
+                      if back and self.card[c["type"]][str(c["channel"])] != c["label"]]
+        doc = {"sent": sent, "failed": failed, "error": "; ".join(errors) or None, "read_back": back,
+               "mismatches": mismatches, "tx": dict(self.card["tx"]) if back else None,
+               "rx": dict(self.card["rx"]) if back else None}
+        if self.tamper is not None:
+            self.tamper(doc)
+        return json.dumps(doc)
 
     def verbs(self) -> list[str]:
         return [cmd[3] for cmd, _ in self.calls]
@@ -280,6 +320,7 @@ class ApplyTests(Base):
         self.python = self.tmp / "netaudio" / "bin" / "python"
         self.python.parent.mkdir(parents=True)
         self.python.write_text("", encoding="utf-8")
+        self.python.chmod(0o755)
         self.env_text = ip.env_path().read_text(encoding="utf-8")
         ip.env_path().write_text(self.env_text + f"DANTE_IEM_HOST={HOST}\nDANTE_IEM_NAME={NAME}\n"
                                  f"NETAUDIO_PYTHON={self.python}\n", encoding="utf-8")
@@ -292,20 +333,31 @@ class ApplyTests(Base):
     def apply(self, *extra: str) -> tuple[int, list[dict], str]:
         return self.run_main("dante-labels", "--roster", str(self.roster), "--apply", *extra)
 
+    def planned(self, rows: list[dante.Label]) -> list[dict]:
+        """The report's entries for `rows`, each with the default label the fake card held before."""
+        return [{"type": r.kind, "channel": r.channel, "label": r.label, "before": str(r.channel)} for r in rows]
+
+    def tx(self, rows: list[dante.Label]) -> list[dict]:
+        return [{"channel": r.channel, "label": r.label, "before": str(r.channel)} for r in rows if r.kind == "tx"]
+
     def test_apply_touches_only_the_iem_card(self) -> None:
         code, docs, err = self.apply()
         self.assertEqual(code, 0, err)
-        # Two runs of the helper, a read and a write, each naming only the configured card.
+        # Two runs of the helper, a read and a write, each naming only the configured card; the write
+        # also gets the EVENT-NOW flag's path, which it checks before each label.
         self.assertEqual(self.fake.verbs(), ["read", "write"])
-        for cmd, _ in self.fake.calls:
-            self.assertEqual(cmd, [str(self.python), "-I", str(dante.HELPER), cmd[3], HOST, NAME])
+        head = [str(self.python), "-I", str(dante.HELPER)]
+        self.assertEqual([cmd for cmd, _ in self.fake.calls], [head + ["read", HOST, NAME],
+                                                              head + ["write", HOST, NAME, str(ip.EVENT_NOW)]])
         # Only label changes, each one of the sheet's rows.
         written = self.fake.written()
         self.assertTrue(all(set(c) == {"type", "channel", "label"} for c in written))
         self.assertEqual(sorted((c["type"], c["channel"], c["label"]) for c in written),
                          sorted((r.kind, r.channel, r.label) for r in self.rows))
         out = docs[-1]["dante_apply"]
-        self.assertEqual((out["changed"], out["unchanged"], out["mismatches"]), (len(self.rows), 0, []))
+        self.assertEqual((out["changed"], out["unchanged"], out["confirmed"], out["unsent"], out["mismatches"],
+                          out["error"]), (len(self.rows), 0, True, [], [], None))
+        self.assertEqual(out["written"], self.planned(self.rows))
         self.assertEqual([r["channel"] for r in out["resubscribe"]], list(range(71, 89)))
         self.assertEqual(out["resubscribe"][0], {"channel": 71, "label": "MEMBER 1 inear L 71", "before": "71"})
         self.assertEqual((self.pc.calls, self.pc.modules, self.pc.scps, self.gh.named("workflow")), ([], [], [], []))
@@ -325,22 +377,91 @@ class ApplyTests(Base):
         code, docs, err = self.apply()
         self.assertEqual(code, 0, err)
         self.assertEqual(self.fake.verbs(), ["read"])
-        self.assertEqual((docs[-1]["dante_apply"]["changed"], docs[-1]["dante_apply"]["resubscribe"]), (0, []))
-        self.assertIn("nothing to change", docs[-1]["dante_apply"]["note"])
+        out = docs[-1]["dante_apply"]
+        self.assertEqual((out["changed"], out["written"], out["resubscribe"], out["confirmed"]), (0, [], [], True))
+        self.assertIn("nothing to change", out["note"])
 
-    def test_a_read_back_mismatch_exits_1(self) -> None:
+    def test_resubscribe_lists_the_tx_labels_the_card_changed(self) -> None:
+        """The safety review's M8: a TX label that did not land keeps its
+        subscription, so it is not listed; one that landed as another label
+        is listed with the label the card holds, marked."""
         self.fake.deaf.add(("tx", 71))
+        self.fake.garbled[("tx", 72)] = "72 ZYXQW"
         code, docs, err = self.apply()
         self.assertEqual(code, 1, err)
-        self.assertEqual(docs[-1]["dante_apply"]["mismatches"],
-                         [{"type": "tx", "channel": 71, "want": "MEMBER 1 inear L 71", "got": "71"}])
-        # An answer that does not count what it was given is no answer either.
-        self.fake.deaf.clear()
-        self.fake.card["tx"]["72"] = "72"
-        self.fake.count_off = -1
+        out = docs[-1]["dante_apply"]
+        self.assertEqual(out["mismatches"],
+                         [{"type": "tx", "channel": 71, "want": "MEMBER 1 inear L 71", "got": "71"},
+                          {"type": "tx", "channel": 72, "want": "MEMBER 1 inear R 72", "got": "72 ZYXQW"}])
+        self.assertEqual(out["resubscribe"][:2], [{"channel": 72, "label": "72 ZYXQW", "before": "72", "mismatch": True},
+                                                  {"channel": 73, "label": "MEMBER 2 inear L 73", "before": "73"}])
+        self.assertEqual([r["channel"] for r in out["resubscribe"]], list(range(72, 89)))
+        self.assertEqual(out["written"], self.planned(self.rows[2:]))   # what the card holds as asked
+        self.assertEqual((out["confirmed"], out["unsent"]), (True, []))
+
+    def test_a_write_that_fails_part_way_reports_what_landed(self) -> None:
+        """The safety review's I1: the helper reports what it sent before a
+        write raised; what landed, what was never sent and the subscriptions
+        to remake come out, exit 1."""
+        self.fake.raise_at = ("tx", 73)
         code, docs, err = self.apply()
-        self.assertEqual((code, docs), (1, []))
-        self.assertIn("answered no count of", err)
+        self.assertEqual(code, 1, err)
+        out = docs[-1]["dante_apply"]
+        self.assertEqual((out["confirmed"], out["written"], out["unsent"]),
+                         (True, self.planned(self.rows[:2]), self.planned(self.rows[3:])))
+        self.assertEqual(out["mismatches"], [{"type": "tx", "channel": 73, "want": "MEMBER 2 inear L 73", "got": "73"}])
+        self.assertEqual(out["resubscribe"], self.tx(self.rows[:2]))
+        self.assertIn("tx 73", out["error"])
+
+    def test_the_flag_during_the_writes_stops_them(self) -> None:
+        """The safety review's M3: an "ide event" while the helper writes
+        stops it before the next label; the rest is reported unsent."""
+        self.fake.after_write = self.flag
+        code, docs, err = self.apply()
+        self.assertEqual(code, 1, err)
+        out = docs[-1]["dante_apply"]
+        self.assertEqual((out["confirmed"], out["written"], out["unsent"], out["resubscribe"]),
+                         (True, self.planned(self.rows[:1]), self.planned(self.rows[1:]), self.tx(self.rows[:1])))
+        self.assertIn("appeared", out["error"])
+
+    def test_a_write_not_read_back_is_unconfirmed(self) -> None:
+        self.fake.no_read_back = True
+        code, docs, err = self.apply()
+        self.assertEqual(code, 1, err)
+        out = docs[-1]["dante_apply"]
+        self.assertEqual((out["confirmed"], out["written"], out["unsent"], out["mismatches"], out["resubscribe"]),
+                         (False, self.planned(self.rows), [], None, self.tx(self.rows)))
+        self.assertIn("not read back", out["error"])
+
+    def test_a_write_run_that_fails_or_outlives_its_bound_prints_the_plan_unconfirmed(self) -> None:
+        """The safety review's I1 and M6: no answer from the write run, or one
+        that is not a report of its writes; the planned labels and their
+        subscriptions are printed unconfirmed, then it fails."""
+        failures = [(ip.StepError("python failed (exit 1): Traceback: ConnectionRefusedError"), "ConnectionRefusedError"),
+                    (ip.StillRunning(f"dante_card.py write still running after {dante.CARD_S:g} s here on this box "
+                                     "(pid 4242)"), "here on this box (pid 4242)")]
+        for error, words in failures:
+            self.fake.write_error = error
+            code, docs, err = self.apply()
+            self.assertEqual(code, 1, words)
+            self.assertIn(words, err)
+            out = docs[-1]["dante_apply"]
+            self.assertEqual((out["confirmed"], out["written"], out["unsent"], out["mismatches"], out["resubscribe"]),
+                             (False, self.planned(self.rows), None, None, self.tx(self.rows)), words)
+            self.assertIn(words, out["error"])
+            self.fake.card = {"tx": {str(n): str(n) for n in range(1, 129)}, "rx": {str(n): str(n) for n in range(1, 129)}}
+        self.fake.write_error = None
+        for tamper in (lambda d: d.update(sent=d["sent"] + [{"type": "tx", "channel": 1, "label": "x"}]),
+                       lambda d: d.update(sent=d["sent"][1:]), lambda d: d.update(read_back="yes"),
+                       lambda d: d.pop("mismatches"), lambda d: d.update(error=3), lambda d: d.update(failed=[]),
+                       lambda d: d.update(tx={"71": 71})):
+            self.fake.tamper = tamper
+            code, docs, err = self.apply()
+            self.assertEqual(code, 1)
+            self.assertIn("answered no report of its writes", err)
+            self.assertEqual((docs[-1]["dante_apply"]["confirmed"], docs[-1]["dante_apply"]["written"]),
+                             (False, self.planned(self.rows)))
+            self.fake.card = {"tx": {str(n): str(n) for n in range(1, 129)}, "rx": {str(n): str(n) for n in range(1, 129)}}
 
     def test_another_device_at_the_host_writes_nothing(self) -> None:
         self.fake.refuse = ("python failed (exit 1): dante_card: the device answering at the configured host is not "
@@ -351,16 +472,31 @@ class ApplyTests(Base):
         self.assertEqual(self.fake.verbs(), ["read"])
 
     def test_a_channel_the_card_lacks_writes_nothing(self) -> None:
-        self.fake.card["tx"] = {str(n): str(n) for n in range(1, 65)}
+        """The card's counts decide (the safety review's M5): a channel above
+        the count, or one the read did not list, refuses before any write."""
+        default = {str(n): str(n) for n in range(1, 129)}
+        cards = [({str(n): str(n) for n in range(1, 65)}, None),              # 64 channels
+                 ({**{str(n): str(n) for n in range(1, 64)}, "71": "71"}, None),   # 64 listed, 71 above the count
+                 ({str(n): str(n) for n in range(1, 130) if n != 71}, None)]   # 128, 71 not listed
+        for tx, count in cards:
+            self.fake.card["tx"] = tx
+            self.fake.counts = {} if count is None else {"tx": count}
+            self.fake.calls.clear()
+            code, docs, err = self.apply()
+            self.assertEqual((code, docs), (1, []), sorted(tx, key=int)[-1])
+            self.assertIn("the card has no tx channel 71 (nothing was written)", err)
+            self.assertEqual(self.fake.verbs(), ["read"])
+        # A read whose counts are not its labels' is no read.
+        self.fake.card["tx"], self.fake.counts = default, {"tx": 129}
         code, docs, err = self.apply()
         self.assertEqual((code, docs), (1, []))
-        self.assertIn("the card has no tx channel 71 (nothing was written)", err)
-        self.assertEqual(self.fake.verbs(), ["read"])
+        self.assertIn("dante_card.py gave no tx labels", err)
 
     def test_apply_refuses_while_event_now(self) -> None:
         """The plan's name: no label is written during an event. Dev time and
-        locked (refused at the start), and the flag read again right before
-        the write (one that came during the card's read)."""
+        locked (refused at the start), the flag read again right before the
+        write (one that came during the card's read), and the helper checks
+        it before each label (test_the_flag_during_the_writes_stops_them)."""
         spec = ip.COMMANDS["dante-labels"]
         self.assertEqual((spec.fn, spec.pc, spec.dev_time, spec.locked), (ip.cmd_dante_labels, False, True, True))
         self.flag()
@@ -382,14 +518,19 @@ class ApplyTests(Base):
             code, docs, err = self.apply()
             self.assertEqual((code, docs), (1, []), key)
             self.assertIn(f"{key} missing in the private env", err)
-        for key, bad, words in (("DANTE_IEM_HOST", "iem-card.example", "not an IP address"),
-                                ("NETAUDIO_PYTHON", "python3", "not the full path of a file"),
-                                ("NETAUDIO_PYTHON", str(self.tmp / "none"), "not the full path of a file")):
-            ip.env_path().write_text(full.replace(f"{key}=", f"{key}={bad}\n#"), encoding="utf-8")
+        plain = self.tmp / "netaudio" / "bin" / "python-plain"
+        plain.write_text("", encoding="utf-8")
+        plain.chmod(0o644)
+        bad = [("DANTE_IEM_HOST", host, "not a unicast IPv4 address")
+               for host in ("iem-card.example", "224.0.0.251", "127.0.0.1", "0.0.0.0", "255.255.255.255", "2001:db8::10")]
+        bad += [("NETAUDIO_PYTHON", python, "not the full path of an executable file")
+                for python in ("python3", str(self.tmp / "none"), str(plain), str(self.python.parent))]
+        for key, value, words in bad:
+            ip.env_path().write_text(full.replace(f"{key}=", f"{key}={value}\n#"), encoding="utf-8")
             code, docs, err = self.apply()
-            self.assertEqual((code, docs), (1, []), bad)
-            self.assertIn(words, err, bad)
-            self.assertNotIn(bad, err)   # a value of the private env is never printed
+            self.assertEqual((code, docs), (1, []), value)
+            self.assertIn(words, err, value)
+            self.assertNotIn(value, err)   # a value of the private env is never printed
         self.assertEqual(self.fake.calls, [])
         # Without the keys the sheet still prints, from --before or nothing.
         ip.env_path().write_text(self.env_text, encoding="utf-8")
@@ -408,7 +549,7 @@ class ApplyTests(Base):
         self.assertEqual([r["channel"] for r in sheet["resubscribe"]], list(range(73, 89)))
         self.assertEqual(self.fake.verbs(), ["read"])
         # The card cannot be read: a warning, then --before (nothing differs), or nothing known.
-        self.fake.refuse = "python failed (exit 1): dante_card: the card did not answer (TimeoutError)"
+        self.fake.refuse = "python failed (exit 1): dante_card: the card did not answer"
         code, docs, err = self.run_main("dante-labels", "--roster", str(self.roster), "--before", str(self.roster))
         self.assertEqual(code, 0, err)
         self.assertIn("WARNING: the card's labels could not be read", err)
@@ -418,6 +559,88 @@ class ApplyTests(Base):
         self.assertEqual(code, 0, err)
         self.assertIn("every TX row is listed", err)
         self.assertIsNone(docs[-1]["dante_labels"]["compared"])
+
+
+class HelperRunTests(Base):
+    """The real `helper`: dante_card.py runs here, on the dev box, in its own
+    process, bounded by CARD_S and never ended by force (the safety review's
+    M4 and M6). A stand-in program takes the netaudio python's place."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.log = self.tmp / "standin.log"
+        self.done = self.tmp / "standin.done"
+        self.program = self.tmp / "netaudio" / "bin" / "python"
+        self.program.parent.mkdir(parents=True)
+        self.program.write_text(
+            f"#!{sys.executable}\nimport json, sys, time\n"
+            f"open({str(self.log)!r}, 'a').write(' '.join(sys.argv[3:]) + '\\n')\n"
+            "data = sys.stdin.read()\nverb = sys.argv[3]\n"
+            "print('netaudio noise', file=sys.stderr)\n"
+            "if verb == 'refuse':\n    print('dante_card: refused here', file=sys.stderr)\n    sys.exit(1)\n"
+            "if verb == 'write':\n    time.sleep(1.5)\n"
+            f"print(json.dumps({{'verb': verb, 'stdin': data}}))\nopen({str(self.done)!r}, 'a').write('ended\\n')\n",
+            encoding="utf-8")
+        self.program.chmod(0o755)
+
+    def cmd(self, verb: str, program: Path | None = None) -> list[str]:
+        return [str(program or self.program), "-I", str(dante.HELPER), verb, HOST, NAME]
+
+    def runs(self) -> list[str]:
+        return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+
+    def wait_for_end(self) -> None:
+        """Until the recorded stand-in has ended by itself (never ended by force)."""
+        pid = ip.read_json(ip.STATE_DIR / dante.RECORD, {})["pid"]
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                alive = str(dante.HELPER).encode() in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            except (FileNotFoundError, ProcessLookupError):
+                alive = False
+            if not alive:
+                break
+            time.sleep(0.05)
+        self.assertTrue(self.done.exists(), "the stand-in never ended")
+
+    def test_a_run_answers_its_stdout_or_fails_with_its_words(self) -> None:
+        out = dante.helper(ip, self.cmd("read"), "")
+        self.assertEqual(json.loads(out), {"verb": "read", "stdin": ""})   # its stderr stays out of the answer
+        with self.assertRaises(ip.StepError) as e:
+            dante.helper(ip, self.cmd("refuse"), "")
+        self.assertIn("(exit 1)", str(e.exception))
+        self.assertIn("dante_card: refused here", str(e.exception))
+
+    def test_a_python_that_cannot_start_is_a_step_error_without_its_path(self) -> None:
+        hidden = self.tmp / "zyxqw-private"
+        hidden.mkdir()
+        plain = hidden / "python"
+        plain.write_text("", encoding="utf-8")
+        for program in (hidden / "none", plain):
+            with self.assertRaises(ip.StepError) as e:
+                dante.helper(ip, self.cmd("read", program), "")
+            self.assertNotIn("zyxqw-private", str(e.exception))
+            self.assertIn("could not be started", str(e.exception))
+        self.assertEqual(self.runs(), [])
+
+    def test_a_run_past_its_bound_is_left_to_end_and_no_second_run_overlaps_it(self) -> None:
+        with mock.patch.object(dante, "CARD_S", 0.3):
+            with self.assertRaises(ip.StillRunning) as e:
+                dante.helper(ip, self.cmd("write"), '[{"type": "tx", "channel": 71, "label": "x"}]')
+            self.assertIn("here on this box (pid ", str(e.exception))
+            self.assertIn("never force-ended", str(e.exception))
+            # While it runs, no other run of the helper starts.
+            with self.assertRaises(ip.Refused) as e:
+                dante.helper(ip, self.cmd("read"), "")
+            self.assertIn("still runs on this box", str(e.exception))
+            self.assertEqual(self.runs(), ["write 192.0.2.10 Zyxqw-Iem-Card"])
+            self.wait_for_end()
+            # It ended by itself, its answer kept on this box; the next run goes ahead.
+            self.assertIn('"stdin": "[{', (ip.STATE_DIR / dante.OUT).read_text(encoding="utf-8"))
+            self.assertEqual(json.loads(dante.helper(ip, self.cmd("read"), ""))["verb"], "read")
+        # A recorded process that is not the helper (its pid reused) does not hold a run back.
+        ip.write_json(ip.STATE_DIR / dante.RECORD, {"pid": os.getpid()})
+        self.assertEqual(json.loads(dante.helper(ip, self.cmd("read"), ""))["verb"], "read")
 
 
 if __name__ == "__main__":
