@@ -44,7 +44,8 @@ class Card:
         self.deaf_to: set[tuple[str, int]] = set()      # writes the card ignores
         self.raise_on: dict[tuple[str, int], Exception] = {}   # writes whose command raises, unsent
         self.silent = False                           # answers nothing: no name, no channels
-        self.partial = False                          # one TX channel missing from the read
+        self.partial = None                           # "tx" or "rx": that kind's last channel missing
+        self.no_counts = False                        # names itself, reports no channel counts
         self.after_write = None                       # called after each write that returned
         self.reads = 0
 
@@ -74,11 +75,14 @@ class Device:
         if self.card.silent:
             return
         self.name = self.card.name
+        if self.card.no_counts:   # netaudio's count command got no reply: no channel is read
+            return
         self.tx_count, self.rx_count = len(self.card.labels["tx"]), len(self.card.labels["rx"])
         self.tx_channels = {n: Channel(n, v) for n, v in self.card.labels["tx"].items()}
         self.rx_channels = {n: Channel(n, v) for n, v in self.card.labels["rx"].items()}
         if self.card.partial:
-            del self.tx_channels[max(self.tx_channels)]
+            channels = getattr(self, f"{self.card.partial}_channels")
+            del channels[max(channels)]
 
     async def set_channel_name(self, kind: str, number: int, label: str) -> None:
         await self._write(kind, number, label)
@@ -203,11 +207,13 @@ class HelperTests(unittest.TestCase):
         code, out, err = self.run_helper("write", IP, NAME, str(self.flag), stdin=changes)
         self.assertEqual((code, out), (1, ""))
         self.assertIn("the card did not answer: nothing was written", err)
-        # A read that lost a page of channels is no read.
-        self.card.silent, self.card.partial = False, True
-        code, out, err = self.run_helper("read", IP, NAME)
-        self.assertEqual((code, out), (1, ""))
-        self.assertIn("incomplete read", err)
+        # A read that lost a page of channels, or got no channel counts, is no read.
+        self.card.silent = False
+        for partial, no_counts in (("tx", False), ("rx", False), (None, True)):
+            self.card.partial, self.card.no_counts = partial, no_counts
+            code, out, err = self.run_helper("read", IP, NAME)
+            self.assertEqual((code, out), (1, ""), (partial, no_counts))
+            self.assertIn(f"incomplete read of the card's {partial or 'tx'} channels", err)
         self.assertEqual(self.writes(), [])
 
     def test_a_channel_the_card_lacks_writes_nothing(self) -> None:
@@ -222,7 +228,7 @@ class HelperTests(unittest.TestCase):
         one = json.dumps([{"type": "tx", "channel": 1, "label": "x"}])
         flag = str(self.flag)
         bad = [((), ""), (("erase", IP, NAME), ""), (("read", "card.example", NAME), ""), (("read", IP, ""), ""),
-               (("read", IP, NAME, flag), ""), (("write", IP, NAME), one)]
+               (("read", IP, NAME, flag), ""), (("write", IP, NAME), one), (("write", IP, NAME, "EVENT-NOW"), one)]
         bad += [(("read", host, NAME), "") for host in ("224.0.0.251", "127.0.0.1", "0.0.0.0", "255.255.255.255",
                                                          "240.0.0.1", "::1", "2001:db8::10")]
         bad += [(("write", IP, NAME, flag), stdin) for stdin in (
@@ -241,8 +247,8 @@ class HelperTests(unittest.TestCase):
             self.assertTrue(err.startswith("dante_card: "), argv)
         self.assertEqual((self.card.opened, self.card.calls), ([], []))
         # The highest channel Dante numbers is still a channel.
-        self.assertEqual(dante_card.parse_changes(json.dumps([{"type": "rx", "channel": 255, "label": "x"}]))[0]["channel"],
-                         255)
+        top = [{"type": "rx", "channel": 255, "label": "x"}]
+        self.assertEqual(dante_card.parse_changes(json.dumps(top)), top)
 
 
 class OpenDeviceTests(unittest.TestCase):
