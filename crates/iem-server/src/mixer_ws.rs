@@ -289,6 +289,20 @@ pub fn on_lineup(state: &AppState, page: &Page, viewer: &Viewer) -> OnLineup {
     }
 }
 
+/// What a session on `page` sends first after the hello: the page's state,
+/// pins and hides, solo, and its alert catch-up.
+pub fn opening(state: &AppState, page: &Page, viewer: &Viewer) -> Vec<ServerMsg> {
+    let mut first = vec![
+        full_state(state, page, viewer),
+        customization_msg(state, page),
+        solo_msg(state, page),
+    ];
+    if let Some(m) = alert_catchup(&lock(&state.alerts), &page.id) {
+        first.push(m);
+    }
+    first
+}
+
 /// Whether an app event for `to` goes to this connection.
 pub fn addressed(to: &To, page: &str, session: u64) -> bool {
     match to {
@@ -327,14 +341,7 @@ async fn session(
     let mut lineup_rx = state.lineup_tx.subscribe();
     lock(&state.solo).connected(&page.mix.0);
 
-    let mut first = vec![
-        full_state(&state, &page, &viewer),
-        customization_msg(&state, &page),
-        solo_msg(&state, &page),
-    ];
-    if let Some(m) = alert_catchup(&lock(&state.alerts), &page.id) {
-        first.push(m);
-    }
+    let mut first = opening(&state, &page, &viewer);
     first.push(ServerMsg::NetworkMode { mode: network_mode });
     first.push(crate::tunnel_watch::current_status_msg(&state).await);
     for m in &first {

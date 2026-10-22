@@ -518,6 +518,43 @@ async fn a_quiet_thaw_announces_only_after_a_page_missed_an_engine_event() {
     assert_eq!(rx.try_recv().unwrap().id, "main", "after a change");
 }
 
+/// #61 second review m2: a session in roster mode opens with the band that
+/// plays, so a page whose read of the band failed, or that a switch
+/// overtook between its read and its socket, shows the band of its socket
+/// (the badge, the switch's offers). Legacy mode has none.
+#[tokio::test]
+async fn a_session_opens_with_the_band_that_plays() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _peer) = on_fake_engine(dir.path(), "youth", Vec::new()).await;
+    let youth = ServerMsg::LineupChanged(iem_core::LineupRef {
+        id: "youth".into(),
+        name: "Youth band".into(),
+    });
+    for (id, v) in [
+        ("member10", viewer("member10", false)),
+        ("engineer", viewer("engineer", true)),
+        ("translator", viewer("engineer", true)),
+    ] {
+        let page = s.page(id).unwrap();
+        let first = opening(&s, &page, &v);
+        assert_eq!(first.first(), Some(&youth), "{id}");
+        assert!(
+            matches!(first.get(1), Some(ServerMsg::State { .. })),
+            "{id}: {first:?}"
+        );
+    }
+    s.set_roster(None);
+    let page = s.page("member1").unwrap();
+    let first = opening(&s, &page, &viewer("member1", false));
+    assert!(
+        !first
+            .iter()
+            .any(|m| matches!(m, ServerMsg::LineupChanged(_))),
+        "{first:?}"
+    );
+    assert!(matches!(first.first(), Some(ServerMsg::State { .. })));
+}
+
 /// #58 Part C: after a switch or a roster change every page first hears
 /// which band plays (`LineupChanged`, read from the roster in use). A
 /// person's page then closes with 4003; the engineer's page and the
