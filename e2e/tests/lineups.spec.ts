@@ -229,6 +229,8 @@ test.describe("Bands (#58)", () => {
     await expect(page.getByTestId("lineup-badge")).toHaveText(YOUTH);
     await expect(page.getByTestId("global-volume-fader")).toHaveCount(0);
     await expect(page.locator(".spinner")).toHaveCount(0);
+    // No connection dot either (#61 M1): the page has no socket on purpose.
+    await expect(page.locator(".mixer-header .status-dot")).toHaveCount(0);
     // member2 leads no band: no switch on the notice.
     await expect(shown.getByTestId("lineup-switch")).toHaveCount(0);
     // It stays the notice when the page reads the band again (every 5 s).
