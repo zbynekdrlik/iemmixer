@@ -301,26 +301,37 @@ test.describe("Talkback (F18)", () => {
 
     test("the microphone starts beside the talkback socket's open, not after it", async ({ page }) => {
       test.setTimeout(60_000);
-      const SOCKET_MS = 1_000;
-      const MIC_MS = 800;
-      const FIRST_FRAME_MS = 1_500;
-      await page.addInitScript((micMs: number) => {
-        const w = window as unknown as { __frames: number };
+      // The upgrade is answered only once the page has encoded a frame
+      // (at most 1.5 s after it asked, inside the server's 2 s bind window):
+      // in turn the encoder never starts before the socket is open, so the
+      // wait runs out; beside it, the first frame comes while it waits.
+      const ENCODED_WITHIN_MS = 1_500;
+      await page.addInitScript(() => {
+        const w = window as unknown as { __frames: number; __live_tracks: () => number };
         w.__frames = 0;
+        const streams: MediaStream[] = [];
         const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
         navigator.mediaDevices.getUserMedia = async (c?: MediaStreamConstraints) => {
-          await new Promise((r) => setTimeout(r, micMs));
-          return getUserMedia(c);
+          const stream = await getUserMedia(c);
+          streams.push(stream);
+          return stream;
         };
+        w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
         const encode = AudioEncoder.prototype.encode;
         AudioEncoder.prototype.encode = function (this: AudioEncoder, ...args: Parameters<typeof encode>) {
           w.__frames += 1;
           return encode.apply(this, args);
         };
-      }, MIC_MS);
-      // The upgrade answers 1 s after the page asked, as through the tunnel.
+      });
+      const frames = (): Promise<number> => page.evaluate(() => (window as unknown as { __frames: number }).__frames);
+      let encodedBeforeOpen: boolean | null = null;
       await page.routeWebSocket(/\/ws\/talkback/, async (ws) => {
-        await new Promise((r) => setTimeout(r, SOCKET_MS));
+        const asked = Date.now();
+        while ((await frames()) === 0 && Date.now() - asked < ENCODED_WITHIN_MS) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        encodedBeforeOpen = (await frames()) > 0;
+        test.info().annotations.push({ type: "talkback_wait_ms", description: String(Date.now() - asked) });
         ws.connectToServer();
       });
       const auth = await openMixer(page, "engineer", { engineer: true });
@@ -334,22 +345,41 @@ test.describe("Talkback (F18)", () => {
         expect(resp.status()).toBe(200);
         return (await resp.json()).packets_in;
       };
-      const frames = (): Promise<number> => page.evaluate(() => (window as unknown as { __frames: number }).__frames);
       const before = await packetsIn();
 
       await talk.hover();
-      const pressedAt = Date.now();
       await page.mouse.down();
       await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
-      await expect.poll(frames, { intervals: [25], timeout: 5_000 }).toBeGreaterThan(0);
-      const firstFrameMs = Date.now() - pressedAt;
+      await expect.poll(() => encodedBeforeOpen, { timeout: 5_000 }).not.toBeNull();
+      expect(encodedBeforeOpen, "the page encoded a frame before its talkback socket opened").toBe(true);
       // The held Talk still reaches the server through the late socket.
       await expect.poll(packetsIn, { timeout: 5_000 }).toBeGreaterThan(before + 50);
       await page.mouse.up();
       await expect(talk).toHaveText("🎤 Talk");
-      expect(firstFrameMs, "the first frame reached the encoder within 1.5 s of the press").toBeLessThan(
-        FIRST_FRAME_MS,
-      );
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
+          timeout: 3_000,
+        })
+        .toBe(0);
+    });
+
+    // A refused microphone is the user's choice: the button shows Mic Blocked
+    // and the console stays clean (the page logged it as an error before).
+    test("a refused microphone shows Mic Blocked with a clean console", async ({ page }) => {
+      await page.addInitScript(() => {
+        navigator.mediaDevices.getUserMedia = async () => {
+          throw new DOMException("Permission denied", "NotAllowedError");
+        };
+      });
+      await openMixer(page, "engineer", { engineer: true });
+      const talk = page.locator(".toolbar-btn-talk");
+      await expect(talk).toHaveText("🎤 Talk");
+      await tab(page, "Mics");
+      await talk.hover();
+      await page.mouse.down();
+      await expect(talk).toHaveClass(/mic-blocked/, { timeout: 5_000 });
+      await page.mouse.up();
+      await expect(talk).toHaveText("🎤 Mic Blocked");
     });
   });
 });
