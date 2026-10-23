@@ -150,7 +150,8 @@ async function holdTalk<T>(
   let result: T;
   try {
     await expect(talk, "Talk goes live").toHaveClass(/\blive\b/, { timeout: LIVE_MS });
-    // The talkback socket opens through the relay, then the microphone and the encoder start.
+    // The microphone and the encoder start beside the talkback socket's open through the
+    // relay (#58), so the first encoder frame can come before the server hears any.
     while ((await encodedFrames(page)) === 0) {
       if (Date.now() - pressedAt > START_MS) {
         throw new Error(`the talkback did not start within ${START_MS / 1000} s of the press`);
@@ -251,12 +252,28 @@ test.describe("talkback on the real PC (S7)", () => {
       await cardAway(desk, engineer, talkbackInput);
       // After the release: the frames from RELEASE_MS to 300 ms later.
       const hold = await holdTalk(page, desk, RELEASE_MS + 300, async ({ pressedAt, startedAt }) => {
-        // Half a second for the first frames to reach the engine's meter,
-        // then 50 frames (5 s) before the release's deadline.
-        const from = startedAt + 500;
+        // The encoder starts beside the socket's open (#58), so its first
+        // frame can come up to a second before the server hears any: the
+        // window starts once the talkback input's meter first hears it
+        // (the card is away, so the input is silent until then), plus
+        // 300 ms, then 50 frames (5 s) before the release's deadline.
+        const deadline = pressedAt + HOLD_MS - HOLD_MARGIN_MS - 100;
+        await expect
+          .poll(
+            () => {
+              relay.check();
+              return engineer.peaks(talkbackInput, startedAt).some((p) => p >= SILENT_PEAK);
+            },
+            {
+              message: "the talkback input hears the talkback",
+              timeout: Math.max(1, deadline - Date.now()),
+              intervals: [50],
+            },
+          )
+          .toBe(true);
+        const from = Date.now() + 300;
         await pause(from - Date.now());
         desk.inside("the held frames");
-        const deadline = pressedAt + HOLD_MS - HOLD_MARGIN_MS - 100;
         await expect
           .poll(
             () => {
