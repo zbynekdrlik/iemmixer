@@ -151,4 +151,121 @@ test.describe("Talkback (F18)", () => {
       watch.close();
     }
   });
+
+  // A Talk released while the talkback is still starting (live run of 819f954,
+  // 2026-10-23, #58): the release stopped the session the start was still
+  // building, so the start went on with the parts gone (a console error) or,
+  // released during getUserMedia, ended "active" with the microphone open and
+  // no socket, and every later press returned at once: talkback was dead
+  // until a reload. The start is held back at one of its waits, Talk is
+  // released there, then a held Talk must still reach the server.
+  test.describe("a Talk released while the talkback starts", () => {
+    // The engineer page subscribes to Web Push (see the describe above).
+    test.use({
+      allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/], { scope: "test" }],
+    });
+
+    for (const [held, stage] of [
+      ["the microphone", "mic"],
+      ["the worklet module", "worklet"],
+    ] as const) {
+      test(`a Talk released while ${held} is starting leaves the mic off, and the next Talk works`, async ({
+        page,
+      }) => {
+        test.setTimeout(60_000);
+        // The start's two waits are wrapped: getUserMedia (`mic`) and the
+        // worklet's addModule (`worklet`; Playwright's routes do not see a
+        // worklet module's fetch). `__calls[stage]` counts them; while
+        // `__hold` names a stage, its call waits for `__free()` first. Every
+        // microphone stream the page gets is kept, so the test can see
+        // whether each one ended.
+        await page.addInitScript(() => {
+          type Hold = { __calls: Record<string, number>; __hold?: string; __free?: () => void };
+          const w = window as unknown as Hold & Record<string, unknown>;
+          w.__calls = { mic: 0, worklet: 0 };
+          const wait = async (stage: string): Promise<void> => {
+            w.__calls[stage] += 1;
+            if (w.__hold === stage) await new Promise<void>((free) => (w.__free = free));
+          };
+          const streams: MediaStream[] = [];
+          const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+          navigator.mediaDevices.getUserMedia = async (c?: MediaStreamConstraints) => {
+            await wait("mic");
+            const stream = await getUserMedia(c);
+            streams.push(stream);
+            return stream;
+          };
+          const addModule = AudioWorklet.prototype.addModule;
+          AudioWorklet.prototype.addModule = async function (
+            this: AudioWorklet,
+            ...args: Parameters<typeof addModule>
+          ) {
+            await wait("worklet");
+            return addModule.apply(this, args);
+          };
+          w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
+        });
+        const calls = (): Promise<Record<string, number>> =>
+          page.evaluate(() => (window as unknown as { __calls: Record<string, number> }).__calls);
+        const auth = await openMixer(page, "engineer", { engineer: true });
+        const talk = page.locator(".toolbar-btn-talk");
+        await expect(talk).toHaveText("🎤 Talk");
+        await tab(page, "Mics");
+        const sent: number[] = [];
+        page.on("websocket", (ws) => {
+          if (!ws.url().includes("/ws/talkback")) return;
+          ws.on("framesent", (f) => {
+            if (typeof f.payload !== "string") sent.push(f.payload.length);
+          });
+        });
+        const packetsIn = async (): Promise<number> => {
+          const resp = await page.request.get("/api/talkback/diagnostics", {
+            headers: { Authorization: `Bearer ${auth.token}` },
+          });
+          expect(resp.status()).toBe(200);
+          return (await resp.json()).packets_in;
+        };
+
+        // The press, held back at one wait of the start, and the release there.
+        await page.evaluate((s) => ((window as unknown as { __hold?: string }).__hold = s), stage);
+        await talk.hover();
+        await page.mouse.down();
+        await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
+        await expect.poll(async () => (await calls())[stage], { timeout: 5_000 }).toBe(1);
+        await page.mouse.up();
+        await expect(talk).toHaveText("🎤 Talk");
+        // The start goes on from where it waited, after the release.
+        await page.evaluate(() => {
+          const w = window as unknown as { __hold?: string; __free?: () => void };
+          w.__hold = undefined;
+          w.__free?.();
+        });
+        // Whatever the start got after the release ends: no microphone stays open.
+        await page.waitForTimeout(1_000);
+        expect((await calls()).mic, "the start asked for the microphone once").toBe(1);
+        await expect
+          .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
+            timeout: 3_000,
+          })
+          .toBe(0);
+        await expect(talk).toHaveText("🎤 Talk");
+
+        // The next held Talk reaches the server.
+        const before = await packetsIn();
+        const sentBefore = sent.length;
+        await talk.hover();
+        await page.mouse.down();
+        await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
+        await expect.poll(() => sent.length - sentBefore, { timeout: 5_000 }).toBeGreaterThan(50);
+        await expect.poll(packetsIn, { timeout: 5_000 }).toBeGreaterThan(before + 50);
+        await page.mouse.up();
+        await expect(talk).toHaveText("🎤 Talk");
+        await expect
+          .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
+            timeout: 3_000,
+          })
+          .toBe(0);
+      });
+    }
+  });
 });

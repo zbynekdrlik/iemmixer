@@ -1,12 +1,51 @@
 // Talkback push-to-talk: capture mic, encode Opus, send via WebSocket (reaperiem#123)
 
-let _state = 'idle'; // 'idle' | 'connecting' | 'active'
-let _stream = null;
-let _audioCtx = null;
-let _encoder = null;
-let _sourceNode = null;
-let _processorNode = null;
-let _ws = null;
+// The session of the last start: its parts live on it, never in shared
+// variables, so a stop while a start still waits frees what that start made
+// and a start that resumes late never touches a newer session (live run of
+// 819f954, 2026-10-23: a release during getUserMedia left the microphone open,
+// the session "active" with no socket, and every later press returned at once).
+let _session = null;
+
+/** A session's parts are freed once; a stopped start resolves without an error. */
+function freeSession(s) {
+  s.stopped = true;
+  s.state = 'idle';
+  if (s.processorNode) {
+    s.processorNode.port.onmessage = null;
+    s.processorNode.disconnect();
+    s.processorNode = null;
+  }
+  if (s.sourceNode) {
+    s.sourceNode.disconnect();
+    s.sourceNode = null;
+  }
+  if (s.encoder && s.encoder.state !== 'closed') {
+    try { s.encoder.close(); } catch (_) {}
+  }
+  s.encoder = null;
+  if (s.stream) {
+    s.stream.getTracks().forEach((t) => t.stop());
+    s.stream = null;
+  }
+  if (s.audioCtx) {
+    s.audioCtx.close().catch(() => {});
+    s.audioCtx = null;
+  }
+  if (s.ws) {
+    const ws = s.ws;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close();
+    } else if (ws.readyState === WebSocket.CONNECTING) {
+      // Closing a socket that still connects makes Chrome log "WebSocket is
+      // closed before the connection is established": close it once it
+      // opens. (When the release's TalkStop reaches the server first, the
+      // upgrade is refused with 403 and Chrome logs that instead.)
+      ws.onopen = () => ws.close();
+    }
+    s.ws = null;
+  }
+}
 
 /**
  * Check if browser supports talkback (mediaDevices + AudioEncoder).
@@ -22,29 +61,43 @@ export function isTalkbackSupported() {
 
 /**
  * Start talkback: capture mic, encode Opus, send binary frames via new WebSocket.
+ * A stop while it waits ends it quietly: it frees what it made and resolves.
  * @param {string} wsUrl - WebSocket URL for talkback audio (wss://host/ws/talkback?token=...&talk=<id>)
  * @returns {Promise<void>}
  */
 export async function startTalkback(wsUrl) {
-  if (_state === 'active') return;
-  _state = 'connecting';
+  if (_session && !_session.stopped) return;
+  const s = { state: 'connecting', stopped: false };
+  _session = s;
 
   try {
     // 1. Open the dedicated talkback WebSocket first: it binds the held talk
     //    lock by the talk id in its URL, which the server allows only briefly
     //    after the lock was granted (X6).
-    _ws = new WebSocket(wsUrl);
-    _ws.binaryType = 'arraybuffer';
+    const ws = new WebSocket(wsUrl);
+    s.ws = ws;
+    ws.binaryType = 'arraybuffer';
 
-    await new Promise((resolve, reject) => {
-      _ws.onopen = resolve;
-      _ws.onerror = () => reject(new Error('Talkback WS failed to connect'));
-      // Timeout after 5s
-      setTimeout(() => reject(new Error('Talkback WS connect timeout')), 5000);
-    });
+    let connectTimer = null;
+    try {
+      await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error('Talkback WS failed to connect'));
+        // A stop closes the socket while it connects: that is no failure.
+        ws.onclose = () => (s.stopped ? resolve() : reject(new Error('Talkback WS closed while connecting')));
+        // Timeout after 5s
+        connectTimer = setTimeout(() => reject(new Error('Talkback WS connect timeout')), 5000);
+      });
+    } finally {
+      clearTimeout(connectTimer);
+    }
+    if (s.stopped) {
+      freeSession(s);
+      return;
+    }
 
     // 2. Get mic stream (mono, 48kHz, echo/noise cancellation)
-    _stream = await navigator.mediaDevices.getUserMedia({
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         sampleRate: 48000,
@@ -54,26 +107,34 @@ export async function startTalkback(wsUrl) {
       },
       video: false,
     });
+    s.stream = stream;
+    if (s.stopped) {
+      freeSession(s);
+      return;
+    }
 
     // 3. AudioContext at 48kHz
-    _audioCtx = new AudioContext({ sampleRate: 48000 });
+    const audioCtx = new AudioContext({ sampleRate: 48000 });
+    s.audioCtx = audioCtx;
 
     // 4. WebCodecs AudioEncoder (Opus, 96 kbps mono — reaperiem#154 quality bump).
-    _encoder = new AudioEncoder({
+    const encoder = new AudioEncoder({
       output: (chunk) => {
-        if (_ws && _ws.readyState === WebSocket.OPEN) {
+        if (s.ws && s.ws.readyState === WebSocket.OPEN) {
           const buf = new ArrayBuffer(chunk.byteLength);
           chunk.copyTo(buf);
-          _ws.send(buf);
+          s.ws.send(buf);
         }
       },
       error: (e) => {
+        if (s.stopped) return;
         console.error('[talkback] encoder error:', e);
         stopTalkback();
       },
     });
+    s.encoder = encoder;
 
-    _encoder.configure({
+    encoder.configure({
       codec: 'opus',
       sampleRate: 48000,
       numberOfChannels: 1,
@@ -84,21 +145,29 @@ export async function startTalkback(wsUrl) {
     //    Replaces deprecated ScriptProcessorNode(1024) which caused Opus
     //    re-framing jitter and DOM/GC stalls on the main thread.
     try {
-      await _audioCtx.audioWorklet.addModule('/talkback-worklet.js');
+      await audioCtx.audioWorklet.addModule('/talkback-worklet.js');
     } catch (err) {
+      if (s.stopped) {
+        freeSession(s);
+        return;
+      }
       console.error('[talkback] failed to load worklet module:', err);
       throw err;
     }
+    if (s.stopped) {
+      freeSession(s);
+      return;
+    }
 
-    _sourceNode = _audioCtx.createMediaStreamSource(_stream);
-    _processorNode = new AudioWorkletNode(_audioCtx, 'talkback-worklet', {
+    s.sourceNode = audioCtx.createMediaStreamSource(stream);
+    s.processorNode = new AudioWorkletNode(audioCtx, 'talkback-worklet', {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       outputChannelCount: [1],
     });
 
-    _processorNode.port.onmessage = (ev) => {
-      if (!_encoder || _encoder.state !== 'configured') return;
+    s.processorNode.port.onmessage = (ev) => {
+      if (!s.encoder || s.encoder.state !== 'configured') return;
       const data = ev.data; // Float32Array(960)
       const frame = new AudioData({
         format: 'f32-planar',
@@ -108,58 +177,39 @@ export async function startTalkback(wsUrl) {
         timestamp: (performance.now() * 1000) | 0, // microseconds
         data: data,
       });
-      _encoder.encode(frame);
+      s.encoder.encode(frame);
       frame.close();
     };
 
-    _sourceNode.connect(_processorNode);
+    s.sourceNode.connect(s.processorNode);
     // Worklet output is unused — connect to a muted gain so the graph is
     // fully wired (required on older Safari; harmless elsewhere).
-    const silentGain = _audioCtx.createGain();
+    const silentGain = audioCtx.createGain();
     silentGain.gain.value = 0;
-    _processorNode.connect(silentGain);
-    silentGain.connect(_audioCtx.destination);
-    _state = 'active';
+    s.processorNode.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+    s.state = 'active';
     console.log('[talkback] active');
   } catch (err) {
+    // A start the stop already ended is no failure.
+    if (s.stopped) {
+      freeSession(s);
+      return;
+    }
     console.error('[talkback] start failed:', err);
-    stopTalkback();
+    freeSession(s);
     throw err;
   }
 }
 
 /**
- * Stop talkback and clean up all resources.
+ * Stop talkback and clean up all resources, also of a start still waiting.
  */
 export function stopTalkback() {
-  if (_processorNode) {
-    _processorNode.disconnect();
-    _processorNode.onaudioprocess = null;
-    _processorNode = null;
+  if (_session) {
+    freeSession(_session);
+    _session = null;
   }
-  if (_sourceNode) {
-    _sourceNode.disconnect();
-    _sourceNode = null;
-  }
-  if (_encoder && _encoder.state !== 'closed') {
-    try { _encoder.close(); } catch (_) {}
-    _encoder = null;
-  }
-  if (_stream) {
-    _stream.getTracks().forEach((t) => t.stop());
-    _stream = null;
-  }
-  if (_audioCtx) {
-    _audioCtx.close().catch(() => {});
-    _audioCtx = null;
-  }
-  if (_ws) {
-    if (_ws.readyState === WebSocket.OPEN || _ws.readyState === WebSocket.CONNECTING) {
-      _ws.close();
-    }
-    _ws = null;
-  }
-  _state = 'idle';
   console.log('[talkback] stopped');
 }
 
@@ -168,5 +218,5 @@ export function stopTalkback() {
  * @returns {'idle'|'connecting'|'active'}
  */
 export function getTalkbackState() {
-  return _state;
+  return _session ? _session.state : 'idle';
 }
