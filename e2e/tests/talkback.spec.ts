@@ -204,6 +204,16 @@ test.describe("Talkback (F18)", () => {
             return addModule.apply(this, args);
           };
           w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
+          // The talkback sockets the page opens, so the test can wait for one to be open.
+          const sockets: WebSocket[] = [];
+          const Native = window.WebSocket;
+          window.WebSocket = class extends Native {
+            constructor(url: string | URL, protocols?: string | string[]) {
+              super(url, protocols);
+              if (String(url).includes("/ws/talkback")) sockets.push(this);
+            }
+          };
+          w.__talk_open = () => sockets.length > 0 && sockets[sockets.length - 1].readyState === Native.OPEN;
         });
         const calls = (): Promise<Record<string, number>> =>
           page.evaluate(() => (window as unknown as { __calls: Record<string, number> }).__calls);
@@ -232,6 +242,14 @@ test.describe("Talkback (F18)", () => {
         await page.mouse.down();
         await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
         await expect.poll(async () => (await calls())[stage], { timeout: 5_000 }).toBe(1);
+        // The capture starts beside the socket's open: the release waits for
+        // the socket, so the start is held in the capture alone (a release
+        // before the upgrade is answered is the 403 case on #58).
+        await expect
+          .poll(() => page.evaluate(() => (window as unknown as { __talk_open: () => boolean }).__talk_open()), {
+            timeout: 5_000,
+          })
+          .toBe(true);
         await page.mouse.up();
         await expect(talk).toHaveText("🎤 Talk");
         // The start goes on from where it waited, after the release.
