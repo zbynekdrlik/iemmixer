@@ -199,15 +199,20 @@ export async function startTalkback(wsUrl) {
     s.ws = ws;
     ws.binaryType = 'arraybuffer';
 
-    // Both are awaited to the end, so neither failure goes unhandled.
-    const [mic, socket] = await Promise.allSettled([capture(s), connected(s, ws)]);
+    // The socket's wait runs beside the capture; its failure is read after
+    // the capture's (a refused microphone, the page's MicBlocked, fails at
+    // once), and it is never left unhandled.
+    const socket = connected(s, ws).then(
+      () => null,
+      (err) => err,
+    );
+    await capture(s);
+    const socketError = await socket;
     if (s.stopped) {
       freeSession(s);
       return;
     }
-    // The microphone's failure first: a refused permission is the page's MicBlocked.
-    if (mic.status === 'rejected') throw mic.reason;
-    if (socket.status === 'rejected') throw socket.reason;
+    if (socketError) throw socketError;
     s.state = 'active';
     console.log('[talkback] active');
   } catch (err) {
@@ -216,7 +221,10 @@ export async function startTalkback(wsUrl) {
       freeSession(s);
       return;
     }
-    console.error('[talkback] start failed:', err);
+    // A refused microphone is the user's choice, shown as Mic Blocked: no error.
+    if (!(err && err.name === 'NotAllowedError')) {
+      console.error('[talkback] start failed:', err);
+    }
     freeSession(s);
     throw err;
   }
