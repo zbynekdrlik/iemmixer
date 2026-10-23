@@ -106,7 +106,12 @@ fn foreign_inputs_belong_to_people_who_do_not_play() {
     let (r, l) = (&youth.roster, youth.lineup());
     let owners =
         |id: &str| -> Vec<String> { input_owners(&cfg, r, id).map(String::from).collect() };
-    assert_eq!(owners("mic1"), ["member1", "member10", "member1"]);
+    assert_eq!(
+        owners("mic1"),
+        ["member1", "member10"],
+        "the lineups' owners only"
+    );
+    assert_eq!(owners("mic10"), ["member9"]);
     assert_eq!(owners("eng_mic"), ["engineer"]);
     assert!(owners("keys").is_empty());
     let foreign = |id: &str| foreign_input(&cfg, r, l, id);
@@ -141,6 +146,37 @@ fn foreign_inputs_belong_to_people_who_do_not_play() {
         listed.lineup(),
         "mic5"
     ));
+}
+
+/// #58 review: the site's `[[inputs]]` owner counts only when no lineup
+/// gives the input an owner. A site owner who does not play (here
+/// member2, while youth plays) never hides an input a lineup gives to
+/// someone who plays (main's member3 owns mic3); with no lineup owner the
+/// site's owner decides, as for a departed person's mic10.
+#[test]
+fn the_site_owner_counts_only_when_no_lineup_owns_the_input() {
+    let mut cfg = test_config();
+    for m in cfg.inputs.iter_mut() {
+        if m.id == "mic3" || m.id == "keys" {
+            m.owner = Some("member2".into());
+        }
+    }
+    let youth = test_roster("youth");
+    let (r, l) = (&youth.roster, youth.lineup());
+    let owners =
+        |id: &str| -> Vec<String> { input_owners(&cfg, r, id).map(String::from).collect() };
+    assert_eq!(owners("mic3"), ["member3"], "a lineup owns it");
+    assert_eq!(owners("keys"), ["member2"], "no lineup owns it");
+    assert!(
+        !foreign_input(&cfg, r, l, "mic3"),
+        "member3 plays in youth; the site's member2 does not count"
+    );
+    assert!(
+        foreign_input(&cfg, r, l, "keys"),
+        "the site's owner decides"
+    );
+    let gone = departed_roster("youth");
+    assert!(foreign_input(&cfg, &gone.roster, gone.lineup(), "mic10"));
 }
 
 #[test]

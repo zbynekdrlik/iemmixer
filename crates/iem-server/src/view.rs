@@ -578,7 +578,7 @@ pub fn limiter_msg(mirror: &Mirror, page: &Page, active_seconds: f64) -> ServerM
 }
 
 /// Mute All (F15): one batch muting every level of the page's mix.
-pub fn mute_all(view: &SiteView, page: &Page) -> Cmd {
+pub fn mute_all(view: &SiteView, page: &Page, _viewer: &Viewer) -> Cmd {
     let heard = view
         .mix(&page.mix)
         .map(|m| m.hears.clone())

@@ -413,7 +413,7 @@ async fn session(
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             m = meters_rx.recv() => match m {
-                Ok(merged) => meters_msg(&state, &page, &merged).into_iter().collect(),
+                Ok(merged) => meters_msg(&state, &page, &viewer, &merged).into_iter().collect(),
                 Err(broadcast::error::RecvError::Lagged(_)) => Vec::new(),
                 Err(broadcast::error::RecvError::Closed) => break,
             },
@@ -471,7 +471,12 @@ fn cleanup(state: &AppState, page: &Page, session: u64) {
     }
 }
 
-fn meters_msg(state: &AppState, page: &Page, merged: &crate::meters::Merged) -> Option<ServerMsg> {
+fn meters_msg(
+    state: &AppState,
+    page: &Page,
+    _viewer: &Viewer,
+    merged: &crate::meters::Merged,
+) -> Option<ServerMsg> {
     let site = state.site()?;
     let topo = state.engine.mirror().topology.clone()?;
     Some(ServerMsg::Meters {

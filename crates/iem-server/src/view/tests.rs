@@ -948,6 +948,55 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
     );
 }
 
+/// #58 review: the ids a person's page does not show never reach it
+/// through a solo: the solo list a solo change sends leaves out the inputs
+/// of people who do not play (an engineer's solo of one on that page); the
+/// engineer's view keeps every soloed id, and legacy mode every id. Youth
+/// plays: mic2 is main's member2's.
+#[test]
+fn a_persons_solo_list_leaves_out_the_inputs_it_does_not_show() {
+    let m = Mirror::default();
+    let (youth, problems) = SiteView::build_with(
+        &crate::site_view::tests::test_config(),
+        Some(&crate::roster_state::tests::test_roster("youth")),
+        &crate::site_view::tests::test_topology(),
+    );
+    assert_eq!(problems, Vec::<String>::new());
+    let solo = [Change::Solo {
+        mix: mix("member1"),
+        sources: vec![input("mic1"), input("mic2"), input("keys")],
+    }];
+    let soloed = |v: &SiteView, p: &str, viewer: &Viewer| -> Vec<Vec<String>> {
+        updates_seen(v, &m, &page(v, p), viewer, &solo)
+            .into_iter()
+            .filter_map(|u| match u {
+                ServerMsg::SoloUpdate { soloed } => Some(soloed),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        soloed(&youth, "member10", &member("member10")),
+        [["mic1", "keys"]]
+    );
+    assert!(
+        updates_for(&youth, &m, &page(&youth, "member10"), &solo).contains(
+            &ServerMsg::SoloUpdate {
+                soloed: vec!["mic1".into(), "keys".into()]
+            }
+        )
+    );
+    assert_eq!(
+        soloed(&youth, "member10", &engineer()),
+        [["mic1", "mic2", "keys"]]
+    );
+    let legacy = test_view();
+    assert_eq!(
+        soloed(&legacy, "member1", &member("member1")),
+        [["mic1", "mic2", "keys"]]
+    );
+}
+
 /// #58: without a roster the rule is today's: a member whose mix hears
 /// others leads (member1, member3), so every test above still holds.
 #[test]
@@ -1415,7 +1464,7 @@ fn eq_and_limiter_messages_read_the_mirror() {
 #[test]
 fn mute_all_mutes_every_level_of_the_page_mix() {
     let v = test_view();
-    let Cmd::Batch { ops } = mute_all(&v, &page(&v, "engineer")) else {
+    let Cmd::Batch { ops } = mute_all(&v, &page(&v, "engineer"), &engineer()) else {
         panic!("a batch");
     };
     assert_eq!(ops.len(), 24 + 9);
@@ -1430,8 +1479,55 @@ fn mute_all_mutes_every_level_of_the_page_mix() {
         pan: None,
         muted: Some(true)
     }));
-    let Cmd::Batch { ops } = mute_all(&v, &page(&v, "member5")) else {
+    let Cmd::Batch { ops } = mute_all(&v, &page(&v, "member5"), &member("member5")) else {
         panic!("a batch");
     };
     assert_eq!(ops.len(), 24);
+}
+
+/// #58 review: Mute All on a person's page mutes only the inputs that page
+/// shows, so the person never holds a muted input they cannot unmute; the
+/// heard mixes stay as before. The engineer on the same page mutes every
+/// input. Youth plays: main's people's mic2, mic5 … mic10 are not on
+/// member10's or member3's page.
+#[test]
+fn mute_all_on_a_persons_page_mutes_only_the_inputs_it_shows() {
+    let (youth, problems) = SiteView::build_with(
+        &crate::site_view::tests::test_config(),
+        Some(&crate::roster_state::tests::test_roster("youth")),
+        &crate::site_view::tests::test_topology(),
+    );
+    assert_eq!(problems, Vec::<String>::new());
+    let muted_inputs = |p: &str, viewer: &Viewer| -> Vec<String> {
+        let Cmd::Batch { ops } = mute_all(&youth, &page(&youth, p), viewer) else {
+            panic!("a batch");
+        };
+        ops.into_iter()
+            .filter_map(|c| match c {
+                Cmd::SetLevel {
+                    source: Source::Input(i),
+                    muted: Some(true),
+                    ..
+                } => Some(i.0),
+                _ => None,
+            })
+            .collect()
+    };
+    let every: Vec<String> = youth.inputs.iter().map(|i| i.id.0.clone()).collect();
+    let hidden = ["mic2", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10"];
+    let shown: Vec<String> = every
+        .iter()
+        .filter(|i| !hidden.contains(&i.as_str()))
+        .cloned()
+        .collect();
+    assert_eq!(shown.len(), 17);
+    assert_eq!(muted_inputs("member10", &member("member10")), shown);
+    assert_eq!(muted_inputs("member3", &member("member3")), shown);
+    assert_eq!(muted_inputs("member10", &engineer()), every);
+    assert_eq!(muted_inputs("engineer", &engineer()), every);
+    // A leader's page still mutes the mixes its mix hears.
+    let Cmd::Batch { ops } = mute_all(&youth, &page(&youth, "member3"), &member("member3")) else {
+        panic!("a batch");
+    };
+    assert_eq!(ops.len(), 17 + 8);
 }

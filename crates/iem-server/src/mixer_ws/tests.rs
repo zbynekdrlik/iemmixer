@@ -447,6 +447,67 @@ async fn the_echo_of_an_own_solo_is_the_viewers() {
     );
 }
 
+/// #58 review: the ids a person's page does not show never reach it: its
+/// opening's and a reset's solo list leave out the inputs of people who do
+/// not play (an engineer's solo of mic2 on member10's page, youth playing),
+/// and so do its meters. The engineer on the same page gets every id.
+#[tokio::test]
+async fn a_persons_page_gets_no_solo_or_meter_of_an_input_it_does_not_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let solo = iem_engine_proto::Solo {
+        mix: MixId::new("member1"),
+        sources: vec![
+            Source::Input(InputId::new("mic1")),
+            Source::Input(InputId::new("mic2")),
+        ],
+    };
+    let (s, _peer) = on_fake_engine(dir.path(), "youth", vec![solo]).await;
+    let page = s.page("member10").unwrap();
+    let soloed = |msgs: Vec<ServerMsg>| -> Vec<Vec<String>> {
+        msgs.into_iter()
+            .filter_map(|m| match m {
+                ServerMsg::SoloUpdate { soloed } => Some(soloed),
+                _ => None,
+            })
+            .collect()
+    };
+    let (me, eng) = (viewer("member10", false), viewer("engineer", true));
+    assert_eq!(soloed(opening(&s, &page, &me)), [["mic1"]]);
+    assert_eq!(soloed(opening(&s, &page, &eng)), [["mic1", "mic2"]]);
+    assert_eq!(
+        soloed(engine_event(&s, 5, &page, &me, EngineEvent::Reset)),
+        [["mic1"]]
+    );
+    assert_eq!(
+        soloed(engine_event(&s, 5, &page, &eng, EngineEvent::Reset)),
+        [["mic1", "mic2"]]
+    );
+
+    let topo = s.engine.mirror().topology.clone().unwrap();
+    let merged = crate::meters::Merged {
+        inputs: vec![[0.5, 0.25]; topo.inputs.len()],
+        mixes: vec![[0.125, 0.125]; topo.mixes.len()],
+        groups: vec![[0.0, 0.0]; topo.mixes.len() * topo.groups.len()],
+        active_s: Vec::new(),
+        own: Vec::new(),
+    };
+    let meters = |v: &Viewer| match meters_msg(&s, &page, v, &merged) {
+        Some(ServerMsg::Meters { meters }) => meters,
+        other => panic!("{other:?}"),
+    };
+    let mine = meters(&me);
+    for id in ["mic2", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10"] {
+        assert!(!mine.contains_key(id), "{id}");
+    }
+    for id in ["mic1", "mic3", "keys", "eng_mic", "member1", "stems"] {
+        assert!(mine.contains_key(id), "{id}");
+    }
+    assert_eq!(mine.len(), 24 - 7 + 11 + 1);
+    let all = meters(&eng);
+    assert_eq!(all.len(), 24 + 11 + 1);
+    assert_eq!(all["mic2"], [0.5, 0.25]);
+}
+
 /// #58 review: a person's page hears nothing of the engine while a switch
 /// runs or once its band no longer plays: the new band's values never
 /// reach a page that is about to close (4003).
@@ -767,7 +828,7 @@ mod live {
             active_s: Vec::new(),
             own: Vec::new(),
         };
-        match meters_msg(&s, &page, &merged) {
+        match meters_msg(&s, &page, &m2, &merged) {
             Some(ServerMsg::Meters { meters }) => {
                 assert_eq!(meters.len(), 24 + 11 + 1);
                 assert_eq!(meters["keys"], [0.5, 0.25]);
