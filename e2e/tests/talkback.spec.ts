@@ -160,56 +160,53 @@ test.describe("Talkback (F18)", () => {
   // until a reload. The start is held back at one of its waits, Talk is
   // released there, then a held Talk must still reach the server.
   test.describe("a Talk released while the talkback starts", () => {
-    // The worklet module is held back with `page.route`, which sees the
-    // page's own request only while no service worker serves it (the app's
-    // worker claims the page): blocked here, as in app-load.spec.ts, with
-    // Playwright's warning about it besides the engineer page's push lines.
+    // The engineer page subscribes to Web Push (see the describe above).
     test.use({
-      serviceWorkers: "block",
-      allowedConsole: [
-        [
-          /^\[push\] /,
-          /does not support the Push API in incognito mode/,
-          /^Service Worker registration blocked by Playwright$/,
-        ],
-        { scope: "test" },
-      ],
+      allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/], { scope: "test" }],
     });
 
-    for (const held of ["the microphone", "the worklet module"] as const) {
+    for (const [held, stage] of [
+      ["the microphone", "mic"],
+      ["the worklet module", "worklet"],
+    ] as const) {
       test(`a Talk released while ${held} is starting leaves the mic off, and the next Talk works`, async ({
         page,
       }) => {
         test.setTimeout(60_000);
-        // Every microphone stream the page gets is kept, so the test can see
-        // whether each one ended; while `__hold_mic` is set, getUserMedia waits
-        // for `__free_mic()` first.
+        // The start's two waits are wrapped: getUserMedia (`mic`) and the
+        // worklet's addModule (`worklet`; Playwright's routes do not see a
+        // worklet module's fetch). `__calls[stage]` counts them; while
+        // `__hold` names a stage, its call waits for `__free()` first. Every
+        // microphone stream the page gets is kept, so the test can see
+        // whether each one ended.
         await page.addInitScript(() => {
-          const w = window as unknown as Record<string, unknown>;
+          type Hold = { __calls: Record<string, number>; __hold?: string; __free?: () => void };
+          const w = window as unknown as Hold & Record<string, unknown>;
+          w.__calls = { mic: 0, worklet: 0 };
+          const wait = async (stage: string): Promise<void> => {
+            w.__calls[stage] += 1;
+            if (w.__hold === stage) await new Promise<void>((free) => (w.__free = free));
+          };
           const streams: MediaStream[] = [];
-          w.__mic_streams = streams;
-          w.__mic_calls = 0;
-          const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+          const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
           navigator.mediaDevices.getUserMedia = async (c?: MediaStreamConstraints) => {
-            w.__mic_calls = (w.__mic_calls as number) + 1;
-            if (w.__hold_mic) await new Promise<void>((free) => (w.__free_mic = free));
-            const stream = await original(c);
+            await wait("mic");
+            const stream = await getUserMedia(c);
             streams.push(stream);
             return stream;
           };
+          const addModule = AudioWorklet.prototype.addModule;
+          AudioWorklet.prototype.addModule = async function (
+            this: AudioWorklet,
+            ...args: Parameters<typeof addModule>
+          ) {
+            await wait("worklet");
+            return addModule.apply(this, args);
+          };
           w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
         });
-        let freeWorklet: () => void = () => undefined;
-        let workletAsked: () => void = () => undefined;
-        const workletRequested = new Promise<void>((r) => (workletAsked = r));
-        let holdWorklet = held === "the worklet module";
-        await page.route("**/talkback-worklet.js", async (route) => {
-          if (holdWorklet) {
-            workletAsked();
-            await new Promise<void>((free) => (freeWorklet = free));
-          }
-          await route.continue();
-        });
+        const calls = (): Promise<Record<string, number>> =>
+          page.evaluate(() => (window as unknown as { __calls: Record<string, number> }).__calls);
         const auth = await openMixer(page, "engineer", { engineer: true });
         const talk = page.locator(".toolbar-btn-talk");
         await expect(talk).toHaveText("🎤 Talk");
@@ -230,36 +227,22 @@ test.describe("Talkback (F18)", () => {
         };
 
         // The press, held back at one wait of the start, and the release there.
-        if (held === "the microphone")
-          await page.evaluate(() => ((window as unknown as Record<string, unknown>).__hold_mic = true));
+        await page.evaluate((s) => ((window as unknown as { __hold?: string }).__hold = s), stage);
         await talk.hover();
         await page.mouse.down();
         await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
-        if (held === "the microphone") {
-          await expect
-            .poll(() => page.evaluate(() => (window as unknown as { __mic_calls: number }).__mic_calls), {
-              timeout: 5_000,
-            })
-            .toBe(1);
-        } else {
-          await workletRequested;
-        }
+        await expect.poll(async () => (await calls())[stage], { timeout: 5_000 }).toBe(1);
         await page.mouse.up();
         await expect(talk).toHaveText("🎤 Talk");
         // The start goes on from where it waited, after the release.
-        if (held === "the microphone") {
-          await page.evaluate(() => {
-            const w = window as unknown as Record<string, unknown>;
-            w.__hold_mic = false;
-            (w.__free_mic as () => void)();
-          });
-        } else {
-          holdWorklet = false;
-          freeWorklet();
-        }
+        await page.evaluate(() => {
+          const w = window as unknown as { __hold?: string; __free?: () => void };
+          w.__hold = undefined;
+          w.__free?.();
+        });
         // Whatever the start got after the release ends: no microphone stays open.
         await page.waitForTimeout(1_000);
-        expect(await page.evaluate(() => (window as unknown as { __mic_calls: number }).__mic_calls)).toBe(1);
+        expect((await calls()).mic, "the start asked for the microphone once").toBe(1);
         await expect
           .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
             timeout: 3_000,
