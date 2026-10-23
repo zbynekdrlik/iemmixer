@@ -204,6 +204,16 @@ test.describe("Talkback (F18)", () => {
             return addModule.apply(this, args);
           };
           w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
+          // The talkback sockets the page opens, so the test can wait for one to be open.
+          const sockets: WebSocket[] = [];
+          const Native = window.WebSocket;
+          window.WebSocket = class extends Native {
+            constructor(url: string | URL, protocols?: string | string[]) {
+              super(url, protocols);
+              if (String(url).includes("/ws/talkback")) sockets.push(this);
+            }
+          };
+          w.__talk_open = () => sockets.length > 0 && sockets[sockets.length - 1].readyState === Native.OPEN;
         });
         const calls = (): Promise<Record<string, number>> =>
           page.evaluate(() => (window as unknown as { __calls: Record<string, number> }).__calls);
@@ -232,6 +242,14 @@ test.describe("Talkback (F18)", () => {
         await page.mouse.down();
         await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
         await expect.poll(async () => (await calls())[stage], { timeout: 5_000 }).toBe(1);
+        // The capture starts beside the socket's open: the release waits for
+        // the socket, so the start is held in the capture alone (a release
+        // before the upgrade is answered is the 403 case on #58).
+        await expect
+          .poll(() => page.evaluate(() => (window as unknown as { __talk_open: () => boolean }).__talk_open()), {
+            timeout: 5_000,
+          })
+          .toBe(true);
         await page.mouse.up();
         await expect(talk).toHaveText("🎤 Talk");
         // The start goes on from where it waited, after the release.
@@ -267,5 +285,101 @@ test.describe("Talkback (F18)", () => {
           .toBe(0);
       });
     }
+  });
+
+  // Talk through the tunnel (live runs of 2026-10-22 and 10-23, #58): the
+  // talkback socket's upgrade took about 1 s, and the microphone, the
+  // context and the worklet started only after it, so the first frame came
+  // after 1.8 s and the first words were lost. They start beside the
+  // socket's open: here the upgrade is held 1 s and getUserMedia 0.8 s, so
+  // in turn the first frame needs at least 1.8 s and side by side about 1.1 s.
+  test.describe("the talkback start", () => {
+    // The engineer page subscribes to Web Push (see the describe above).
+    test.use({
+      allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/], { scope: "test" }],
+    });
+
+    test("the microphone starts beside the talkback socket's open, not after it", async ({ page }) => {
+      test.setTimeout(60_000);
+      // The upgrade is answered only once the page has encoded a frame
+      // (at most 1.5 s after it asked, inside the server's 2 s bind window):
+      // in turn the encoder never starts before the socket is open, so the
+      // wait runs out; beside it, the first frame comes while it waits.
+      const ENCODED_WITHIN_MS = 1_500;
+      await page.addInitScript(() => {
+        const w = window as unknown as { __frames: number; __live_tracks: () => number };
+        w.__frames = 0;
+        const streams: MediaStream[] = [];
+        const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async (c?: MediaStreamConstraints) => {
+          const stream = await getUserMedia(c);
+          streams.push(stream);
+          return stream;
+        };
+        w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
+        const encode = AudioEncoder.prototype.encode;
+        AudioEncoder.prototype.encode = function (this: AudioEncoder, ...args: Parameters<typeof encode>) {
+          w.__frames += 1;
+          return encode.apply(this, args);
+        };
+      });
+      const frames = (): Promise<number> => page.evaluate(() => (window as unknown as { __frames: number }).__frames);
+      let encodedBeforeOpen: boolean | null = null;
+      await page.routeWebSocket(/\/ws\/talkback/, async (ws) => {
+        const asked = Date.now();
+        while ((await frames()) === 0 && Date.now() - asked < ENCODED_WITHIN_MS) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        encodedBeforeOpen = (await frames()) > 0;
+        test.info().annotations.push({ type: "talkback_wait_ms", description: String(Date.now() - asked) });
+        ws.connectToServer();
+      });
+      const auth = await openMixer(page, "engineer", { engineer: true });
+      const talk = page.locator(".toolbar-btn-talk");
+      await expect(talk).toHaveText("🎤 Talk");
+      await tab(page, "Mics");
+      const packetsIn = async (): Promise<number> => {
+        const resp = await page.request.get("/api/talkback/diagnostics", {
+          headers: { Authorization: `Bearer ${auth.token}` },
+        });
+        expect(resp.status()).toBe(200);
+        return (await resp.json()).packets_in;
+      };
+      const before = await packetsIn();
+
+      await talk.hover();
+      await page.mouse.down();
+      await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
+      await expect.poll(() => encodedBeforeOpen, { timeout: 5_000 }).not.toBeNull();
+      expect(encodedBeforeOpen, "the page encoded a frame before its talkback socket opened").toBe(true);
+      // The held Talk still reaches the server through the late socket.
+      await expect.poll(packetsIn, { timeout: 5_000 }).toBeGreaterThan(before + 50);
+      await page.mouse.up();
+      await expect(talk).toHaveText("🎤 Talk");
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
+          timeout: 3_000,
+        })
+        .toBe(0);
+    });
+
+    // A refused microphone is the user's choice: the button shows Mic Blocked
+    // and the console stays clean (the page logged it as an error before).
+    test("a refused microphone shows Mic Blocked with a clean console", async ({ page }) => {
+      await page.addInitScript(() => {
+        navigator.mediaDevices.getUserMedia = async () => {
+          throw new DOMException("Permission denied", "NotAllowedError");
+        };
+      });
+      await openMixer(page, "engineer", { engineer: true });
+      const talk = page.locator(".toolbar-btn-talk");
+      await expect(talk).toHaveText("🎤 Talk");
+      await tab(page, "Mics");
+      await talk.hover();
+      await page.mouse.down();
+      await expect(talk).toHaveClass(/mic-blocked/, { timeout: 5_000 });
+      await page.mouse.up();
+      await expect(talk).toHaveText("🎤 Mic Blocked");
+    });
   });
 });

@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "assert_no_alloc",
  "azo",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "assert_no_alloc",
  "iem-audio-io",
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "iem-guard"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "iem-win",
  "interprocess",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2808,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "iem-migrate"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "iem-rpp"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2838,7 +2838,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "dirs 6.0.0",
  "iem-core",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "iem-win"
-version = "2.0.0-dev.37"
+version = "2.0.0-dev.38"
 dependencies = [
  "tokio",
  "windows-registry 0.100.0",
@@ -3621,9 +3621,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.1.1"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a69bcab0ad47271a0234d9422b131806bf3968021e5dc9328caf2d4cd58557fc"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
@@ -6086,6 +6086,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "syn_derive"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6651,9 +6662,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.50.0"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -6667,13 +6678,13 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "2.6.1"
+version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.9",
 ]
 
 [[package]]

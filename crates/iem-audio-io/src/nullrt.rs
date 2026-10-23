@@ -391,6 +391,9 @@ mod tests {
     #[test]
     fn a_panic_records_the_faulting_callbacks_own_time() {
         let fire = Arc::new(AtomicBool::new(false));
+        // The faulting callback began after this, so its own time is at most
+        // the time since (a runner that stalls the thread only adds to both).
+        let started = Instant::now();
         let rt = NullRt::start(
             cfg(InputSignal::Silence),
             Trigger {
@@ -404,11 +407,14 @@ mod tests {
         assert_eq!((before.fault_callback_ns, before.last_reopen_us), (0, 0));
         fire.store(true, Ordering::Release);
         let s = wait_for(&rt, |s| s.faulted && !s.running);
+        let since_start = u64::try_from(started.elapsed().as_nanos()).unwrap();
         assert!(s.faulted && !s.running, "{s:?}");
-        // The panic followed 3 ms of the callback's own time.
+        // The panic followed 3 ms of the callback's own time; a fixed upper
+        // bound (1 s) failed once on a hosted Windows runner that stalled the
+        // callback's thread (1.04 s, CI run 39982193086).
         assert!(
-            (3_000_000..1_000_000_000).contains(&s.fault_callback_ns),
-            "{s:?}"
+            (3_000_000..=since_start).contains(&s.fault_callback_ns),
+            "{s:?} since the start {since_start} ns"
         );
         assert!(s.fault_callback_ns <= s.max_process_ns, "{s:?}");
         assert_eq!(s.last_reopen_us, 0, "NullRt never reopens");
