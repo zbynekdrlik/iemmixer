@@ -997,6 +997,28 @@ fn a_persons_solo_list_leaves_out_the_inputs_it_does_not_show() {
     );
 }
 
+/// #58 review: the solo list leaves out only the inputs a person does not
+/// see; a heard mix in a solo stays named (a leader's page, youth playing:
+/// member3 hears member1's set as a peer).
+#[test]
+fn a_solo_list_keeps_the_heard_mixes() {
+    let (youth, problems) = SiteView::build_with(
+        &crate::site_view::tests::test_config(),
+        Some(&crate::roster_state::tests::test_roster("youth")),
+        &crate::site_view::tests::test_topology(),
+    );
+    assert_eq!(problems, Vec::<String>::new());
+    let sources = [Source::Mix(mix("member1")), input("mic2"), input("mic3")];
+    assert_eq!(
+        soloed_seen(&youth, &member("member3"), &sources),
+        ["member1", "mic3"]
+    );
+    assert_eq!(
+        soloed_seen(&youth, &engineer(), &sources),
+        ["member1", "mic2", "mic3"]
+    );
+}
+
 /// #58: without a roster the rule is today's: a member whose mix hears
 /// others leads (member1, member3), so every test above still holds.
 #[test]

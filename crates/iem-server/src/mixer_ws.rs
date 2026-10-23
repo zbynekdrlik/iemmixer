@@ -182,16 +182,19 @@ fn full_state(state: &AppState, page: &Page, viewer: &Viewer) -> ServerMsg {
     }
 }
 
-fn solo_msg(state: &AppState, page: &Page) -> ServerMsg {
-    ServerMsg::SoloUpdate {
-        soloed: state
-            .engine
-            .mirror()
-            .solo(&page.mix)
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-    }
+/// The page's solo as `viewer` gets it: only the inputs they see
+/// (`view::soloed_seen`, #58 review); every id while there is no site view.
+fn solo_msg(state: &AppState, page: &Page, viewer: &Viewer) -> ServerMsg {
+    // The site view first: it may read the mirror itself (never two reads
+    // of that lock at once on one thread).
+    let site = state.site();
+    let mirror = state.engine.mirror();
+    let sources = mirror.solo(&page.mix);
+    let soloed = match site {
+        Some(site) => view::soloed_seen(&site, viewer, sources),
+        None => sources.iter().map(ToString::to_string).collect(),
+    };
+    ServerMsg::SoloUpdate { soloed }
 }
 
 fn customization_msg(state: &AppState, page: &Page) -> ServerMsg {
@@ -299,7 +302,7 @@ pub fn opening(state: &AppState, page: &Page, viewer: &Viewer) -> Vec<ServerMsg>
     first.extend([
         full_state(state, page, viewer),
         customization_msg(state, page),
-        solo_msg(state, page),
+        solo_msg(state, page, viewer),
     ]);
     if let Some(m) = alert_catchup(&lock(&state.alerts), &page.id) {
         first.push(m);
@@ -408,7 +411,7 @@ async fn session(
                 Ok(ev) => engine_event(&state, session, &page, &viewer, ev),
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(page = %page.id, skipped = n, "engine events lagged: full state");
-                    vec![full_state(&state, &page, &viewer), solo_msg(&state, &page)]
+                    vec![full_state(&state, &page, &viewer), solo_msg(&state, &page, &viewer)]
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
@@ -471,17 +474,19 @@ fn cleanup(state: &AppState, page: &Page, session: u64) {
     }
 }
 
+/// The meters `page` shows `viewer`: no input they do not see
+/// (`view::shows_input`, #58 review); mixes and the stems strip as before.
 fn meters_msg(
     state: &AppState,
     page: &Page,
-    _viewer: &Viewer,
+    viewer: &Viewer,
     merged: &crate::meters::Merged,
 ) -> Option<ServerMsg> {
     let site = state.site()?;
     let topo = state.engine.mirror().topology.clone()?;
-    Some(ServerMsg::Meters {
-        meters: crate::meters::page_meters(merged, &topo, page, site.group.as_ref()),
-    })
+    let mut meters = crate::meters::page_meters(merged, &topo, page, site.group.as_ref());
+    meters.retain(|id, _| site.input(id).is_none() || view::shows_input(&site, viewer, id));
+    Some(ServerMsg::Meters { meters })
 }
 
 /// The UI messages one engine event produces for this connection.
@@ -501,7 +506,10 @@ fn engine_event(
         // A person's page about to close (#58 review): never the next band's
         // values.
         EngineEvent::Reset | EngineEvent::Changed { .. } if closing(state, page) => Vec::new(),
-        EngineEvent::Reset => vec![full_state(state, page, viewer), solo_msg(state, page)],
+        EngineEvent::Reset => vec![
+            full_state(state, page, viewer),
+            solo_msg(state, page, viewer),
+        ],
         EngineEvent::Changed { origin, changes } => {
             let Some(site) = state.site() else {
                 return Vec::new();

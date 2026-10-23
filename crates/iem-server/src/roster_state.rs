@@ -83,31 +83,38 @@ pub fn person_sets(cfg: &Config, roster: &Roster) -> BTreeSet<String> {
 }
 
 /// Whom the input `id` belongs to (#58, owner option 1): the owner each
-/// lineup gives it, then the site's `[[inputs]]` owner (a member id of the
-/// legacy layout, a departed person's when no roster person has it).
+/// lineup gives it; only when no lineup gives it one, the site's
+/// `[[inputs]]` owner (a member id of the legacy layout, a departed
+/// person's when no roster person has it). A legacy owner never outvotes
+/// the roster (#58 review).
 pub fn input_owners<'a>(
     cfg: &'a Config,
     roster: &'a Roster,
     id: &'a str,
 ) -> impl Iterator<Item = &'a str> + 'a {
-    roster
+    let lineups: Vec<&'a str> = roster
         .lineups
         .iter()
-        .filter_map(move |l| l.inputs.get(id)?.owner.as_deref())
-        .chain(
-            cfg.inputs
-                .iter()
-                .filter(move |m| m.id == id)
-                .filter_map(|m| m.owner.as_deref()),
-        )
+        .filter_map(|l| l.inputs.get(id)?.owner.as_deref())
+        .collect();
+    let owners = if lineups.is_empty() {
+        cfg.inputs
+            .iter()
+            .filter(|m| m.id == id)
+            .filter_map(|m| m.owner.as_deref())
+            .collect()
+    } else {
+        lineups
+    };
+    owners.into_iter()
 }
 
 /// Whether a person's page leaves the input `id` out while `lineup` plays
 /// (#58, owner option 1): `lineup` does not list it, and it belongs to
-/// someone who does not play in `lineup` (another lineup's person, a
-/// departed member), never the engineer. The inputs of the playing
-/// people and the shared ones (hand mics, stems, tech, the engineer's
-/// mic) stay; an input `lineup` lists is its own, owner or not.
+/// someone who does not play in `lineup` ([`input_owners`]: another
+/// lineup's person, a departed member), never the engineer. The inputs of
+/// the playing people and the shared ones (hand mics, stems, tech, the
+/// engineer's mic) stay; an input `lineup` lists is its own, owner or not.
 pub fn foreign_input(cfg: &Config, roster: &Roster, lineup: &Lineup, id: &str) -> bool {
     !lineup.inputs.contains_key(id)
         && input_owners(cfg, roster, id).any(|o| o != ENGINEER_ID && !lineup.plays(o))

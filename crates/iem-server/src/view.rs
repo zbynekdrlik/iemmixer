@@ -99,6 +99,21 @@ pub fn shows_input(view: &SiteView, viewer: &Viewer, id: &str) -> bool {
     view.input(id).is_some() && (viewer.engineer || !view.foreign_inputs.iter().any(|f| f.0 == id))
 }
 
+/// The ids of a solo's `sources` as `viewer` gets them (`SoloUpdate`): the
+/// inputs they see ([`shows_input`], #58 review: an engineer's solo of a
+/// hidden input never names it on a person's page) and the heard mixes,
+/// whose channels [`heard`] already decides.
+pub fn soloed_seen(view: &SiteView, viewer: &Viewer, sources: &[Source]) -> Vec<String> {
+    sources
+        .iter()
+        .filter(|s| match s {
+            Source::Input(id) => shows_input(view, viewer, &id.0),
+            Source::Mix(_) => true,
+        })
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// The mixes `page`'s mix hears that `viewer` sees and moves (its Mixes
 /// tab): none but to a leader of the band or the engineer (#58 design §8),
 /// and never a set nobody wears.
@@ -246,7 +261,7 @@ pub fn updates_seen(
             }
             Change::Solo { mix, sources } if *mix == page.mix => {
                 out.push(ServerMsg::SoloUpdate {
-                    soloed: sources.iter().map(ToString::to_string).collect(),
+                    soloed: soloed_seen(view, viewer, sources),
                 });
                 // The mask shows as each channel's mute (as the predecessor's
                 // REAPER mutes did): every channel is sent again.
@@ -577,8 +592,10 @@ pub fn limiter_msg(mirror: &Mirror, page: &Page, active_seconds: f64) -> ServerM
     }
 }
 
-/// Mute All (F15): one batch muting every level of the page's mix.
-pub fn mute_all(view: &SiteView, page: &Page, _viewer: &Viewer) -> Cmd {
+/// Mute All (F15): one batch muting every level of the page's mix, but the
+/// inputs `viewer` does not see ([`shows_input`], #58 review: a person
+/// could not unmute those; the engineer mutes every input on any page).
+pub fn mute_all(view: &SiteView, page: &Page, viewer: &Viewer) -> Cmd {
     let heard = view
         .mix(&page.mix)
         .map(|m| m.hears.clone())
@@ -586,6 +603,7 @@ pub fn mute_all(view: &SiteView, page: &Page, _viewer: &Viewer) -> Cmd {
     let sources = view
         .inputs
         .iter()
+        .filter(|i| shows_input(view, viewer, &i.id.0))
         .map(|i| Source::Input(i.id.clone()))
         .chain(heard.into_iter().map(Source::Mix));
     Cmd::Batch {
