@@ -268,4 +268,70 @@ test.describe("Talkback (F18)", () => {
       });
     }
   });
+
+  // Talk through the tunnel (live runs of 2026-10-22 and 10-23, #58): the
+  // talkback socket's upgrade took about 1 s, and the microphone, the
+  // context and the worklet started only after it, so the first frame came
+  // after 1.8 s and the first words were lost. They start beside the
+  // socket's open: here the upgrade is held 1 s and getUserMedia 0.8 s, so
+  // in turn the first frame needs at least 1.8 s and side by side about 1.1 s.
+  test.describe("the talkback start", () => {
+    // The engineer page subscribes to Web Push (see the describe above).
+    test.use({
+      allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/], { scope: "test" }],
+    });
+
+    test("the microphone starts beside the talkback socket's open, not after it", async ({ page }) => {
+      test.setTimeout(60_000);
+      const SOCKET_MS = 1_000;
+      const MIC_MS = 800;
+      const FIRST_FRAME_MS = 1_500;
+      await page.addInitScript((micMs: number) => {
+        const w = window as unknown as { __frames: number };
+        w.__frames = 0;
+        const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async (c?: MediaStreamConstraints) => {
+          await new Promise((r) => setTimeout(r, micMs));
+          return getUserMedia(c);
+        };
+        const encode = AudioEncoder.prototype.encode;
+        AudioEncoder.prototype.encode = function (this: AudioEncoder, ...args: Parameters<typeof encode>) {
+          w.__frames += 1;
+          return encode.apply(this, args);
+        };
+      }, MIC_MS);
+      // The upgrade answers 1 s after the page asked, as through the tunnel.
+      await page.routeWebSocket(/\/ws\/talkback/, async (ws) => {
+        await new Promise((r) => setTimeout(r, SOCKET_MS));
+        ws.connectToServer();
+      });
+      const auth = await openMixer(page, "engineer", { engineer: true });
+      const talk = page.locator(".toolbar-btn-talk");
+      await expect(talk).toHaveText("🎤 Talk");
+      await tab(page, "Mics");
+      const packetsIn = async (): Promise<number> => {
+        const resp = await page.request.get("/api/talkback/diagnostics", {
+          headers: { Authorization: `Bearer ${auth.token}` },
+        });
+        expect(resp.status()).toBe(200);
+        return (await resp.json()).packets_in;
+      };
+      const frames = (): Promise<number> => page.evaluate(() => (window as unknown as { __frames: number }).__frames);
+      const before = await packetsIn();
+
+      await talk.hover();
+      const pressedAt = Date.now();
+      await page.mouse.down();
+      await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
+      await expect.poll(frames, { intervals: [25], timeout: 5_000 }).toBeGreaterThan(0);
+      const firstFrameMs = Date.now() - pressedAt;
+      // The held Talk still reaches the server through the late socket.
+      await expect.poll(packetsIn, { timeout: 5_000 }).toBeGreaterThan(before + 50);
+      await page.mouse.up();
+      await expect(talk).toHaveText("🎤 Talk");
+      expect(firstFrameMs, "the first frame reached the encoder within 1.5 s of the press").toBeLessThan(
+        FIRST_FRAME_MS,
+      );
+    });
+  });
 });
