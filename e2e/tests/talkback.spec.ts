@@ -151,4 +151,138 @@ test.describe("Talkback (F18)", () => {
       watch.close();
     }
   });
+
+  // A Talk released while the talkback is still starting (live run of 819f954,
+  // 2026-10-23, #58): the release stopped the session the start was still
+  // building, so the start went on with the parts gone (a console error) or,
+  // released during getUserMedia, ended "active" with the microphone open and
+  // no socket, and every later press returned at once: talkback was dead
+  // until a reload. The start is held back at one of its waits, Talk is
+  // released there, then a held Talk must still reach the server.
+  test.describe("a Talk released while the talkback starts", () => {
+    // The worklet module is held back with `page.route`, which sees the
+    // page's own request only while no service worker serves it (the app's
+    // worker claims the page): blocked here, as in app-load.spec.ts, with
+    // Playwright's warning about it besides the engineer page's push lines.
+    test.use({
+      serviceWorkers: "block",
+      allowedConsole: [
+        [
+          /^\[push\] /,
+          /does not support the Push API in incognito mode/,
+          /^Service Worker registration blocked by Playwright$/,
+        ],
+        { scope: "test" },
+      ],
+    });
+
+    for (const held of ["the microphone", "the worklet module"] as const) {
+      test(`a Talk released while ${held} is starting leaves the mic off, and the next Talk works`, async ({
+        page,
+      }) => {
+        test.setTimeout(60_000);
+        // Every microphone stream the page gets is kept, so the test can see
+        // whether each one ended; while `__hold_mic` is set, getUserMedia waits
+        // for `__free_mic()` first.
+        await page.addInitScript(() => {
+          const w = window as unknown as Record<string, unknown>;
+          const streams: MediaStream[] = [];
+          w.__mic_streams = streams;
+          w.__mic_calls = 0;
+          const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+          navigator.mediaDevices.getUserMedia = async (c?: MediaStreamConstraints) => {
+            w.__mic_calls = (w.__mic_calls as number) + 1;
+            if (w.__hold_mic) await new Promise<void>((free) => (w.__free_mic = free));
+            const stream = await original(c);
+            streams.push(stream);
+            return stream;
+          };
+          w.__live_tracks = () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === "live").length;
+        });
+        let freeWorklet: () => void = () => undefined;
+        let workletAsked: () => void = () => undefined;
+        const workletRequested = new Promise<void>((r) => (workletAsked = r));
+        let holdWorklet = held === "the worklet module";
+        await page.route("**/talkback-worklet.js", async (route) => {
+          if (holdWorklet) {
+            workletAsked();
+            await new Promise<void>((free) => (freeWorklet = free));
+          }
+          await route.continue();
+        });
+        const auth = await openMixer(page, "engineer", { engineer: true });
+        const talk = page.locator(".toolbar-btn-talk");
+        await expect(talk).toHaveText("🎤 Talk");
+        await tab(page, "Mics");
+        const sent: number[] = [];
+        page.on("websocket", (ws) => {
+          if (!ws.url().includes("/ws/talkback")) return;
+          ws.on("framesent", (f) => {
+            if (typeof f.payload !== "string") sent.push(f.payload.length);
+          });
+        });
+        const packetsIn = async (): Promise<number> => {
+          const resp = await page.request.get("/api/talkback/diagnostics", {
+            headers: { Authorization: `Bearer ${auth.token}` },
+          });
+          expect(resp.status()).toBe(200);
+          return (await resp.json()).packets_in;
+        };
+
+        // The press, held back at one wait of the start, and the release there.
+        if (held === "the microphone")
+          await page.evaluate(() => ((window as unknown as Record<string, unknown>).__hold_mic = true));
+        await talk.hover();
+        await page.mouse.down();
+        await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
+        if (held === "the microphone") {
+          await expect
+            .poll(() => page.evaluate(() => (window as unknown as { __mic_calls: number }).__mic_calls), {
+              timeout: 5_000,
+            })
+            .toBe(1);
+        } else {
+          await workletRequested;
+        }
+        await page.mouse.up();
+        await expect(talk).toHaveText("🎤 Talk");
+        // The start goes on from where it waited, after the release.
+        if (held === "the microphone") {
+          await page.evaluate(() => {
+            const w = window as unknown as Record<string, unknown>;
+            w.__hold_mic = false;
+            (w.__free_mic as () => void)();
+          });
+        } else {
+          holdWorklet = false;
+          freeWorklet();
+        }
+        // Whatever the start got after the release ends: no microphone stays open.
+        await page.waitForTimeout(1_000);
+        expect(await page.evaluate(() => (window as unknown as { __mic_calls: number }).__mic_calls)).toBe(1);
+        await expect
+          .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
+            timeout: 3_000,
+          })
+          .toBe(0);
+        await expect(talk).toHaveText("🎤 Talk");
+
+        // The next held Talk reaches the server.
+        const before = await packetsIn();
+        const sentBefore = sent.length;
+        await talk.hover();
+        await page.mouse.down();
+        await expect(talk).toHaveClass(/live/, { timeout: 5_000 });
+        await expect.poll(() => sent.length - sentBefore, { timeout: 5_000 }).toBeGreaterThan(50);
+        await expect.poll(packetsIn, { timeout: 5_000 }).toBeGreaterThan(before + 50);
+        await page.mouse.up();
+        await expect(talk).toHaveText("🎤 Talk");
+        await expect
+          .poll(() => page.evaluate(() => (window as unknown as { __live_tracks: () => number }).__live_tracks()), {
+            timeout: 3_000,
+          })
+          .toBe(0);
+      });
+    }
+  });
 });
