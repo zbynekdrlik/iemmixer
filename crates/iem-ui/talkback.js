@@ -10,6 +10,7 @@ let _session = null;
 /** A session's parts are freed once; a stopped start resolves without an error. */
 function freeSession(s) {
   s.stopped = true;
+  s.state = 'idle';
   if (s.processorNode) {
     s.processorNode.port.onmessage = null;
     s.processorNode.disconnect();
@@ -37,7 +38,9 @@ function freeSession(s) {
       ws.close();
     } else if (ws.readyState === WebSocket.CONNECTING) {
       // Closing a socket that still connects makes Chrome log "WebSocket is
-      // closed before the connection is established": close it once it opens.
+      // closed before the connection is established": close it once it
+      // opens. (When the release's TalkStop reaches the server first, the
+      // upgrade is refused with 403 and Chrome logs that instead.)
       ws.onopen = () => ws.close();
     }
     s.ws = null;
@@ -75,15 +78,23 @@ export async function startTalkback(wsUrl) {
     s.ws = ws;
     ws.binaryType = 'arraybuffer';
 
-    await new Promise((resolve, reject) => {
-      ws.onopen = resolve;
-      ws.onerror = () => reject(new Error('Talkback WS failed to connect'));
-      // A stop closes the socket while it connects: that is no failure.
-      ws.onclose = () => (s.stopped ? resolve() : reject(new Error('Talkback WS closed while connecting')));
-      // Timeout after 5s
-      setTimeout(() => reject(new Error('Talkback WS connect timeout')), 5000);
-    });
-    if (s.stopped) return;
+    let connectTimer = null;
+    try {
+      await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error('Talkback WS failed to connect'));
+        // A stop closes the socket while it connects: that is no failure.
+        ws.onclose = () => (s.stopped ? resolve() : reject(new Error('Talkback WS closed while connecting')));
+        // Timeout after 5s
+        connectTimer = setTimeout(() => reject(new Error('Talkback WS connect timeout')), 5000);
+      });
+    } finally {
+      clearTimeout(connectTimer);
+    }
+    if (s.stopped) {
+      freeSession(s);
+      return;
+    }
 
     // 2. Get mic stream (mono, 48kHz, echo/noise cancellation)
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -136,7 +147,10 @@ export async function startTalkback(wsUrl) {
     try {
       await audioCtx.audioWorklet.addModule('/talkback-worklet.js');
     } catch (err) {
-      if (s.stopped) return;
+      if (s.stopped) {
+        freeSession(s);
+        return;
+      }
       console.error('[talkback] failed to load worklet module:', err);
       throw err;
     }
