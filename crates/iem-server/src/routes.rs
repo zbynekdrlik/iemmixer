@@ -212,12 +212,12 @@ async fn batch_control(
     headers: axum::http::HeaderMap,
     Json(payload): Json<iem_core::BatchControlRequest>,
 ) -> Result<StatusCode, Reject> {
-    let (page, _) = page_for(&state, &headers, &page).await?;
+    let (page, viewer) = page_for(&state, &headers, &page).await?;
     state.may_change(&page).map_err(switching)?;
     let site = state.site().ok_or_else(engine_unavailable)?;
     match payload.operation {
         iem_core::BatchOperation::MuteAll => {
-            let cmd = crate::view::mute_all(&site, &page);
+            let cmd = crate::view::mute_all(&site, &page, &viewer);
             state
                 .apply(&page, vec![cmd], None)
                 .await

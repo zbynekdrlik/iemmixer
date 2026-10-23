@@ -5,6 +5,7 @@
 //! plus the site's engineer entry; every person is a login tile, playing or
 //! not.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use iem_core::config::{Config, SiteMember};
@@ -65,6 +66,58 @@ pub fn site_members(cfg: &Config, roster: Option<&RosterState>) -> Vec<SiteMembe
         })
         .chain(cfg.member(ENGINEER_ID).cloned())
         .collect()
+}
+
+/// Every person's set (#58, the owner's look at the live system): a mix
+/// any lineup places a person on, or one the site's `[[members]]` give a
+/// member other than the engineer. A set only the site's legacy members
+/// name is a person's who left: nobody wears it in any lineup. The
+/// engineer's and the translator's mixes are no person's set.
+pub fn person_sets(cfg: &Config, roster: &Roster) -> BTreeSet<String> {
+    cfg.members
+        .iter()
+        .filter(|m| m.id != ENGINEER_ID)
+        .map(|m| m.mix.clone())
+        .chain(roster.lineups.iter().flat_map(|l| l.sets.keys().cloned()))
+        .collect()
+}
+
+/// Whom the input `id` belongs to (#58, owner option 1): the owner each
+/// lineup gives it; only when no lineup gives it one, the site's
+/// `[[inputs]]` owner (a member id of the legacy layout, a departed
+/// person's when no roster person has it). A legacy owner never outvotes
+/// the roster (#58 review).
+pub fn input_owners<'a>(
+    cfg: &'a Config,
+    roster: &'a Roster,
+    id: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    let lineups: Vec<&'a str> = roster
+        .lineups
+        .iter()
+        .filter_map(|l| l.inputs.get(id)?.owner.as_deref())
+        .collect();
+    let owners = if lineups.is_empty() {
+        cfg.inputs
+            .iter()
+            .filter(|m| m.id == id)
+            .filter_map(|m| m.owner.as_deref())
+            .collect()
+    } else {
+        lineups
+    };
+    owners.into_iter()
+}
+
+/// Whether a person's page leaves the input `id` out while `lineup` plays
+/// (#58, owner option 1): `lineup` does not list it, and it belongs to
+/// someone who does not play in `lineup` ([`input_owners`]: another
+/// lineup's person, a departed member), never the engineer. The inputs of
+/// the playing people and the shared ones (hand mics, stems, tech, the
+/// engineer's mic) stay; an input `lineup` lists is its own, owner or not.
+pub fn foreign_input(cfg: &Config, roster: &Roster, lineup: &Lineup, id: &str) -> bool {
+    !lineup.inputs.contains_key(id)
+        && input_owners(cfg, roster, id).any(|o| o != ENGINEER_ID && !lineup.plays(o))
 }
 
 /// Every login tile: legacy, the site's members in their order, all

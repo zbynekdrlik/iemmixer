@@ -17,6 +17,38 @@ pub(crate) fn test_roster(active: &str) -> RosterState {
     }
 }
 
+/// The test roster's text after member9 left (#58, the owner's look at the
+/// live system): no person, set or input of theirs in any lineup, while the
+/// site's legacy `[[members]]` and `[[inputs]]` still name member9, their
+/// set member9 and their mic10.
+pub(crate) fn departed_text() -> String {
+    let cut = |text: &str, part: &str| {
+        assert_eq!(text.matches(part).count(), 1, "{part}");
+        text.replacen(part, "", 1)
+    };
+    let text = include_str!("../../../../config/test-roster.toml");
+    let text = cut(
+        text,
+        "[[people]]\nid = \"member9\"\nname = \"Member 9\"\n\n",
+    );
+    let text = cut(&text, "member9 = \"member9\"\n");
+    cut(
+        &text,
+        "mic10 = { name = \"MEMBER9 mic\", owner = \"member9\" }\n",
+    )
+}
+
+/// [`departed_text`]'s roster with `active` playing.
+pub(crate) fn departed_roster(active: &str) -> RosterState {
+    let roster = Roster::parse(&departed_text()).expect("the roster without member9");
+    assert_eq!(roster.problems(), Vec::<String>::new());
+    RosterState {
+        roster: Arc::new(roster),
+        sha256: "departed-roster".into(),
+        active: active.into(),
+    }
+}
+
 fn ids(members: &[SiteMember]) -> Vec<(&str, &str, &str)> {
     members
         .iter()
@@ -36,6 +68,115 @@ fn the_active_lineup_and_its_leaders() {
     assert!(!main.is_leader("member2"));
     // An unknown active lineup is never applied; should it be, main plays.
     assert_eq!(test_roster("gone").lineup().id, "main");
+}
+
+/// #58, the owner's look at the live system: a person's set is one a
+/// lineup lists or one the site's members name, never the engineer's or
+/// the translator's.
+#[test]
+fn person_sets_are_the_lineups_sets_and_the_site_members_sets() {
+    let nine: BTreeSet<String> = (1..=9).map(|n| format!("member{n}")).collect();
+    let cfg = test_config();
+    assert_eq!(person_sets(&cfg, &test_roster("youth").roster), nine);
+    assert_eq!(
+        person_sets(&cfg, &departed_roster("main").roster),
+        nine,
+        "member9 left; the site's members still name their set"
+    );
+    let listed = person_sets(&Config::default(), &departed_roster("main").roster);
+    assert_eq!(listed.len(), 8);
+    assert!(!listed.contains("member9"), "no lineup lists it");
+    let mut no_engineer_set = cfg.clone();
+    no_engineer_set.members.retain(|m| m.id == ENGINEER_ID);
+    assert_eq!(
+        person_sets(&no_engineer_set, &test_roster("main").roster),
+        nine,
+        "the engineer's mix is no person's set"
+    );
+}
+
+/// #58, owner option 1: an input is foreign to a lineup that does not list
+/// it when it belongs to someone who does not play there (another lineup's
+/// person, a departed member); the engineer's and the unowned ones never
+/// are, and one the lineup lists is its own, owner or not.
+#[test]
+fn foreign_inputs_belong_to_people_who_do_not_play() {
+    let cfg = test_config();
+    let youth = test_roster("youth");
+    let (r, l) = (&youth.roster, youth.lineup());
+    let owners =
+        |id: &str| -> Vec<String> { input_owners(&cfg, r, id).map(String::from).collect() };
+    assert_eq!(
+        owners("mic1"),
+        ["member1", "member10"],
+        "the lineups' owners only"
+    );
+    assert_eq!(owners("mic10"), ["member9"]);
+    assert_eq!(owners("eng_mic"), ["engineer"]);
+    assert!(owners("keys").is_empty());
+    let foreign = |id: &str| foreign_input(&cfg, r, l, id);
+    for id in ["mic2", "mic5", "mic6", "mic10"] {
+        assert!(foreign(id), "{id}");
+    }
+    for id in ["mic1", "mic3", "mic4", "eng_mic", "keys", "hand1", "drums"] {
+        assert!(!foreign(id), "{id}");
+    }
+    // member9 left: the site's member9 is no roster person.
+    let gone = departed_roster("main");
+    assert!(foreign_input(&cfg, &gone.roster, gone.lineup(), "mic10"));
+    assert!(!foreign_input(&cfg, &gone.roster, gone.lineup(), "mic9"));
+    // Youth names main's member4's guitar input for itself, without an owner.
+    let mut listed = test_roster("youth");
+    Arc::make_mut(&mut listed.roster)
+        .lineups
+        .iter_mut()
+        .find(|l| l.id == "youth")
+        .unwrap()
+        .inputs
+        .insert(
+            "mic5".into(),
+            iem_core::roster::LineupInput {
+                name: "SHARED gtr".into(),
+                owner: None,
+            },
+        );
+    assert!(!foreign_input(
+        &cfg,
+        &listed.roster,
+        listed.lineup(),
+        "mic5"
+    ));
+}
+
+/// #58 review: the site's `[[inputs]]` owner counts only when no lineup
+/// gives the input an owner. A site owner who does not play (here
+/// member2, while youth plays) never hides an input a lineup gives to
+/// someone who plays (main's member3 owns mic3); with no lineup owner the
+/// site's owner decides, as for a departed person's mic10.
+#[test]
+fn the_site_owner_counts_only_when_no_lineup_owns_the_input() {
+    let mut cfg = test_config();
+    for m in cfg.inputs.iter_mut() {
+        if m.id == "mic3" || m.id == "keys" {
+            m.owner = Some("member2".into());
+        }
+    }
+    let youth = test_roster("youth");
+    let (r, l) = (&youth.roster, youth.lineup());
+    let owners =
+        |id: &str| -> Vec<String> { input_owners(&cfg, r, id).map(String::from).collect() };
+    assert_eq!(owners("mic3"), ["member3"], "a lineup owns it");
+    assert_eq!(owners("keys"), ["member2"], "no lineup owns it");
+    assert!(
+        !foreign_input(&cfg, r, l, "mic3"),
+        "member3 plays in youth; the site's member2 does not count"
+    );
+    assert!(
+        foreign_input(&cfg, r, l, "keys"),
+        "the site's owner decides"
+    );
+    let gone = departed_roster("youth");
+    assert!(foreign_input(&cfg, &gone.roster, gone.lineup(), "mic10"));
 }
 
 #[test]

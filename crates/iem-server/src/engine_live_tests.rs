@@ -212,9 +212,13 @@ async fn mute_all_mutes_every_level_of_the_engineers_mix() {
     let (_d, s) = h.state().await;
     let site = s.site().unwrap();
     let page = s.page("engineer").unwrap();
-    s.apply(&page, vec![view::mute_all(&site, &page)], None)
-        .await
-        .unwrap();
+    s.apply(
+        &page,
+        vec![view::mute_all(&site, &page, &Viewer::of_page(&page))],
+        None,
+    )
+    .await
+    .unwrap();
     let m = s.engine.mirror();
     let mix = &m.state.mixes[&MixId::new("engineer")];
     assert_eq!(mix.inputs.len(), 24);

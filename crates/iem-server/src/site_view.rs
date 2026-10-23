@@ -58,9 +58,15 @@ pub struct SiteView {
     /// Every login tile, each with whether they play (legacy: the members,
     /// all playing; `roster_state::people`).
     pub people: Vec<PersonView>,
-    /// Sets of the roster that nobody wears in the active lineup: no page
-    /// (legacy: none).
+    /// People's sets nobody wears in the active lineup
+    /// (`roster_state::person_sets`: a departed person's too): no page, no
+    /// Mixes channel (legacy: none).
     pub vacant: Vec<MixId>,
+    /// Inputs of people who do not play in the active lineup, which it does
+    /// not list (`roster_state::foreign_input`: another lineup's people's,
+    /// a departed person's): no person's page shows or moves them, the
+    /// engineer's every page does (`view::shows_input`; legacy: none).
+    pub foreign_inputs: Vec<InputId>,
 }
 
 /// "translator" → "Translator".
@@ -181,17 +187,22 @@ impl SiteView {
                 .collect(),
         };
         let vacant = match (roster, lineup) {
+            (Some(r), Some(l)) => {
+                let sets = roster_state::person_sets(config, &r.roster);
+                topo.mixes
+                    .iter()
+                    .filter(|m| l.person_on(&m.id.0).is_none() && sets.contains(&m.id.0))
+                    .map(|m| m.id.clone())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let foreign_inputs = match (roster, lineup) {
             (Some(r), Some(l)) => topo
-                .mixes
+                .inputs
                 .iter()
-                .filter(|m| {
-                    l.person_on(&m.id.0).is_none()
-                        && r.roster
-                            .lineups
-                            .iter()
-                            .any(|x| x.sets.contains_key(&m.id.0))
-                })
-                .map(|m| m.id.clone())
+                .filter(|i| roster_state::foreign_input(config, &r.roster, l, &i.id.0))
+                .map(|i| i.id.clone())
                 .collect(),
             _ => Vec::new(),
         };
@@ -204,6 +215,7 @@ impl SiteView {
             leaders,
             people: roster_state::people(config, roster),
             vacant,
+            foreign_inputs,
         };
         (view, problems)
     }
@@ -442,6 +454,52 @@ pub(crate) mod tests {
         assert_eq!(m.page("member2").unwrap().mix, MixId::new("member2"));
         assert_eq!(m.leaders, ["member1", "member3"]);
         assert!(m.vacant.is_empty());
+    }
+
+    /// #58, the owner's look at the live system: a person's set no lineup
+    /// lists (member9 left; the site's legacy `[[members]]` still give them
+    /// set member9) is vacant like a set the other lineup wears, whichever
+    /// lineup plays: no page. The engineer's and the translator's mixes
+    /// never are. Legacy mode keeps member9 on their set, as before.
+    #[test]
+    fn a_departed_persons_set_is_vacant_and_no_page() {
+        let view = |active: &str| {
+            let roster = crate::roster_state::tests::departed_roster(active);
+            let (v, problems) =
+                SiteView::build_with(&test_config(), Some(&roster), &test_topology());
+            assert_eq!(problems, Vec::<String>::new());
+            v
+        };
+        let vacant =
+            |v: &SiteView| -> Vec<String> { v.vacant.iter().map(|m| m.0.clone()).collect() };
+        let main = view("main");
+        assert_eq!(vacant(&main), ["member9"]);
+        let youth = view("youth");
+        assert_eq!(
+            vacant(&youth),
+            [
+                "member2", "member5", "member6", "member7", "member8", "member9"
+            ]
+        );
+        for v in [&main, &youth] {
+            assert!(v.page("member9").is_none(), "nobody wears set member9");
+            let pages: Vec<String> = v.mix_pages().into_iter().map(|p| p.id).collect();
+            assert_eq!(pages, ["translator"], "the translator's is no person's set");
+            assert_eq!(v.page("engineer").unwrap().mix, MixId::new("engineer"));
+            assert_eq!(v.mix_name(&MixId::new("member9")), "Member9");
+        }
+        assert_eq!(
+            main.page("member8").unwrap().member.as_deref(),
+            Some("member8")
+        );
+        // Legacy: member9 is a member on their own set.
+        let legacy = test_view();
+        assert!(legacy.vacant.is_empty());
+        let p = legacy.page("member9").unwrap();
+        assert_eq!(
+            (p.mix.0.as_str(), p.member.as_deref()),
+            ("member9", Some("member9"))
+        );
     }
 
     /// #58: an input the lineup lists takes its name and owner; any other

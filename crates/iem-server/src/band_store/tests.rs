@@ -467,6 +467,52 @@ fn a_ramp_moves_heard_mixes_only_on_a_leaders_page() {
     assert_eq!((skipped, steps[0].len()), (0, 1));
 }
 
+/// #58, owner option 1: an old preset or history entry applied on a
+/// person's page never moves an input that page does not show (another
+/// band's person's, a departed person's); a shared one moves. On the
+/// engineer's page every input moves (legacy: every input everywhere).
+#[test]
+fn a_ramp_moves_only_the_inputs_the_persons_page_shows() {
+    let roster = crate::roster_state::tests::test_roster("youth");
+    let (v, _) = SiteView::build_with(
+        &crate::site_view::tests::test_config(),
+        Some(&roster),
+        &crate::site_view::tests::test_topology(),
+    );
+    let m = mirror(|_| {});
+    let send = |of: &str| MixSend {
+        src: Source::Input(InputId::new(of)),
+        gain_db: 0.0,
+        pan: 0.0,
+        muted: false,
+    };
+    let moved = |steps: &[Vec<Cmd>]| -> Vec<String> {
+        steps[0]
+            .iter()
+            .filter_map(|c| match c {
+                Cmd::SetLevel { source, .. } => Some(source.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let sends = [send("mic2"), send("mic10"), send("keys"), send("mic1")];
+    // member10 (youth): main's member2's and member9's mics are skipped.
+    let p10 = v.page("member10").unwrap();
+    let (steps, skipped) = ramp(&v, &m, &p10, &sends, &BTreeMap::new());
+    assert_eq!(skipped, 2);
+    assert_eq!(moved(&steps), ["keys", "mic1"]);
+    // The engineer's page: every input.
+    let eng = v.page("engineer").unwrap();
+    let (steps, skipped) = ramp(&v, &m, &eng, &sends, &BTreeMap::new());
+    assert_eq!(skipped, 0);
+    assert_eq!(moved(&steps), ["mic2", "mic10", "keys", "mic1"]);
+    // Legacy: member2's page moves every input.
+    let legacy = test_view();
+    let p2 = legacy.page("member2").unwrap();
+    let (steps, skipped) = ramp(&legacy, &m, &p2, &sends, &BTreeMap::new());
+    assert_eq!((skipped, moved(&steps).len()), (0, 4));
+}
+
 #[test]
 fn ramp_orders_mutes_so_nothing_jumps() {
     let v = test_view();
