@@ -444,6 +444,16 @@ test.describe("Bands (#58)", () => {
       await expect(page.getByTestId("lineup-badge")).toHaveText(YOUTH);
       await expect(section.getByTestId("lineup-switch-message")).toHaveText(`Hrá ${YOUTH}.`);
       await expect(section.getByTestId("lineup-target").locator("option")).toHaveText([MAIN]);
+      // A switched band is the whole view, the engineer's too (#58, the
+      // owner, 2026-10-24): youth's people's inputs and the shared ones,
+      // never main's people's.
+      await page.locator(".settings-modal .modal-close").click();
+      await tab(page, "Mics");
+      await expect(strip(page, "mic3")).toBeVisible();
+      await expect(strip(page, "mic1")).toBeVisible();
+      await expect(strip(page, "mic2")).toHaveCount(0);
+      await expect(strip(page, "mic10")).toHaveCount(0);
+      await page.locator(".settings-btn").click();
       await switchTo(page, section, "main", confirmation(YOUTH, MAIN));
       await expect(page.getByTestId("lineup-badge")).toHaveText(MAIN);
       await expect(section.getByTestId("lineup-switch-message")).toHaveText(`Hrá ${MAIN}.`);
