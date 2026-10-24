@@ -469,8 +469,9 @@ fn a_ramp_moves_heard_mixes_only_on_a_leaders_page() {
 
 /// #58, owner option 1: an old preset or history entry applied on a
 /// person's page never moves an input that page does not show (another
-/// band's person's, a departed person's); a shared one moves. On the
-/// engineer's page every input moves (legacy: every input everywhere).
+/// band's person's, a departed person's); a shared one moves. The
+/// engineer's page skips the same (the owner, 2026-10-24); legacy: every
+/// input everywhere.
 #[test]
 fn a_ramp_moves_only_the_inputs_the_persons_page_shows() {
     let roster = crate::roster_state::tests::test_roster("youth");
@@ -501,11 +502,11 @@ fn a_ramp_moves_only_the_inputs_the_persons_page_shows() {
     let (steps, skipped) = ramp(&v, &m, &p10, &sends, &BTreeMap::new());
     assert_eq!(skipped, 2);
     assert_eq!(moved(&steps), ["keys", "mic1"]);
-    // The engineer's page: every input.
+    // The engineer's page: the same two are skipped.
     let eng = v.page("engineer").unwrap();
     let (steps, skipped) = ramp(&v, &m, &eng, &sends, &BTreeMap::new());
-    assert_eq!(skipped, 0);
-    assert_eq!(moved(&steps), ["mic2", "mic10", "keys", "mic1"]);
+    assert_eq!(skipped, 2);
+    assert_eq!(moved(&steps), ["keys", "mic1"]);
     // Legacy: member2's page moves every input.
     let legacy = test_view();
     let p2 = legacy.page("member2").unwrap();

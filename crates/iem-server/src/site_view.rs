@@ -64,8 +64,9 @@ pub struct SiteView {
     pub vacant: Vec<MixId>,
     /// Inputs of people who do not play in the active lineup, which it does
     /// not list (`roster_state::foreign_input`: another lineup's people's,
-    /// a departed person's): no person's page shows or moves them, the
-    /// engineer's every page does (`view::shows_input`; legacy: none).
+    /// a departed person's): no page shows or moves them, the engineer's
+    /// included (`view::shows_input`, the owner on the live system,
+    /// 2026-10-24: a switched band is the whole view; legacy: none).
     pub foreign_inputs: Vec<InputId>,
 }
 
@@ -218,6 +219,11 @@ impl SiteView {
             foreign_inputs,
         };
         (view, problems)
+    }
+
+    /// Whether the input `id` is foreign to the active lineup ([`Self::foreign_inputs`]).
+    pub fn foreign_input(&self, id: &str) -> bool {
+        self.foreign_inputs.iter().any(|f| f.0 == id)
     }
 
     pub fn member(&self, id: &str) -> Option<&SiteMember> {

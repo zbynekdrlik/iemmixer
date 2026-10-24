@@ -109,8 +109,9 @@ pub fn input_owners<'a>(
     owners.into_iter()
 }
 
-/// Whether a person's page leaves the input `id` out while `lineup` plays
-/// (#58, owner option 1): `lineup` does not list it, and it belongs to
+/// Whether every page leaves the input `id` out while `lineup` plays (#58,
+/// owner option 1; the engineer's too since the owner's word on the live
+/// system, 2026-10-24): `lineup` does not list it, and it belongs to
 /// someone who does not play in `lineup` ([`input_owners`]: another
 /// lineup's person, a departed member), never the engineer. The inputs of
 /// the playing people and the shared ones (hand mics, stems, tech, the
