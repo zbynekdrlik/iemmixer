@@ -5,7 +5,7 @@
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0429"
-reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only (deny.toml, #12)"
+reason = "glib < 0.20 only via Tauri's Linux GTK stack; the tray ships for Windows only (#12; cargo-deny no longer reports it, an informational advisory on a transitive crate)"
 
 [[IgnoredVulns]]
 id = "GHSA-wrw7-89jp-8q8g"
@@ -14,6 +14,10 @@ reason = "alias of RUSTSEC-2024-0429 (glib, Linux GTK stack only)"
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0071"
 reason = "rsa (Marvin timing attack, no fixed release) only via jsonwebtoken's rust_crypto backend; iem-server uses HS256 and ES256 only, iem-soakclient HS256 only, and neither builds an RSA key (deny.toml)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+reason = "crypto-bigint 0.5 timing via p256/p384 0.13 (iem-core vapid, iem-server, jsonwebtoken 11.1 rust_crypto); it does reach the server's VAPID signing, so this is temporary: the fix needs p256 0.14, which jsonwebtoken does not support yet (deny.toml, #74)"
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0097"
