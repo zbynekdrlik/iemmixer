@@ -35,7 +35,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 
 **Site data (P6).** Never commit names, hosts, IPs, Dante channel numbers, real track names, PINs, keys or tokens. Real site values live only in the private `zbynekdrlik/iemmixer-ops` (credential strings not even there: only in `~/.config/iemmixer/` and the CI secret). Every clone installs the pre-push hook (gitleaks + private denylist + allowed commit identities); CI repeats all three.
 
-**Dante.** Never change Dante subscriptions or any Dante device other than the IEM PC's own card.
+**Dante.** Never change Dante subscriptions or any Dante device other than the IEM PC's own card. One exception (owner, #72, 2026-10-24): for a Gen 3 test, the card's spare HIL return inputs may subscribe to our own 3.0 device's test TX, never on a band member's channel, and the subscription is removed after the test.
 
 **Builds.** Tier 0: no local cargo compilation — push `dev` and verify in CI. Local `cargo fmt`, `cargo metadata`, `cargo tree`, `cargo update -p` are fine; `cargo deny` and `cargo mutants` run in CI only.
 

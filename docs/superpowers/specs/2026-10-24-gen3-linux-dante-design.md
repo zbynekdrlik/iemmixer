@@ -111,7 +111,7 @@ Ordered by what makes the device usable:
 
 - Unit and protocol tests run in CI on Linux (packet codec, mDNS records, ARC messages, servo, the RT contract as today).
 - Function is proven on the real Dante network: the dev box against real Dante devices and Dante Controller, the same way 2.x proved itself with HIL and live tests on the IEM PC.
-- Every live test uses spare or test channels. Our device's own RX subscriptions are ours to set (receiving from the stagebox takes one of its flow slots). Which other device may subscribe to our TX is the owner's decision, open on #72.
+- Every live test uses spare or test channels. Our device's own RX subscriptions are ours to set (receiving from the stagebox takes one of its flow slots). The receiver for our TX in phases B and E is the IEM card's spare HIL return inputs (owner, #72, 2026-10-24). They subscribe to our device's test TX only for a test, never on a band member's channel, and the subscription is removed afterwards. No other device's subscriptions are changed.
 
 ## 6. Left to the builder
 
