@@ -77,11 +77,12 @@ pub fn engine_pan(u: f32) -> Option<f64> {
     is_valid_ui_pan(u).then(|| f64::from(u) * 2.0 - 1.0)
 }
 
-/// The source a channel id names on `page`: an input, or a mix the page's
-/// mix hears that is no set nobody wears (#58: such a set is silent and has
-/// no channel).
+/// The source a channel id names on `page`: an input no departed person
+/// alone owns (#58, 2026-10-24: such an input has no channel anywhere), or
+/// a mix the page's mix hears that is no set nobody wears (#58: such a set
+/// is silent and has no channel).
 pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
-    if view.input(id).is_some() {
+    if view.input(id).is_some() && !view.departed_input(id) {
         return Some(Source::Input(InputId::new(id)));
     }
     view.mix(&page.mix)?
@@ -92,11 +93,14 @@ pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
 }
 
 /// Whether `viewer` sees and moves the input `id` (#58, owner option 1):
-/// the engineer every input on any page, a person every input but the
-/// active lineup's foreign ones (`SiteView::foreign_inputs`: another
-/// band's people's, a departed person's).
+/// nobody an input only departed people own (`SiteView::departed_inputs`,
+/// the owner on the live system, 2026-10-24); otherwise the engineer every
+/// input on any page, a person every input but the active lineup's foreign
+/// ones (`SiteView::foreign_inputs`: another band's people's).
 pub fn shows_input(view: &SiteView, viewer: &Viewer, id: &str) -> bool {
-    view.input(id).is_some() && (viewer.engineer || !view.foreign_inputs.iter().any(|f| f.0 == id))
+    view.input(id).is_some()
+        && !view.departed_input(id)
+        && (viewer.engineer || !view.foreign_inputs.iter().any(|f| f.0 == id))
 }
 
 /// The ids of a solo's `sources` as `viewer` gets them (`SoloUpdate`): the

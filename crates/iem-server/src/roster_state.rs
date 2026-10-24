@@ -120,6 +120,17 @@ pub fn foreign_input(cfg: &Config, roster: &Roster, lineup: &Lineup, id: &str) -
         && input_owners(cfg, roster, id).any(|o| o != ENGINEER_ID && !lineup.plays(o))
 }
 
+/// Whether the input `id` belongs only to departed people (#58, the owner
+/// on the live system, 2026-10-24): it has an owner other than the
+/// engineer ([`input_owners`]) and none of its owners is a roster person.
+/// Such an input is on no page, the engineer's included (`view::shows_input`).
+pub fn departed_input(cfg: &Config, roster: &Roster, id: &str) -> bool {
+    let mut owners = input_owners(cfg, roster, id)
+        .filter(|o| *o != ENGINEER_ID)
+        .peekable();
+    owners.peek().is_some() && owners.all(|o| !roster.people.iter().any(|p| p.id == o))
+}
+
 /// Every login tile: legacy, the site's members in their order, all
 /// playing; roster mode, the active lineup's people in set order, then the
 /// other people in roster order (not playing), then the site's engineer.

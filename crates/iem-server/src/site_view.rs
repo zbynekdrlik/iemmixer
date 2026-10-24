@@ -67,6 +67,9 @@ pub struct SiteView {
     /// a departed person's): no person's page shows or moves them, the
     /// engineer's every page does (`view::shows_input`; legacy: none).
     pub foreign_inputs: Vec<InputId>,
+    /// Inputs only departed people own (`roster_state::departed_input`):
+    /// no page shows or moves them, the engineer's included (legacy: none).
+    pub departed_inputs: Vec<InputId>,
 }
 
 /// "translator" → "Translator".
@@ -206,6 +209,15 @@ impl SiteView {
                 .collect(),
             _ => Vec::new(),
         };
+        let departed_inputs = match roster {
+            Some(r) => topo
+                .inputs
+                .iter()
+                .filter(|i| roster_state::departed_input(config, &r.roster, &i.id.0))
+                .map(|i| i.id.clone())
+                .collect(),
+            None => Vec::new(),
+        };
         let view = Self {
             members,
             inputs,
@@ -216,8 +228,14 @@ impl SiteView {
             people: roster_state::people(config, roster),
             vacant,
             foreign_inputs,
+            departed_inputs,
         };
         (view, problems)
+    }
+
+    /// Whether only departed people own the input `id` ([`Self::departed_inputs`]).
+    pub fn departed_input(&self, id: &str) -> bool {
+        self.departed_inputs.iter().any(|d| d.0 == id)
     }
 
     pub fn member(&self, id: &str) -> Option<&SiteMember> {
