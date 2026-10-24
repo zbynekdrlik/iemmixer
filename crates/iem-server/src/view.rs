@@ -77,12 +77,13 @@ pub fn engine_pan(u: f32) -> Option<f64> {
     is_valid_ui_pan(u).then(|| f64::from(u) * 2.0 - 1.0)
 }
 
-/// The source a channel id names on `page`: an input no departed person
-/// alone owns (#58, 2026-10-24: such an input has no channel anywhere), or
-/// a mix the page's mix hears that is no set nobody wears (#58: such a set
-/// is silent and has no channel).
+/// The source a channel id names on `page`: an input the active lineup
+/// does not leave out (#58, the owner on the live system, 2026-10-24: a
+/// foreign input is no channel anywhere, so it is an unknown id), or a mix
+/// the page's mix hears that is no set nobody wears (#58: such a set is
+/// silent and has no channel).
 pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
-    if view.input(id).is_some() && !view.departed_input(id) {
+    if view.input(id).is_some() && !view.foreign_input(id) {
         return Some(Source::Input(InputId::new(id)));
     }
     view.mix(&page.mix)?
@@ -92,15 +93,13 @@ pub fn source(view: &SiteView, page: &Page, id: &str) -> Option<Source> {
         .map(|m| Source::Mix(m.clone()))
 }
 
-/// Whether `viewer` sees and moves the input `id` (#58, owner option 1):
-/// nobody an input only departed people own (`SiteView::departed_inputs`,
-/// the owner on the live system, 2026-10-24); otherwise the engineer every
-/// input on any page, a person every input but the active lineup's foreign
-/// ones (`SiteView::foreign_inputs`: another band's people's).
-pub fn shows_input(view: &SiteView, viewer: &Viewer, id: &str) -> bool {
-    view.input(id).is_some()
-        && !view.departed_input(id)
-        && (viewer.engineer || !view.foreign_inputs.iter().any(|f| f.0 == id))
+/// Whether `viewer` sees and moves the input `id` (#58): every input but
+/// the active lineup's foreign ones (`SiteView::foreign_inputs`: another
+/// band's people's, a departed person's), for a person and the engineer
+/// alike (the owner on the live system, 2026-10-24: a switched band is the
+/// whole view). `viewer` stays a parameter: the rule is the viewer's.
+pub fn shows_input(view: &SiteView, _viewer: &Viewer, id: &str) -> bool {
+    view.input(id).is_some() && !view.foreign_input(id)
 }
 
 /// The ids of a solo's `sources` as `viewer` gets them (`SoloUpdate`): the
@@ -323,15 +322,12 @@ pub fn command(
     msg: &ClientMsg,
 ) -> Result<Vec<Cmd>, ViewError> {
     // A level of a heard mix (a whole mix or a peer) is a leader's or the
-    // engineer's to move (#58 design §8); an input of someone who does not
-    // play is the engineer's (#58, owner option 1).
+    // engineer's to move (#58 design §8); an input the active lineup leaves
+    // out is no source at all (`source`).
     let src = |id: &str| match source(view, page, id) {
         None => Err(ViewError::UnknownId(id.into())),
         Some(Source::Mix(_)) if !viewer.leads(view) => Err(ViewError::Forbidden(
             "the mixes a set hears are its leader's",
-        )),
-        Some(Source::Input(_)) if !shows_input(view, viewer, id) => Err(ViewError::Forbidden(
-            "the inputs of people who do not play are the engineer's",
         )),
         Some(s) => Ok(s),
     };
@@ -486,7 +482,10 @@ pub fn eq_target(
             GROUP_NAME.into(),
         ));
     }
-    if let Some(i) = view.input(target) {
+    if let Some(i) = view
+        .input(target)
+        .filter(|_| shows_input(view, viewer, target))
+    {
         if viewer.engineer || i.owner.as_deref() == Some(viewer.sub.as_str()) {
             return Ok((EqTarget::Input(i.id.clone()), i.name.clone()));
         }
@@ -598,7 +597,7 @@ pub fn limiter_msg(mirror: &Mirror, page: &Page, active_seconds: f64) -> ServerM
 
 /// Mute All (F15): one batch muting every level of the page's mix, but the
 /// inputs `viewer` does not see ([`shows_input`], #58 review: a person
-/// could not unmute those; the engineer mutes every input on any page).
+/// could not unmute those; the engineer's pages alike since 2026-10-24).
 pub fn mute_all(view: &SiteView, page: &Page, viewer: &Viewer) -> Cmd {
     let heard = view
         .mix(&page.mix)
