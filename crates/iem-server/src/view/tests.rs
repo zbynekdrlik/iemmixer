@@ -763,6 +763,54 @@ fn a_departed_persons_set_is_no_mixes_channel() {
     assert!(command(&legacy, &m, &p1, &member("member1"), &set9).is_ok());
 }
 
+/// #58, the owner on the live system (2026-10-24): a departed person's
+/// inputs (member9's mic10 once they left: no roster person owns it, the
+/// site's legacy `[[inputs]]` still name member9) are no channel on any
+/// page, the engineer's included, whichever lineup plays, and no command
+/// reaches them. Another lineup's people's inputs stay the engineer's.
+#[test]
+fn a_departed_persons_inputs_are_on_no_page() {
+    let m = Mirror::default();
+    let inputs = |v: &SiteView, p: &Page, viewer: &Viewer| -> Vec<String> {
+        channels(v, &m, p, viewer)
+            .into_iter()
+            .filter(|c| c.category != "mixes")
+            .map(|c| c.id)
+            .collect()
+    };
+    let level = ClientMsg::SetLevel {
+        id: "mic10".into(),
+        level_db: 0.0,
+    };
+    for active in ["main", "youth"] {
+        let roster = crate::roster_state::tests::departed_roster(active);
+        let (v, problems) = SiteView::build_with(
+            &crate::site_view::tests::test_config(),
+            Some(&roster),
+            &crate::site_view::tests::test_topology(),
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        for p in ["engineer", "member3", "translator"] {
+            let shown = inputs(&v, &page(&v, p), &engineer());
+            assert!(!shown.contains(&"mic10".to_string()), "{active}: {p}");
+            assert!(shown.contains(&"hand1".to_string()), "{active}: {p}");
+            assert_eq!(
+                command(&v, &m, &page(&v, p), &engineer(), &level),
+                Err(ViewError::UnknownId("mic10".into())),
+                "{active}: {p}"
+            );
+        }
+        if active == "youth" {
+            // Main's people do not play in youth; their inputs stay the
+            // engineer's (#58, owner option 1).
+            let shown = inputs(&v, &page(&v, "engineer"), &engineer());
+            for id in ["mic2", "mic5", "mic9"] {
+                assert!(shown.contains(&id.to_string()), "{id}");
+            }
+        }
+    }
+}
+
 /// #58, owner option 1: a person's page shows the inputs of the playing
 /// lineup's people and the shared ones (hand mics, stems, tech, the
 /// engineer's mic); another lineup's people's inputs and a departed
