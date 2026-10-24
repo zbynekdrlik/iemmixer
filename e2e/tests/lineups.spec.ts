@@ -453,6 +453,7 @@ test.describe("Bands (#58)", () => {
       await expect(strip(page, "mic1")).toBeVisible();
       await expect(strip(page, "mic2")).toHaveCount(0);
       await expect(strip(page, "mic10")).toHaveCount(0);
+      await tab(page, "Main");
       await page.locator(".settings-btn").click();
       await switchTo(page, section, "main", confirmation(YOUTH, MAIN));
       await expect(page.getByTestId("lineup-badge")).toHaveText(MAIN);
