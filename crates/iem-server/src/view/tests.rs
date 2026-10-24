@@ -970,11 +970,12 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
         command(&youth, &m, &p10, &me, &level("mic3")).is_ok(),
         "member3 plays in youth"
     );
-    assert!(
-        command(&youth, &m, &p10, &engineer(), &level("mic2")).is_ok(),
-        "the engineer's"
+    assert_eq!(
+        command(&youth, &m, &p10, &engineer(), &level("mic2")),
+        Err(ViewError::UnknownId("mic2".into())),
+        "the engineer's too"
     );
-    // A change of a hidden input reaches only the engineer's view.
+    // A change of a hidden input reaches no view, the engineer's included.
     let change = [Change::Level {
         mix: mix("member1"),
         source: input("mic2"),
@@ -986,10 +987,7 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
     }];
     assert!(updates_seen(&youth, &m, &p10, &me, &change).is_empty());
     assert!(updates_for(&youth, &m, &p10, &change).is_empty());
-    assert_eq!(
-        updates_seen(&youth, &m, &p10, &engineer(), &change).len(),
-        1
-    );
+    assert!(updates_seen(&youth, &m, &p10, &engineer(), &change).is_empty());
     // A solo sends again the channels the page shows, no other.
     let solo = [Change::Solo {
         mix: mix("member1"),
@@ -1091,10 +1089,7 @@ fn a_persons_solo_list_leaves_out_the_inputs_it_does_not_show() {
             }
         )
     );
-    assert_eq!(
-        soloed(&youth, "member10", &engineer()),
-        [["mic1", "mic2", "keys"]]
-    );
+    assert_eq!(soloed(&youth, "member10", &engineer()), [["mic1", "keys"]]);
     let legacy = test_view();
     assert_eq!(
         soloed(&legacy, "member1", &member("member1")),
@@ -1120,7 +1115,7 @@ fn a_solo_list_keeps_the_heard_mixes() {
     );
     assert_eq!(
         soloed_seen(&youth, &engineer(), &sources),
-        ["member1", "mic2", "mic3"]
+        ["member1", "mic3"]
     );
 }
 
