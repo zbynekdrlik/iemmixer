@@ -954,7 +954,8 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
         every(&main)
     );
     // member9 left: their mic10 (the site's member9's, no lineup's) is on
-    // no person's page, whichever lineup plays; the engineer still has it.
+    // no page, whichever lineup plays, the engineer's view included (the
+    // owner, 2026-10-24), and a command naming it is an unknown id.
     for active in ["main", "youth"] {
         let gone = build(&crate::roster_state::tests::departed_roster(active));
         let (p, who) = if active == "main" {
@@ -966,10 +967,14 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
         let seen = inputs(&gone, &on, &member(who));
         assert!(!seen.contains(&"mic10".to_string()), "{active}");
         assert!(seen.contains(&"keys".to_string()), "{active}");
-        assert_eq!(inputs(&gone, &on, &engineer()), every(&gone), "{active}");
+        assert_eq!(
+            inputs(&gone, &on, &engineer()),
+            but(&gone, &["mic10"]),
+            "{active}"
+        );
         assert_eq!(
             command(&gone, &m, &on, &member(who), &level("mic10")),
-            not_here,
+            Err(ViewError::UnknownId("mic10".into())),
             "{active}"
         );
     }
