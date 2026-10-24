@@ -763,6 +763,61 @@ fn a_departed_persons_set_is_no_mixes_channel() {
     assert!(command(&legacy, &m, &p1, &member("member1"), &set9).is_ok());
 }
 
+/// #58, the owner on the live system (2026-10-24): a switched band is the
+/// whole view. The engineer, like everyone, sees the playing lineup's
+/// inputs and the shared ones on any page; another lineup's people's inputs
+/// are no channel there and a command naming one is an unknown id.
+#[test]
+fn the_engineer_sees_only_the_playing_bands_inputs() {
+    let m = Mirror::default();
+    let build = |r: &crate::roster_state::RosterState| {
+        let (v, problems) = SiteView::build_with(
+            &crate::site_view::tests::test_config(),
+            Some(r),
+            &crate::site_view::tests::test_topology(),
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        v
+    };
+    let inputs = |v: &SiteView, p: &Page| -> Vec<String> {
+        channels(v, &m, p, &engineer())
+            .into_iter()
+            .filter(|c| c.category != "mixes")
+            .map(|c| c.id)
+            .collect()
+    };
+    let youth = build(&crate::roster_state::tests::test_roster("youth"));
+    let hidden = ["mic2", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10"];
+    let shown: Vec<String> = youth
+        .inputs
+        .iter()
+        .map(|i| i.id.0.clone())
+        .filter(|i| !hidden.contains(&i.as_str()))
+        .collect();
+    assert_eq!(shown.len(), 17);
+    for p in ["engineer", "member10", "member3", "translator"] {
+        assert_eq!(inputs(&youth, &page(&youth, p)), shown, "{p}");
+        assert_eq!(
+            command(
+                &youth,
+                &m,
+                &page(&youth, p),
+                &engineer(),
+                &ClientMsg::SetLevel {
+                    id: "mic2".into(),
+                    level_db: 0.0,
+                },
+            ),
+            Err(ViewError::UnknownId("mic2".into())),
+            "{p}"
+        );
+    }
+    // Main plays: all of main's people play, so every input is main's own.
+    let main = build(&crate::roster_state::tests::test_roster("main"));
+    let every: Vec<String> = main.inputs.iter().map(|i| i.id.0.clone()).collect();
+    assert_eq!(inputs(&main, &page(&main, "engineer")), every);
+}
+
 /// #58, the owner on the live system (2026-10-24): a departed person's
 /// inputs (member9's mic10 once they left: no roster person owns it, the
 /// site's legacy `[[inputs]]` still name member9) are no channel on any
