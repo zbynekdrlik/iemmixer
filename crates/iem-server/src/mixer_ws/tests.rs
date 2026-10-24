@@ -450,7 +450,8 @@ async fn the_echo_of_an_own_solo_is_the_viewers() {
 /// #58 review: the ids a person's page does not show never reach it: its
 /// opening's and a reset's solo list leave out the inputs of people who do
 /// not play (an engineer's solo of mic2 on member10's page, youth playing),
-/// and so do its meters. The engineer on the same page gets every id.
+/// and so do its meters. The engineer on the same page gets the same
+/// (the owner, 2026-10-24: the playing band is the whole view).
 #[tokio::test]
 async fn a_persons_page_gets_no_solo_or_meter_of_an_input_it_does_not_show() {
     let dir = tempfile::tempdir().unwrap();
@@ -473,14 +474,14 @@ async fn a_persons_page_gets_no_solo_or_meter_of_an_input_it_does_not_show() {
     };
     let (me, eng) = (viewer("member10", false), viewer("engineer", true));
     assert_eq!(soloed(opening(&s, &page, &me)), [["mic1"]]);
-    assert_eq!(soloed(opening(&s, &page, &eng)), [["mic1", "mic2"]]);
+    assert_eq!(soloed(opening(&s, &page, &eng)), [["mic1"]]);
     assert_eq!(
         soloed(engine_event(&s, 5, &page, &me, EngineEvent::Reset)),
         [["mic1"]]
     );
     assert_eq!(
         soloed(engine_event(&s, 5, &page, &eng, EngineEvent::Reset)),
-        [["mic1", "mic2"]]
+        [["mic1"]]
     );
 
     let topo = s.engine.mirror().topology.clone().unwrap();
@@ -503,9 +504,7 @@ async fn a_persons_page_gets_no_solo_or_meter_of_an_input_it_does_not_show() {
         assert!(mine.contains_key(id), "{id}");
     }
     assert_eq!(mine.len(), 24 - 7 + 11 + 1);
-    let all = meters(&eng);
-    assert_eq!(all.len(), 24 + 11 + 1);
-    assert_eq!(all["mic2"], [0.5, 0.25]);
+    assert_eq!(meters(&eng), mine);
 }
 
 /// #58 review: a person's page hears nothing of the engine while a switch

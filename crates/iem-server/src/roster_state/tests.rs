@@ -179,24 +179,6 @@ fn the_site_owner_counts_only_when_no_lineup_owns_the_input() {
     assert!(foreign_input(&cfg, &gone.roster, gone.lineup(), "mic10"));
 }
 
-/// #58, the owner on the live system (2026-10-24): an input only departed
-/// people own is no channel anywhere. Departed: an owner other than the
-/// engineer, and no owner a roster person.
-#[test]
-fn a_departed_input_belongs_only_to_people_who_left() {
-    let cfg = test_config();
-    let gone = departed_roster("main");
-    assert!(departed_input(&cfg, &gone.roster, "mic10"), "member9 left");
-    for id in ["mic2", "mic5", "eng_mic", "hand1", "keys"] {
-        assert!(!departed_input(&cfg, &gone.roster, id), "{id}");
-    }
-    let here = test_roster("main");
-    assert!(
-        !departed_input(&cfg, &here.roster, "mic10"),
-        "member9 is a roster person"
-    );
-}
-
 #[test]
 fn site_members_are_the_lineups_people_on_their_sets_then_the_engineer() {
     let cfg = test_config();

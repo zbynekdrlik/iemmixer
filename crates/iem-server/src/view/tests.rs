@@ -822,7 +822,7 @@ fn the_engineer_sees_only_the_playing_bands_inputs() {
 /// inputs (member9's mic10 once they left: no roster person owns it, the
 /// site's legacy `[[inputs]]` still name member9) are no channel on any
 /// page, the engineer's included, whichever lineup plays, and no command
-/// reaches them. Another lineup's people's inputs stay the engineer's.
+/// reaches them.
 #[test]
 fn a_departed_persons_inputs_are_on_no_page() {
     let m = Mirror::default();
@@ -855,14 +855,6 @@ fn a_departed_persons_inputs_are_on_no_page() {
                 "{active}: {p}"
             );
         }
-        if active == "youth" {
-            // Main's people do not play in youth; their inputs stay the
-            // engineer's (#58, owner option 1).
-            let shown = inputs(&v, &page(&v, "engineer"), &engineer());
-            for id in ["mic2", "mic5", "mic9"] {
-                assert!(shown.contains(&id.to_string()), "{id}");
-            }
-        }
     }
 }
 
@@ -871,7 +863,8 @@ fn a_departed_persons_inputs_are_on_no_page() {
 /// engineer's mic); another lineup's people's inputs and a departed
 /// person's are not on it, and no level, mute, pan, solo or EQ reaches
 /// them from it (they are the engineer's, as a heard mix is a leader's).
-/// The engineer sees every input on any page. Youth plays: main's people
+/// Since the owner's word on the live system (2026-10-24) the engineer
+/// sees the same: a hidden input is an unknown id. Youth plays: main's people
 /// member2, member4 (mic5, their guitar) and member5 … member9 do not.
 #[test]
 fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
@@ -925,42 +918,50 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
         .map(|c| c.id)
         .collect();
     assert_eq!(own, ["mic1"]);
-    // The engineer sees every input, on their page and on a person's.
+    // The engineer sees the same, on their page and on a person's.
     for p in ["engineer", "member10", "translator"] {
-        assert_eq!(
-            inputs(&youth, &page(&youth, p), &engineer()),
-            every(&youth),
-            "{p}"
-        );
+        assert_eq!(inputs(&youth, &page(&youth, p), &engineer()), shown, "{p}");
     }
-    // Nothing reaches another band's person's input from a person's page.
-    let not_here = Err(ViewError::Forbidden(
-        "the inputs of people who do not play are the engineer's",
-    ));
+    // Nothing reaches another band's person's input: it is an unknown id.
     let level = |id: &str| ClientMsg::SetLevel {
         id: id.into(),
         level_db: 0.0,
     };
-    for msg in [
-        level("mic2"),
-        ClientMsg::SetMute {
-            id: "mic5".into(),
-            muted: false,
-        },
-        ClientMsg::SetPan {
-            id: "mic10".into(),
-            pan: 0.5,
-        },
-        ClientMsg::SetSolo {
-            soloed: vec!["mic1".into(), "mic2".into()],
-        },
+    for (msg, id) in [
+        (level("mic2"), "mic2"),
+        (
+            ClientMsg::SetMute {
+                id: "mic5".into(),
+                muted: false,
+            },
+            "mic5",
+        ),
+        (
+            ClientMsg::SetPan {
+                id: "mic10".into(),
+                pan: 0.5,
+            },
+            "mic10",
+        ),
+        (
+            ClientMsg::SetSolo {
+                soloed: vec!["mic1".into(), "mic2".into()],
+            },
+            "mic2",
+        ),
     ] {
-        assert_eq!(command(&youth, &m, &p10, &me, &msg), not_here, "{msg:?}");
+        for viewer in [me.clone(), engineer()] {
+            assert_eq!(
+                command(&youth, &m, &p10, &viewer, &msg),
+                Err(ViewError::UnknownId(id.into())),
+                "{msg:?}"
+            );
+        }
     }
-    assert!(matches!(
-        eq_target(&youth, &p10, &me, "mic2"),
-        Err(ViewError::Forbidden(_))
-    ));
+    assert_eq!(
+        eq_target(&youth, &p10, &engineer(), "mic2"),
+        Err(ViewError::UnknownId("mic2".into()))
+    );
     assert!(
         command(&youth, &m, &p10, &me, &level("keys")).is_ok(),
         "shared"
@@ -1022,11 +1023,7 @@ fn a_persons_page_shows_the_playing_bands_inputs_and_the_shared_ones() {
         let seen = inputs(&gone, &on, &member(who));
         assert!(!seen.contains(&"mic10".to_string()), "{active}");
         assert!(seen.contains(&"keys".to_string()), "{active}");
-        assert_eq!(
-            inputs(&gone, &on, &engineer()),
-            but(&gone, &["mic10"]),
-            "{active}"
-        );
+        assert_eq!(inputs(&gone, &on, &engineer()), seen, "{active}");
         assert_eq!(
             command(&gone, &m, &on, &member(who), &level("mic10")),
             Err(ViewError::UnknownId("mic10".into())),
@@ -1653,8 +1650,8 @@ fn mute_all_on_a_persons_page_mutes_only_the_inputs_it_shows() {
     assert_eq!(shown.len(), 17);
     assert_eq!(muted_inputs("member10", &member("member10")), shown);
     assert_eq!(muted_inputs("member3", &member("member3")), shown);
-    assert_eq!(muted_inputs("member10", &engineer()), every);
-    assert_eq!(muted_inputs("engineer", &engineer()), every);
+    assert_eq!(muted_inputs("member10", &engineer()), shown);
+    assert_eq!(muted_inputs("engineer", &engineer()), shown);
     // A leader's page still mutes the mixes its mix hears.
     let Cmd::Batch { ops } = mute_all(&youth, &page(&youth, "member3"), &member("member3")) else {
         panic!("a batch");
