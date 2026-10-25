@@ -176,6 +176,3 @@ pub fn restore_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::R
     }
     Ok(restored)
 }
-
-#[cfg(test)]
-mod tests;

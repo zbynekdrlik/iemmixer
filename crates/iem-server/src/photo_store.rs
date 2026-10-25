@@ -134,36 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn a_photo_moves_out_and_back_and_a_bad_id_is_an_error() {
-        let (store, dir) = test_store();
-        let dest = dir.path().join("archive").join("member1").join("photo.jpg");
-        assert!(!store.move_to("member1", &dest).unwrap(), "no photo yet");
-        assert!(!dest.exists());
-        store.save("member1", b"jpeg").unwrap();
-        assert!(store.move_to("member1", &dest).unwrap());
-        assert!(!store.exists("member1"));
-        assert_eq!(std::fs::read(&dest).unwrap(), b"jpeg");
-        assert!(store.restore_from("member1", &dest).unwrap());
-        assert_eq!(store.load("member1").unwrap(), b"jpeg");
-        assert!(!dest.exists());
-        assert!(
-            !store.restore_from("member1", &dest).unwrap(),
-            "nothing left"
-        );
-        // A photo taken since the archive is kept.
-        std::fs::write(&dest, b"old").unwrap();
-        assert!(!store.restore_from("member1", &dest).unwrap());
-        assert_eq!(store.load("member1").unwrap(), b"jpeg");
-        assert!(dest.exists());
-        for bad in ["../x", ""] {
-            let err = store.move_to(bad, &dest).unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-            let err = store.restore_from(bad, &dest).unwrap_err();
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        }
-    }
-
-    #[test]
     fn test_overwrite_existing() {
         let (store, _dir) = test_store();
         store.save("oldmember1", b"first").unwrap();

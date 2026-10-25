@@ -339,7 +339,7 @@ class RosterInstallTests(RosterBase):
         self.assertEqual(self.restores(), [])
 
     def test_applied_with_problems_counts_as_applied(self) -> None:
-        why = "person 'member2' was not archived: PermissionDenied"
+        why = "person 'member2' was not removed: PermissionDenied"
         self.statuses = [status(ok=False, problems=[why], removed=["member2"])]
         code, docs, err = self.install()
         self.assertEqual(code, 0, err)

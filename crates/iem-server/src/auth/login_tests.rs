@@ -650,7 +650,7 @@ async fn the_engineer_pin_check_is_a_guarded_login() {
 }
 
 /// The test roster with `active` playing, minus the people in `gone` (who
-/// left: archived).
+/// left: removed).
 fn roster_without(active: &str, gone: &[&str]) -> crate::roster_state::RosterState {
     let mut r = crate::roster_state::tests::test_roster(active);
     let roster = std::sync::Arc::make_mut(&mut r.roster);
@@ -689,10 +689,10 @@ async fn a_person_not_playing_may_log_in() {
     assert_eq!(body["engineer"], true);
 }
 
-/// #58 decision 6: a person the roster no longer holds logs in nowhere,
-/// even with a PIN hash still stored, and their old token changes no PIN.
+/// #58: a person the roster no longer holds (removed) logs in nowhere, even
+/// with a PIN hash still stored, and their old token changes no PIN.
 #[tokio::test]
-async fn an_archived_person_may_not() {
+async fn a_removed_person_may_not() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path()).await;
     state.set_roster(Some(roster_without("main", &["member1"])));
