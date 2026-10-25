@@ -296,9 +296,9 @@ pub struct People {
 /// ([`remove_person`]: their PIN hash, photo and every lineup's files
 /// deleted), and the PIN hashes and the `archive/` folder an older server
 /// archived are deleted. Nothing is ever brought back: a person added
-/// again starts fresh. A live
-/// PIN whose id is no lower-case person id is kept and named. A failure is
-/// logged and named in `problems`; the rest still runs.
+/// again starts fresh. A live PIN whose id is no lower-case person id is
+/// kept and named. A failure is logged and named in `problems`; the rest
+/// still runs.
 pub fn follow_people(
     config_dir: &Path,
     roster: &Roster,
