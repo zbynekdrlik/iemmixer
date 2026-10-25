@@ -319,6 +319,38 @@ fn exactly_one_main_lineup() {
     assert_eq!(r.main().id, "youth");
 }
 
+/// #58 review: a valid but wrong roster would remove everyone (every
+/// person it lacks is deleted), so a roster with no people, or whose main
+/// lineup places nobody on a set, is a problem; another lineup may be
+/// empty.
+#[test]
+fn a_roster_without_people_or_a_main_without_sets_is_refused() {
+    let empty = Roster::parse(
+        "people = []\n\n[[lineups]]\nid = \"main\"\nname = \"Main\"\nmain = true\n\n[lineups.sets]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        empty.problems(),
+        ["the roster has no people", "lineup 'main' is main and has no sets"]
+    );
+    // The test roster's main lineup with nobody on its sets (no leaders
+    // and no owners either, which would be problems of their own).
+    let clear = |l: &mut Lineup| {
+        l.sets.clear();
+        l.leaders.clear();
+        for input in l.inputs.values_mut() {
+            input.owner = None;
+        }
+    };
+    let mut r = roster();
+    clear(&mut r.lineups[0]);
+    assert_eq!(r.problems(), ["lineup 'main' is main and has no sets"]);
+    // A lineup that is not main may be empty.
+    let mut r = roster();
+    clear(&mut r.lineups[1]);
+    assert_eq!(r.problems(), Vec::<String>::new());
+}
+
 #[test]
 fn a_leader_whose_set_cannot_hear_the_others_is_refused() {
     // member1's set no longer hears member3's (a site copy without that peer).
