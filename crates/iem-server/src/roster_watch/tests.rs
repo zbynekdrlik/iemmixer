@@ -536,6 +536,31 @@ fn nothing_an_older_server_archived_comes_back() {
     assert_eq!(reloaded.member_hash("member9"), None);
 }
 
+/// #58 review: the `archive/` folder an older server wrote (decision 6's
+/// people archive, overruled by the owner) is deleted where the PIN hashes
+/// it archived are, whoever it holds; without one nothing happens.
+#[test]
+fn an_older_servers_archive_folder_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let old = d.join("archive").join("member9");
+    put(&old.join("photo.jpg"), "jpeg");
+    put(
+        &lineup_file(&old, "main", "presets", "member9"),
+        "member9's",
+    );
+    put(
+        &d.join("archive").join("member11").join("photo.jpg"),
+        "jpeg",
+    );
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let p = follow_people(d, &parse(TEXT), &mut pins, &[]);
+    assert_eq!(p.problems, Vec::<String>::new());
+    assert!(!d.join("archive").exists());
+    let again = follow_people(d, &parse(TEXT), &mut pins, &[]);
+    assert_eq!(again, People::default());
+}
+
 /// #58: follow_people names whom it removed, the removed first, then a
 /// live PIN of no person; with nobody left to remove it names nobody.
 #[test]
