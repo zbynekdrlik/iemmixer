@@ -858,6 +858,61 @@ fn a_departed_persons_inputs_are_on_no_page() {
     }
 }
 
+/// #58, the last step of point 2: with the roster's `[equipment]` and a
+/// site that no longer names member9 (no `[[members]]` entry, mic10 without
+/// an owner), member9's set is no Mixes channel and mic10 no input channel
+/// on any page, for a leader and the engineer alike, whichever lineup
+/// plays, and no command reaches either.
+#[test]
+fn with_equipment_a_departed_person_is_on_no_page_of_a_site_without_them() {
+    let m = Mirror::default();
+    let shown = |v: &SiteView, p: &Page, viewer: &Viewer| -> Vec<String> {
+        channels(v, &m, p, viewer)
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    };
+    let level = |id: &str| ClientMsg::SetLevel {
+        id: id.into(),
+        level_db: -6.0,
+    };
+    for (active, leader) in [("main", "member1"), ("youth", "member3")] {
+        let roster = crate::roster_state::tests::equipped_departed(active);
+        let (v, problems) = SiteView::build_with(
+            &crate::site_view::tests::departed_site(),
+            Some(&roster),
+            &crate::site_view::tests::test_topology(),
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        let own = page(&v, leader);
+        for (p, viewer) in [
+            (&own, member(leader)),
+            (&own, engineer()),
+            (&page(&v, "engineer"), engineer()),
+            (&page(&v, "translator"), engineer()),
+        ] {
+            let on = format!("{active}: {} as {}", p.id, viewer.sub);
+            let ids = shown(&v, p, &viewer);
+            assert!(ids.contains(&"hand1".to_string()), "{on}");
+            for id in ["member9", "mic10"] {
+                assert!(!ids.contains(&id.to_string()), "{on}: {id}");
+                assert_eq!(
+                    command(&v, &m, p, &viewer, &level(id)),
+                    Err(ViewError::UnknownId(id.into())),
+                    "{on}: {id}"
+                );
+            }
+        }
+        // The leader still hears the sets the playing lineup's people wear.
+        let heard: Vec<String> = channels(&v, &m, &own, &member(leader))
+            .into_iter()
+            .filter(|c| c.category == "mixes")
+            .map(|c| c.id)
+            .collect();
+        assert!(!heard.is_empty(), "{active}");
+    }
+}
+
 /// #58, owner option 1: a person's page shows the inputs of the playing
 /// lineup's people and the shared ones (hand mics, stems, tech, the
 /// engineer's mic); another lineup's people's inputs and a departed

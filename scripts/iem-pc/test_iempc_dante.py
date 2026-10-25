@@ -155,6 +155,23 @@ class LabelTests(unittest.TestCase):
         # The main lineup's wearer wins over another lineup's: youth's member10 on set member1 names nothing.
         self.assertNotIn("MEMBER 10", " ".join(r.label for r in labels))
 
+    def test_the_sheet_reads_no_person_from_the_sites_members_or_inputs(self) -> None:
+        """#58, the last step of point 2: the roster's [equipment] lets the
+        site lose a departed person's [[members]] entry and their inputs'
+        owners. The sheet comes from the roster and the site's [engine]
+        alone, so neither that site, nor one without any [[members]] or
+        [[inputs]], nor the roster's [equipment] changes a label."""
+        equipment = ("\n[equipment]\nsets = [" + ", ".join(f'"member{n}"' for n in range(1, 10)) + "]\n"
+                     "inputs = [" + ", ".join(f'"mic{n}"' for n in range(1, 11)) + "]\n")
+        departed = changed(SITE, ('[[members]]\nid = "member9"\nname = "Member9"\nmix = "member9"\n\n', ""),
+                           ('name = "MEMBER9 mic"\nowner = "member9"\n', 'name = "MEMBER9 mic"\n'))
+        self.assertNotIn('owner = "member9"', departed)
+        engine_only = "[engine]" + SITE.split("[engine]", 1)[1]
+        self.assertNotIn("[[members]]", engine_only)
+        want = rows()
+        self.assertEqual(rows(ROSTER + equipment, departed), want)
+        self.assertEqual(rows(ROSTER + equipment, engine_only), want)
+
     def test_renamed_tx_channels_are_listed_for_resubscription(self) -> None:
         after = rows(changed(ROSTER, ('name = "Member 2"', 'name = "Member Two"'),
                              ('member5 = "member5"', 'member5 = "member10"'),

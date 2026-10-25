@@ -6,7 +6,9 @@
 # member1 ... member9 on their own sets, led by member1 and member3; lineup
 # `youth` places member10 on member1's set, member3 on their own and member11
 # on member4's, led by member3. Inputs a lineup lists get its name and owner;
-# the others keep the site's label and have no owner.
+# the others keep the site's label and have no owner. It has no
+# `[equipment]` table, so the site's legacy members and owners still count;
+# the tests of `[equipment]` (#58) append one (`roster_state::tests::EQUIPMENT`).
 
 [[people]]
 id = "member1"

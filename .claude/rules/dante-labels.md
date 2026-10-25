@@ -46,6 +46,7 @@ paths:
   - Nobody, or different people, means no row: the card keeps its label.
   - The labels follow the roster, never the lineup that plays (design §10, decision 4), so a band switch never touches Dante.
   - No row either for the engineer's or translator's mixes, HIL's spare outputs, or an input nobody owns.
+  - Of the site only `[engine]` is read (the channels): its `[[members]]` and `[[inputs]]`, and the roster's `[equipment]` (#58), change no label, so the site can lose a departed person's entries (`test_the_sheet_reads_no_person_from_the_sites_members_or_inputs`).
 - **The convention** is the predecessor's (read from `~/devel/reaperiem`, the naming notes of 2026-02). The number goes last on TX and first on RX, so Dante Controller's matrix lines up; at least two digits (`03`); a label holds at most 31 characters (`LIMIT`).
   - `NAME` is the person's name in ASCII capitals (`plain`, then `caps`): NFKD drops the diacritics; any other non-ASCII letter, a control character and Dante's `= . @` are left out; spaces are collapsed.
   - A NAME too long for the label is cut and its row says `shortened: true`. With two-digit channels the budget is 20 characters on TX and 24 on RX.
