@@ -365,14 +365,15 @@ pub fn follow_people(
 /// Puts `roster` into use on the files' side: the legacy layout migrated
 /// (or a committed migration finished), the recorded active lineup (main
 /// before any) checked to be the roster's, who is no person of it removed
-/// ([`follow_people`]). The roster state and whom the migration and the
-/// removal took out.
+/// ([`follow_people`]) unless `remove` is false (a fall-back start). The
+/// roster state and whom the migration and the removal took out.
 fn adopt(
     config_dir: &Path,
     cfg: &Config,
     pins: &mut PinStore,
     roster: Roster,
     sha256: &str,
+    remove: bool,
 ) -> Result<(RosterState, People), Vec<String>> {
     let report = migrate_legacy(config_dir, &roster, cfg, pins).map_err(|e| vec![e.to_string()])?;
     let active = LineupStore::new(config_dir)
@@ -382,7 +383,12 @@ fn adopt(
     if roster.lineup(&active).is_none() {
         return Err(vec![missing_active(&active)]);
     }
-    let mut people = follow_people(config_dir, &roster, pins, &[]);
+    let mut people = if remove {
+        follow_people(config_dir, &roster, pins, &[])
+    } else {
+        tracing::warn!("a fall-back start removes nobody: the next roster that applies does");
+        People::default()
+    };
     let mut removed = report.removed;
     removed.append(&mut people.removed);
     people.removed = removed;
@@ -408,9 +414,22 @@ const NOT_FOUND: &str = "roster file: not found";
 /// The last problem of a start that fell back to the recorded roster.
 const FALLBACK: &str = "in use instead: the roster applied last";
 
+/// What [`take`] puts into use at the start.
+#[derive(Debug, Clone, Copy)]
+enum Start<'a> {
+    /// `roster.toml`, beside the roster applied last when there is one:
+    /// refused when it keeps none of that one's people (#58 review); who is
+    /// no person of it is removed.
+    File(Option<&'a Roster>),
+    /// The roster applied last, standing in for a `roster.toml` that cannot
+    /// be used: nobody is removed (#58 review: the file has problems, so
+    /// its removals are not to be trusted; the next roster that applies
+    /// does them).
+    Fallback,
+}
+
 /// The roster in `bytes` (SHA-256 `sha256`) validated and adopted
-/// ([`adopt`]); refused before anything is written when it keeps none of
-/// `base`'s people (the roster applied last, #58 review).
+/// ([`adopt`]) as `start` says; a refusal writes nothing.
 fn take(
     config_dir: &Path,
     cfg: &Config,
@@ -418,14 +437,17 @@ fn take(
     bytes: &[u8],
     sha256: &str,
     facts: Option<&TopologyFacts>,
-    base: Option<&Roster>,
+    start: Start,
 ) -> Result<(RosterState, People), Vec<String>> {
     let text = std::str::from_utf8(bytes).map_err(|_| vec![NOT_UTF8.to_string()])?;
     let roster = validate(text, facts)?;
-    if base.is_some_and(|base| removes_everyone(base, &roster)) {
+    if let Start::File(Some(base)) = start
+        && removes_everyone(base, &roster)
+    {
         return Err(vec![EVERYONE_REMOVED.to_string()]);
     }
-    adopt(config_dir, cfg, pins, roster, sha256)
+    let remove = matches!(start, Start::File(_));
+    adopt(config_dir, cfg, pins, roster, sha256, remove)
 }
 
 /// The roster at the server's start: `None` without `roster.toml` (legacy
@@ -437,8 +459,8 @@ fn take(
 /// #58 review), or none, beside a recorded roster
 /// (`LineupStore::applied_roster`, the one the states follow) starts with
 /// that one (#58 review: a server that does not start is the worst outcome;
-/// [`Loaded::fallback`]). The status file says what happened; an error
-/// refuses the start.
+/// [`Loaded::fallback`]), removing nobody ([`Start::Fallback`]). The status
+/// file says what happened; an error refuses the start.
 pub fn load(
     config_dir: &Path,
     cfg: &Config,
@@ -457,7 +479,15 @@ pub fn load(
     let (sha256, problems) = match &file {
         Some(bytes) => {
             let sha256 = sha256_hex(bytes);
-            match take(config_dir, cfg, pins, bytes, &sha256, facts, base.as_ref()) {
+            match take(
+                config_dir,
+                cfg,
+                pins,
+                bytes,
+                &sha256,
+                facts,
+                Start::File(base.as_ref()),
+            ) {
                 Ok((state, people)) => {
                     if let Ok(text) = std::str::from_utf8(bytes) {
                         keep(config_dir, &sha256, text);
@@ -485,7 +515,15 @@ pub fn load(
     };
     if let Some(text) = recorded {
         let copy = sha256_hex(text.as_bytes());
-        match take(config_dir, cfg, pins, text.as_bytes(), &copy, facts, None) {
+        match take(
+            config_dir,
+            cfg,
+            pins,
+            text.as_bytes(),
+            &copy,
+            facts,
+            Start::Fallback,
+        ) {
             Ok((state, _)) => {
                 keep(config_dir, &copy, &text);
                 tracing::error!(
@@ -791,6 +829,7 @@ async fn adopt_live(state: &AppState, roster: Roster, text: &str, sha256: &str) 
             &mut pins,
             roster,
             sha256,
+            true,
         )
     };
     match adopted {
