@@ -45,9 +45,10 @@ def status(sha: str = FILE_SHA, *, applied: bool = True, ok: bool | None = None,
                        "problems": list(problems), "added": list(added), "removed": list(removed)}, indent=2)
 
 
-def checked(ok: bool = True, problems=(), sha: str = FILE_SHA) -> tuple[int, str]:
-    """`iem-server roster check`'s exit code and its one JSON line."""
-    return (0 if ok else 1), json.dumps({"ok": ok, "problems": list(problems), "sha256": sha})
+def checked(ok: bool = True, problems=(), sha: str = FILE_SHA, removes=None) -> tuple[int, str]:
+    """`iem-server roster check`'s exit code and its one JSON line (`removes`:
+    the ids it takes out of the roster applied last, null before one)."""
+    return (0 if ok else 1), json.dumps({"ok": ok, "problems": list(problems), "sha256": sha, "removes": removes})
 
 
 class RosterBase(Base):
@@ -115,7 +116,7 @@ class RosterInstallTests(RosterBase):
         code, docs, err = self.install()
         self.assertEqual(code, 1, err)
         self.assertEqual(docs, [{"roster_install": {"sha256": FILE_SHA, "ok": False, "problems": [why],
-                                                    "applied": False, "added": [], "removed": []}}])
+                                                    "applied": False, "added": [], "removed": [], "removes": None}}])
         self.assertEqual((self.installs(), self.status_reads(), self.restores()), ([], [], []))
         self.assertEqual(self.pc.calls[-1], ("iem-server.exe", list(CHECK), "abandon"))
 
@@ -123,7 +124,7 @@ class RosterInstallTests(RosterBase):
         code, docs, err = self.install("--dry-run")
         self.assertEqual(code, 0, err)
         self.assertEqual(docs, [{"roster_install": {"sha256": FILE_SHA, "ok": True, "problems": [], "applied": False,
-                                                    "added": [], "removed": [], "dry_run": True}}])
+                                                    "added": [], "removed": [], "removes": None, "dry_run": True}}])
         self.assertEqual([c[:2] for c in self.pc.calls], [("iemmode.exe", ["status"]), ("iem-server.exe", list(CHECK))])
         self.assertEqual([(src, dst) for src, dst, _ in self.pc.scps],
                          [(str(self.file.resolve()), f"tester@pc.test:/X:/root/incoming/roster-{FILE_SHA[:12]}.toml")])
@@ -414,6 +415,32 @@ class RosterInstallTests(RosterBase):
         self.assertEqual((self.pc.scps, self.installs()), ([], []))
         # Only the dry run in dev reached the check: every refusal came before the upload.
         self.assertEqual(len([c for c in self.pc.calls if c[0] == "iem-server.exe"]), 1)
+
+    def test_a_dry_run_names_whom_the_roster_removes(self) -> None:
+        """#58 review: the server's check names the ids the roster takes out
+        of the roster applied last, and the dry run prints them (ids only, as
+        the status's people); a check that names none (no roster applied
+        before, or a bundle from before the field) prints null."""
+        self.pc.replies[CHECK] = checked(removes=["member2", "Zyxqw Name", 7])
+        code, docs, err = self.install("--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1]["roster_install"]["removes"], ["member2", "?", "?"])
+        self.pc.replies[CHECK] = checked(removes=[])
+        _, docs, _ = self.install("--dry-run")
+        self.assertEqual(docs[-1]["roster_install"]["removes"], [])
+        for reply in (checked(), (0, json.dumps({"ok": True, "problems": [], "sha256": FILE_SHA}))):
+            self.pc.replies[CHECK] = reply
+            code, docs, err = self.install("--dry-run")
+            self.assertEqual(code, 0, err)
+            self.assertIsNone(docs[-1]["roster_install"]["removes"])
+        # A check refused for removing everyone names them too.
+        why = "the roster keeps none of the people of the roster in use: it would remove them all"
+        self.pc.replies[CHECK] = checked(ok=False, problems=[why], removes=["member10", "member11"])
+        code, docs, _ = self.install("--dry-run")
+        self.assertEqual(code, 1)
+        out = docs[-1]["roster_install"]
+        self.assertEqual((out["problems"], out["removes"]), ([why], ["member10", "member11"]))
+        self.assertEqual(self.installs(), [])
 
     def test_a_server_without_roster_check_or_an_odd_answer_fails(self) -> None:
         for reply, words in (((2, ""), "does not know 'roster check'"),
