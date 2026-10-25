@@ -50,7 +50,7 @@ use crate::engine::client::EngineError;
 use crate::lineup_store::{
     ACTIVE_FILE, LineupStore, Pending, Running, SWITCH_FILE, migrate_legacy, migration_problems,
 };
-use crate::people_removal::{held_ids, remove_person};
+use crate::people_removal::{drop_archive, held_ids, remove_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
 use crate::roster_state::RosterState;
 
@@ -283,8 +283,9 @@ pub struct People {
 /// failed part-way, a person removed while the server was stopped; #58
 /// review), who is no person of it (nor the engineer) is removed
 /// ([`remove_person`]: their PIN hash, photo and every lineup's files
-/// deleted), and the PIN hashes an older server archived are deleted.
-/// Nothing is ever brought back: a person added again starts fresh. A live
+/// deleted), and the PIN hashes and the `archive/` folder an older server
+/// archived are deleted. Nothing is ever brought back: a person added
+/// again starts fresh. A live
 /// PIN whose id is no lower-case person id is kept and named. A failure is
 /// logged and named in `problems`; the rest still runs.
 pub fn follow_people(
@@ -298,6 +299,13 @@ pub fn follow_people(
         tracing::error!(error = %e, "the PIN hashes an older server archived were not deleted");
         out.problems.push(format!(
             "the PIN hashes an older server archived were not deleted: {}",
+            e.kind()
+        ));
+    }
+    if let Err(e) = drop_archive(config_dir) {
+        tracing::error!(error = %e, "the archive an older server wrote was not deleted");
+        out.problems.push(format!(
+            "the archive an older server wrote was not deleted: {}",
             e.kind()
         ));
     }

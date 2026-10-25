@@ -82,6 +82,24 @@ pub fn held_ids(config_dir: &Path) -> io::Result<BTreeSet<String>> {
     Ok(out)
 }
 
+/// `<config>/archive/`: the people archive an older server wrote (#58
+/// decision 6, overruled by the owner on 2026-10-24). Never written or
+/// read, only deleted ([`drop_archive`]).
+pub const ARCHIVE_DIR: &str = "archive";
+
+/// Deletes the `archive/` folder an older server wrote, whatever it holds,
+/// tried again on a short-lived Windows error; `false` when there is none
+/// (a file of that name is no archive and stays).
+pub fn drop_archive(config_dir: &Path) -> io::Result<bool> {
+    let dir = config_dir.join(ARCHIVE_DIR);
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    retrying(cfg!(windows), || fs::remove_dir_all(&dir))?;
+    tracing::info!("the people archive an older server wrote is deleted");
+    Ok(true)
+}
+
 /// Every `(lineup, kind)` file of `id` under `root`.
 fn files_of(root: &Path, id: &str) -> io::Result<Vec<(String, &'static str, PathBuf)>> {
     let mut out = Vec::new();
