@@ -1579,6 +1579,10 @@ pub struct CheckReport {
     pub ok: bool,
     pub problems: Vec<String>,
     pub sha256: String,
+    /// The people of the roster applied last (`lineups/applied-roster.toml`)
+    /// that this roster removes, ids in that roster's order; `None` when no
+    /// roster was applied before or it cannot be read (#58 review).
+    pub removes: Option<Vec<String>>,
 }
 
 /// [`CheckReport`] of the roster at `roster_path` for the site at
@@ -1592,6 +1596,7 @@ pub fn check_cli(roster_path: &Path, site_path: &Path) -> CheckReport {
         ok: problems.is_empty(),
         problems,
         sha256,
+        removes: None,
     }
 }
 

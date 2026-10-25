@@ -536,6 +536,131 @@ fn nothing_an_older_server_archived_comes_back() {
     assert_eq!(reloaded.member_hash("member9"), None);
 }
 
+/// A small roster on the test site: member10 and member11 on member1's
+/// and member4's sets.
+const PAIR: &str = "[[people]]\nid = \"member10\"\nname = \"Member 10\"\n\n\
+    [[people]]\nid = \"member11\"\nname = \"Member 11\"\n\n\
+    [[lineups]]\nid = \"main\"\nname = \"Main band\"\nmain = true\n\n\
+    [lineups.sets]\nmember1 = \"member10\"\nmember4 = \"member11\"\n";
+
+/// A small roster with none of [`PAIR`]'s people: member1 on their set.
+const OTHERS: &str = "[[people]]\nid = \"member1\"\nname = \"Member 1\"\n\n\
+    [[lineups]]\nid = \"main\"\nname = \"Main band\"\nmain = true\n\n\
+    [lineups.sets]\nmember1 = \"member1\"\n";
+
+/// The refusal of a roster that keeps none of the roster in use's people.
+const EVERYONE: &str =
+    "the roster keeps none of the people of the roster in use: it would remove them all";
+
+/// `text` in use, `main` playing.
+fn in_use(text: &str) -> RosterState {
+    RosterState {
+        roster: Arc::new(parse(text)),
+        sha256: sha256_hex(text.as_bytes()),
+        active: "main".into(),
+    }
+}
+
+/// #58 review: a valid but wrong roster that keeps none of the people of
+/// the roster in use (another band's file, ids typed anew) is refused as a
+/// problem of the reload: the roster in use stays and nothing is deleted.
+#[tokio::test]
+async fn a_reload_that_removes_everyone_is_refused_and_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let state = AppState::new(test_config(), d);
+    state.set_roster(Some(in_use(PAIR)));
+    state
+        .pin_store
+        .write()
+        .await
+        .set_member_hash("member10", PHC.into())
+        .unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member11");
+    put(&theirs, "member11's");
+    std::fs::write(d.join(ROSTER_FILE), OTHERS).unwrap();
+    assert_eq!(
+        check_file(&state).await,
+        Some(Applied::Refused(vec![EVERYONE.to_string()]))
+    );
+    let s = status(d);
+    assert_eq!(
+        (s.ok, s.applied, s.problems.as_slice()),
+        (false, false, &[EVERYONE.to_string()][..])
+    );
+    assert_eq!(state.roster().unwrap().sha256, sha256_hex(PAIR.as_bytes()));
+    assert_eq!(
+        state.pin_store.read().await.member_hash("member10"),
+        Some(PHC)
+    );
+    assert_eq!(read(&theirs), "member11's");
+}
+
+/// #58 review: the start refuses such a roster.toml against the roster
+/// applied last, so it starts with that one (the fall-back) and deletes
+/// nothing.
+#[test]
+fn a_start_on_a_roster_that_removes_everyone_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let cfg = test_config();
+    let facts = TopologyFacts::from(&test_topology());
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    std::fs::write(d.join(ROSTER_FILE), PAIR).unwrap();
+    load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    LineupStore::new(d).set_applied_roster(PAIR).unwrap();
+    pins.set_member_hash("member10", PHC.into()).unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member11");
+    put(&theirs, "member11's");
+    std::fs::write(d.join(ROSTER_FILE), OTHERS).unwrap();
+    let loaded = load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    assert!(loaded.fallback);
+    assert_eq!(loaded.roster.sha256, sha256_hex(PAIR.as_bytes()));
+    let s = status(d);
+    assert_eq!(
+        (s.applied, s.sha256.as_str(), s.problems.as_slice()),
+        (
+            false,
+            sha256_hex(OTHERS.as_bytes()).as_str(),
+            &[EVERYONE.to_string(), FALLBACK.to_string()][..]
+        )
+    );
+    assert_eq!(pins.member_hash("member10"), Some(PHC));
+    assert_eq!(read(&theirs), "member11's");
+}
+
+/// #58 review: `iem-server roster check` names, ids only, the people of
+/// the roster applied last that the roster would remove (none known
+/// before a roster was applied), and refuses one that removes them all.
+#[test]
+fn the_check_names_whom_the_roster_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let site = d.join("iemmixer.toml");
+    std::fs::write(&site, include_str!("../../../../config/test-site.toml")).unwrap();
+    let file = d.join("roster.new.toml");
+    let check = |text: &str| {
+        std::fs::write(&file, text).unwrap();
+        check_cli(&file, &site)
+    };
+    let r = check(TEXT);
+    assert_eq!((r.ok, r.removes), (true, None), "no roster applied before");
+    let store = LineupStore::new(d);
+    store.set_applied_roster(TEXT).unwrap();
+    let r = check(&without_member11());
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.removes, Some(vec!["member11".to_string()]));
+    assert_eq!(check(TEXT).removes, Some(Vec::new()));
+    store.set_applied_roster(PAIR).unwrap();
+    let r = check(OTHERS);
+    assert!(!r.ok);
+    assert_eq!(r.problems, [EVERYONE]);
+    assert_eq!(
+        r.removes,
+        Some(vec!["member10".to_string(), "member11".to_string()])
+    );
+}
+
 /// #58 review: the `archive/` folder an older server wrote (decision 6's
 /// people archive, overruled by the owner) is deleted where the PIN hashes
 /// it archived are, whoever it holds; without one nothing happens.

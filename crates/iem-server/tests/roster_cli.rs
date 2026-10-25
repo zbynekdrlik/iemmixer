@@ -1,6 +1,6 @@
 //! `iem-server roster check <file>` end to end (#58): a roster against the
 //! site file `IEMMIXER_CONFIG` names, before it is installed on the PC. One
-//! JSON line `{"ok","problems","sha256"}`; exit 0 when it can be installed,
+//! JSON line `{"ok","problems","sha256","removes"}`; exit 0 when it can be installed,
 //! 1 when not, 2 for bad arguments.
 
 use std::path::Path;
@@ -56,7 +56,7 @@ fn check_prints_one_json_line_and_exits_by_result() {
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(
         json,
-        serde_json::json!({"ok": true, "problems": [], "sha256": hex(ROSTER.as_bytes())})
+        serde_json::json!({"ok": true, "problems": [], "sha256": hex(ROSTER.as_bytes()), "removes": null})
     );
 
     // Two main lineups: refused, the problem named.
@@ -72,7 +72,8 @@ fn check_prints_one_json_line_and_exits_by_result() {
         serde_json::json!({
             "ok": false,
             "problems": ["exactly one lineup must be main, not 2"],
-            "sha256": hex(two.as_bytes())
+            "sha256": hex(two.as_bytes()),
+            "removes": null
         })
     );
 
@@ -117,6 +118,28 @@ fn check_prints_one_json_line_and_exits_by_result() {
     .unwrap();
     let (code, json, _) = check(&taker);
     assert_eq!(code, Some(0), "migrated: takes_over means nothing: {json}");
+
+    // #58 review: against the roster applied last, whom it would remove
+    // (ids only).
+    std::fs::write(
+        dir.path().join("lineups").join("applied-roster.toml"),
+        ROSTER,
+    )
+    .unwrap();
+    let without = edit(
+        ROSTER,
+        "[[people]]\nid = \"member11\"\nname = \"Member 11\"\n\n",
+        "",
+    );
+    let without = edit(&without, "member4 = \"member11\"\n", "");
+    let without = edit(
+        &without,
+        "mic4 = { name = \"MEMBER11 mic\", owner = \"member11\" }\n",
+        "",
+    );
+    let (code, json, _) = check(&without);
+    assert_eq!(code, Some(0), "{json}");
+    assert_eq!(json["removes"], serde_json::json!(["member11"]));
 }
 
 /// #58 review: the check reads the site's lineup files as the start does: a
@@ -191,7 +214,7 @@ fn a_file_that_cannot_be_read_is_a_problem_and_bad_arguments_are_usage() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         line(&out),
-        serde_json::json!({"ok": false, "problems": ["roster file: entity not found"], "sha256": ""})
+        serde_json::json!({"ok": false, "problems": ["roster file: entity not found"], "sha256": "", "removes": null})
     );
     // A roster beside no site file.
     let roster = dir.path().join("roster.toml");
