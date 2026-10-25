@@ -166,3 +166,36 @@ fn the_engineer_and_bad_ids_are_refused_before_anything_goes() {
     assert!(PhotoStore::new(d).exists(ENGINEER_ID));
     assert!(d.join("secrets").join(PIN_HASHES_FILE).exists());
 }
+
+/// #58 review: an id that is no lower-case person id (the roster's id
+/// rule) is refused before anything is deleted, its PIN hash included: on
+/// case-insensitive NTFS a `Member3` PIN entry's photo and files are
+/// member3's. The error never echoes the id (P6).
+#[test]
+fn an_id_that_is_no_lower_case_person_id_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = store(d);
+    pins.set_member_hash("Member3", PHC.into()).unwrap();
+    pins.set_member_hash("member3", PHC.into()).unwrap();
+    // On NTFS each pair is one file.
+    let files = [
+        lineup_file(d, "main", "presets", "Member3"),
+        lineup_file(d, "main", "presets", "member3"),
+    ];
+    for f in &files {
+        write(f, "member3's");
+    }
+    let photos = PhotoStore::new(d);
+    photos.save("Member3", b"jpeg").unwrap();
+    photos.save("member3", b"jpeg").unwrap();
+    let err = remove_person(d, &mut pins, "Member3").unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert!(!err.to_string().contains("Member3"), "{err}");
+    assert_eq!(pins.member_hash("Member3"), Some(PHC), "not even the hash");
+    assert_eq!(pins.member_hash("member3"), Some(PHC));
+    for f in &files {
+        assert_eq!(fs::read_to_string(f).unwrap(), "member3's");
+    }
+    assert!(photos.exists("Member3") && photos.exists("member3"));
+}

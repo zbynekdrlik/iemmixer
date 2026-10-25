@@ -563,6 +563,34 @@ fn follow_people_names_whom_it_removed() {
     assert_eq!(pins.member_hash("member2"), Some(PHC));
 }
 
+/// #58 review: a live PIN whose id is no lower-case person id is never
+/// removed (on NTFS its photo and files would be a person's of the same
+/// letters): it stays, named in the problems without its id (P6).
+#[test]
+fn a_pin_entry_that_is_no_lower_case_person_id_is_kept_and_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    pins.set_member_hash("Member3", PHC.into()).unwrap();
+    let files = [
+        lineup_file(d, "main", "presets", "Member3"),
+        lineup_file(d, "main", "presets", "member3"),
+    ];
+    for f in &files {
+        put(f, "member3's");
+    }
+    let p = follow_people(d, &parse(TEXT), &mut pins, &[]);
+    assert_eq!(p.removed, Vec::<String>::new());
+    assert_eq!(
+        p.problems,
+        ["a PIN hash whose id is no lower-case person id was not removed"]
+    );
+    assert_eq!(pins.member_hash("Member3"), Some(PHC));
+    for f in &files {
+        assert_eq!(read(f), "member3's");
+    }
+}
+
 #[test]
 fn load_migrates_starts_on_main_and_refuses_what_it_cannot_use() {
     let dir = tempfile::tempdir().unwrap();
