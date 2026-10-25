@@ -181,6 +181,12 @@ pub struct EngineStatus {
     pub resets: u64,
     pub parked: bool,
     pub faulted: bool,
+    /// Started with `--hold` and not armed yet (`pc::Status.held`): every
+    /// output is silent, so it plays for no one (#57). Null from an older
+    /// guard, also once a newer `iemmode` prints its reply again, so the dev
+    /// box's engine-plays gate (`iempc_soak.playing_refusal`) reads it as
+    /// unknown, never as an engine that plays.
+    pub held: Option<bool>,
     /// The engine pipes' DACL, read back, holds only the user and SYSTEM.
     pub pipe_private: bool,
     /// Engine processes this guard started; a respawn adds one.

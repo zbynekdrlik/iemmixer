@@ -9,8 +9,8 @@ no EVENT-NOW flag at the start). In this order:
    one `iemmode status` (a new flag abandons it and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job (iempc_soak's
    `settled_refusal`); the active bundle (the detail's `bundle <sha>`) is the
-   running engine's build, and that engine plays, neither parked nor faulted
-   (an engine already silent or broken gives no silence of a switch from a
+   running engine's build, and that engine plays, neither parked, faulted nor
+   held (an engine already silent or broken gives no silence of a switch from a
    playing one). Then a trace an `iempc trace` that died left recorded is
    stopped (iempc_trace.stop_recorded, as `iempc dev` and `iempc event` do);
    one that may still run refuses the test (it would run through both legs

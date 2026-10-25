@@ -89,9 +89,11 @@ def settled_refusal(reply) -> str | None:
 
 
 def playing_refusal(engine: dict, what: str) -> str | None:
-    """Why the reply's `engine` does not play (`parked` and `faulted` must be
-    exactly false), for `what` that measures it; None when it plays."""
-    for state in ("parked", "faulted"):
+    """Why the reply's `engine` does not play (`parked`, `faulted` and `held`
+    must be exactly false: a held engine, started with --hold and not armed,
+    is silent, #57; a missing field is unknown), for `what` that measures it;
+    None when it plays."""
+    for state in ("parked", "faulted", "held"):
         if engine.get(state) is not False:
             return f"the engine is {state} ({engine.get(state)!r}); {what} measures an engine that plays"
     return None
