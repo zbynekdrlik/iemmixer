@@ -262,6 +262,17 @@ fn missing_active(active: &str) -> String {
     format!("the roster has no lineup '{active}', which plays: switch to a lineup it keeps first")
 }
 
+/// The refusal of a roster that keeps none of the people of the roster in
+/// use (#58 review: every person a roster lacks is deleted, so a valid but
+/// wrong file, another band's or ids typed anew, would delete everyone).
+const EVERYONE_REMOVED: &str =
+    "the roster keeps none of the people of the roster in use: it would remove them all";
+
+/// Whether `new` keeps none of `old`'s people (`old` has some).
+fn removes_everyone(old: &Roster, new: &Roster) -> bool {
+    !old.people.is_empty() && old.people.iter().all(|p| new.person(&p.id).is_none())
+}
+
 /// The problem of a live PIN whose id is no lower-case person id: it is
 /// kept (#58 review: on case-insensitive NTFS its photo and files would be
 /// a person's), and the PIN store's file needs a look by hand.
@@ -398,7 +409,8 @@ const NOT_FOUND: &str = "roster file: not found";
 const FALLBACK: &str = "in use instead: the roster applied last";
 
 /// The roster in `bytes` (SHA-256 `sha256`) validated and adopted
-/// ([`adopt`]).
+/// ([`adopt`]); refused before anything is written when it keeps none of
+/// `base`'s people (the roster applied last, #58 review).
 fn take(
     config_dir: &Path,
     cfg: &Config,
@@ -406,11 +418,14 @@ fn take(
     bytes: &[u8],
     sha256: &str,
     facts: Option<&TopologyFacts>,
+    base: Option<&Roster>,
 ) -> Result<(RosterState, People), Vec<String>> {
-    std::str::from_utf8(bytes)
-        .map_err(|_| vec![NOT_UTF8.to_string()])
-        .and_then(|text| validate(text, facts))
-        .and_then(|roster| adopt(config_dir, cfg, pins, roster, sha256))
+    let text = std::str::from_utf8(bytes).map_err(|_| vec![NOT_UTF8.to_string()])?;
+    let roster = validate(text, facts)?;
+    if base.is_some_and(|base| removes_everyone(base, &roster)) {
+        return Err(vec![EVERYONE_REMOVED.to_string()]);
+    }
+    adopt(config_dir, cfg, pins, roster, sha256)
 }
 
 /// The roster at the server's start: `None` without `roster.toml` (legacy
@@ -418,10 +433,12 @@ fn take(
 /// too, when given); the legacy layout is migrated first, or a committed
 /// migration finished; its active lineup is the recorded one and must be
 /// the roster's; who is no person of it is removed. A `roster.toml` that cannot
-/// be used, or none, beside a recorded roster (`LineupStore::applied_roster`,
-/// the one the states follow) starts with that one (#58 review: a server
-/// that does not start is the worst outcome; [`Loaded::fallback`]). The
-/// status file says what happened; an error refuses the start.
+/// be used (one that keeps none of the people of the recorded roster too,
+/// #58 review), or none, beside a recorded roster
+/// (`LineupStore::applied_roster`, the one the states follow) starts with
+/// that one (#58 review: a server that does not start is the worst outcome;
+/// [`Loaded::fallback`]). The status file says what happened; an error
+/// refuses the start.
 pub fn load(
     config_dir: &Path,
     cfg: &Config,
@@ -429,10 +446,18 @@ pub fn load(
     facts: Option<&TopologyFacts>,
 ) -> Result<Option<Loaded>, String> {
     let file = read_roster(config_dir)?;
+    let recorded = match LineupStore::new(config_dir).applied_roster() {
+        Ok(recorded) => recorded,
+        Err(e) => {
+            tracing::error!(error = %e, "the roster applied last is unreadable");
+            None
+        }
+    };
+    let base = recorded.as_deref().and_then(|t| Roster::parse(t).ok());
     let (sha256, problems) = match &file {
         Some(bytes) => {
             let sha256 = sha256_hex(bytes);
-            match take(config_dir, cfg, pins, bytes, &sha256, facts) {
+            match take(config_dir, cfg, pins, bytes, &sha256, facts, base.as_ref()) {
                 Ok((state, people)) => {
                     if let Ok(text) = std::str::from_utf8(bytes) {
                         keep(config_dir, &sha256, text);
@@ -458,16 +483,9 @@ pub fn load(
         }
         None => (String::new(), vec![NOT_FOUND.to_string()]),
     };
-    let recorded = match LineupStore::new(config_dir).applied_roster() {
-        Ok(recorded) => recorded,
-        Err(e) => {
-            tracing::error!(error = %e, "the roster applied last is unreadable");
-            None
-        }
-    };
     if let Some(text) = recorded {
         let copy = sha256_hex(text.as_bytes());
-        match take(config_dir, cfg, pins, text.as_bytes(), &copy, facts) {
+        match take(config_dir, cfg, pins, text.as_bytes(), &copy, facts, None) {
             Ok((state, _)) => {
                 keep(config_dir, &copy, &text);
                 tracing::error!(
@@ -1223,7 +1241,8 @@ fn import(state: MixState) -> Cmd {
 
 /// A new roster (`text`) in place of `old` (see [`apply_text`]): the states
 /// go over from what they follow (`old`, or an unsettled base), and `text`
-/// is recorded as what they follow now.
+/// is recorded as what they follow now. One that keeps none of `old`'s
+/// people is refused first (#58 review).
 async fn reload(
     state: &AppState,
     old: &RosterState,
@@ -1231,6 +1250,10 @@ async fn reload(
     text: &str,
     sha256: &str,
 ) -> Applied {
+    // Before anything is read or written (#58 review).
+    if removes_everyone(&old.roster, &new) {
+        return Applied::Refused(vec![EVERYONE_REMOVED.to_string()]);
+    }
     let active = old.lineup().id.clone();
     // Kept before any state is marked with it.
     keep(&state.config_dir, sha256, text);
@@ -1573,7 +1596,8 @@ async fn poll(state: &AppState, path: &Path, seen: Stamp) -> Stamp {
 /// and against the site file's topology (`[engine]`), with the migration's
 /// own while the site's directory is not migrated yet, and against the
 /// site's lineup files the start reads (the lineup that plays, the target
-/// of a switch a restart cut short).
+/// of a switch a restart cut short, the roster applied last: whom it
+/// removes, and a refusal when that is everyone).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckReport {
     pub ok: bool,
@@ -1588,33 +1612,38 @@ pub struct CheckReport {
 /// [`CheckReport`] of the roster at `roster_path` for the site at
 /// `site_path`; it only reads.
 pub fn check_cli(roster_path: &Path, site_path: &Path) -> CheckReport {
-    let (problems, sha256) = match std::fs::read(roster_path) {
+    let ((problems, removes), sha256) = match std::fs::read(roster_path) {
         Ok(bytes) => (check_problems(&bytes, site_path), sha256_hex(&bytes)),
-        Err(e) => (vec![format!("roster file: {}", e.kind())], String::new()),
+        Err(e) => (
+            (vec![format!("roster file: {}", e.kind())], None),
+            String::new(),
+        ),
     };
     CheckReport {
         ok: problems.is_empty(),
         problems,
         sha256,
-        removes: None,
+        removes,
     }
 }
 
-fn check_problems(bytes: &[u8], site_path: &Path) -> Vec<String> {
+/// The check's problems, and whom the roster removes against the roster
+/// applied last ([`CheckReport::removes`]).
+fn check_problems(bytes: &[u8], site_path: &Path) -> (Vec<String>, Option<Vec<String>>) {
     let Ok(text) = std::str::from_utf8(bytes) else {
-        return vec![NOT_UTF8.to_string()];
+        return (vec![NOT_UTF8.to_string()], None);
     };
     let site = match std::fs::read_to_string(site_path) {
         Ok(site) => site,
-        Err(e) => return vec![format!("site file: {}", e.kind())],
+        Err(e) => return (vec![format!("site file: {}", e.kind())], None),
     };
     let facts = match site_facts(&site) {
         Ok(facts) => facts,
-        Err(e) => return vec![e.to_string()],
+        Err(e) => return (vec![e.to_string()], None),
     };
     let roster = match Roster::parse(text) {
         Ok(roster) => roster,
-        Err(e) => return vec![e.to_string()],
+        Err(e) => return (vec![e.to_string()], None),
     };
     let config_dir = crate::provision::config_dir_of(site_path);
     let migrated = config_dir.join(ACTIVE_FILE).exists();
@@ -1642,7 +1671,21 @@ fn check_problems(bytes: &[u8], site_path: &Path) -> Vec<String> {
         Ok(_) => {}
         Err(e) => problems.push(format!("{SWITCH_FILE}: {}", e.kind())),
     }
-    problems
+    // Whom it removes against the roster the states follow, as the start
+    // and a reload refuse one that removes everyone (#58 review); none
+    // known before a roster was applied or when that one cannot be read.
+    let base = store
+        .applied_roster()
+        .ok()
+        .flatten()
+        .and_then(|t| Roster::parse(&t).ok());
+    let removes = base.map(|base| {
+        if removes_everyone(&base, &roster) {
+            problems.push(EVERYONE_REMOVED.to_string());
+        }
+        people_diff(&base, &roster).1
+    });
+    (problems, removes)
 }
 
 #[cfg(test)]
