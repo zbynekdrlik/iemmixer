@@ -14,8 +14,10 @@ this order, nothing dispatched on any refusal:
    and switch-test's dev leg, `current_entry`).
 2. `iemmode status` (a new flag abandons the read and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job; the active bundle and
-   the running engine's build are both the SHA; the engine plays (neither
-   parked nor faulted). `soak_refusal` judges the reply (pure).
+   the running engine's build are both the SHA; the engine plays (not
+   parked, not faulted, not held: a held engine, started with `--hold` and
+   not armed, is silent, #57; `playing_refusal`). `soak_refusal` judges the
+   reply (pure).
 2b. No HIL run that may still hold the PC (`iempc_live.refuse_while_hil`,
    dispatch-live's guard): a HIL run restarts the engine in its own job,
    which the soak would meet red.
@@ -89,9 +91,11 @@ def settled_refusal(reply) -> str | None:
 
 
 def playing_refusal(engine: dict, what: str) -> str | None:
-    """Why the reply's `engine` does not play (`parked` and `faulted` must be
-    exactly false), for `what` that measures it; None when it plays."""
-    for state in ("parked", "faulted"):
+    """Why the reply's `engine` does not play (`parked`, `faulted` and `held`
+    must be exactly false: a held engine, started with --hold and not armed,
+    is silent, #57; a missing field is unknown), for `what` that measures it;
+    None when it plays."""
+    for state in ("parked", "faulted", "held"):
         if engine.get(state) is not False:
             return f"the engine is {state} ({engine.get(state)!r}); {what} measures an engine that plays"
     return None

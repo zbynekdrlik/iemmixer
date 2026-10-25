@@ -1870,24 +1870,3 @@ fn a_band_import_refuses_the_roster_layout() {
     }
     assert_eq!(tree(&out), before, "nothing written");
 }
-
-/// #58: an archived member's PIN stays in the archive: a later band import
-/// gives them no login.
-#[test]
-fn a_band_import_leaves_an_archived_pin_archived() {
-    let w = World::new(12);
-    let (l, eras) = legacy(&w);
-    let out = w.path("band");
-    run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
-    let (_, mut store) = hasher(&out);
-    assert!(store.archive_member("member2").unwrap());
-    let report = run(&band_args(&w, &l, &eras, &out, &[])).unwrap();
-    assert!(
-        report.contains("pin member2: skipped (archived)"),
-        "{report}"
-    );
-    assert!(report.contains("pin member1: unchanged"), "{report}");
-    let (h, store) = hasher(&out);
-    assert!(store.member_hash("member2").is_none(), "no login");
-    assert!(h.verify("2468", store.archived_hash("member2").unwrap()));
-}

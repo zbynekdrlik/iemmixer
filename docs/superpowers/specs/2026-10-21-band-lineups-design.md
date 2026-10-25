@@ -52,7 +52,7 @@ Success: every person logs in as themselves and hears their own mix for the band
 3. Shared equipment switches **inside iemmixer**. The output to a shared receiver and the shared mic's input stay subscribed in Dante for good; iemmixer sends the mix of whoever wears that receiver in the active band.
 4. Dante keeps the **main person's** name on a shared set. Only iemmixer knows that a youth-band member borrows it.
 5. Roster changes may be done with Claude, without a GUI, at first.
-6. A person who leaves is removed from iemmixer, and their files (presets, history, photo, PIN hash) are kept in an archive on disk so they can be restored on return. An archived person is in no band, cannot log in, appears nowhere and costs the engine nothing.
+6. A person who leaves is removed from iemmixer: in no band, no login, nowhere in the interface, no cost to the engine. **Overruled by the owner on the live system (2026-10-24):** a removed person is removed, not archived and not hidden. Their files (presets, history, pins/hides, photo, PIN hash) are deleted, nothing is kept "just in case", and a person who returns starts fresh like any new person. The archive this decision first described was never asked for (#58).
 7. **Everything ships together** (owner, 2026-10-21): people, the roster, both bands, switching and the leaders' mutual hearing reach the band as one result, not the lineup clean-up first. The technical steps below (§12, two-step rollout) may still span more than one weekly window.
 
 ## 4. Facts the design rests on
@@ -118,7 +118,7 @@ From the epic's findings comments (HEAD `59b2995`):
 - Done by Claude with the owner, through a tool on the dev box that installs a new roster file on the PC *(my call)*. It validates first (ids unique and valid, every set and input exists in the topology, a person in at most one set per band, leaders are members of their band, exactly one main band, the active band exists) and refuses with the reason; a valid roster is applied by the server without an engine restart or maintenance.
 - **Add a person:** new id, name, set per band. Their PIN is set by the engineer's PIN reset (F3) or by Claude through the secret provider; never in the roster file.
 - **Rename:** name only. The id, PIN, photo and every file stay.
-- **Remove:** the person's files move to an archive, never deleted (decision 6); their tokens stop working. **Restore** brings an archived person back with their files.
+- **Remove:** the person's files, photo and PIN hash are deleted (decision 6 as the owner ruled it on 2026-10-24; first written as an archive with a restore, which is gone); their tokens stop working. A person added again starts fresh.
 - **A set's person changes:** that set's mix keeps its state for the band (the new person starts from the old mix, can then make it their own) *(my call)*.
 - **A person moves to another set within a band:** their mix goes with them; whoever takes the vacated set starts from its old mix *(my call)*.
 - **A login someone else uses today** (a new person logging in under a former member's id): at migration the tool either hands that id's files to the new person or renames in place; the owner picks per person in the migration session.
@@ -136,7 +136,7 @@ From the epic's findings comments (HEAD `59b2995`):
 ## 11. Migration from today
 
 1. Today's members become people with their ids unchanged, so PINs, photos and tokens survive.
-2. Band A (main) = today's sets, adjusted to the current lineup: people who no longer play are archived; new people are added. Its state = the engine's current state; today's presets, history and pins/hides become band A's.
+2. Band A (main) = today's sets, adjusted to the current lineup: people who no longer play are removed (their files deleted, decision 6 as ruled on 2026-10-24; first: archived); new people are added. Its state = the engine's current state; today's presets, history and pins/hides become band A's.
 3. Band B (youth) is created from the owner's data; its first state is a copy of band A's.
 4. The leaders, the main band and the active band (A) are set.
 5. Dante labels are rewritten for the main band in one dev-time session with the owner.

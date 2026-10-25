@@ -146,16 +146,12 @@ fn every_bad_argument_is_a_usage_error() {
 pub(crate) const SECRET: &str = "synthetic-jwt-secret";
 
 /// The claims of `token` as the server reads them (the body of
-/// `iem_server::auth::extract_claims`: HS256 with the secret's bytes and the
-/// default validation, which checks `exp`). The tests link no server crate:
+/// `iem_server::auth::extract_claims`: `iem_core::jwt::decode_hs256` with the
+/// secret's bytes, which checks `exp`). The tests link no server crate:
 /// it embeds the UI's `dist`, and its axum, tokio and argon2 are no
 /// client's. `mint`'s tests read their tokens with it too.
 pub(crate) fn as_server(token: &str, secret: &str) -> Option<iem_core::AuthClaims> {
-    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
-    let validation = jsonwebtoken::Validation::default();
-    jsonwebtoken::decode::<iem_core::AuthClaims>(token, &key, &validation)
-        .ok()
-        .map(|data| data.claims)
+    iem_core::jwt::decode_hs256(token, secret.as_bytes(), unix_now()).ok()
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -258,9 +254,9 @@ fn the_minted_token_is_the_engineers_as_the_server_issues_it() {
     // The run's seconds and the margin.
     assert_eq!(TOKEN_MARGIN, 600);
     assert_eq!(claims.exp, now + 3_600 + TOKEN_MARGIN);
-    // HS256, the server's `Header::default()`.
-    let header = jsonwebtoken::decode_header(&token).unwrap();
-    assert_eq!(header.alg, jsonwebtoken::Algorithm::HS256);
+    // HS256, the server's header.
+    let header = iem_core::jwt::header_of(&token).unwrap();
+    assert_eq!(header["alg"], "HS256");
     // Another secret is refused, and so is a token whose time is over.
     assert!(as_server(&token, "another-synthetic-secret").is_none());
     let old = engineer_token(&secret, now - 7_200, 1).unwrap();

@@ -13,8 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use iem_core::{ApiError, AuthClaims};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use iem_core::{ApiError, AuthClaims, jwt};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -127,7 +126,7 @@ async fn with_hasher<T: Send + 'static>(
 /// Whether `member` logs in and owns a PIN: legacy, a site member; roster
 /// mode (#58), a person of the roster, whether they play in the band that
 /// plays or not, or the site's engineer. A person the roster no longer
-/// holds (archived) is nobody.
+/// holds (removed) is nobody.
 pub(crate) fn member_exists(state: &AppState, member: &str) -> bool {
     match state.roster() {
         Some(r) => {
@@ -280,12 +279,7 @@ fn issue_token(
         iat: now,
     };
 
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
-    )
-    .map_err(|_| {
+    let token = jwt::encode_hs256(&claims, config.jwt_secret.as_bytes()).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError::new("TOKEN_ERROR", "Failed to create token")),
@@ -454,15 +448,12 @@ pub fn verify_member_access(
     }
 }
 
-/// Extract claims from a valid JWT token
+/// The claims of a valid login token: HS256 with the secret's bytes, `exp`
+/// at most `jwt::LEEWAY_SECS` past (`iem_core::jwt`'s rules, jsonwebtoken's
+/// default validation). A clock before 1970 takes no token.
 pub fn extract_claims(token: &str, secret: &str) -> Option<AuthClaims> {
-    decode::<AuthClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
-    )
-    .ok()
-    .map(|data| data.claims)
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    jwt::decode_hs256(token, secret.as_bytes(), now).ok()
 }
 
 #[cfg(test)]

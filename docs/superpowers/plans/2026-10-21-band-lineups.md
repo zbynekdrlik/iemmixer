@@ -181,6 +181,8 @@
 
 ### Task 6: Lineup files and the legacy migration
 
+> **Superseded in part (owner, 2026-10-24, #58):** a removed person is removed, not archived. `people_archive` (archive and restore, `archive/<id>/`, the PIN store's archive) is gone; `people_removal::remove_person` deletes the PIN hash, photo and every lineup's files, and nothing is restored. The archive steps below and in Tasks 7, 9 and 17 are history (`.claude/rules/server-engine.md`, roster mode).
+
 **Files:**
 - Create: `crates/iem-server/src/lineup_store.rs`, `crates/iem-server/src/lineup_store/tests.rs`, `crates/iem-server/src/people_archive.rs`, `crates/iem-server/src/people_archive/tests.rs`
 - Modify: `crates/iem-server/src/band_store.rs` (`BandStore::new` takes the data dir; unchanged otherwise), `crates/iem-server/src/lib.rs` (`AppState.band` becomes `fn band(&self) -> Arc<BandStore>` over the active lineup's dir), `crates/iem-server/src/pin_store.rs` (`archive_member`, `restore_member`: `PinFile.archived: BTreeMap<String, String>`, `#[serde(default)]`), `crates/iem-server/src/photo_store.rs` (`move_to`, never panics on a bad id: returns an error)

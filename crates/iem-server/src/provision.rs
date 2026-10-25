@@ -70,7 +70,7 @@ pub fn check_target(config: &iem_core::Config, target: &PinTarget) -> Result<(),
 
 /// [`check_target`] with the site's roster, if it has one (#58): then a
 /// member target must be one of its people (a site member who is no person
-/// is archived, never given a PIN).
+/// is removed, never given a PIN).
 pub fn check_target_in(
     config: &iem_core::Config,
     roster: Option<&Roster>,

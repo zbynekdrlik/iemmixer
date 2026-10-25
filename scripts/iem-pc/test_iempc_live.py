@@ -185,7 +185,7 @@ class DispatchLiveTests(LiveBase):
             (ready(engine=None), "no engine runs (the guard's status shows none)"),
             (ready(engine="running"), "no engine runs (the guard's status shows none)"),
         ]
-        for state in ("parked", "faulted"):
+        for state in ("parked", "faulted", "held"):
             for value in (True, None, "false", 0, ...):
                 shown = None if value is ... else value
                 cases.append((engine(**{state: value}),
@@ -633,6 +633,8 @@ class PureTests(LiveBase):
                          f"the running engine's build is {SHA2!r}, not {SHA}")
         self.assertEqual(live.live_refusal(engine(parked=True), SHA),
                          "the engine is parked (True); a live run measures an engine that plays")
+        self.assertEqual(live.live_refusal(engine(held=True), SHA),
+                         "the engine is held (True); a live run measures an engine that plays")
         # The soak's own refusal is unchanged.
         self.assertEqual(iempc_soak.soak_refusal(engine(faulted=True), SHA),
                          "the engine is faulted (True); a soak measures an engine that plays")

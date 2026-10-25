@@ -301,6 +301,7 @@ pub fn engine_status(
         resets: s.resets,
         parked: s.parked,
         faulted: s.faulted,
+        held: Some(s.held),
         pipe_private: seen.pipe_private,
         spawns,
         last_exit,

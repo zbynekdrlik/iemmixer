@@ -26,8 +26,12 @@ In this order (dev time: the EVENT-NOW flag at the start refuses it, design
    fetch record, staged admin-only and run from there (#15: the elevated
    session runs only admin-only copies of our programs, iempc_bin); then
    `iem-server roster check <upload>` with IEMMIXER_CONFIG = server_config.
-   Its one JSON line `{ok, problems, sha256}` decides (`check_result`):
-   problems install nothing (exit 1); `--dry-run` ends here (exit 0 when ok).
+   Its one JSON line `{ok, problems, sha256, removes}` decides
+   (`check_result`): problems install nothing (exit 1); `--dry-run` ends
+   here (exit 0 when ok). `removes` (`check_removes`, #58 review) names the
+   people of the roster applied last that this roster removes (their PIN,
+   photo and files are deleted once it applies; a roster that removes them
+   all is a problem), null before any roster was applied.
 5. The flag again, then one ssh call (a change: a new flag lets it finish):
    the upload checked again; `roster.status.json` as it stands (`before`)
    and the sha256 of `lineups\\applied-roster.toml` (the roster the server
@@ -41,9 +45,9 @@ In this order (dev time: the EVENT-NOW flag at the start refuses it, design
    no status for it. Else `roster.status.json` every POLL_S, at most WAIT_S,
    until it names the file's sha256 (`outcome`). `applied` true: in use
    (exit 0; `ok` false and `problems` name what failed after it went into
-   use, an archive move). Else refused (exit 1), with the server's problems,
-   among them its fallback line "in use instead: the roster applied last"
-   while it runs on that one. The server writes no status for a roster it
+   use, a removed person's file not deleted). Else refused (exit 1), with
+   the server's problems, among them its fallback line "in use instead:
+   the roster applied last" while it runs on that one. The server writes no status for a roster it
    defers (an engine not synced, a switch a restart cut short): a wait that
    runs out is "not applied" (exit 1) and says what the status named. The
    same refusal as `before` (the same bytes refused earlier) is waited out,
@@ -61,7 +65,8 @@ In this order (dev time: the EVENT-NOW flag at the start refuses it, design
    (`late: true`, exit 0).
 
 It prints one JSON object `{"roster_install": {sha256, ok, problems,
-applied, added, removed}}` (`dry_run`, `unchanged`, `restored`,
+applied, added, removed}}` (`removes` when it ended at the check, a dry run
+or a check with problems; `dry_run`, `unchanged`, `restored`,
 `restore_failed` when so): ids and counts only, never a person's name (the
 server's problems name ids only, P6). Exit 0 applied, or a dry run that
 checked ok; 1 refused or not applied.
@@ -147,17 +152,32 @@ def guard_refusal(reply) -> str | None:
     return None
 
 
+def check_line(out: str):
+    """The check's last non-empty line as JSON (pure); None when it is none."""
+    lines = [line for line in out.splitlines() if line.strip()]
+    try:
+        return json.loads(lines[-1].lstrip("﻿")) if lines else None
+    except ValueError:
+        return None
+
+
+def check_removes(out: str) -> list[str] | None:
+    """Whom the checked roster takes out of the roster applied last, from
+    the check's `removes` (pure; #58 review): ids only, as the status's
+    people (`_ids`); None when the check names none (no roster applied
+    before, or a bundle from before the field)."""
+    doc = check_line(out)
+    removes = doc.get("removes") if isinstance(doc, dict) else None
+    return _ids(removes) if isinstance(removes, list) else None
+
+
 def check_result(code: int, out: str, sha: str) -> list[str]:
     """`iem-server roster check`'s problems (pure; empty: it may be
     installed); CheckError for an answer that is not the check's."""
     if code == 2:
         raise CheckError(f"the active bundle's {SERVER} does not know 'roster check' (exit 2): a bundle of the band "
                          "lineups plan must be active")
-    lines = [line for line in out.splitlines() if line.strip()]
-    try:
-        doc = json.loads(lines[-1].lstrip("\ufeff")) if lines else None
-    except ValueError:
-        doc = None
+    doc = check_line(out)
     if not isinstance(doc, dict):
         raise CheckError(f"{SERVER} roster check (exit {code}) printed no JSON object: {out[-300:]!r}")
     problems = doc.get("problems")
@@ -432,7 +452,8 @@ def run(ctx, ip) -> int:
         problems = check_result(code, raw["out"], sha)
     except CheckError as e:
         raise ip.StepError(str(e)) from None
-    empty = {"sha256": sha, "ok": not problems, "problems": problems, "applied": False, "added": [], "removed": []}
+    empty = {"sha256": sha, "ok": not problems, "problems": problems, "applied": False, "added": [], "removed": [],
+             "removes": check_removes(raw["out"])}
     if problems or dry:
         ip.emit({"roster_install": {**empty, **({"dry_run": True} if dry else {})}})
         return 1 if problems else 0

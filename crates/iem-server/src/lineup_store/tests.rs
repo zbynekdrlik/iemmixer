@@ -257,7 +257,7 @@ fn a_kept_roster_is_not_written_again() {
 
 /// #58 fourth review: the kept rosters' folder in `lineups/` is no
 /// lineup's: no lineup id can name it, so no lineup shares it and no walk
-/// over the lineups' folders (`people_archive`) takes it for one.
+/// over the lineups' folders (`people_removal`) takes it for one.
 #[test]
 fn the_kept_rosters_folder_is_named_by_no_lineup_id() {
     assert_eq!(ROSTERS_DIR, format!("{LINEUPS_DIR}/{ROSTERS_NAME}"));
@@ -317,7 +317,7 @@ async fn the_band_store_follows_the_active_lineup() {
 }
 
 #[test]
-fn migration_moves_main_people_files_and_archives_the_rest() {
+fn migration_moves_main_people_files_and_removes_the_rest() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     for id in ["member1", "member2", "member9"] {
@@ -333,7 +333,7 @@ fn migration_moves_main_people_files_and_archives_the_rest() {
         MigrationReport {
             moved: vec!["member1".into(), "member2".into()],
             taken_over: vec![],
-            archived: vec!["member9".into()],
+            removed: vec!["member9".into()],
         }
     );
     let main = d.join(LINEUPS_DIR).join("main");
@@ -349,22 +349,16 @@ fn migration_moves_main_people_files_and_archives_the_rest() {
             );
         }
     }
-    // Who is no person is archived: files, photo and PIN hash.
-    let archive = d.join("archive").join("member9");
+    // Who is no person is removed: files, photo and PIN hash.
     for kind in KINDS {
-        let archived = archive
-            .join(LINEUPS_DIR)
-            .join("main")
-            .join(file_of(kind, "member9"));
-        assert_eq!(read(&archived), format!("{kind} of member9"));
         assert!(!main.join(file_of(kind, "member9")).exists());
         assert!(!d.join(file_of(kind, "member9")).exists());
     }
-    assert_eq!(read(&archive.join("photo.jpg")), "member9");
+    assert!(!d.join("archive").exists());
     assert!(!d.join("photos").join("member9.jpg").exists());
     assert!(d.join("photos").join("member1.jpg").exists());
     assert_eq!(pins.member_hash("member9"), None);
-    assert_eq!(pins.archived_hash("member9"), Some(PHC));
+    assert!(!pin_file(d).contains("member9"));
     assert_eq!(pins.member_hash("member1"), Some(PHC));
     // The main lineup plays; the staging is gone.
     assert_eq!(
@@ -405,7 +399,7 @@ fn takes_over_moves_presets_history_and_pins_hides_but_not_pin_or_photo() {
         MigrationReport {
             moved: vec![],
             taken_over: vec![("member10".into(), "member9".into())],
-            archived: vec!["member9".into()],
+            removed: vec!["member9".into()],
         }
     );
     let lineup = d.join(LINEUPS_DIR).join("main");
@@ -417,20 +411,17 @@ fn takes_over_moves_presets_history_and_pins_hides_but_not_pin_or_photo() {
         assert!(!lineup.join(file_of(kind, "member9")).exists());
         assert!(!d.join(file_of(kind, "member9")).exists());
     }
-    // Never the PIN or the photo: those are member9's, in the archive.
+    // Never the PIN or the photo: those are member9's, deleted with them.
     assert_eq!(pins.member_hash("member10"), None);
-    assert_eq!(pins.archived_hash("member9"), Some(PHC));
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!pin_file(d).contains("member9"));
     assert!(!d.join("photos").join("member10.jpg").exists());
-    let archive = d.join("archive").join("member9");
-    assert_eq!(read(&archive.join("photo.jpg")), "member9");
-    assert!(
-        !archive.join(LINEUPS_DIR).exists(),
-        "no file of theirs left"
-    );
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert!(!d.join("archive").exists());
 }
 
 #[test]
-fn a_taker_keeps_their_own_files_and_the_rest_is_archived() {
+fn a_taker_keeps_their_own_files_and_the_rest_is_removed() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     // member2 plays on; their own presets and history stay theirs. old7, a
@@ -452,23 +443,18 @@ fn a_taker_keeps_their_own_files_and_the_rest_is_archived() {
         report.taken_over,
         [("member2".to_string(), "old7".to_string())]
     );
-    assert_eq!(report.archived, ["old7"]);
+    assert_eq!(report.removed, ["old7"]);
     let lineup = d.join(LINEUPS_DIR).join("main");
     let in_main = |kind: &str| read(&lineup.join(file_of(kind, "member2")));
     assert_eq!(in_main("presets"), "presets of member2");
     assert_eq!(in_main("snapshots"), "snapshots of member2");
     assert_eq!(in_main("customizations"), "customizations of old7");
-    let archived = d
-        .join("archive")
-        .join("old7")
-        .join(LINEUPS_DIR)
-        .join("main")
-        .join(file_of("presets", "old7"));
-    assert_eq!(read(&archived), "presets of old7");
+    // old7's presets, which member2 did not take, are deleted with old7.
     for kind in KINDS {
         assert!(!d.join(file_of(kind, "old7")).exists());
         assert!(!lineup.join(file_of(kind, "old7")).exists());
     }
+    assert!(!d.join("archive").exists());
 }
 
 #[test]
@@ -505,7 +491,7 @@ fn a_crash_mid_migration_leaves_the_legacy_layout_and_runs_again() {
     // The next start removes the staging and runs the whole migration.
     let report = migrate_legacy(d, &roster, &test_config(), &mut pins).unwrap();
     assert_eq!(report.moved, ["member1"]);
-    assert_eq!(report.archived, ["member9"]);
+    assert_eq!(report.removed, ["member9"]);
     assert!(!d.join(STAGING_DIR).exists());
     assert!(!d.join(LINEUPS_DIR).join("junk").exists());
     let main = d.join(LINEUPS_DIR).join("main");
@@ -513,11 +499,13 @@ fn a_crash_mid_migration_leaves_the_legacy_layout_and_runs_again() {
         read(&main.join(file_of("presets", "member1"))),
         "presets of member1"
     );
-    assert_eq!(pins.archived_hash("member9"), Some(PHC));
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert!(!d.join("archive").exists());
 }
 
 /// #58: the engineer's presets, history and pins/hides are per lineup like
-/// everyone's: they move into the main lineup and are never archived.
+/// everyone's: they move into the main lineup and are never removed.
 #[test]
 fn the_engineers_files_move_into_the_main_lineup() {
     let dir = tempfile::tempdir().unwrap();
@@ -527,7 +515,7 @@ fn the_engineers_files_move_into_the_main_lineup() {
     let mut pins = pins(d, &[]);
     let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
     assert_eq!(report.moved, ["member1", ENGINEER_ID]);
-    assert_eq!(report.archived, Vec::<String>::new());
+    assert_eq!(report.removed, Vec::<String>::new());
     let main = d.join(LINEUPS_DIR).join("main");
     for kind in KINDS {
         assert_eq!(
@@ -551,7 +539,7 @@ fn the_engineers_files_move_into_the_main_lineup() {
 }
 
 /// A crash after the commit: the next call finishes the deletes and the
-/// archives from `migration.json`, then removes it.
+/// removals from `migration.json`, then removes it.
 #[test]
 fn a_crash_after_the_commit_is_finished_by_the_next_call() {
     let dir = tempfile::tempdir().unwrap();
@@ -571,14 +559,15 @@ fn a_crash_after_the_commit_is_finished_by_the_next_call() {
     };
     let err = migrate_with(d, &roster, &test_config(), &mut pins, &crash).unwrap_err();
     assert!(err.to_string().contains("power cut"), "{err}");
-    // Committed: the main lineup plays; nothing deleted or archived yet.
+    // Committed: the main lineup plays; nothing deleted or removed yet.
     assert_eq!(
         LineupStore::new(d).active().unwrap().as_deref(),
         Some("main")
     );
     let pending: serde_json::Value = serde_json::from_str(&read(&d.join(PENDING_FILE))).unwrap();
     assert_eq!(pending["format"], PENDING_FORMAT);
-    assert_eq!(pending["archive"], serde_json::json!(["member9"]));
+    assert_eq!(pending["remove"], serde_json::json!(["member9"]));
+    assert!(pending.get("archive").is_none(), "{pending}");
     assert!(d.join(file_of("presets", "member1")).exists());
     assert_eq!(pins.member_hash("member9"), Some(PHC));
     // The next start finishes it.
@@ -588,7 +577,7 @@ fn a_crash_after_the_commit_is_finished_by_the_next_call() {
         MigrationReport {
             moved: vec![],
             taken_over: vec![],
-            archived: vec!["member9".into()],
+            removed: vec!["member9".into()],
         }
     );
     for id in ["member1", "member9"] {
@@ -596,8 +585,10 @@ fn a_crash_after_the_commit_is_finished_by_the_next_call() {
             assert!(!d.join(file_of(kind, id)).exists(), "{kind}/{id}");
         }
     }
-    assert_eq!(pins.archived_hash("member9"), Some(PHC));
-    assert!(d.join("archive").join("member9").join("photo.jpg").exists());
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!pin_file(d).contains("member9"));
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert!(!d.join("archive").exists());
     assert!(!d.join(PENDING_FILE).exists());
     let main = d.join(LINEUPS_DIR).join("main");
     assert_eq!(
@@ -614,7 +605,7 @@ fn a_crash_after_the_commit_is_finished_by_the_next_call() {
 /// Someone who is a person again by the time the pending work runs keeps
 /// their files and PIN.
 #[test]
-fn a_former_member_who_is_back_is_not_archived_when_the_work_is_finished() {
+fn a_former_member_who_is_back_is_not_removed_when_the_work_is_finished() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     legacy_files(d, "member9", &KINDS);
@@ -630,7 +621,7 @@ fn a_former_member_who_is_back_is_not_archived_when_the_work_is_finished() {
     migrate_with(d, &gone, &test_config(), &mut pins, &crash).unwrap_err();
     let back = (*test_roster("main").roster).clone();
     let report = migrate_legacy(d, &back, &test_config(), &mut pins).unwrap();
-    assert_eq!(report.archived, Vec::<String>::new());
+    assert_eq!(report.removed, Vec::<String>::new());
     assert_eq!(pins.member_hash("member9"), Some(PHC));
     let main = d.join(LINEUPS_DIR).join("main");
     assert_eq!(
@@ -638,6 +629,67 @@ fn a_former_member_who_is_back_is_not_archived_when_the_work_is_finished() {
         "presets of member9"
     );
     assert!(!d.join(file_of("presets", "member9")).exists());
+    assert!(!d.join(PENDING_FILE).exists());
+}
+
+/// The PIN store's file under `dir` as it is on disk.
+fn pin_file(dir: &Path) -> String {
+    read(&dir.join("secrets").join(crate::pin_store::PIN_HASHES_FILE))
+}
+
+/// #58, the owner's ruling (2026-10-24): a former member who is no person
+/// is removed by the migration, not archived: their files (legacy and
+/// staged), photo and PIN hash are deleted.
+#[test]
+fn the_migration_deletes_a_former_member_and_archives_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for id in ["member1", "member9"] {
+        legacy_files(d, id, &KINDS);
+        photo(d, id);
+    }
+    let mut pins = pins(d, &["member1", "member9"]);
+    let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
+    assert_eq!(report.removed, ["member9"]);
+    let main = d.join(LINEUPS_DIR).join("main");
+    for kind in KINDS {
+        assert!(!d.join(file_of(kind, "member9")).exists(), "{kind}");
+        assert!(!main.join(file_of(kind, "member9")).exists(), "{kind}");
+        assert_eq!(
+            read(&main.join(file_of(kind, "member1"))),
+            format!("{kind} of member1")
+        );
+    }
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert!(d.join("photos").join("member1.jpg").exists());
+    assert!(!d.join("archive").exists(), "nothing is archived");
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!pin_file(d).contains("member9"), "{}", pin_file(d));
+    assert_eq!(pins.member_hash("member1"), Some(PHC));
+}
+
+/// A committed migration's pending file an older server wrote names the
+/// former members to archive (`archive`): the next call deletes them.
+#[test]
+fn an_older_pending_files_former_members_are_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    LineupStore::new(d).set_active("main", 1).unwrap();
+    put_in(d, "lineups/main/presets/member9.json", "presets of member9");
+    photo(d, "member9");
+    let mut pins = pins(d, &["member9"]);
+    put_in(
+        d,
+        PENDING_FILE,
+        r#"{"format":"iemmixer-migration","delete":[],"archive":["member9"]}"#,
+    );
+    let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
+    assert_eq!(report.removed, ["member9"]);
+    assert!(!d.join("lineups/main/presets/member9.json").exists());
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!pin_file(d).contains("member9"));
+    assert!(!d.join("archive").exists());
     assert!(!d.join(PENDING_FILE).exists());
 }
 
@@ -695,8 +747,10 @@ fn a_damaged_pending_file_is_an_error_and_deletes_nothing() {
     let mut pins = pins(d, &[]);
     let roster = roster_without("member9");
     for text in [
-        r#"{"format":"other","delete":["member1"],"archive":[]}"#,
-        r#"{"format":"iemmixer-migration","delete":["../x"],"archive":[]}"#,
+        r#"{"format":"other","delete":["member1"],"remove":[]}"#,
+        r#"{"format":"iemmixer-migration","delete":["../x"],"remove":[]}"#,
+        r#"{"format":"iemmixer-migration","delete":[],"remove":["a b"]}"#,
+        // An older server's list of former members is checked the same.
         r#"{"format":"iemmixer-migration","delete":[],"archive":["a b"]}"#,
         "{",
     ] {
