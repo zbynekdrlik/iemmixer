@@ -366,7 +366,7 @@ pub struct MigrationReport {
     /// `(person, former member)`: whose files the person took over.
     pub taken_over: Vec<(String, String)>,
     /// Former members who are no person, gone to the archive.
-    pub archived: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 /// A step of the migration a test can fail.
@@ -467,7 +467,7 @@ pub(crate) fn migrate_with(
                 "the roster's takes_over is read only by the one-time migration, done: it can go"
             );
         }
-        report.archived = finish(config_dir, roster, pins)?;
+        report.removed = finish(config_dir, roster, pins)?;
         return Ok(report);
     }
     let problems = migration_problems(roster);
@@ -568,7 +568,7 @@ pub(crate) fn migrate_with(
         "legacy band files migrated into the main lineup"
     );
     fault(Step::Finish)?;
-    report.archived = finish(config_dir, roster, pins)?;
+    report.removed = finish(config_dir, roster, pins)?;
     Ok(report)
 }
 

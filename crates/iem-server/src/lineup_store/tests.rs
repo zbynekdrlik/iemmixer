@@ -333,7 +333,7 @@ fn migration_moves_main_people_files_and_archives_the_rest() {
         MigrationReport {
             moved: vec!["member1".into(), "member2".into()],
             taken_over: vec![],
-            archived: vec!["member9".into()],
+            removed: vec!["member9".into()],
         }
     );
     let main = d.join(LINEUPS_DIR).join("main");
@@ -405,7 +405,7 @@ fn takes_over_moves_presets_history_and_pins_hides_but_not_pin_or_photo() {
         MigrationReport {
             moved: vec![],
             taken_over: vec![("member10".into(), "member9".into())],
-            archived: vec!["member9".into()],
+            removed: vec!["member9".into()],
         }
     );
     let lineup = d.join(LINEUPS_DIR).join("main");
@@ -452,7 +452,7 @@ fn a_taker_keeps_their_own_files_and_the_rest_is_archived() {
         report.taken_over,
         [("member2".to_string(), "old7".to_string())]
     );
-    assert_eq!(report.archived, ["old7"]);
+    assert_eq!(report.removed, ["old7"]);
     let lineup = d.join(LINEUPS_DIR).join("main");
     let in_main = |kind: &str| read(&lineup.join(file_of(kind, "member2")));
     assert_eq!(in_main("presets"), "presets of member2");
@@ -505,7 +505,7 @@ fn a_crash_mid_migration_leaves_the_legacy_layout_and_runs_again() {
     // The next start removes the staging and runs the whole migration.
     let report = migrate_legacy(d, &roster, &test_config(), &mut pins).unwrap();
     assert_eq!(report.moved, ["member1"]);
-    assert_eq!(report.archived, ["member9"]);
+    assert_eq!(report.removed, ["member9"]);
     assert!(!d.join(STAGING_DIR).exists());
     assert!(!d.join(LINEUPS_DIR).join("junk").exists());
     let main = d.join(LINEUPS_DIR).join("main");
@@ -527,7 +527,7 @@ fn the_engineers_files_move_into_the_main_lineup() {
     let mut pins = pins(d, &[]);
     let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
     assert_eq!(report.moved, ["member1", ENGINEER_ID]);
-    assert_eq!(report.archived, Vec::<String>::new());
+    assert_eq!(report.removed, Vec::<String>::new());
     let main = d.join(LINEUPS_DIR).join("main");
     for kind in KINDS {
         assert_eq!(
@@ -588,7 +588,7 @@ fn a_crash_after_the_commit_is_finished_by_the_next_call() {
         MigrationReport {
             moved: vec![],
             taken_over: vec![],
-            archived: vec!["member9".into()],
+            removed: vec!["member9".into()],
         }
     );
     for id in ["member1", "member9"] {
@@ -630,7 +630,7 @@ fn a_former_member_who_is_back_is_not_archived_when_the_work_is_finished() {
     migrate_with(d, &gone, &test_config(), &mut pins, &crash).unwrap_err();
     let back = (*test_roster("main").roster).clone();
     let report = migrate_legacy(d, &back, &test_config(), &mut pins).unwrap();
-    assert_eq!(report.archived, Vec::<String>::new());
+    assert_eq!(report.removed, Vec::<String>::new());
     assert_eq!(pins.member_hash("member9"), Some(PHC));
     let main = d.join(LINEUPS_DIR).join("main");
     assert_eq!(

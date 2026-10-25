@@ -264,7 +264,7 @@ fn missing_active(active: &str) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct People {
     pub restored: Vec<String>,
-    pub archived: Vec<String>,
+    pub removed: Vec<String>,
     /// A move that failed (the person and the error's kind).
     pub problems: Vec<String>,
 }
@@ -292,7 +292,7 @@ pub fn follow_people(
             continue;
         }
         match archive_person(config_dir, pins, id) {
-            Ok(true) => out.archived.push(id.clone()),
+            Ok(true) => out.removed.push(id.clone()),
             Ok(false) => {}
             Err(e) => out
                 .problems
@@ -337,9 +337,9 @@ fn adopt(
         return Err(vec![missing_active(&active)]);
     }
     let mut people = follow_people(config_dir, &roster, pins, &[]);
-    let mut archived = report.archived;
-    archived.append(&mut people.archived);
-    people.archived = archived;
+    let mut removed = report.removed;
+    removed.append(&mut people.removed);
+    people.removed = removed;
     let state = RosterState {
         roster: Arc::new(roster),
         sha256: sha256.to_string(),
@@ -406,17 +406,12 @@ pub fn load(
                         lineup = %state.active,
                         people = state.roster.people.len(),
                         restored = people.restored.len(),
-                        archived = people.archived.len(),
+                        archived = people.removed.len(),
                         "roster mode"
                     );
                     note(
                         config_dir,
-                        &Status::applied(
-                            &sha256,
-                            people.restored,
-                            people.archived,
-                            people.problems,
-                        ),
+                        &Status::applied(&sha256, people.restored, people.removed, people.problems),
                     );
                     return Ok(Some(Loaded {
                         roster: state,
@@ -756,7 +751,7 @@ async fn adopt_live(state: &AppState, roster: Roster, text: &str, sha256: &str) 
             tokio::spawn(settle_when_synced(state.clone()));
             Applied::Applied {
                 added: people.restored,
-                removed: people.archived,
+                removed: people.removed,
                 problems: people.problems,
             }
         }
@@ -1254,7 +1249,7 @@ async fn reload(
         removed = removed.len(),
         moved = done.moved,
         restored = people.restored.len(),
-        archived = people.archived.len(),
+        archived = people.removed.len(),
         "roster reloaded"
     );
     Applied::Applied {

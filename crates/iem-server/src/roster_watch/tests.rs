@@ -409,7 +409,7 @@ fn follow_people_archives_who_left_and_restores_who_came_back() {
         p,
         People {
             restored: Vec::new(),
-            archived: vec!["member11".into(), "member12".into(), "stale".into()],
+            removed: vec!["member11".into(), "member12".into(), "stale".into()],
             problems: Vec::new(),
         },
         "the removed, then a live PIN of no person"
@@ -432,7 +432,7 @@ fn follow_people_archives_who_left_and_restores_who_came_back() {
         back,
         People {
             restored: vec!["member9".into(), "member11".into()],
-            archived: Vec::new(),
+            removed: Vec::new(),
             problems: Vec::new(),
         }
     );
@@ -455,7 +455,7 @@ fn follow_people_archives_who_left_and_restores_who_came_back() {
     );
     let gone = ["member14".to_string(), "member15".to_string()];
     let p = follow_people(d, &full, &mut pins, &gone);
-    assert_eq!(p.archived, ["member15"]);
+    assert_eq!(p.removed, ["member15"]);
     assert_eq!(p.problems.len(), 1, "{p:?}");
     assert!(
         p.problems[0].starts_with("person 'member14' was not archived: "),
