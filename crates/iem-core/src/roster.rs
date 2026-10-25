@@ -238,6 +238,10 @@ impl Roster {
         let person = |i: usize, p: &Person| {
             format!("person {}", quoted(&p.id, lower_member_id(&p.id), i + 1))
         };
+        // A roster without people removes everyone (#58 review).
+        if self.people.is_empty() {
+            out.push("the roster has no people".to_string());
+        }
         for (i, p) in self.people.iter().enumerate() {
             let who = person(i, p);
             if !lower_member_id(&p.id) {
@@ -284,6 +288,11 @@ impl Roster {
             }
             if l.name.trim().is_empty() {
                 out.push(format!("{lineup} has no name"));
+            }
+            // The main band names the sets in Dante: one with nobody on a
+            // set is a wrong roster, never a band (#58 review).
+            if l.main && l.sets.is_empty() {
+                out.push(format!("{lineup} is main and has no sets"));
             }
             let mut placed = HashSet::new();
             for (j, (set, p)) in l.sets.iter().enumerate() {
