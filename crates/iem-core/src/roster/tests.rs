@@ -331,7 +331,10 @@ fn a_roster_without_people_or_a_main_without_sets_is_refused() {
     .unwrap();
     assert_eq!(
         empty.problems(),
-        ["the roster has no people", "lineup 'main' is main and has no sets"]
+        [
+            "the roster has no people",
+            "lineup 'main' is main and has no sets"
+        ]
     );
     // The test roster's main lineup with nobody on its sets (no leaders
     // and no owners either, which would be problems of their own).
