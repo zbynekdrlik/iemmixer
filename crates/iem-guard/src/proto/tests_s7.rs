@@ -16,6 +16,7 @@ pub(super) fn an_engine() -> EngineStatus {
         resets: 2,
         parked: false,
         faulted: true,
+        held: Some(true),
         pipe_private: true,
         spawns: 3,
         last_exit: Some(70),
@@ -65,6 +66,7 @@ fn the_engine_carries_the_fields_hil_v1_reads() {
             "resets": 2,
             "parked": false,
             "faulted": true,
+            "held": true,
             "pipe_private": true,
             "spawns": 3,
             "last_exit": 70,
@@ -123,6 +125,15 @@ fn the_engine_carries_the_fields_hil_v1_reads() {
     assert_eq!(fresh["pipe_server_pid"], serde_json::Value::Null);
     assert_eq!(fresh["last_reopen_us"], 0);
     assert_eq!(fresh["last_fault_us"], serde_json::Value::Null);
+    // #57: an older guard's reply names no held engine, and iemmode prints
+    // it again as null, never false: the dev box's engine-plays gate
+    // (iempc_soak.playing_refusal) reads it as unknown, so it refuses.
+    assert_eq!(fresh["held"], serde_json::Value::Null);
+    let older =
+        decode::<Reply>(br#"{"ok":true,"mode":"dev","switching":null,"engine":{"frames":32}}"#)
+            .unwrap();
+    let printed: serde_json::Value = serde_json::from_str(&crate::cli::reply_json(&older)).unwrap();
+    assert_eq!(printed["engine"]["held"], serde_json::Value::Null);
 }
 
 /// The guard's largest reply fits one frame (S7, #10): every kept alarm
@@ -209,6 +220,7 @@ fn the_largest_reply_fits_a_frame() {
                 pipe_server_pid: Some(u32::MAX),
                 last_reopen_us: u64::MAX,
                 last_fault_us: Some(f64::MAX),
+                held: Some(false),
                 ..an_engine()
             }),
             guard_build: Some(GUARD_BUILD.into()),

@@ -20,6 +20,7 @@ fn engine_of(spawns: u64, last_exit: Option<i32>) -> EngineStatus {
         pipe_private: true,
         spawns,
         last_exit,
+        held: Some(false),
         ..EngineStatus::default()
     }
 }
