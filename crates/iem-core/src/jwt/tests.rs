@@ -348,13 +348,14 @@ mod es256 {
     use super::*;
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Verifier};
 
-    /// The VAPID claims as `push::build_vapid_header` writes them (a
-    /// `serde_json::Value`, so the keys are sorted).
+    /// The VAPID claims as `push::build_vapid_header` writes them: a
+    /// `serde_json::Value` whose keys are already in sorted order, so its
+    /// bytes are the same whether serde_json keeps insertion order or not.
     fn vapid_claims() -> Value {
         serde_json::json!({
-            "sub": "mailto:ops@example.org",
             "aud": "https://push.example.org",
             "exp": 2_000_000_000u64,
+            "sub": "mailto:ops@example.org",
         })
     }
 
