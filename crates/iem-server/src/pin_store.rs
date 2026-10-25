@@ -351,7 +351,7 @@ mod tests {
             h.hash("1357"),
             h.hash("2468")
         );
-        std::fs::write(dir.path().join(PIN_HASHES_FILE), &text).unwrap();
+        std::fs::write(dir.path().join(PIN_HASHES_FILE), text).unwrap();
         let mut store = PinStore::load(dir.path()).unwrap();
         assert!(store.member_hash("member1").is_some());
         assert_eq!(store.member_hash("member2"), None, "no login");
@@ -432,7 +432,7 @@ mod tests {
         std::fs::create_dir(&tmp).unwrap();
         assert!(store.drop_archived().is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "unchanged");
-        std::fs::remove_dir(&tmp).unwrap();
+        std::fs::remove_dir(tmp).unwrap();
         assert_eq!(store.drop_archived().unwrap(), ["member2", "member3"]);
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(!written.contains("archived"), "{written}");

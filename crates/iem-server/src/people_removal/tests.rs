@@ -82,8 +82,8 @@ fn a_removal_deletes_the_pin_hash_the_photo_and_every_lineups_files() {
         }
     }
     // Nobody else's.
-    assert_eq!(fs::read_to_string(&other).unwrap(), "member6's");
-    assert_eq!(fs::read_to_string(&stray).unwrap(), "stray");
+    assert_eq!(fs::read_to_string(other).unwrap(), "member6's");
+    assert_eq!(fs::read_to_string(stray).unwrap(), "stray");
     assert_eq!(photos.load("member6").unwrap(), b"member6's photo");
     assert_eq!(pins.member_hash("member6"), Some(PHC));
     // Again: nothing of theirs is left.
@@ -162,7 +162,7 @@ fn the_engineer_and_bad_ids_are_refused_before_anything_goes() {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad}");
     }
     assert_eq!(pins.engineer_hash(), Some(PHC));
-    assert_eq!(fs::read_to_string(&engineers).unwrap(), "the engineer's");
+    assert_eq!(fs::read_to_string(engineers).unwrap(), "the engineer's");
     assert!(PhotoStore::new(d).exists(ENGINEER_ID));
     assert!(d.join("secrets").join(PIN_HASHES_FILE).exists());
 }

@@ -72,7 +72,7 @@ pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Re
     };
     let mut files = 0usize;
     for (lineup, kind, path) in files_of(&config_dir.join(LINEUPS_DIR), id)? {
-        match fs::remove_file(&path) {
+        match fs::remove_file(path) {
             Ok(()) => files += 1,
             Err(e) => {
                 tracing::error!(
