@@ -689,6 +689,25 @@ fn equipment_problems_name_every_offender() {
             assert!(!x.to_lowercase().contains("qzyx"), "{x}");
         }
     }
+    // A lineup's set and owned input that are no id (they sort first) are
+    // named by their position in the lineup.
+    let mut r = equipped();
+    let youth = &mut r.lineups[1];
+    youth.sets.insert("Zyxq Wvn".into(), "member2".into());
+    youth.inputs.insert(
+        "Qzyx Lw".into(),
+        LineupInput {
+            name: "X".into(),
+            owner: Some("member3".into()),
+        },
+    );
+    assert_eq!(
+        r.problems(),
+        [
+            "lineup 'youth': set #1 is not in [equipment] sets",
+            "lineup 'youth': input #1 has an owner and is not in [equipment] inputs",
+        ]
+    );
     // A lineup input without an owner (youth's keys) is no person's.
     let mut r = equipped();
     r.lineups[1].inputs.insert(
