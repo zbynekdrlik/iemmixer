@@ -483,6 +483,7 @@ fn the_reply_names_the_engine_by_its_commit() {
             resets: 2,
             faulted: true,
             parked: true,
+            held: true,
             hil: spare.clone(),
             loopback_samples: 129,
             late: 5,
@@ -509,6 +510,8 @@ fn the_reply_names_the_engine_by_its_commit() {
             resets: 2,
             parked: true,
             faulted: true,
+            // #57: a held engine is named, so the dev box's gate refuses it.
+            held: Some(true),
             pipe_private: true,
             spawns: 3,
             last_exit: Some(70),
@@ -537,6 +540,8 @@ fn the_reply_names_the_engine_by_its_commit() {
         engine_status(&quiet, 0, None, None),
         EngineStatus {
             build: String::new(),
+            // This guard always knows: an older engine's status reads not held.
+            held: Some(false),
             ..EngineStatus::default()
         }
     );

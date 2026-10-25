@@ -19,7 +19,7 @@ from iempc_test_support import RUN, SHA, SHA2, Base, ip  # noqa: E402
 
 # The guard's `iemmode status` while the PC runs bundle SHA in dev, its engine playing.
 READY = {"ok": True, "mode": "dev", "switching": None, "detail": f"mode dev; bundle {SHA}", "alarms": [],
-         "engine": {"build": SHA, "pid": 4242, "parked": False, "faulted": False}}
+         "engine": {"build": SHA, "pid": 4242, "parked": False, "faulted": False, "held": False}}
 SWITCHING = {"from": "event", "to": "dev", "done": ["precheck"], "started": 1790000100}
 NOTHING = "(nothing was dispatched)"
 
@@ -178,8 +178,10 @@ class DispatchSoakTests(SoakBase):
             self.refused(f"no soak: {words}", reply)
         self.assertEqual(self.gh.calls, [])
 
-    def test_a_parked_or_faulted_engine_is_refused(self) -> None:
-        for state in ("parked", "faulted"):
+    def test_a_parked_faulted_or_held_engine_is_refused(self) -> None:
+        """A held engine (started with --hold, not armed) is silent: it passes
+        for no engine that plays (#57). A missing field is unknown."""
+        for state in ("parked", "faulted", "held"):
             for value in (True, None, "false", 0, ...):
                 self.status(engine(**{state: value}))
                 shown = None if value is ... else value

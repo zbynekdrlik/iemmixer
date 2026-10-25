@@ -48,7 +48,7 @@ DEV = record("event", "dev", DEV_STEPS, 14_000, started=1_790_000_200)
 UNWOUND = record("event", "event", DEV_STEPS[:8] + EVENT_STEPS[2:12], 52_250, unwound="dev", started=1_790_000_200)
 # The guard's `iemmode status` in dev, the engine of the active bundle playing.
 READY = {"ok": True, "mode": "dev", "switching": None, "detail": f"mode dev; bundle {SHA}", "alarms": [],
-         "engine": {"build": SHA, "pid": 4242, "parked": False, "faulted": False}, "last_switch": BEFORE}
+         "engine": {"build": SHA, "pid": 4242, "parked": False, "faulted": False, "held": False}, "last_switch": BEFORE}
 GREEN_NUMBERS = {"event_silence_ms": 25_050, "handover_ms": 34_000, "dev_silence_ms": 14_000}
 GREEN_TEXT = "event-leg silence 25050 ms, handover 34000 ms, dev-leg silence 14000 ms"
 NOTHING = "(nothing was switched)"
@@ -233,10 +233,10 @@ class SwitchTestTests(SwitchBase):
             self.status(doc)
             self.refused(f"no switch test: {words}", doc)
 
-    def test_a_parked_or_faulted_engine_is_refused(self) -> None:
+    def test_a_parked_faulted_or_held_engine_is_refused(self) -> None:
         """An engine already silent or broken gives no silence of a switch from
-        a playing one: the test needs one that plays."""
-        for state in ("parked", "faulted"):
+        a playing one: the test needs one that plays (a held one is silent, #57)."""
+        for state in ("parked", "faulted", "held"):
             for value in (True, None, "false", 0, ...):
                 self.status(engine(**{state: value}))
                 shown = None if value is ... else value
