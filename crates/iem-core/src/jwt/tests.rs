@@ -299,14 +299,39 @@ fn claims_without_a_whole_second_exp_or_with_an_audience_are_refused() {
 }
 
 #[test]
-fn a_secret_of_any_length_signs_and_verifies() {
+fn a_secret_of_any_length_but_none_signs_and_verifies() {
     // Shorter than, as long as and longer than SHA-256's 64-byte block.
-    let secrets: [&[u8]; 5] = [b"", b"k", &[0x5a; 64], &[0xa5; 65], &[1; 200]];
+    let secrets: [&[u8]; 4] = [b"k", &[0x5a; 64], &[0xa5; 65], &[1; 200]];
     for secret in secrets {
         let token = encode_hs256(&claims(NOW + 3_600), secret).unwrap();
         assert!(decode_hs256::<AuthClaims>(&token, secret, NOW).is_ok());
         assert_ne!(token, encode_hs256(&claims(NOW + 3_600), SECRET).unwrap());
     }
+}
+
+/// Review of #74: an empty key signs nothing and verifies nothing, so a
+/// path that forgot to load the secret (a default config's empty
+/// `jwt_secret`) never accepts a token anyone could forge.
+#[test]
+fn an_empty_secret_signs_and_verifies_nothing() {
+    assert_eq!(
+        encode_hs256(&claims(NOW + 3_600), b""),
+        Err(JwtError::Encode)
+    );
+    let forged = {
+        let input = format!(
+            "{}.{}",
+            B64.encode(HS256_HEADER),
+            B64.encode(serde_json::to_vec(&claims(NOW + 3_600)).unwrap())
+        );
+        let mut m = Hmac::<Sha256>::new_from_slice(b"").unwrap();
+        m.update(input.as_bytes());
+        signed(input, &m.finalize().into_bytes())
+    };
+    assert_eq!(
+        decode_hs256::<AuthClaims>(&forged, b"", NOW).unwrap_err(),
+        JwtError::Signature
+    );
 }
 
 #[test]
