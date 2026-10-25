@@ -2142,6 +2142,36 @@ async fn fallen_back(d: &Path) -> (AppState, crate::push::tests::Seen) {
     (state, seen)
 }
 
+/// #58 review: a fall-back start removes nobody; once `roster.toml` is the
+/// roster in use again (the same roster: nothing to apply), the removals
+/// it held back run and the status names them.
+#[tokio::test]
+async fn the_removals_a_fallback_held_back_run_once_roster_toml_is_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let departed = crate::roster_state::tests::departed_text();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(&departed).unwrap();
+    let two = edit(
+        &departed,
+        "name = \"Youth band\"\n",
+        "name = \"Youth band\"\nmain = true\n",
+    );
+    std::fs::write(d.join(ROSTER_FILE), two).unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member9");
+    put(&theirs, "member9's");
+    let state = AppState::new(test_config(), d);
+    assert!(state.fallback.load(Ordering::SeqCst));
+    assert_eq!(read(&theirs), "member9's", "the fall-back removed nobody");
+    std::fs::write(d.join(ROSTER_FILE), &departed).unwrap();
+    assert_eq!(check_file(&state).await, Some(Applied::Unchanged));
+    let s = status(d);
+    assert!(s.ok && s.applied, "{s:?}");
+    assert_eq!(s.removed, ["member9"]);
+    assert!(!theirs.exists());
+}
+
 /// #58 re-review: after a start on the roster applied last, the status
 /// keeps saying so while `roster.toml` stays refused, and stops once it
 /// can be used.
