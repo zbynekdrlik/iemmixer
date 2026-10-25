@@ -325,7 +325,7 @@ pub fn read_secret(path: &Path) -> Result<Secret, Reason> {
 }
 
 /// The engineer's token as the server's login issues it
-/// (iem-server's `auth::issue_token`, private: the default header, HS256, the
+/// (iem-server's `auth::issue_token`, private: the HS256 header, the
 /// secret's bytes), issued at the Unix second `now` and valid for `seconds`
 /// and [`TOKEN_MARGIN`] more: [`mint::token`], the one signing path, which
 /// `iem-soakclient token` uses too. A token that cannot be signed with the

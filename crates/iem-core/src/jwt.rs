@@ -146,9 +146,13 @@ fn signed(input: String, signature: &[u8]) -> String {
     format!("{input}.{}", B64.encode(signature))
 }
 
-/// HMAC-SHA-256 keyed with `secret`, fed with `input` (HMAC takes a key of
-/// any length, so `None` is not seen).
+/// HMAC-SHA-256 keyed with `secret`, fed with `input`; `None` for an empty
+/// secret (review of #74: a path that never loaded the secret, a default
+/// config's empty `jwt_secret`, must sign and accept nothing).
 fn mac(secret: &[u8], input: &str) -> Option<HmacSha256> {
+    if secret.is_empty() {
+        return None;
+    }
     let mut state = HmacSha256::new_from_slice(secret).ok()?;
     state.update(input.as_bytes());
     Some(state)
