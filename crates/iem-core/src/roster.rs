@@ -246,6 +246,57 @@ impl Lineup {
     }
 }
 
+impl Equipment {
+    /// Whether `id` is a person's set.
+    pub fn has_set(&self, id: &str) -> bool {
+        self.sets.iter().any(|s| s == id)
+    }
+
+    /// Whether `id` is a person's input.
+    pub fn has_input(&self, id: &str) -> bool {
+        self.inputs.iter().any(|i| i == id)
+    }
+
+    /// What `l` (named `lineup` in the problems) places outside the
+    /// equipment: a set someone wears that is no listed set, an input it
+    /// gives an owner that is no listed input.
+    fn lineup_problems(&self, lineup: &str, l: &Lineup, out: &mut Vec<String>) {
+        for (j, set) in l.sets.keys().enumerate() {
+            if !self.has_set(set) {
+                out.push(format!(
+                    "{lineup}: set {} is not in [equipment] sets",
+                    quoted(set, valid_id(set), j + 1)
+                ));
+            }
+        }
+        for (k, (input, i)) in l.inputs.iter().enumerate() {
+            if i.owner.is_some() && !self.has_input(input) {
+                out.push(format!(
+                    "{lineup}: input {} has an owner and is not in [equipment] inputs",
+                    quoted(input, valid_id(input), k + 1)
+                ));
+            }
+        }
+    }
+
+    /// The lists' own problems: an id that is no valid id (named by
+    /// position), an id listed twice.
+    fn own_problems(&self, out: &mut Vec<String>) {
+        for (what, ids) in [("set", &self.sets), ("input", &self.inputs)] {
+            let mut seen = HashSet::new();
+            for (n, id) in ids.iter().enumerate() {
+                let valid = valid_id(id);
+                let named = format!("[equipment]: {what} {}", quoted(id, valid, n + 1));
+                if !valid {
+                    out.push(format!("{named} is no valid id"));
+                } else if !seen.insert(id.as_str()) {
+                    out.push(format!("{named} is listed twice"));
+                }
+            }
+        }
+    }
+}
+
 impl Roster {
     /// Reads a roster file (unknown keys are errors). Validation is
     /// [`Roster::problems`] and [`Roster::problems_against`].
@@ -256,6 +307,8 @@ impl Roster {
     /// Every problem of the roster on its own, in ids and positions only.
     /// A `takes_over` that names a person is the migration's to refuse
     /// (`takes_over` is read only then), never a problem of the roster.
+    /// With `[equipment]` every lineup set and every lineup input with an
+    /// owner must be listed there (#58).
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut ids = HashSet::new();
@@ -349,18 +402,25 @@ impl Roster {
                     ));
                 }
             }
+            if let Some(e) = &self.equipment {
+                e.lineup_problems(&lineup, l, &mut out);
+            }
         }
         let mains = self.lineups.iter().filter(|l| l.main).count();
         if mains != 1 {
             out.push(format!("exactly one lineup must be main, not {mains}"));
         }
+        if let Some(e) = &self.equipment {
+            e.own_problems(&mut out);
+        }
         out
     }
 
     /// Every problem of the roster against the site's topology: a set is a
-    /// stereo mix other than the engineer's, an input is the site's, and
-    /// each leader's set hears every other set of their lineup (whole or as
-    /// a peer). Values that are no valid id are named by position.
+    /// stereo mix other than the engineer's, an input is the site's (a
+    /// lineup's and `[equipment]`'s alike), and each leader's set hears
+    /// every other set of their lineup (whole or as a peer). Values that are
+    /// no valid id are named by position.
     pub fn problems_against(&self, facts: &TopologyFacts) -> Vec<String> {
         let mut out = Vec::new();
         let mix = |id: &str| facts.mixes.iter().find(|m| m.id == id);
@@ -404,6 +464,24 @@ impl Roster {
                             unquoted(other, valid_id(other), j + 1)
                         ));
                     }
+                }
+            }
+        }
+        if let Some(e) = &self.equipment {
+            for (j, set) in e.sets.iter().enumerate() {
+                if !mix(set.as_str()).is_some_and(|m| m.stereo && m.id != facts.engineer) {
+                    out.push(format!(
+                        "[equipment]: set {} is not a stereo mix of the site other than the engineer's",
+                        quoted(set, valid_id(set), j + 1)
+                    ));
+                }
+            }
+            for (k, input) in e.inputs.iter().enumerate() {
+                if !facts.inputs.contains(input) {
+                    out.push(format!(
+                        "[equipment]: input {} is not an input of the site",
+                        quoted(input, valid_id(input), k + 1)
+                    ));
                 }
             }
         }
