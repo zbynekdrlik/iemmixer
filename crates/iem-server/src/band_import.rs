@@ -170,9 +170,6 @@ pub enum PinOutcome {
     Unchanged,
     /// A PIN set in iemmixer is kept (never overwritten by an import).
     KeptIemmixerPin,
-    /// The member is archived (#58): their hash stays in the archive and no
-    /// import gives them a login.
-    Archived,
 }
 
 /// Hashes and stores the PINs in `secrets_dir` with the installation's pepper.
@@ -202,7 +199,6 @@ pub fn import_pins(
         }
         .map(str::to_owned);
         let outcome = match (&existing, &hasher) {
-            _ if store.archived_hash(&r.owner).is_some() => PinOutcome::Archived,
             (Some(_), _) if !store.is_imported(&r.owner) => PinOutcome::KeptIemmixerPin,
             (Some(phc), Some(h)) if h.verify(&r.pin, phc) => PinOutcome::Unchanged,
             (_, Some(h)) if !dry_run => {
@@ -498,37 +494,6 @@ mod tests {
         let store = PinStore::load(&secrets).unwrap();
         assert!(h.verify("9753", store.member_hash("member1").unwrap()));
         assert!(import_pins(&secrets, &[req("member2", "12a4")], true).is_err());
-    }
-
-    /// #58: an archived member gets no login from an import; their
-    /// archived hash stays as it is.
-    #[test]
-    fn an_archived_member_gets_no_pin_from_an_import() {
-        let dir = tempfile::tempdir().unwrap();
-        let secrets = dir.path().join(SECRETS_DIR);
-        import_pins(&secrets, &[req("member1", "1357")], false).unwrap();
-        let mut store = PinStore::load(&secrets).unwrap();
-        assert!(store.archive_member("member1").unwrap());
-        let dry = import_pins(&secrets, &[req("member1", "1357")], true).unwrap();
-        assert_eq!(dry, vec![("member1".to_owned(), PinOutcome::Archived)]);
-        let out = import_pins(
-            &secrets,
-            &[req("member1", "2222"), req("member2", "2468")],
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            out,
-            vec![
-                ("member1".to_owned(), PinOutcome::Archived),
-                ("member2".to_owned(), PinOutcome::Set)
-            ]
-        );
-        let store = PinStore::load(&secrets).unwrap();
-        assert!(store.member_hash("member1").is_none(), "no login");
-        let h = PinHasher::new(pepper::load_or_create(&secrets).unwrap());
-        assert!(h.verify("1357", store.archived_hash("member1").unwrap()));
-        assert!(h.verify("2468", store.member_hash("member2").unwrap()));
     }
 
     #[test]

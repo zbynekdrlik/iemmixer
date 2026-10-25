@@ -12,10 +12,10 @@
 //!
 //! Also the one-time migration of the legacy layout (no
 //! `lineups/active.json`): today's per-member files and the engineer's
-//! become the main lineup's, and the members who are no person go to the
-//! people archive; the work left after its commit is kept in
-//! `lineups/migration.json` until done, so a crash anywhere is finished by
-//! the next start.
+//! become the main lineup's, and the members who are no person are removed
+//! (`people_removal`: their files, photo and PIN hash deleted); the work
+//! left after its commit is kept in `lineups/migration.json` until done, so
+//! a crash anywhere is finished by the next start.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -27,7 +27,7 @@ use iem_core::config::Config;
 use iem_core::roster::{Roster, valid_lineup_id};
 use serde::{Deserialize, Serialize};
 
-use crate::people_archive::archive_person;
+use crate::people_removal::remove_person;
 use crate::pin_store::{ENGINEER_ID, PinStore};
 
 /// `<config>/lineups/`: one directory per lineup.
@@ -50,7 +50,7 @@ pub const ROSTERS_DIR: &str = "lineups/rosters.kept";
 pub const ACTIVE_FORMAT: &str = "iemmixer-active-lineup";
 /// The migration builds `lineups/` here and renames it as its commit.
 pub const STAGING_DIR: &str = "lineups.migrating";
-/// The work a committed migration still has to do (deletes, archives);
+/// The work a committed migration still has to do (deletes, removals);
 /// gone once done.
 pub const PENDING_FILE: &str = "lineups/migration.json";
 /// The pending file's format.
@@ -365,8 +365,8 @@ pub struct MigrationReport {
     pub moved: Vec<String>,
     /// `(person, former member)`: whose files the person took over.
     pub taken_over: Vec<(String, String)>,
-    /// Former members who are no person, gone to the archive.
-    pub archived: Vec<String>,
+    /// Former members who are no person, removed (their data deleted).
+    pub removed: Vec<String>,
 }
 
 /// A step of the migration a test can fail.
@@ -374,7 +374,7 @@ pub struct MigrationReport {
 pub(crate) enum Step {
     /// The rename of the staged `lineups/` into place.
     Commit,
-    /// The pending work after the commit (deletes, archives).
+    /// The pending work after the commit (deletes, removals).
     Finish,
 }
 
@@ -385,8 +385,11 @@ struct MigrationPending {
     format: String,
     /// Ids whose legacy files (`<kind>/<id>.json`) are copies now: deleted.
     delete: Vec<String>,
-    /// Former members who are no person: archived.
-    archive: Vec<String>,
+    /// Former members who are no person: removed. An older server wrote
+    /// them as `archive` (#58 decision 6, overruled 2026-10-24); that list
+    /// is read the same.
+    #[serde(alias = "archive")]
+    remove: Vec<String>,
 }
 
 fn file_of(kind: &str, id: &str) -> PathBuf {
@@ -431,7 +434,8 @@ pub fn migration_problems(roster: &Roster) -> Vec<String> {
 /// member's files and the engineer's become the main lineup's under their
 /// id; a person with `takes_over = X` gets X's files (never X's PIN or
 /// photo; their own files, if any, stay theirs); every former member who is
-/// no person (and every `takes_over` one) then goes to the archive;
+/// no person (and every `takes_over` one) is then removed
+/// (`people_removal::remove_person`: files, photo and PIN hash deleted);
 /// `active.json` names the main lineup. A roster with
 /// [`migration_problems`] is refused before anything is written.
 ///
@@ -467,7 +471,7 @@ pub(crate) fn migrate_with(
                 "the roster's takes_over is read only by the one-time migration, done: it can go"
             );
         }
-        report.archived = finish(config_dir, roster, pins)?;
+        report.removed = finish(config_dir, roster, pins)?;
         return Ok(report);
     }
     let problems = migration_problems(roster);
@@ -508,8 +512,8 @@ pub(crate) fn migrate_with(
     let main = store.data_dir(&roster.main().id);
     let stays = |id: &str| id == ENGINEER_ID || roster.person(id).is_some();
     // Each member's own files under their own id: a person's, the
-    // engineer's, and a former member's whom nobody takes over (for the
-    // archive).
+    // engineer's, and a former member's whom nobody takes over (deleted by
+    // the pending work, unless they are a person again by then).
     for &id in &legacy {
         if !stays(id) && takers.iter().any(|&(_, x)| x == id) {
             continue;
@@ -524,7 +528,7 @@ pub(crate) fn migrate_with(
         }
     }
     // Taken-over files under the taker's id; one the taker already has stays
-    // the former member's, for the archive.
+    // the former member's (deleted with them by the pending work).
     for &(person, from) in &takers {
         let mut copied = false;
         for kind in KINDS {
@@ -549,7 +553,7 @@ pub(crate) fn migrate_with(
     let pending = MigrationPending {
         format: PENDING_FORMAT.into(),
         delete: former.iter().copied().map(str::to_string).collect(),
-        archive: former
+        remove: former
             .iter()
             .copied()
             .filter(|&id| !stays(id))
@@ -568,14 +572,15 @@ pub(crate) fn migrate_with(
         "legacy band files migrated into the main lineup"
     );
     fault(Step::Finish)?;
-    report.archived = finish(config_dir, roster, pins)?;
+    report.removed = finish(config_dir, roster, pins)?;
     Ok(report)
 }
 
 /// Finishes a committed migration's pending work, if any: deletes the
-/// legacy copies, archives the former members who are (still) no person,
-/// then removes [`PENDING_FILE`]. Each step may run again, so a crash in it
-/// is finished by the next call. The ids archived.
+/// legacy copies, removes the former members who are (still) no person
+/// (their files, photo and PIN hash deleted), then removes
+/// [`PENDING_FILE`]. Each step may run again, so a crash or a failed delete
+/// in it is finished by the next call. The ids removed.
 fn finish(config_dir: &Path, roster: &Roster, pins: &mut PinStore) -> io::Result<Vec<String>> {
     let path = config_dir.join(PENDING_FILE);
     let Some(text) = read_optional(&path)? else {
@@ -590,7 +595,7 @@ fn finish(config_dir: &Path, roster: &Roster, pins: &mut PinStore) -> io::Result
             pending.format
         )));
     }
-    for id in pending.delete.iter().chain(&pending.archive) {
+    for id in pending.delete.iter().chain(&pending.remove) {
         iem_core::config::validate_member_id(id)
             .map_err(|e| invalid(format!("{}: {e}", path.display())))?;
     }
@@ -603,15 +608,15 @@ fn finish(config_dir: &Path, roster: &Roster, pins: &mut PinStore) -> io::Result
             }
         }
     }
-    let mut archived = Vec::new();
-    for id in &pending.archive {
-        if roster.person(id).is_none() && archive_person(config_dir, pins, id)? {
-            tracing::info!(member = %id, "former member archived");
-            archived.push(id.clone());
+    let mut removed = Vec::new();
+    for id in &pending.remove {
+        if roster.person(id).is_none() && remove_person(config_dir, pins, id)? {
+            tracing::info!(member = %id, "former member removed");
+            removed.push(id.clone());
         }
     }
     fs::remove_file(path)?;
-    Ok(archived)
+    Ok(removed)
 }
 
 #[cfg(test)]
