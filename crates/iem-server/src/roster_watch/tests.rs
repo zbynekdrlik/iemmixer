@@ -629,6 +629,38 @@ fn a_start_on_a_roster_that_removes_everyone_falls_back() {
     assert_eq!(read(&theirs), "member11's");
 }
 
+/// #58 review: a fall-back start (roster.toml cannot be used) removes
+/// nobody: the roster file has problems, so its removals are not to be
+/// trusted; the next roster that applies does them.
+#[test]
+fn a_fallback_start_removes_nobody() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let cfg = test_config();
+    let facts = TopologyFacts::from(&test_topology());
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let departed = crate::roster_state::tests::departed_text();
+    std::fs::write(d.join(ROSTER_FILE), &departed).unwrap();
+    load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    LineupStore::new(d).set_applied_roster(&departed).unwrap();
+    pins.set_member_hash("member9", PHC.into()).unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member9");
+    put(&theirs, "member9's");
+    std::fs::write(d.join(ROSTER_FILE), "[[people]]\n").unwrap();
+    let loaded = load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    assert!(loaded.fallback);
+    assert_eq!(pins.member_hash("member9"), Some(PHC));
+    assert_eq!(read(&theirs), "member9's");
+    assert!(!status(d).applied);
+    // The next roster that applies removes them.
+    std::fs::write(d.join(ROSTER_FILE), &departed).unwrap();
+    let loaded = load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    assert!(!loaded.fallback);
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!theirs.exists());
+    assert_eq!(status(d).removed, ["member9"]);
+}
+
 /// #58 review: `iem-server roster check` names, ids only, the people of
 /// the roster applied last that the roster would remove (none known
 /// before a roster was applied), and refuses one that removes them all.
