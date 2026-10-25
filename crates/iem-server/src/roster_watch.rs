@@ -1527,6 +1527,24 @@ pub async fn fallback_alarm(state: &AppState) -> usize {
     devices
 }
 
+/// The removals a fall-back start held back ([`Start::Fallback`]), run
+/// once `roster.toml` is the roster in use again ([`follow_people`] on it,
+/// under the switching lock as a reload's).
+async fn held_back(state: &AppState) -> People {
+    let _running = state.switching.lock().await;
+    let Some(r) = state.roster() else {
+        return People::default();
+    };
+    let mut pins = state.pin_store.write().await;
+    let people = follow_people(&state.config_dir, &r.roster, &mut pins, &[]);
+    tracing::info!(
+        deleted = people.removed.len(),
+        problems = people.problems.len(),
+        "roster.toml is in use again: the removals the fall-back held back ran"
+    );
+    people
+}
+
 /// Reads `roster.toml` once and applies it ([`apply_text`]), writing the
 /// status file unless nothing changed. `None` when the file cannot be read
 /// (gone: the roster in use stays until a restart).
@@ -1554,11 +1572,13 @@ pub async fn check_file(state: &AppState) -> Option<Applied> {
     let fallback = state.fallback.load(Ordering::SeqCst);
     match &applied {
         Applied::Unchanged if fallback => {
-            // roster.toml is the roster in use again.
+            // roster.toml is the roster in use again: the removals the
+            // fall-back start held back run now (#58 review).
             state.fallback.store(false, Ordering::SeqCst);
+            let people = held_back(state).await;
             note(
                 &state.config_dir,
-                &Status::applied(&sha256, Vec::new(), Vec::new(), Vec::new()),
+                &Status::applied(&sha256, Vec::new(), people.removed, people.problems),
             );
         }
         Applied::Unchanged => {}
