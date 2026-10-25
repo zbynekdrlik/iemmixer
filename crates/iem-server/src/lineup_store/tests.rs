@@ -257,7 +257,7 @@ fn a_kept_roster_is_not_written_again() {
 
 /// #58 fourth review: the kept rosters' folder in `lineups/` is no
 /// lineup's: no lineup id can name it, so no lineup shares it and no walk
-/// over the lineups' folders (`people_archive`) takes it for one.
+/// over the lineups' folders (`people_removal`) takes it for one.
 #[test]
 fn the_kept_rosters_folder_is_named_by_no_lineup_id() {
     assert_eq!(ROSTERS_DIR, format!("{LINEUPS_DIR}/{ROSTERS_NAME}"));

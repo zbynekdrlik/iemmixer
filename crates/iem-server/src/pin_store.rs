@@ -380,6 +380,69 @@ mod tests {
         assert_eq!(store.member_ids(), ["member1", "member2", "member3"]);
     }
 
+    /// #58: a removed member's hash and import mark are deleted and stay
+    /// deleted; a member without a hash writes nothing; the engineer and a
+    /// bad id are refused.
+    #[test]
+    fn remove_member_deletes_the_hash_and_its_import_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store.import_member_hash("member1", h.hash("1357")).unwrap();
+        store.set_member_hash("member2", h.hash("2468")).unwrap();
+        assert!(store.remove_member("member1").unwrap());
+        assert_eq!(store.member_hash("member1"), None);
+        assert!(!store.is_imported("member1"));
+        let store = PinStore::load(dir.path()).unwrap();
+        assert_eq!(store.member_hash("member1"), None, "after a reload too");
+        assert!(h.verify("2468", store.member_hash("member2").unwrap()));
+        let text = std::fs::read_to_string(dir.path().join(PIN_HASHES_FILE)).unwrap();
+        assert!(!text.contains("member1"), "{text}");
+        let mut store = store;
+        std::fs::remove_file(dir.path().join(PIN_HASHES_FILE)).unwrap();
+        assert!(!store.remove_member("member3").unwrap());
+        assert!(
+            !dir.path().join(PIN_HASHES_FILE).exists(),
+            "nothing written"
+        );
+        for bad in [ENGINEER_ID, "../x"] {
+            let err = store.remove_member(bad).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad}");
+        }
+    }
+
+    /// #58: the hashes an older server archived are deleted once, their
+    /// ids named; a write that fails keeps them for the next try, and with
+    /// none nothing is written.
+    #[test]
+    fn drop_archived_deletes_an_older_servers_hashes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let text = format!(
+            r#"{{"members":{{"member1":"{}"}},"archived":{{"member3":"{}","member2":"{}"}}}}"#,
+            h.hash("1357"),
+            h.hash("2468"),
+            h.hash("8642")
+        );
+        let file = dir.path().join(PIN_HASHES_FILE);
+        std::fs::write(&file, &text).unwrap();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        // The write's temporary file cannot be made: a directory is there.
+        let tmp = file.with_extension("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(store.drop_archived().is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "unchanged");
+        std::fs::remove_dir(&tmp).unwrap();
+        assert_eq!(store.drop_archived().unwrap(), ["member2", "member3"]);
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(!written.contains("archived"), "{written}");
+        assert!(!written.contains("member2") && !written.contains("member3"));
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(store.drop_archived().unwrap(), Vec::<String>::new());
+        assert!(!file.exists(), "nothing written");
+    }
+
     /// Never plaintext, also in the hashes an older server archived: such a
     /// file is a load error, never read as nobody.
     #[test]

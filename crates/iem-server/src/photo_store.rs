@@ -118,6 +118,24 @@ mod tests {
         assert!(store.delete("oldmember1").is_ok());
     }
 
+    /// #58: a removed person's photo is deleted; none is no removal; a bad
+    /// id is an error, never a panic.
+    #[test]
+    fn remove_deletes_the_photo_and_a_bad_id_is_an_error() {
+        let (store, _dir) = test_store();
+        assert!(!store.remove("member1").unwrap(), "no photo yet");
+        store.save("member1", b"jpeg").unwrap();
+        store.save("member2", b"jpeg").unwrap();
+        assert!(store.remove("member1").unwrap());
+        assert!(!store.exists("member1"));
+        assert!(store.exists("member2"));
+        assert!(!store.remove("member1").unwrap(), "gone");
+        for bad in ["../x", ""] {
+            let err = store.remove(bad).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
     #[test]
     fn test_overwrite_existing() {
         let (store, _dir) = test_store();

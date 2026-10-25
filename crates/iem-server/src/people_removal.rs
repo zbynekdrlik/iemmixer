@@ -97,3 +97,6 @@ pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Re
     }
     Ok(removed)
 }
+
+#[cfg(test)]
+mod tests;
