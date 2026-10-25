@@ -16,13 +16,19 @@ thiserror = "2.0"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # Constant-time comparison for PIN verification (prevents timing attacks)
 subtle = "2"
-# VAPID public-key derivation (Web Push) — optional, not needed on WASM
-p256 = { version = "0.13", features = ["pkcs8", "ecdsa"], optional = true }
+# VAPID public-key derivation and the VAPID JWT's ES256 signature (Web
+# Push) — optional, not needed on WASM
+p256 = { version = "0.14", features = ["ecdsa"], optional = true }
 base64 = { version = "0.22", optional = true }
+# The login tokens' HS256 (`jwt`): the server's and the soak client's
+hmac = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
 
 [features]
 default = ["config"]
 config = ["dep:toml"]
+# JSON Web Tokens (`jwt.rs`): HS256, and ES256 with `vapid`
+jwt = ["dep:hmac", "dep:sha2", "dep:base64"]
 vapid = ["dep:p256", "dep:base64"]
 
 [dev-dependencies]

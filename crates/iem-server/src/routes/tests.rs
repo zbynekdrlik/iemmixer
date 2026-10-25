@@ -167,7 +167,6 @@ async fn the_index_answers_the_root_and_spa_routes_uncached() {
 // would otherwise turn the gate into "always allow" or "always deny".
 
 fn make_test_token(secret: &str, member: &str, engineer: bool) -> String {
-    use jsonwebtoken::{EncodingKey, Header, encode};
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -179,12 +178,7 @@ fn make_test_token(secret: &str, member: &str, engineer: bool) -> String {
         exp: now + 3600,
         iat: now,
     };
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .unwrap()
+    iem_core::jwt::encode_hs256(&claims, secret.as_bytes()).unwrap()
 }
 
 fn headers_with_bearer(token: &str) -> axum::http::HeaderMap {

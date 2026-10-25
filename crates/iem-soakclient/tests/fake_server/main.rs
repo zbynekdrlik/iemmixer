@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 use iem_core::AuthClaims;
 use iem_soakclient::net::{Limits, run};
 use iem_soakclient::{Args, Credential, PIN_ENV, Reason, Summary, write_summary};
-use jsonwebtoken::{DecodingKey, Validation, decode};
 use serde_json::json;
 use tungstenite::{Message, WebSocket};
 
@@ -287,14 +286,15 @@ fn socket(target: &str) -> Option<(bool, &str)> {
     }
 }
 
-/// The claims of `token` as the server reads them: HS256 with `secret`'s
-/// bytes and the default validation, which checks `exp`
+/// The claims of `token` as the server reads them: `iem_core::jwt`'s HS256
+/// with `secret`'s bytes, which checks `exp`
 /// (`iem_server::auth::extract_claims`).
 fn claims(token: &str, secret: &str) -> Option<AuthClaims> {
-    let key = DecodingKey::from_secret(secret.as_bytes());
-    decode::<AuthClaims>(token, &key, &Validation::default())
-        .ok()
-        .map(|data| data.claims)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    iem_core::jwt::decode_hs256(token, secret.as_bytes(), now).ok()
 }
 
 type Ws = WebSocket<TcpStream>;

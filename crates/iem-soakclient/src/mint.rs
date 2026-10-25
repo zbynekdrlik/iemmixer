@@ -12,8 +12,8 @@
 //! path or member id is ever printed (P6).
 //!
 //! The server reads these tokens as it reads its login's
-//! (`iem_server::auth::extract_claims`: HS256, the secret's bytes, the
-//! default validation), so [`token`] is the one signing path:
+//! (`iem_server::auth::extract_claims`: `iem_core::jwt`'s HS256 with the
+//! secret's bytes), so [`token`] is the one signing path:
 //! [`crate::engineer_token`], the soak's own, calls it too.
 
 use std::fmt;
@@ -22,7 +22,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use jsonwebtoken::{EncodingKey, Header};
 use serde::Serialize;
 
 use crate::{ENGINEER, Reason, Secret, read_secret, valid_member};
@@ -154,8 +153,9 @@ struct Claims<'a> {
 }
 
 /// The token for `sub` as the server's login issues one
-/// (iem-server's `auth::issue_token`, private: the default header, HS256, the
-/// secret's bytes), issued at the Unix second `now` and valid for `seconds`.
+/// (iem-server's `auth::issue_token`, private: `iem_core::jwt::encode_hs256`
+/// with the secret's bytes), issued at the Unix second `now` and valid for
+/// `seconds`.
 /// A token that cannot be signed with the secret is `secret-unreadable`
 /// (not seen with HS256).
 pub fn token(
@@ -171,8 +171,7 @@ pub fn token(
         exp: now + seconds,
         iat: now,
     };
-    let key = EncodingKey::from_secret(secret.0.as_bytes());
-    jsonwebtoken::encode(&Header::default(), &claims, &key).map_err(|_| Reason::SecretUnreadable)
+    iem_core::jwt::encode_hs256(&claims, secret.0.as_bytes()).map_err(|_| Reason::SecretUnreadable)
 }
 
 /// Why `iem-soakclient token` wrote no token: a fixed code, never a value.
@@ -302,10 +301,10 @@ mod tests {
         assert!(!claims.engineer);
         assert_eq!(claims.iat, now);
         assert_eq!(claims.exp, now + 3_600);
-        // HS256, the server's `Header::default()`; another secret is
-        // refused, and so is a token whose time is over.
-        let header = jsonwebtoken::decode_header(&token).unwrap();
-        assert_eq!(header.alg, jsonwebtoken::Algorithm::HS256);
+        // HS256, the server's header; another secret is refused, and so
+        // is a token whose time is over.
+        let header = iem_core::jwt::header_of(&token).unwrap();
+        assert_eq!(header["alg"], "HS256");
         assert!(as_server(&token, "another-synthetic-secret").is_none());
         let old = token_at(now - 7_200, 60);
         assert!(as_server(&old, SECRET).is_none());

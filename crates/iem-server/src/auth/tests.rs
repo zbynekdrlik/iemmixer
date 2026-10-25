@@ -167,16 +167,42 @@ fn test_verify_member_access_expired_token() {
         exp: now - 3600, // expired 1 hour ago
         iat: now - 7200,
     };
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
-    )
-    .unwrap();
+    let token = jwt::encode_hs256(&claims, config.jwt_secret.as_bytes()).unwrap();
     let headers = headers_with_token(&token);
 
     let result = verify_member_access(&headers, "oldmember1", &config.jwt_secret);
     assert!(result.is_err());
     let (status, _) = result.unwrap_err();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// The login's tokens keep the form jsonwebtoken gave them (#74): the
+/// tokens phones hold from before the change still verify, and its
+/// one-minute leeway on `exp` stays.
+#[test]
+fn login_tokens_keep_their_form_and_leeway() {
+    let config = test_config();
+    let token = make_token(&config, "oldmember1", false);
+    let header = jwt::header_of(&token).unwrap();
+    assert_eq!(
+        serde_json::Value::Object(header),
+        serde_json::from_str::<serde_json::Value>(jwt::HS256_HEADER).unwrap()
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let at = |exp: u64| {
+        let claims = AuthClaims {
+            sub: "oldmember1".to_string(),
+            engineer: false,
+            exp,
+            iat: exp - 60,
+        };
+        jwt::encode_hs256(&claims, config.jwt_secret.as_bytes()).unwrap()
+    };
+    // A few seconds inside the leeway (the clock moves while the test runs).
+    assert!(extract_claims(&at(now - 50), &config.jwt_secret).is_some());
+    assert!(extract_claims(&at(now - 120), &config.jwt_secret).is_none());
+    assert!(extract_claims(&token, "another_secret").is_none());
 }

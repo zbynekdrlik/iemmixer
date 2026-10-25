@@ -1,36 +1,56 @@
 //! Web Push encryption (RFC 8291) and VAPID delivery (reaperiem#133)
 
 use crate::push_store::PushSubscription;
-use aes_gcm::{Aes128Gcm, KeyInit, Nonce, aead::Aead};
+use aes_gcm::aead::{Aead, Nonce};
+use aes_gcm::{Aes128Gcm, Key, KeyInit};
 use base64::Engine;
 use hkdf::Hkdf;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::Generate;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use sha2::Sha256;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-/// Encrypt a push message payload per RFC 8291 (aes128gcm content encoding).
+/// Encrypt a push message payload per RFC 8291 (aes128gcm content encoding),
+/// with a new ECDH key and a new salt for every message.
 pub fn encrypt_payload(
     plaintext: &[u8],
     subscriber_p256dh_b64: &str,
     subscriber_auth_b64: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let subscriber_pub_bytes = B64.decode(subscriber_p256dh_b64)?;
-    let auth_secret = B64.decode(subscriber_auth_b64)?;
-
-    let subscriber_pk = p256::PublicKey::from_sec1_bytes(&subscriber_pub_bytes)?;
-
-    // Generate ephemeral ECDH key pair
-    let ephemeral = p256::ecdh::EphemeralSecret::random(&mut rand_core::OsRng);
-    let ephemeral_pk = p256::PublicKey::from(&ephemeral);
-    let ephemeral_pub_bytes = ephemeral_pk.to_encoded_point(false);
-
-    // ECDH shared secret
-    let shared = ephemeral.diffie_hellman(&subscriber_pk);
+    // The message's own ECDH key (from the OS's RNG), dropped (zeroed) after it
+    let ephemeral = p256::SecretKey::try_generate()?;
 
     // Random salt
     let mut salt = [0u8; 16];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut salt);
+
+    encrypt_with(
+        plaintext,
+        subscriber_p256dh_b64,
+        subscriber_auth_b64,
+        &ephemeral,
+        salt,
+    )
+}
+
+/// RFC 8291 with the sender's ECDH key and the salt given: [`encrypt_payload`]
+/// draws both, the tests give the RFC's example values.
+fn encrypt_with(
+    plaintext: &[u8],
+    subscriber_p256dh_b64: &str,
+    subscriber_auth_b64: &str,
+    ephemeral: &p256::SecretKey,
+    salt: [u8; 16],
+) -> anyhow::Result<Vec<u8>> {
+    let subscriber_pub_bytes = B64.decode(subscriber_p256dh_b64)?;
+    let auth_secret = B64.decode(subscriber_auth_b64)?;
+
+    let subscriber_pk = p256::PublicKey::from_sec1_bytes(&subscriber_pub_bytes)?;
+    let ephemeral_pub_bytes = ephemeral.public_key().to_sec1_point(false);
+
+    // ECDH shared secret
+    let shared = ephemeral.diffie_hellman(&subscriber_pk);
 
     // Derive IKM: HKDF(salt=auth_secret, ikm=shared, info="WebPush: info\0" || ua_pub || as_pub)
     let mut info_ikm = Vec::with_capacity(131);
@@ -60,10 +80,10 @@ pub fn encrypt_payload(
     padded.push(0x02);
 
     // Encrypt with AES-128-GCM
-    let cipher = Aes128Gcm::new_from_slice(&cek)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let cipher = Aes128Gcm::new(&Key::<Aes128Gcm>::from(cek));
+    let nonce = Nonce::<Aes128Gcm>::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, padded.as_slice())
+        .encrypt(&nonce, padded.as_slice())
         .map_err(|e| anyhow::anyhow!("AES-GCM encrypt: {}", e))?;
 
     // Build aes128gcm body: salt(16) + rs(4) + idlen(1) + keyid(65) + ciphertext
@@ -101,17 +121,12 @@ pub fn build_vapid_header(
         "sub": subject,
     });
 
-    // Sign with ES256 using jsonwebtoken
-    use p256::pkcs8::EncodePrivateKey;
-    let pkcs8_der = sk.to_pkcs8_der()?;
-    let encoding_key = jsonwebtoken::EncodingKey::from_ec_der(pkcs8_der.as_bytes());
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
-    header.typ = Some("JWT".into());
-    let jwt = jsonwebtoken::encode(&header, &claims, &encoding_key)?;
+    // Sign with ES256 (`{"typ":"JWT","alg":"ES256"}`, r || s)
+    let jwt = iem_core::jwt::encode_es256(&claims, &sk)?;
 
     // Public key for k= parameter
     let pk = sk.public_key();
-    let pub_b64 = B64.encode(pk.to_encoded_point(false).as_bytes());
+    let pub_b64 = B64.encode(pk.to_sec1_point(false).as_bytes());
 
     Ok((jwt, pub_b64))
 }
@@ -200,9 +215,9 @@ pub(crate) mod tests {
     #[test]
     fn test_encrypt_payload_produces_valid_output() {
         // Generate a fake subscriber key pair (simulating browser)
-        let subscriber_sk = p256::SecretKey::random(&mut rand_core::OsRng);
+        let subscriber_sk = p256::SecretKey::generate();
         let subscriber_pk = subscriber_sk.public_key();
-        let subscriber_pub_bytes = subscriber_pk.to_encoded_point(false);
+        let subscriber_pub_bytes = subscriber_pk.to_sec1_point(false);
 
         let mut auth_secret = [0u8; 16];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut auth_secret);
@@ -217,11 +232,81 @@ pub(crate) mod tests {
         let rs = u32::from_be_bytes([body[16], body[17], body[18], body[19]]);
         assert_eq!(rs, 4096);
         assert_eq!(body[20], 65);
+
+        // Every message has its own salt and ECDH key.
+        let again = encrypt_payload(b"test payload", &p256dh, &auth).unwrap();
+        assert_ne!(body[..16], again[..16], "salt");
+        assert_ne!(body[21..86], again[21..86], "the sender's key");
+    }
+
+    /// RFC 8291 §5 and Appendix A: the example message, the sender's ECDH
+    /// scalar, the receiver's point, the auth value and the salt, and the
+    /// body they encrypt to (the RFC's line breaks removed).
+    const RFC8291_PLAINTEXT: &[u8] = b"When I grow up, I want to be a watermelon";
+    const RFC8291_SENDER_SCALAR: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
+    const RFC8291_RECEIVER_POINT: &str =
+        "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+    const RFC8291_AUTH_VALUE: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+    const RFC8291_SALT: &str = "DGv6ra1nlYgDCS1FRnbzlw";
+    const RFC8291_BODY: &str = "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN";
+
+    /// The ECDH, both HKDF steps, AES-128-GCM and the body's layout against
+    /// the RFC's published example (#74 moved every crate under them).
+    #[test]
+    fn the_rfc_8291_example_encrypts_to_its_published_body() {
+        let scalar = B64.decode(RFC8291_SENDER_SCALAR).unwrap();
+        let sender = p256::SecretKey::from_slice(&scalar).unwrap();
+        let salt: [u8; 16] = B64.decode(RFC8291_SALT).unwrap().try_into().unwrap();
+        let body = encrypt_with(
+            RFC8291_PLAINTEXT,
+            RFC8291_RECEIVER_POINT,
+            RFC8291_AUTH_VALUE,
+            &sender,
+            salt,
+        )
+        .unwrap();
+        assert_eq!(B64.encode(body), RFC8291_BODY);
+    }
+
+    /// What the push service checks (RFC 8292): the VAPID JWT is ES256 over
+    /// its first two parts with the key the `k=` parameter names, expires
+    /// in 12 h, and its header is the one jsonwebtoken wrote.
+    #[test]
+    fn the_vapid_jwt_verifies_with_the_key_it_names() {
+        use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+        let sk = p256::SecretKey::generate();
+        let (jwt, k) = build_vapid_header(
+            &B64.encode(sk.to_bytes()),
+            "https://push.example.org/send/1",
+            SUBJECT,
+        )
+        .unwrap();
+        let header = iem_core::jwt::header_of(&jwt).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(header),
+            serde_json::json!({"typ": "JWT", "alg": "ES256"})
+        );
+        let (input, signature) = jwt.rsplit_once('.').unwrap();
+        let verifying = VerifyingKey::from_sec1_bytes(&B64.decode(k.as_bytes()).unwrap()).unwrap();
+        let signature = Signature::from_slice(&B64.decode(signature).unwrap()).unwrap();
+        assert!(verifying.verify(input.as_bytes(), &signature).is_ok());
+        let other =
+            VerifyingKey::from(&p256::ecdsa::SigningKey::from(&p256::SecretKey::generate()));
+        assert!(other.verify(input.as_bytes(), &signature).is_err());
+        let claims = input.split_once('.').unwrap().1;
+        let claims: serde_json::Value =
+            serde_json::from_slice(&B64.decode(claims).unwrap()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = claims["exp"].as_u64().unwrap();
+        assert!(exp.abs_diff(now + 12 * 3600) < 5, "exp {exp}, now {now}");
     }
 
     #[test]
     fn test_vapid_jwt_structure() {
-        let sk = p256::SecretKey::random(&mut rand_core::OsRng);
+        let sk = p256::SecretKey::generate();
         let key_b64 = B64.encode(sk.to_bytes());
 
         let (jwt, pub_key) = build_vapid_header(
@@ -237,7 +322,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_vapid_jwt_carries_the_configured_subject() {
-        let sk = p256::SecretKey::random(&mut rand_core::OsRng);
+        let sk = p256::SecretKey::generate();
         let key_b64 = B64.encode(sk.to_bytes());
         let (jwt, _) = build_vapid_header(
             &key_b64,
@@ -292,16 +377,16 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn subscription(endpoint: String) -> PushSubscription {
-        let browser_key = p256::SecretKey::random(&mut rand_core::OsRng);
+        let browser_key = p256::SecretKey::generate();
         PushSubscription {
             endpoint,
-            p256dh: B64.encode(browser_key.public_key().to_encoded_point(false).as_bytes()),
+            p256dh: B64.encode(browser_key.public_key().to_sec1_point(false).as_bytes()),
             auth: B64.encode([7u8; 16]),
         }
     }
 
     pub(crate) fn vapid_private_key() -> String {
-        B64.encode(p256::SecretKey::random(&mut rand_core::OsRng).to_bytes())
+        B64.encode(p256::SecretKey::generate().to_bytes())
     }
 
     const SUBJECT: &str = "mailto:ops@example.org";

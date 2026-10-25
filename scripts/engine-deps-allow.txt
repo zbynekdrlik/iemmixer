@@ -7,7 +7,6 @@ azo-sys
 bitflags
 block-buffer
 cfg-if
-const-oid
 cpufeatures
 crossbeam-utils
 crypto-common
@@ -15,7 +14,6 @@ digest
 doctest-file
 equivalent
 generic-array
-getrandom
 hashbrown
 iem-audio-io
 iem-dsp
@@ -35,7 +33,6 @@ once_cell
 pin-project-lite
 proc-macro2
 quote
-rand_core
 recvmsg
 regex-automata
 regex-syntax
@@ -48,7 +45,6 @@ serde_spanned
 sha2
 sharded-slab
 smallvec
-spin  # lazy_static's spin_no_std backend (sharded-slab via tracing-subscriber, off the RT path), unified in from jsonwebtoken's rsa (num-bigint-dig), #9 2026-09-28
 subtle
 syn
 thiserror
@@ -80,6 +76,4 @@ windows-result
 windows-strings
 windows-sys
 winnow
-zeroize
-zeroize_derive  # proc-macro (build time), zeroize's derive feature unified in from jsonwebtoken >= 10.4, #9 2026-09-28
 zmij

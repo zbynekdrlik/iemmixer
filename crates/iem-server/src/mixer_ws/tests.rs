@@ -116,15 +116,14 @@ fn tokens_are_required_valid_and_fresh() {
         StatusCode::UNAUTHORIZED
     );
     let token = |exp: u64| {
-        jsonwebtoken::encode(
-            &jsonwebtoken::Header::default(),
+        iem_core::jwt::encode_hs256(
             &iem_core::AuthClaims {
                 sub: "member1".into(),
                 engineer: false,
                 exp,
                 iat: 0,
             },
-            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+            secret.as_bytes(),
         )
         .unwrap()
     };
@@ -158,15 +157,14 @@ fn a_token_is_valid_through_its_expiry_second() {
         .unwrap()
         .as_secs();
     let exp = now + 3600;
-    let token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
+    let token = iem_core::jwt::encode_hs256(
         &iem_core::AuthClaims {
             sub: "member1".into(),
             engineer: false,
             exp,
             iat: 0,
         },
-        &jsonwebtoken::EncodingKey::from_secret(b"s"),
+        b"s",
     )
     .unwrap();
     assert_eq!(
