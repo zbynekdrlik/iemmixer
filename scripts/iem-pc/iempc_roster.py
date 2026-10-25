@@ -41,9 +41,9 @@ In this order (dev time: the EVENT-NOW flag at the start refuses it, design
    no status for it. Else `roster.status.json` every POLL_S, at most WAIT_S,
    until it names the file's sha256 (`outcome`). `applied` true: in use
    (exit 0; `ok` false and `problems` name what failed after it went into
-   use, an archive move). Else refused (exit 1), with the server's problems,
-   among them its fallback line "in use instead: the roster applied last"
-   while it runs on that one. The server writes no status for a roster it
+   use, a removed person's file not deleted). Else refused (exit 1), with
+   the server's problems, among them its fallback line "in use instead:
+   the roster applied last" while it runs on that one. The server writes no status for a roster it
    defers (an engine not synced, a switch a restart cut short): a wait that
    runs out is "not applied" (exit 1) and says what the status named. The
    same refusal as `before` (the same bytes refused earlier) is waited out,

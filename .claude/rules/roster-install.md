@@ -21,7 +21,7 @@ paths:
   - Each file is checked by its sha256 at each step.
 - **Reads share the server's files.** The server replaces `roster.status.json` and `applied-roster.toml` by a tmp-then-rename (`lib.rs` `atomic_write`, `write_durable`). A handle without delete sharing would make that rename fail. So every read of those two files (and of pc.toml) opens with `[IO.File]::Open(p, 'Open', 'Read', 'ReadWrite, Delete')` (`read_shared`, `sha_shared`), never `ReadAllText`, `Get-Content` or `Get-FileHash`; `hash_check`'s `Get-FileHash` reads only the tool's own files (the upload, `.new`, `.prev`, `roster.toml`, which the server never replaces). A read that fails in the instant of a rename counts as "not now".
 - **What `roster.status.json` can say** (`roster_watch::Status`, `outcome`):
-  - `applied: true`: in use (exit 0). `ok: false` with `problems` names what failed after it went into use, such as an archive move.
+  - `applied: true`: in use (exit 0). `ok: false` with `problems` names what failed after it went into use, such as a removed person's file that could not be deleted (`person '<id>' was not removed: <kind>`).
   - `applied: false`: refused (exit 1). Its problems end with "in use instead: the roster applied last" while the server runs on its fallback.
   - The server writes **no** status for a Deferred roster (an engine not synced, a switch a restart cut short; it reads the file again every 2 s) or for the roster already in use. The wait (`WAIT_S` 20 s, a read every `POLL_S`) then ends "not applied within 20 s", naming what the status held (exit 1).
   - When the applied roster's sha256 is the upload's, the result is `unchanged` at once, whatever a later refusal wrote into the status.
