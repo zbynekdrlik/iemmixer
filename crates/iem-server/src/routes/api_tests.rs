@@ -14,12 +14,7 @@ pub(crate) fn token(sub: &str, engineer: bool) -> String {
         exp: u64::MAX / 2,
         iat: 0,
     };
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
-        &claims,
-        &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
-    )
-    .unwrap()
+    iem_core::jwt::encode_hs256(&claims, SECRET.as_bytes()).unwrap()
 }
 
 /// A state without an engine (tokens signed with [`SECRET`]) and its API.

@@ -8,6 +8,8 @@ pub mod backup;
 pub mod band;
 #[cfg(feature = "config")]
 pub mod config;
+#[cfg(feature = "jwt")]
+pub mod jwt;
 pub mod legacy;
 pub mod lineup;
 #[cfg(feature = "config")]

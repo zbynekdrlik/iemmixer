@@ -548,7 +548,6 @@ mod tests {
 
     #[test]
     fn a_token_signed_with_the_legacy_secret_verifies() {
-        use jsonwebtoken::{EncodingKey, Header, encode};
         let dir = tempfile::tempdir().unwrap();
         let secrets = dir.path().join(SECRETS_DIR);
         let legacy = "auto-5f3a-9c1d";
@@ -561,12 +560,7 @@ mod tests {
             exp,
             iat: exp - 7200,
         };
-        let token = encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(legacy.as_bytes()),
-        )
-        .unwrap();
+        let token = iem_core::jwt::encode_hs256(&claims, legacy.as_bytes()).unwrap();
         let got = crate::auth::extract_claims(&token, &loaded.jwt_secret).unwrap();
         assert_eq!(got.sub, "member1");
     }

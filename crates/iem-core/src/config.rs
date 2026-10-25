@@ -311,14 +311,14 @@ impl Config {
     #[cfg(feature = "vapid")]
     pub fn vapid_public_key_base64url(private_key_b64: &str) -> Result<String, ConfigError> {
         use base64::Engine;
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        use p256::elliptic_curve::sec1::ToSec1Point;
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(private_key_b64)
             .map_err(|e| ConfigError::Io(format!("invalid VAPID key base64: {}", e)))?;
         let sk = p256::SecretKey::from_slice(&raw)
             .map_err(|e| ConfigError::Io(format!("invalid VAPID P-256 key: {}", e)))?;
         let pk = sk.public_key();
-        let point = pk.to_encoded_point(false);
+        let point = pk.to_sec1_point(false);
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(point.as_bytes()))
     }
 
@@ -708,6 +708,29 @@ mod tests {
         assert!(constant_time_eq("1234", "1234"));
         assert!(!constant_time_eq("1234", "1235"));
         assert!(!constant_time_eq("123", "1234"));
+    }
+
+    /// The browser's `applicationServerKey`: the uncompressed SEC1 point of
+    /// the VAPID scalar, base64url. Known answer for the synthetic scalar
+    /// 0x07…07, computed with OpenSSL (Python's `cryptography`).
+    #[cfg(feature = "vapid")]
+    #[test]
+    fn the_vapid_public_point_is_the_uncompressed_sec1_point() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let point = Config::vapid_public_key_base64url(&b64.encode([7u8; 32])).unwrap();
+        assert_eq!(
+            point,
+            "BB4YUy_UdUwC8wQdnHXOszuD_9gax85P6ILMscmLxYlupGwxHE4v9A3ZajZT5uRURdMt_khuztdcepDGoYiBwKM"
+        );
+        assert_eq!(b64.decode(point.as_bytes()).unwrap().len(), 65);
+        for bad in [
+            b64.encode([0u8; 32]),
+            b64.encode([7u8; 16]),
+            "not base64!".into(),
+        ] {
+            assert!(Config::vapid_public_key_base64url(&bad).is_err(), "{bad}");
+        }
     }
 }
 

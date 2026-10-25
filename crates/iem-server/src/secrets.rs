@@ -72,7 +72,8 @@ fn new_jwt_secret() -> String {
 }
 
 fn new_vapid_private_key() -> String {
-    URL_SAFE_NO_PAD.encode(p256::SecretKey::random(&mut OsRng).to_bytes())
+    use p256::elliptic_curve::Generate;
+    URL_SAFE_NO_PAD.encode(p256::SecretKey::generate().to_bytes())
 }
 
 fn read_or_create(path: &Path, generate: fn() -> String) -> io::Result<String> {

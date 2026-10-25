@@ -9,9 +9,11 @@ description = "iemmixer soak harness (S7): one mixer socket and one listen socke
 
 [dependencies]
 # On the PC the client signs its own engineer token with the server's JWT
-# secret (#10 decision, 2026-10-07): the server's own crate, version and
-# backend (rust_crypto: pure-Rust HS256; RSA is never used).
-jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
+# secret (#10 decision, 2026-10-07): the server's own HS256 (`iem_core::jwt`,
+# #74). The tests also pin this client's wire forms to the server's wire
+# types in iem-core (UI protocol, ClientMsg, ServerMsg, SiteLinks); the
+# client links no server crate. Without defaults, as iem-ui uses it.
+iem-core = { path = "../iem-core", default-features = false, features = ["jwt"] }
 # The listen frames are the server's Opus (X4); the server's own codec crate.
 opus = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -26,10 +28,6 @@ ureq = { version = "3.4", default-features = false }
 iem-win = { path = "../iem-win" }
 
 [dev-dependencies]
-# The server's own wire types (UI protocol, ClientMsg, ServerMsg, SiteLinks):
-# the tests pin this client's wire forms to them. Tests only: the client
-# links no server crate. Without defaults, as iem-ui uses it.
-iem-core = { path = "../iem-core", default-features = false }
 # A listen frame's 960 samples are the engine's FRAME_48K (tally's test).
 iem-engine-proto = { path = "../iem-engine-proto" }
 # write_summary's tests (a temporary directory), as the other crates use it.

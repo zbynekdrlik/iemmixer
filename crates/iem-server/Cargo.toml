@@ -9,7 +9,7 @@ description = "HTTPS/WebSocket server of iemmixer"
 
 [dependencies]
 # Core library
-iem-core = { path = "../iem-core", features = ["vapid"] }
+iem-core = { path = "../iem-core", features = ["vapid", "jwt"] }
 
 # The engine protocol (MIT OR Apache-2.0; the GPL engine is a separate process)
 iem-engine-proto = { path = "../iem-engine-proto" }
@@ -25,10 +25,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 
 # HTTP client (Web Push, public-IP detection)
 reqwest = { version = "0.12", features = ["json"] }
-
-# JWT authentication
-# rust_crypto: pure-Rust HS256 (auth) and ES256 (VAPID); RSA is never used
-jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
 
 # Serialization (float_roundtrip: a backup, preset or snapshot reads back
 # with exactly the values that were written)
@@ -64,10 +60,12 @@ bytes = { version = "1", optional = true }
 opus = { version = "0.4", optional = true }
 
 # Web Push notifications (RFC 8291 + VAPID) — pure Rust, no OpenSSL
-p256 = { version = "0.13", features = ["ecdh", "pkcs8"] }
-aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
+p256 = { version = "0.14", features = ["ecdh"] }
+aes-gcm = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
+# argon2's salt (password-hash 0.5 takes a rand_core 0.6 RNG) and the
+# secrets' random bytes; p256 0.14 draws its keys from the OS itself
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 url = "2"
