@@ -162,8 +162,10 @@ fn parse_error(text: &str, e: &toml::de::Error) -> String {
 }
 
 /// A member-style id that is lower case: what a person id and a
-/// `takes_over` id must be.
-fn lower_member_id(id: &str) -> bool {
+/// `takes_over` id must be. The server removes a person's data only under
+/// such an id (#58 review: on case-insensitive NTFS `Member3`'s files are
+/// `member3`'s).
+pub fn valid_person_id(id: &str) -> bool {
     validate_member_id(id).is_ok() && !id.chars().any(|c| c.is_ascii_uppercase())
 }
 
@@ -190,7 +192,7 @@ fn unquoted(value: &str, valid: bool, n: usize) -> String {
 /// A set's wearer or an input's owner as a problem names it: `'<id>'`, or
 /// `fallback` when it is no person id.
 fn someone(id: &str, fallback: &str) -> String {
-    if lower_member_id(id) {
+    if valid_person_id(id) {
         format!("'{id}'")
     } else {
         fallback.to_string()
@@ -236,7 +238,7 @@ impl Roster {
         let mut out = Vec::new();
         let mut ids = HashSet::new();
         let person = |i: usize, p: &Person| {
-            format!("person {}", quoted(&p.id, lower_member_id(&p.id), i + 1))
+            format!("person {}", quoted(&p.id, valid_person_id(&p.id), i + 1))
         };
         // A roster without people removes everyone (#58 review).
         if self.people.is_empty() {
@@ -244,7 +246,7 @@ impl Roster {
         }
         for (i, p) in self.people.iter().enumerate() {
             let who = person(i, p);
-            if !lower_member_id(&p.id) {
+            if !valid_person_id(&p.id) {
                 out.push(format!(
                     "{who}: the id must be lower-case a-z 0-9 _ -, at least one"
                 ));
@@ -265,7 +267,7 @@ impl Roster {
                 continue;
             };
             let who = person(i, p);
-            if !lower_member_id(t) || t == p.id || t == ENGINEER {
+            if !valid_person_id(t) || t == p.id || t == ENGINEER {
                 out.push(format!(
                     "{who}: takes_over must be another member's lower-case id"
                 ));
@@ -307,7 +309,7 @@ impl Roster {
             }
             for (k, leader) in l.leaders.iter().enumerate() {
                 if !placed.contains(leader.as_str()) {
-                    let who = quoted(leader, lower_member_id(leader), k + 1);
+                    let who = quoted(leader, valid_person_id(leader), k + 1);
                     out.push(format!("{lineup}: leader {who} wears no set of it"));
                 }
             }
@@ -369,7 +371,7 @@ impl Roster {
                 let Some(set) = l.set_of(leader) else {
                     continue; // problems() names a leader without a set
                 };
-                let who = unquoted(leader, lower_member_id(leader), k + 1);
+                let who = unquoted(leader, valid_person_id(leader), k + 1);
                 let n = sets.iter().position(|s| s.as_str() == set).unwrap_or(0) + 1;
                 let own = unquoted(set, valid_id(set), n);
                 let hears = mix(set).map(|m| m.hears.as_slice()).unwrap_or_default();

@@ -39,7 +39,7 @@ use std::time::{Duration, SystemTime};
 
 use iem_core::backup::MixerBackup;
 use iem_core::config::Config;
-use iem_core::roster::{Lineup, ROSTER_FILE, Roster, TopologyFacts, site_facts};
+use iem_core::roster::{Lineup, ROSTER_FILE, Roster, TopologyFacts, site_facts, valid_person_id};
 use iem_engine_proto::shape;
 use iem_engine_proto::{Cmd, MixId, MixState, TopologyInfo, Transient};
 use serde::{Deserialize, Serialize};
@@ -262,6 +262,11 @@ fn missing_active(active: &str) -> String {
     format!("the roster has no lineup '{active}', which plays: switch to a lineup it keeps first")
 }
 
+/// The problem of a live PIN whose id is no lower-case person id: it is
+/// kept (#58 review: on case-insensitive NTFS its photo and files would be
+/// a person's), and the PIN store's file needs a look by hand.
+const NOT_A_PERSON_ID: &str = "a PIN hash whose id is no lower-case person id was not removed";
+
 /// What [`follow_people`] did, in ids.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct People {
@@ -301,6 +306,13 @@ pub fn follow_people(
     }
     for id in &gone {
         if id == ENGINEER_ID || roster.person(id).is_some() {
+            continue;
+        }
+        if !valid_person_id(id) {
+            // Only a PIN entry can be one (the roster's people are valid
+            // ids); never echoed, it may be a name (P6).
+            tracing::error!("{NOT_A_PERSON_ID}");
+            out.problems.push(NOT_A_PERSON_ID.to_string());
             continue;
         }
         match remove_person(config_dir, pins, id) {

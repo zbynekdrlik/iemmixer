@@ -10,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use iem_core::roster::valid_lineup_id;
+use iem_core::roster::{valid_lineup_id, valid_person_id};
 
 use crate::lineup_store::{KINDS, LINEUPS_DIR};
 use crate::photo_store::PhotoStore;
@@ -54,12 +54,20 @@ fn files_of(root: &Path, id: &str) -> io::Result<Vec<(String, &'static str, Path
 
 /// Removes `id`: their PIN hash first (no login while their files go),
 /// then their photo and every lineup's files of theirs. `false` when
-/// nothing of theirs was found (nothing is written). The engineer, or an
-/// id that is no member id, is refused (`InvalidInput`) by the PIN store
-/// before anything is deleted. A photo or file that cannot be deleted is
-/// logged and the others are deleted all the same; then the first such
-/// error is returned, so the caller names the person as not removed.
+/// nothing of theirs was found (nothing is written). An id that is no
+/// lower-case person id (`roster::valid_person_id`; on case-insensitive
+/// NTFS `Member3`'s files are `member3`'s), or the engineer (by the PIN
+/// store), is refused (`InvalidInput`, the id not echoed) before anything
+/// is deleted. A photo or file that cannot be deleted is logged and the
+/// others are deleted all the same; then the first such error is returned,
+/// so the caller names the person as not removed.
 pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Result<bool> {
+    if !valid_person_id(id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a removal takes a lower-case person id only",
+        ));
+    }
     let pin = pins.remove_member(id)?;
     let mut failed: Option<io::Error> = None;
     let photo = match PhotoStore::new(config_dir).remove(id) {
