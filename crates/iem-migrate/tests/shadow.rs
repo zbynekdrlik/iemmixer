@@ -116,8 +116,14 @@ fn the_shadow_of_the_imported_project_is_clean_and_writes_nothing() {
     let dir = w.imported();
     let (state, project) = (tree(&dir), std::fs::read(&w.rpp).unwrap());
     // A running engine's lock never stops it: the shadow takes no lock.
+    // The import just released the directory's lock; another test's child
+    // process forked in that moment can hold the lock's file a moment
+    // longer (CI run 40220705962), so take it as an engine takes it after
+    // a restart: waiting a moment (`lock_within`).
     let store = Store::open(&dir).unwrap();
-    let lock = store.lock().unwrap();
+    let lock = store
+        .lock_within(std::time::Duration::from_secs(5))
+        .unwrap();
     let r = w.shadow(&dir);
     drop(lock);
     assert_eq!(
