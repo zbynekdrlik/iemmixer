@@ -4,7 +4,7 @@ use iem_engine_proto::MixId;
 
 use crate::AppState;
 use crate::engine::client::fake;
-use crate::site_view::tests::{test_config, test_topology};
+use crate::site_view::tests::{departed_site, test_config, test_topology};
 
 /// The test roster (`config/test-roster.toml`) with `active` playing.
 pub(crate) fn test_roster(active: &str) -> RosterState {
@@ -45,6 +45,32 @@ pub(crate) fn departed_roster(active: &str) -> RosterState {
     RosterState {
         roster: Arc::new(roster),
         sha256: "departed-roster".into(),
+        active: active.into(),
+    }
+}
+
+/// The test site's people's equipment as a roster's `[equipment]` table
+/// (#58, the last step of point 2): member1 ... member9's sets and their
+/// inputs mic1 ... mic10 (mic5 is member4's guitar); `keys` is nobody's.
+pub(crate) const EQUIPMENT: &str = "\n[equipment]\n\
+    sets = [\"member1\", \"member2\", \"member3\", \"member4\", \"member5\", \"member6\", \"member7\", \"member8\", \"member9\"]\n\
+    inputs = [\"mic1\", \"mic2\", \"mic3\", \"mic4\", \"mic5\", \"mic6\", \"mic7\", \"mic8\", \"mic9\", \"mic10\"]\n";
+
+/// `text` (a roster) with [`EQUIPMENT`]: the roster declares the people's
+/// equipment, so the site's legacy person entries are no longer read.
+pub(crate) fn equipped_text(text: &str) -> String {
+    format!("{text}{EQUIPMENT}")
+}
+
+/// [`departed_text`] with [`EQUIPMENT`] (member9 left; their set member9
+/// and their mic10 are still equipment) and `active` playing.
+pub(crate) fn equipped_departed(active: &str) -> RosterState {
+    let roster = Roster::parse(&equipped_text(&departed_text()))
+        .expect("the roster without member9, with [equipment]");
+    assert_eq!(roster.problems(), Vec::<String>::new());
+    RosterState {
+        roster: Arc::new(roster),
+        sha256: "equipped-departed-roster".into(),
         active: active.into(),
     }
 }
@@ -177,6 +203,99 @@ fn the_site_owner_counts_only_when_no_lineup_owns_the_input() {
     );
     let gone = departed_roster("youth");
     assert!(foreign_input(&cfg, &gone.roster, gone.lineup(), "mic10"));
+}
+
+/// #58, the last step of point 2: with `[equipment]` a person's set is
+/// exactly one it lists. The site's legacy `[[members]]` are not read: a
+/// departed person's set stays one on a site without their entry, and a
+/// site member's set the equipment leaves out is none.
+#[test]
+fn with_equipment_the_person_sets_are_its_sets() {
+    let nine: BTreeSet<String> = (1..=9).map(|n| format!("member{n}")).collect();
+    let gone = equipped_departed("main");
+    assert_eq!(person_sets(&departed_site(), &gone.roster), nine);
+    assert_eq!(person_sets(&Config::default(), &gone.roster), nine);
+    // Without [equipment] (today's rule) that site leaves member9 out.
+    assert!(!person_sets(&departed_site(), &departed_roster("main").roster).contains("member9"));
+    // A set the site's members name and the equipment does not is none.
+    let mut fewer = equipped_departed("main");
+    Arc::make_mut(&mut fewer.roster)
+        .equipment
+        .as_mut()
+        .unwrap()
+        .sets
+        .retain(|s| s != "member9");
+    assert_eq!(fewer.roster.problems(), Vec::<String>::new());
+    let eight = person_sets(&test_config(), &fewer.roster);
+    assert_eq!(eight.len(), 8);
+    assert!(!eight.contains("member9"), "the site's member9 is not read");
+}
+
+/// #58, the last step of point 2: with `[equipment]` an input is foreign to
+/// the active lineup exactly when it is listed there and the lineup does
+/// not list it. The site's `[[inputs]]` owners are not read: the departed
+/// member9's mic10 stays hidden without its site owner, and a site owner of
+/// an input the equipment does not list hides nothing. So a lineup lists
+/// every person's input it shows: youth, which does not list member3's
+/// mic3, hides it while it plays; once youth lists it, it shows.
+#[test]
+fn with_equipment_an_input_is_foreign_when_listed_and_not_the_lineups() {
+    let site = departed_site();
+    let foreign =
+        |cfg: &Config, r: &RosterState, id: &str| foreign_input(cfg, &r.roster, r.lineup(), id);
+    let youth = equipped_departed("youth");
+    for id in [
+        "mic2", "mic3", "mic5", "mic6", "mic7", "mic8", "mic9", "mic10",
+    ] {
+        assert!(foreign(&site, &youth, id), "youth: {id}");
+    }
+    for id in ["mic1", "mic4", "eng_mic", "keys", "hand1", "drums"] {
+        assert!(!foreign(&site, &youth, id), "youth: {id}");
+    }
+    let main = equipped_departed("main");
+    assert!(foreign(&site, &main, "mic10"));
+    for id in ["mic1", "mic5", "mic9", "eng_mic", "keys"] {
+        assert!(!foreign(&site, &main, id), "main: {id}");
+    }
+    // The site's owners are not read: mic10's, nor one given to keys.
+    let mut owned = test_config();
+    for m in owned.inputs.iter_mut() {
+        if m.id == "keys" {
+            m.owner = Some("member2".into());
+        }
+    }
+    assert!(
+        !foreign(&owned, &youth, "keys"),
+        "keys is no person's input"
+    );
+    let owners = |cfg: &Config, id: &str| -> Vec<String> {
+        input_owners(cfg, &youth.roster, id)
+            .map(String::from)
+            .collect()
+    };
+    assert!(owners(&owned, "keys").is_empty());
+    assert!(
+        owners(&test_config(), "mic10").is_empty(),
+        "no lineup owns mic10"
+    );
+    assert_eq!(owners(&owned, "mic1"), ["member1", "member10"]);
+    // Youth lists member3's mic3: it shows while youth plays.
+    let mut listed = equipped_departed("youth");
+    Arc::make_mut(&mut listed.roster)
+        .lineups
+        .iter_mut()
+        .find(|l| l.id == "youth")
+        .unwrap()
+        .inputs
+        .insert(
+            "mic3".into(),
+            iem_core::roster::LineupInput {
+                name: "MEMBER3 mic".into(),
+                owner: Some("member3".into()),
+            },
+        );
+    assert_eq!(listed.roster.problems(), Vec::<String>::new());
+    assert!(!foreign(&site, &listed, "mic3"));
 }
 
 #[test]
