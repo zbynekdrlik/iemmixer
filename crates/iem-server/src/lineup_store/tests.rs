@@ -641,6 +641,67 @@ fn a_former_member_who_is_back_is_not_archived_when_the_work_is_finished() {
     assert!(!d.join(PENDING_FILE).exists());
 }
 
+/// The PIN store's file under `dir` as it is on disk.
+fn pin_file(dir: &Path) -> String {
+    read(&dir.join("secrets").join(crate::pin_store::PIN_HASHES_FILE))
+}
+
+/// #58, the owner's ruling (2026-10-24): a former member who is no person
+/// is removed by the migration, not archived: their files (legacy and
+/// staged), photo and PIN hash are deleted.
+#[test]
+fn the_migration_deletes_a_former_member_and_archives_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for id in ["member1", "member9"] {
+        legacy_files(d, id, &KINDS);
+        photo(d, id);
+    }
+    let mut pins = pins(d, &["member1", "member9"]);
+    let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
+    assert_eq!(report.removed, ["member9"]);
+    let main = d.join(LINEUPS_DIR).join("main");
+    for kind in KINDS {
+        assert!(!d.join(file_of(kind, "member9")).exists(), "{kind}");
+        assert!(!main.join(file_of(kind, "member9")).exists(), "{kind}");
+        assert_eq!(
+            read(&main.join(file_of(kind, "member1"))),
+            format!("{kind} of member1")
+        );
+    }
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert!(d.join("photos").join("member1.jpg").exists());
+    assert!(!d.join("archive").exists(), "nothing is archived");
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!pin_file(d).contains("member9"), "{}", pin_file(d));
+    assert_eq!(pins.member_hash("member1"), Some(PHC));
+}
+
+/// A committed migration's pending file an older server wrote names the
+/// former members to archive (`archive`): the next call deletes them.
+#[test]
+fn an_older_pending_files_former_members_are_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    LineupStore::new(d).set_active("main", 1).unwrap();
+    put_in(d, "lineups/main/presets/member9.json", "presets of member9");
+    photo(d, "member9");
+    let mut pins = pins(d, &["member9"]);
+    put_in(
+        d,
+        PENDING_FILE,
+        r#"{"format":"iemmixer-migration","delete":[],"archive":["member9"]}"#,
+    );
+    let report = migrate_legacy(d, &roster_without("member9"), &test_config(), &mut pins).unwrap();
+    assert_eq!(report.removed, ["member9"]);
+    assert!(!d.join("lineups/main/presets/member9.json").exists());
+    assert!(!d.join("photos").join("member9.jpg").exists());
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!pin_file(d).contains("member9"));
+    assert!(!d.join("archive").exists());
+    assert!(!d.join(PENDING_FILE).exists());
+}
+
 #[test]
 fn a_roster_with_problems_or_a_takeover_of_a_person_migrates_nothing() {
     let dir = tempfile::tempdir().unwrap();
