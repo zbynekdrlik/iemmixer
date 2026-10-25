@@ -4,7 +4,8 @@
 //! beside the site file holds it (P6: this repository has only the synthetic
 //! `config/test-roster.toml`); without the file the server runs as before
 //! (legacy mode). Sets and inputs are the site's `[engine]` hardware, never
-//! declared here.
+//! declared here; the optional `[equipment]` table only says which of them
+//! are people's ([`Equipment`]).
 //!
 //! Validation lists every problem together, in ids only (never a name): on
 //! its own ([`Roster::problems`]) and against the engine's topology
@@ -35,6 +36,27 @@ pub const MAX_LINEUP_ID: usize = 32;
 pub struct Roster {
     pub people: Vec<Person>,
     pub lineups: Vec<Lineup>,
+    /// Which sets and inputs are people's; `None`: the site's legacy
+    /// `[[members]]` and `[[inputs]]` owners still say it.
+    #[serde(default)]
+    pub equipment: Option<Equipment>,
+}
+
+/// The people's equipment of the site (#58, the last step of point 2: the
+/// roster declares it, so the site's legacy person entries can go): every
+/// in-ear set, worn or not, and every input that belongs to a person (a
+/// mic, a player's instrument). With it a listed set nobody wears in the
+/// active lineup is vacant, and a listed input shows only while the active
+/// lineup lists it; the server then reads no person from the site's
+/// `[[members]]` (but the engineer's entry) or `[[inputs]]` owners
+/// (`roster_state` in iem-server). Ids are the site's `[engine]` ones.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Equipment {
+    /// Every in-ear set (an engine mix id): an equipment slot, worn or not.
+    pub sets: Vec<String>,
+    /// Every input (an engine input id) that belongs to a person.
+    pub inputs: Vec<String>,
 }
 
 /// A person: the id is the login, the URL and the key of the PIN, the photo
