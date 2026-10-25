@@ -46,36 +46,21 @@ impl PhotoStore {
     }
 
     /// The photo's path, or an error for an id that is no member id (never
-    /// a panic: the archive gets ids from files on disk).
+    /// a panic: a removal gets ids from files on disk).
     fn checked_path(&self, member_id: &str) -> std::io::Result<PathBuf> {
         iem_core::config::validate_member_id(member_id)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         Ok(self.photos_dir.join(format!("{member_id}.jpg")))
     }
 
-    /// Moves the member's photo to `dest` (the people archive, #58);
-    /// `false` when there is none.
-    pub fn move_to(&self, member_id: &str, dest: &std::path::Path) -> std::io::Result<bool> {
+    /// Deletes the member's photo (a person the roster removes, #58);
+    /// `false` when there is none. A bad id is an error, never a panic.
+    pub fn remove(&self, member_id: &str) -> std::io::Result<bool> {
         let path = self.checked_path(member_id)?;
         if !path.try_exists()? {
             return Ok(false);
         }
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(path, dest)?;
-        Ok(true)
-    }
-
-    /// Moves `src` back as the member's photo unless they have one again;
-    /// `true` when it moved.
-    pub fn restore_from(&self, member_id: &str, src: &std::path::Path) -> std::io::Result<bool> {
-        let path = self.checked_path(member_id)?;
-        if !src.try_exists()? || path.try_exists()? {
-            return Ok(false);
-        }
-        std::fs::create_dir_all(&self.photos_dir)?;
-        std::fs::rename(src, path)?;
+        std::fs::remove_file(path)?;
         Ok(true)
     }
 }

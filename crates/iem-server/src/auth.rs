@@ -127,7 +127,7 @@ async fn with_hasher<T: Send + 'static>(
 /// Whether `member` logs in and owns a PIN: legacy, a site member; roster
 /// mode (#58), a person of the roster, whether they play in the band that
 /// plays or not, or the site's engineer. A person the roster no longer
-/// holds (archived) is nobody.
+/// holds (removed) is nobody.
 pub(crate) fn member_exists(state: &AppState, member: &str) -> bool {
     match state.roster() {
         Some(r) => {

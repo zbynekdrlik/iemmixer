@@ -29,9 +29,12 @@ struct PinFile {
     /// predecessor's PIN and was not changed in iemmixer since.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     imported: BTreeSet<String>,
-    /// Hashes of archived people (#58 decision 6), member id → hash: kept
-    /// for their return, never a login.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Hashes an older server kept for the people it archived (#58
+    /// decision 6, overruled by the owner on 2026-10-24: a removed person is
+    /// removed, not archived), member id → hash. Read only to be deleted
+    /// ([`PinStore::drop_archived`]): never a login, counted nowhere and
+    /// never written back.
+    #[serde(default, skip_serializing)]
     archived: BTreeMap<String, String>,
 }
 
@@ -82,45 +85,42 @@ impl PinStore {
         if let Some(phc) = &file.engineer {
             check_phc(ENGINEER_ID, phc)?;
         }
+        // Never plaintext, the hashes an older server archived included: a
+        // file holding anything else is an error, never read as nobody.
         for (member, phc) in file.members.iter().chain(&file.archived) {
             check_phc(member, phc)?;
         }
         Ok(Self { file, path })
     }
 
-    /// An archived person's hash (never one a login reads).
-    pub fn archived_hash(&self, member_id: &str) -> Option<&str> {
-        self.file.archived.get(member_id).map(String::as_str)
-    }
-
-    /// Moves a member's hash to the archive (#58 decision 6): no login
-    /// finds it, a restore brings it back. Its import mark goes: a restored
-    /// hash counts as set in iemmixer. `false` when there is none.
-    pub fn archive_member(&mut self, member_id: &str) -> io::Result<bool> {
+    /// Deletes a member's hash and its import mark (#58: a person the
+    /// roster removes is removed, nothing of theirs kept). `false` when
+    /// there is none (nothing is written).
+    pub fn remove_member(&mut self, member_id: &str) -> io::Result<bool> {
         check_member(member_id)?;
-        let Some(phc) = self.file.members.remove(member_id) else {
+        if self.file.members.remove(member_id).is_none() {
             return Ok(false);
-        };
-        self.file.archived.insert(member_id.to_string(), phc);
+        }
         self.file.imported.remove(member_id);
         self.save()?;
         Ok(true)
     }
 
-    /// Brings an archived hash back. A hash set since (the engineer's reset
-    /// for the returning person) is kept and the archived one dropped.
-    /// `true` when the archived hash is the member's again.
-    pub fn restore_member(&mut self, member_id: &str) -> io::Result<bool> {
-        check_member(member_id)?;
-        let Some(phc) = self.file.archived.remove(member_id) else {
-            return Ok(false);
-        };
-        let restored = !self.file.members.contains_key(member_id);
-        if restored {
-            self.file.members.insert(member_id.to_string(), phc);
+    /// Deletes the hashes an older server archived (#58: a removed person
+    /// is removed); their ids, in id order. Nothing is written when there
+    /// are none; a write that fails keeps them for the next try.
+    pub fn drop_archived(&mut self) -> io::Result<Vec<String>> {
+        if self.file.archived.is_empty() {
+            return Ok(Vec::new());
         }
-        self.save()?;
-        Ok(restored)
+        let kept = std::mem::take(&mut self.file.archived);
+        if let Err(e) = self.save() {
+            self.file.archived = kept;
+            return Err(e);
+        }
+        let ids: Vec<String> = kept.into_keys().collect();
+        tracing::info!(people = ?ids, "the PIN hashes an older server archived are deleted");
+        Ok(ids)
     }
 
     pub fn engineer_hash(&self) -> Option<&str> {
@@ -131,18 +131,16 @@ impl PinStore {
         self.file.members.get(member_id).map(String::as_str)
     }
 
-    /// Every member with a live PIN hash (not the engineer, not an
-    /// archived one), in id order.
+    /// Every member with a live PIN hash (not the engineer), in id order.
     pub fn member_ids(&self) -> Vec<String> {
         self.file.members.keys().cloned().collect()
     }
 
-    /// Whether any PIN hash (engineer, member or archived) is stored: a new
-    /// pepper would void each of them.
+    /// Whether any PIN hash (engineer or member) is stored: a new pepper
+    /// would void each of them. The hashes an older server archived count
+    /// for nothing: none of them is ever checked again.
     pub fn has_hashes(&self) -> bool {
-        self.file.engineer.is_some()
-            || !self.file.members.is_empty()
-            || !self.file.archived.is_empty()
+        self.file.engineer.is_some() || !self.file.members.is_empty()
     }
 
     /// Whether `owner`'s hash (a member id or `engineer`) came from an import.

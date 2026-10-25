@@ -22,7 +22,7 @@ pub mod meters;
 pub mod mixer_ws;
 pub mod notify;
 pub mod peer_route;
-pub mod people_archive;
+pub mod people_removal;
 pub mod pepper;
 pub mod photo_store;
 pub mod pin_hash;

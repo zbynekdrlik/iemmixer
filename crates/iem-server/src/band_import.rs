@@ -170,9 +170,6 @@ pub enum PinOutcome {
     Unchanged,
     /// A PIN set in iemmixer is kept (never overwritten by an import).
     KeptIemmixerPin,
-    /// The member is archived (#58): their hash stays in the archive and no
-    /// import gives them a login.
-    Archived,
 }
 
 /// Hashes and stores the PINs in `secrets_dir` with the installation's pepper.
@@ -202,7 +199,6 @@ pub fn import_pins(
         }
         .map(str::to_owned);
         let outcome = match (&existing, &hasher) {
-            _ if store.archived_hash(&r.owner).is_some() => PinOutcome::Archived,
             (Some(_), _) if !store.is_imported(&r.owner) => PinOutcome::KeptIemmixerPin,
             (Some(phc), Some(h)) if h.verify(&r.pin, phc) => PinOutcome::Unchanged,
             (_, Some(h)) if !dry_run => {

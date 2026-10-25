@@ -580,7 +580,6 @@ impl<'a> Plan<'a> {
                 PinOutcome::Set => "set",
                 PinOutcome::Unchanged => "unchanged",
                 PinOutcome::KeptIemmixerPin => "kept (set in iemmixer)",
-                PinOutcome::Archived => "skipped (archived)",
             };
             self.report.push(format!("pin {owner}: {what}"));
         }

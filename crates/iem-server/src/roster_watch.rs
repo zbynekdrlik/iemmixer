@@ -16,8 +16,9 @@
 //! on every set ([`fit_recorded`]: a set worn by no leader hears no other mix, a set
 //! nobody wears is silent), in every inactive lineup's stored state and in
 //! the active lineup's running one through one `ImportState`, before the new
-//! roster is swapped in; then people it removed are archived and people it
-//! brings back restored ([`follow_people`]).
+//! roster is swapped in; then the people it removed are removed for good,
+//! their PIN hash, photo and files deleted ([`follow_people`]; a person added
+//! again starts fresh).
 //!
 //! A roster that comes into use without a synced engine (the start, a
 //! legacy server's adoption) is `AppState::unsettled` until [`settle`] has
@@ -49,7 +50,7 @@ use crate::engine::client::EngineError;
 use crate::lineup_store::{
     ACTIVE_FILE, LineupStore, Pending, Running, SWITCH_FILE, migrate_legacy, migration_problems,
 };
-use crate::people_archive::{ARCHIVE_DIR, archive_person, restore_person};
+use crate::people_removal::remove_person;
 use crate::pin_store::{ENGINEER_ID, PinStore};
 use crate::roster_state::RosterState;
 
@@ -148,10 +149,11 @@ pub struct Status {
     pub at: i64,
     /// Why it was refused, or what failed once it was applied.
     pub problems: Vec<String>,
-    /// People it brought (back) into use.
+    /// People it brought into use (new ones: nothing of a person removed
+    /// before comes back).
     #[serde(default)]
     pub added: Vec<String>,
-    /// People it took out of use (archived).
+    /// People it took out of use (removed: their data deleted).
     #[serde(default)]
     pub removed: Vec<String>,
 }
@@ -193,7 +195,7 @@ pub enum Applied {
     /// The roster in use already (same SHA-256): nothing done.
     Unchanged,
     /// In use now. `added` and `removed` are people (ids); `problems` what
-    /// failed after it went into use (an archive move).
+    /// failed after it went into use (a removed person's file not deleted).
     Applied {
         added: Vec<String>,
         removed: Vec<String>,
@@ -263,17 +265,20 @@ fn missing_active(active: &str) -> String {
 /// What [`follow_people`] did, in ids.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct People {
-    pub restored: Vec<String>,
+    /// Whom it removed (something of theirs was deleted).
     pub removed: Vec<String>,
-    /// A move that failed (the person and the error's kind).
+    /// A removal that failed (the person and the error's kind).
     pub problems: Vec<String>,
 }
 
-/// The people archive follows `roster` (#58 decision 6): everyone in
-/// `removed`, and anyone else with a live PIN, who is no person of it (nor
-/// the engineer) is archived; every person of it with something in the
-/// archive gets it back. A failure is named in `problems`; the rest still
-/// runs.
+/// The people's data follows `roster` (#58; the owner's ruling of
+/// 2026-10-24: a removed person is removed, not archived and not hidden):
+/// everyone in `removed`, and anyone else with a live PIN, who is no person
+/// of it (nor the engineer) is removed ([`remove_person`]: their PIN hash,
+/// photo and every lineup's files deleted), and the PIN hashes an older
+/// server archived are deleted. Nothing is ever brought back: a person
+/// added again starts fresh. A failure is logged and named in `problems`;
+/// the rest still runs.
 pub fn follow_people(
     config_dir: &Path,
     roster: &Roster,
@@ -281,6 +286,13 @@ pub fn follow_people(
     removed: &[String],
 ) -> People {
     let mut out = People::default();
+    if let Err(e) = pins.drop_archived() {
+        tracing::error!(error = %e, "the PIN hashes an older server archived were not deleted");
+        out.problems.push(format!(
+            "the PIN hashes an older server archived were not deleted: {}",
+            e.kind()
+        ));
+    }
     let mut gone: Vec<String> = removed.to_vec();
     for id in pins.member_ids() {
         if !gone.contains(&id) {
@@ -291,26 +303,17 @@ pub fn follow_people(
         if id == ENGINEER_ID || roster.person(id).is_some() {
             continue;
         }
-        match archive_person(config_dir, pins, id) {
+        match remove_person(config_dir, pins, id) {
             Ok(true) => out.removed.push(id.clone()),
             Ok(false) => {}
-            Err(e) => out
-                .problems
-                .push(format!("person '{id}' was not archived: {}", e.kind())),
-        }
-    }
-    for p in &roster.people {
-        let archived = pins.archived_hash(&p.id).is_some()
-            || config_dir.join(ARCHIVE_DIR).join(&p.id).exists();
-        if !archived {
-            continue;
-        }
-        match restore_person(config_dir, pins, &p.id) {
-            Ok(true) => out.restored.push(p.id.clone()),
-            Ok(false) => {}
             Err(e) => {
+                tracing::error!(
+                    person = %id,
+                    error = %e,
+                    "a person the roster removed was not wholly deleted"
+                );
                 out.problems
-                    .push(format!("person '{}' was not restored: {}", p.id, e.kind()))
+                    .push(format!("person '{id}' was not removed: {}", e.kind()));
             }
         }
     }
@@ -319,8 +322,9 @@ pub fn follow_people(
 
 /// Puts `roster` into use on the files' side: the legacy layout migrated
 /// (or a committed migration finished), the recorded active lineup (main
-/// before any) checked to be the roster's, the people archive following
-/// it. The roster state and what the migration and the archive did.
+/// before any) checked to be the roster's, who is no person of it removed
+/// ([`follow_people`]). The roster state and whom the migration and the
+/// removal took out.
 fn adopt(
     config_dir: &Path,
     cfg: &Config,
@@ -382,7 +386,7 @@ fn take(
 /// mode). Otherwise it must parse and have no problems (against `facts`
 /// too, when given); the legacy layout is migrated first, or a committed
 /// migration finished; its active lineup is the recorded one and must be
-/// the roster's; the people archive follows it. A `roster.toml` that cannot
+/// the roster's; who is no person of it is removed. A `roster.toml` that cannot
 /// be used, or none, beside a recorded roster (`LineupStore::applied_roster`,
 /// the one the states follow) starts with that one (#58 review: a server
 /// that does not start is the worst outcome; [`Loaded::fallback`]). The
@@ -405,13 +409,13 @@ pub fn load(
                     tracing::info!(
                         lineup = %state.active,
                         people = state.roster.people.len(),
-                        restored = people.restored.len(),
-                        archived = people.removed.len(),
+                        removed = people.removed.len(),
+                        problems = people.problems.len(),
                         "roster mode"
                     );
                     note(
                         config_dir,
-                        &Status::applied(&sha256, people.restored, people.removed, people.problems),
+                        &Status::applied(&sha256, Vec::new(), people.removed, people.problems),
                     );
                     return Ok(Some(Loaded {
                         roster: state,
@@ -750,7 +754,7 @@ async fn adopt_live(state: &AppState, roster: Roster, text: &str, sha256: &str) 
             state.announce_lineup();
             tokio::spawn(settle_when_synced(state.clone()));
             Applied::Applied {
-                added: people.restored,
+                added: Vec::new(),
                 removed: people.removed,
                 problems: people.problems,
             }
@@ -1248,8 +1252,8 @@ async fn reload(
         added = added.len(),
         removed = removed.len(),
         moved = done.moved,
-        restored = people.restored.len(),
-        archived = people.removed.len(),
+        deleted = people.removed.len(),
+        problems = people.problems.len(),
         "roster reloaded"
     );
     Applied::Applied {
