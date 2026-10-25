@@ -4,16 +4,18 @@
 //! PIN hash, their photo and every lineup's files of theirs
 //! (`lineups/<lineup>/<kind>/<id>.json`) are deleted and nothing of theirs
 //! is kept anywhere, so a person added again starts fresh, like any new
-//! person. Logs name ids only (P6).
+//! person. What a removal could not delete is found again at the next
+//! start or reload ([`held_ids`]). Logs name ids only (P6).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use iem_core::roster::{valid_lineup_id, valid_person_id};
 
-use crate::lineup_store::{KINDS, LINEUPS_DIR};
-use crate::photo_store::PhotoStore;
+use crate::lineup_store::{KINDS, LINEUPS_DIR, retrying};
+use crate::photo_store::{PHOTO_EXT, PHOTOS_DIR, PhotoStore};
 use crate::pin_store::PinStore;
 
 /// The lineup directories under `root` (the live `lineups/`): every
@@ -35,6 +37,48 @@ fn lineup_dirs(root: &Path) -> io::Result<Vec<(String, PathBuf)>> {
         }
     }
     out.sort();
+    Ok(out)
+}
+
+/// Adds to `out` the `<stem>` of every `<stem>.<ext>` in `dir` (none when
+/// it does not exist) that is a lower-case person id; any other name (a
+/// temporary file, one an upper-case id holds: on NTFS a person's own) is
+/// never taken for anyone's.
+fn stems(dir: &Path, ext: &str, out: &mut BTreeSet<String>) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let name = entry?.file_name();
+        let Some(stem) = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(ext))
+            .and_then(|n| n.strip_suffix('.'))
+        else {
+            continue;
+        };
+        if valid_person_id(stem) {
+            out.insert(stem.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Every id whose photo (`photos/<id>.jpg`) or lineup file
+/// (`lineups/<lineup>/<kind>/<id>.json`) is on disk, lower-case person ids
+/// only, in id order: what the start and every reload look through, so a
+/// removal that failed part-way, or a person removed from the roster while
+/// the server was stopped, is deleted all the same (#58 review).
+pub fn held_ids(config_dir: &Path) -> io::Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    stems(&config_dir.join(PHOTOS_DIR), PHOTO_EXT, &mut out)?;
+    for (_, dir) in lineup_dirs(&config_dir.join(LINEUPS_DIR))? {
+        for kind in KINDS {
+            stems(&dir.join(kind), "json", &mut out)?;
+        }
+    }
     Ok(out)
 }
 
@@ -60,19 +104,25 @@ fn files_of(root: &Path, id: &str) -> io::Result<Vec<(String, &'static str, Path
 /// store), is refused (`InvalidInput`, the id not echoed) before anything
 /// is deleted. A photo or file that cannot be deleted is logged and the
 /// others are deleted all the same; then the first such error is returned,
-/// so the caller names the person as not removed.
+/// so the caller names the person as not removed. Each delete is tried
+/// again on a short-lived Windows error, as a lineup file's rename is
+/// (`lineup_store::retrying`: a scanner or the indexer holding the file);
+/// what is left after that is deleted by the next start or reload
+/// (`roster_watch::follow_people` looks through [`held_ids`]).
 pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Result<bool> {
     remove_with(config_dir, pins, id, cfg!(windows), &|path| {
         fs::remove_file(path)
     })
 }
 
-/// [`remove_person`], each photo and file deleted by `remove`.
+/// [`remove_person`], each photo and file deleted by `remove`, tried
+/// again while it fails with a transient error (`windows`: the server's
+/// OS; tests pass `true` with a `remove` that fails as Windows does).
 pub(crate) fn remove_with(
     config_dir: &Path,
     pins: &mut PinStore,
     id: &str,
-    _windows: bool,
+    windows: bool,
     remove: &dyn Fn(&Path) -> io::Result<()>,
 ) -> io::Result<bool> {
     if !valid_person_id(id) {
@@ -81,9 +131,10 @@ pub(crate) fn remove_with(
             "a removal takes a lower-case person id only",
         ));
     }
+    let delete = |path: &Path| retrying(windows, || remove(path));
     let pin = pins.remove_member(id)?;
     let mut failed: Option<io::Error> = None;
-    let photo = match PhotoStore::new(config_dir).remove(id, remove) {
+    let photo = match PhotoStore::new(config_dir).remove(id, &delete) {
         Ok(found) => found,
         Err(e) => {
             tracing::error!(person = %id, error = %e, "a removed person's photo was not deleted");
@@ -93,7 +144,7 @@ pub(crate) fn remove_with(
     };
     let mut files = 0usize;
     for (lineup, kind, path) in files_of(&config_dir.join(LINEUPS_DIR), id)? {
-        match remove(&path) {
+        match delete(&path) {
             Ok(()) => files += 1,
             Err(e) => {
                 tracing::error!(

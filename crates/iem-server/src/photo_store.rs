@@ -4,6 +4,11 @@
 
 use std::path::PathBuf;
 
+/// `<config>/photos/`: one `<member>.jpg` per member.
+pub const PHOTOS_DIR: &str = "photos";
+/// A photo's file extension.
+pub const PHOTO_EXT: &str = "jpg";
+
 /// Profile photo storage backed by per-member JPEG files
 pub struct PhotoStore {
     photos_dir: PathBuf,
@@ -11,14 +16,14 @@ pub struct PhotoStore {
 
 impl PhotoStore {
     pub fn new(config_dir: &std::path::Path) -> Self {
-        let photos_dir = config_dir.join("photos");
+        let photos_dir = config_dir.join(PHOTOS_DIR);
         Self { photos_dir }
     }
 
     fn member_path(&self, member_id: &str) -> PathBuf {
         iem_core::config::validate_member_id(member_id)
             .expect("invalid member_id passed to PhotoStore");
-        self.photos_dir.join(format!("{}.jpg", member_id))
+        self.photos_dir.join(format!("{member_id}.{PHOTO_EXT}"))
     }
 
     pub fn save(&self, member_id: &str, data: &[u8]) -> std::io::Result<()> {
@@ -50,7 +55,7 @@ impl PhotoStore {
     fn checked_path(&self, member_id: &str) -> std::io::Result<PathBuf> {
         iem_core::config::validate_member_id(member_id)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        Ok(self.photos_dir.join(format!("{member_id}.jpg")))
+        Ok(self.photos_dir.join(format!("{member_id}.{PHOTO_EXT}")))
     }
 
     /// Deletes the member's photo with `delete` (a person the roster

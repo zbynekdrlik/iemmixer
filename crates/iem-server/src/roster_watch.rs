@@ -50,7 +50,7 @@ use crate::engine::client::EngineError;
 use crate::lineup_store::{
     ACTIVE_FILE, LineupStore, Pending, Running, SWITCH_FILE, migrate_legacy, migration_problems,
 };
-use crate::people_removal::remove_person;
+use crate::people_removal::{held_ids, remove_person};
 use crate::pin_store::{ENGINEER_ID, PinStore};
 use crate::roster_state::RosterState;
 
@@ -278,12 +278,15 @@ pub struct People {
 
 /// The people's data follows `roster` (#58; the owner's ruling of
 /// 2026-10-24: a removed person is removed, not archived and not hidden):
-/// everyone in `removed`, and anyone else with a live PIN, who is no person
-/// of it (nor the engineer) is removed ([`remove_person`]: their PIN hash,
-/// photo and every lineup's files deleted), and the PIN hashes an older
-/// server archived are deleted. Nothing is ever brought back: a person
-/// added again starts fresh. A failure is logged and named in `problems`;
-/// the rest still runs.
+/// everyone in `removed`, anyone else with a live PIN, and every id that
+/// still holds a photo or a lineup's file ([`held_ids`]: a removal that
+/// failed part-way, a person removed while the server was stopped; #58
+/// review), who is no person of it (nor the engineer) is removed
+/// ([`remove_person`]: their PIN hash, photo and every lineup's files
+/// deleted), and the PIN hashes an older server archived are deleted.
+/// Nothing is ever brought back: a person added again starts fresh. A live
+/// PIN whose id is no lower-case person id is kept and named. A failure is
+/// logged and named in `problems`; the rest still runs.
 pub fn follow_people(
     config_dir: &Path,
     roster: &Roster,
@@ -298,8 +301,16 @@ pub fn follow_people(
             e.kind()
         ));
     }
+    let held = held_ids(config_dir).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "the people's photos and files were not looked through");
+        out.problems.push(format!(
+            "the people's photos and files were not looked through: {}",
+            e.kind()
+        ));
+        BTreeSet::new()
+    });
     let mut gone: Vec<String> = removed.to_vec();
-    for id in pins.member_ids() {
+    for id in pins.member_ids().into_iter().chain(held) {
         if !gone.contains(&id) {
             gone.push(id);
         }
@@ -1268,6 +1279,14 @@ async fn reload(
         problems = people.problems.len(),
         "roster reloaded"
     );
+    // Whom the roster took out, then whom the look through the people's
+    // data removed besides (#58 review).
+    let mut removed = removed;
+    for id in people.removed {
+        if !removed.contains(&id) {
+            removed.push(id);
+        }
+    }
     Applied::Applied {
         added,
         removed,
