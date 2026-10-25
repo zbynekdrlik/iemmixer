@@ -62,6 +62,19 @@ fn files_of(root: &Path, id: &str) -> io::Result<Vec<(String, &'static str, Path
 /// others are deleted all the same; then the first such error is returned,
 /// so the caller names the person as not removed.
 pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Result<bool> {
+    remove_with(config_dir, pins, id, cfg!(windows), &|path| {
+        fs::remove_file(path)
+    })
+}
+
+/// [`remove_person`], each photo and file deleted by `remove`.
+pub(crate) fn remove_with(
+    config_dir: &Path,
+    pins: &mut PinStore,
+    id: &str,
+    _windows: bool,
+    remove: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<bool> {
     if !valid_person_id(id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -70,7 +83,7 @@ pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Re
     }
     let pin = pins.remove_member(id)?;
     let mut failed: Option<io::Error> = None;
-    let photo = match PhotoStore::new(config_dir).remove(id) {
+    let photo = match PhotoStore::new(config_dir).remove(id, remove) {
         Ok(found) => found,
         Err(e) => {
             tracing::error!(person = %id, error = %e, "a removed person's photo was not deleted");
@@ -80,7 +93,7 @@ pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Re
     };
     let mut files = 0usize;
     for (lineup, kind, path) in files_of(&config_dir.join(LINEUPS_DIR), id)? {
-        match fs::remove_file(path) {
+        match remove(&path) {
             Ok(()) => files += 1,
             Err(e) => {
                 tracing::error!(
