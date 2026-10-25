@@ -806,6 +806,31 @@ fn follow_people_deletes_what_is_left_of_who_is_no_person() {
     );
 }
 
+/// #58 review: people's data that cannot be looked through (a `photos` file
+/// where the folder is) is named in the problems, and the removals still
+/// run: a live PIN of no person goes (its photo then cannot be looked at
+/// either, so that person is named as well).
+#[test]
+fn a_look_that_fails_is_named_and_the_rest_still_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    put(&d.join("photos"), "a file, no folder");
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    pins.set_member_hash("member9", PHC.into()).unwrap();
+    let departed = crate::roster_state::tests::departed_roster("main");
+    let p = follow_people(d, &departed.roster, &mut pins, &[]);
+    assert_eq!(p.problems.len(), 2, "{p:?}");
+    assert!(
+        p.problems[0].starts_with("the people's photos and files were not looked through: "),
+        "{p:?}"
+    );
+    assert!(
+        p.problems[1].starts_with("person 'member9' was not removed: "),
+        "{p:?}"
+    );
+    assert_eq!(pins.member_hash("member9"), None, "the PIN hash went first");
+}
+
 /// #58 review: a removal that failed part-way (the PIN hash went, a file
 /// could not be deleted) is finished by the next start or reload, which
 /// knows nothing of that person any more.

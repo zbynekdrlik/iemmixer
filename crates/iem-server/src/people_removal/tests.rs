@@ -219,6 +219,28 @@ fn a_short_lived_windows_error_is_tried_again() {
     }
 }
 
+/// #58 review: the ids that still hold a photo or a lineup's file, lower-case
+/// person ids only; a folder that cannot be read is an error, never nobody.
+#[test]
+fn held_ids_names_the_ids_on_disk_and_fails_on_what_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    assert!(held_ids(d).unwrap().is_empty(), "nothing on disk");
+    write(&lineup_file(d, "main", "presets", "member5"), "x");
+    write(&lineup_file(d, "youth", "customizations", "member7"), "x");
+    write(&lineup_file(d, "youth", "customizations", "Member8"), "x");
+    PhotoStore::new(d).save("member6", b"jpeg").unwrap();
+    assert_eq!(
+        held_ids(d).unwrap().into_iter().collect::<Vec<_>>(),
+        ["member5", "member6", "member7"]
+    );
+    for odd in ["photos", "lineups/main/presets"] {
+        let other = tempfile::tempdir().unwrap();
+        write(&other.path().join(odd), "a file, no folder");
+        assert!(held_ids(other.path()).is_err(), "{odd}");
+    }
+}
+
 /// #58 review: an id that is no lower-case person id (the roster's id
 /// rule) is refused before anything is deleted, its PIN hash included: on
 /// case-insensitive NTFS a `Member3` PIN entry's photo and files are
