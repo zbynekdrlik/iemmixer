@@ -59,12 +59,14 @@ pub struct SiteView {
     /// all playing; `roster_state::people`).
     pub people: Vec<PersonView>,
     /// People's sets nobody wears in the active lineup
-    /// (`roster_state::person_sets`: a departed person's too): no page, no
-    /// Mixes channel (legacy: none).
+    /// (`roster_state::person_sets`: the roster's `[equipment]` sets, else
+    /// the lineups' and the site's members' ones; a departed person's too):
+    /// no page, no Mixes channel (legacy: none).
     pub vacant: Vec<MixId>,
-    /// Inputs of people who do not play in the active lineup, which it does
-    /// not list (`roster_state::foreign_input`: another lineup's people's,
-    /// a departed person's): no page shows or moves them, the engineer's
+    /// People's inputs the active lineup does not list
+    /// (`roster_state::foreign_input`: with `[equipment]` its inputs, else
+    /// those of people who do not play in it, another lineup's people's, a
+    /// departed person's): no page shows or moves them, the engineer's
     /// included (`view::shows_input`, the owner on the live system,
     /// 2026-10-24: a switched band is the whole view; legacy: none).
     pub foreign_inputs: Vec<InputId>,
