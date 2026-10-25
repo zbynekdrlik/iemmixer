@@ -494,7 +494,6 @@ fn the_reply_names_the_engine_by_its_commit() {
             process_hist: vec![(60, 360_000)],
             last_reopen_us: 104_000,
             fault_callback_us: 412.5,
-            ..Status::default()
         },
         pipe_private: true,
         pipe_server_pid: Some(4242),
