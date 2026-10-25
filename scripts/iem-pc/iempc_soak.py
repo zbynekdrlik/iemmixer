@@ -14,8 +14,10 @@ this order, nothing dispatched on any refusal:
    and switch-test's dev leg, `current_entry`).
 2. `iemmode status` (a new flag abandons the read and runs the event path):
    the guard answers ok, in dev, no switch, no HIL job; the active bundle and
-   the running engine's build are both the SHA; the engine plays (neither
-   parked nor faulted). `soak_refusal` judges the reply (pure).
+   the running engine's build are both the SHA; the engine plays (not
+   parked, not faulted, not held: a held engine, started with `--hold` and
+   not armed, is silent, #57; `playing_refusal`). `soak_refusal` judges the
+   reply (pure).
 2b. No HIL run that may still hold the PC (`iempc_live.refuse_while_hil`,
    dispatch-live's guard): a HIL run restarts the engine in its own job,
    which the soak would meet red.

@@ -166,3 +166,110 @@ fn the_engineer_and_bad_ids_are_refused_before_anything_goes() {
     assert!(PhotoStore::new(d).exists(ENGINEER_ID));
     assert!(d.join("secrets").join(PIN_HASHES_FILE).exists());
 }
+
+/// #58 review: a delete that a short-lived Windows error fails (access
+/// denied, a sharing or lock violation: a scanner or the indexer holding
+/// the file for a moment) is tried again, as a lineup file's rename is;
+/// off Windows, or any other error, it fails at once.
+#[test]
+fn a_short_lived_windows_error_is_tried_again() {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = store(d);
+    let file = lineup_file(d, "main", "presets", "member5");
+    let photos = PhotoStore::new(d);
+    // Each path fails twice with `code`, then goes.
+    let tries: RefCell<BTreeMap<PathBuf, u32>> = RefCell::default();
+    let code = std::cell::Cell::new(32);
+    let busy_twice = |path: &Path| {
+        let mut tries = tries.borrow_mut();
+        let n = tries.entry(path.to_path_buf()).or_default();
+        *n += 1;
+        if *n <= 2 {
+            Err(io::Error::from_raw_os_error(code.get()))
+        } else {
+            fs::remove_file(path)
+        }
+    };
+    // A sharing violation (the classification's own test is lineup_store's
+    // `only_a_transient_windows_error_is_tried_again`).
+    write(&file, "member5's");
+    photos.save("member5", b"jpeg").unwrap();
+    assert!(remove_with(d, &mut pins, "member5", true, &busy_twice).unwrap());
+    assert!(!file.exists() && !photos.exists("member5"));
+    assert_eq!(
+        tries.borrow().values().copied().collect::<Vec<_>>(),
+        [3, 3],
+        "the photo and the file, three tries each"
+    );
+    // Off Windows the same error fails at once; so does another one there.
+    for (windows, c) in [(false, 32), (true, 2), (true, 13)] {
+        code.set(c);
+        tries.borrow_mut().clear();
+        write(&file, "member5's");
+        assert!(
+            remove_with(d, &mut pins, "member5", windows, &busy_twice).is_err(),
+            "{windows} {c}"
+        );
+        assert!(file.exists(), "{windows} {c}");
+        assert_eq!(tries.borrow()[&file], 1, "{windows} {c}");
+        fs::remove_file(&file).unwrap();
+    }
+}
+
+/// #58 review: the ids that still hold a photo or a lineup's file, lower-case
+/// person ids only; a folder that cannot be read is an error, never nobody.
+#[test]
+fn held_ids_names_the_ids_on_disk_and_fails_on_what_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    assert!(held_ids(d).unwrap().is_empty(), "nothing on disk");
+    write(&lineup_file(d, "main", "presets", "member5"), "x");
+    write(&lineup_file(d, "youth", "customizations", "member7"), "x");
+    write(&lineup_file(d, "youth", "customizations", "Member8"), "x");
+    PhotoStore::new(d).save("member6", b"jpeg").unwrap();
+    assert_eq!(
+        held_ids(d).unwrap().into_iter().collect::<Vec<_>>(),
+        ["member5", "member6", "member7"]
+    );
+    for odd in ["photos", "lineups/main/presets"] {
+        let other = tempfile::tempdir().unwrap();
+        write(&other.path().join(odd), "a file, no folder");
+        assert!(held_ids(other.path()).is_err(), "{odd}");
+    }
+}
+
+/// #58 review: an id that is no lower-case person id (the roster's id
+/// rule) is refused before anything is deleted, its PIN hash included: on
+/// case-insensitive NTFS a `Member3` PIN entry's photo and files are
+/// member3's. The error never echoes the id (P6).
+#[test]
+fn an_id_that_is_no_lower_case_person_id_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = store(d);
+    pins.set_member_hash("Member3", PHC.into()).unwrap();
+    pins.set_member_hash("member3", PHC.into()).unwrap();
+    // On NTFS each pair is one file.
+    let files = [
+        lineup_file(d, "main", "presets", "Member3"),
+        lineup_file(d, "main", "presets", "member3"),
+    ];
+    for f in &files {
+        write(f, "member3's");
+    }
+    let photos = PhotoStore::new(d);
+    photos.save("Member3", b"jpeg").unwrap();
+    photos.save("member3", b"jpeg").unwrap();
+    let err = remove_person(d, &mut pins, "Member3").unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert!(!err.to_string().contains("Member3"), "{err}");
+    assert_eq!(pins.member_hash("Member3"), Some(PHC), "not even the hash");
+    assert_eq!(pins.member_hash("member3"), Some(PHC));
+    for f in &files {
+        assert_eq!(fs::read_to_string(f).unwrap(), "member3's");
+    }
+    assert!(photos.exists("Member3") && photos.exists("member3"));
+}

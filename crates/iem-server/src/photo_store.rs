@@ -4,6 +4,11 @@
 
 use std::path::PathBuf;
 
+/// `<config>/photos/`: one `<member>.jpg` per member.
+pub const PHOTOS_DIR: &str = "photos";
+/// A photo's file extension.
+pub const PHOTO_EXT: &str = "jpg";
+
 /// Profile photo storage backed by per-member JPEG files
 pub struct PhotoStore {
     photos_dir: PathBuf,
@@ -11,14 +16,14 @@ pub struct PhotoStore {
 
 impl PhotoStore {
     pub fn new(config_dir: &std::path::Path) -> Self {
-        let photos_dir = config_dir.join("photos");
+        let photos_dir = config_dir.join(PHOTOS_DIR);
         Self { photos_dir }
     }
 
     fn member_path(&self, member_id: &str) -> PathBuf {
         iem_core::config::validate_member_id(member_id)
             .expect("invalid member_id passed to PhotoStore");
-        self.photos_dir.join(format!("{}.jpg", member_id))
+        self.photos_dir.join(format!("{member_id}.{PHOTO_EXT}"))
     }
 
     pub fn save(&self, member_id: &str, data: &[u8]) -> std::io::Result<()> {
@@ -50,17 +55,22 @@ impl PhotoStore {
     fn checked_path(&self, member_id: &str) -> std::io::Result<PathBuf> {
         iem_core::config::validate_member_id(member_id)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        Ok(self.photos_dir.join(format!("{member_id}.jpg")))
+        Ok(self.photos_dir.join(format!("{member_id}.{PHOTO_EXT}")))
     }
 
-    /// Deletes the member's photo (a person the roster removes, #58);
-    /// `false` when there is none. A bad id is an error, never a panic.
-    pub fn remove(&self, member_id: &str) -> std::io::Result<bool> {
+    /// Deletes the member's photo with `delete` (a person the roster
+    /// removes, #58: `people_removal`'s delete); `false` when there is
+    /// none. A bad id is an error, never a panic.
+    pub fn remove(
+        &self,
+        member_id: &str,
+        delete: &dyn Fn(&std::path::Path) -> std::io::Result<()>,
+    ) -> std::io::Result<bool> {
         let path = self.checked_path(member_id)?;
         if !path.try_exists()? {
             return Ok(false);
         }
-        std::fs::remove_file(path)?;
+        delete(&path)?;
         Ok(true)
     }
 }
@@ -123,15 +133,16 @@ mod tests {
     #[test]
     fn remove_deletes_the_photo_and_a_bad_id_is_an_error() {
         let (store, _dir) = test_store();
-        assert!(!store.remove("member1").unwrap(), "no photo yet");
+        let delete = |p: &std::path::Path| std::fs::remove_file(p);
+        assert!(!store.remove("member1", &delete).unwrap(), "no photo yet");
         store.save("member1", b"jpeg").unwrap();
         store.save("member2", b"jpeg").unwrap();
-        assert!(store.remove("member1").unwrap());
+        assert!(store.remove("member1", &delete).unwrap());
         assert!(!store.exists("member1"));
         assert!(store.exists("member2"));
-        assert!(!store.remove("member1").unwrap(), "gone");
+        assert!(!store.remove("member1", &delete).unwrap(), "gone");
         for bad in ["../x", ""] {
-            let err = store.remove(bad).unwrap_err();
+            let err = store.remove(bad, &delete).unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         }
     }

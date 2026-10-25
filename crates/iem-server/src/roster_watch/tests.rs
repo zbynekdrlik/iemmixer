@@ -30,8 +30,13 @@ fn parse(text: &str) -> Roster {
 /// The test roster without member11 (who left: youth's set member4 is
 /// empty, mic4 is youth's no more).
 fn without_member11() -> String {
+    drop_member11(TEXT)
+}
+
+/// `text` (the test roster or one made from it) without member11.
+fn drop_member11(text: &str) -> String {
     let t = edit(
-        TEXT,
+        text,
         "[[people]]\nid = \"member11\"\nname = \"Member 11\"\n\n",
         "",
     );
@@ -531,6 +536,188 @@ fn nothing_an_older_server_archived_comes_back() {
     assert_eq!(reloaded.member_hash("member9"), None);
 }
 
+/// A small roster on the test site: member10 and member11 on member1's
+/// and member4's sets.
+const PAIR: &str = "[[people]]\nid = \"member10\"\nname = \"Member 10\"\n\n\
+    [[people]]\nid = \"member11\"\nname = \"Member 11\"\n\n\
+    [[lineups]]\nid = \"main\"\nname = \"Main band\"\nmain = true\n\n\
+    [lineups.sets]\nmember1 = \"member10\"\nmember4 = \"member11\"\n";
+
+/// A small roster with none of [`PAIR`]'s people: member1 on their set.
+const OTHERS: &str = "[[people]]\nid = \"member1\"\nname = \"Member 1\"\n\n\
+    [[lineups]]\nid = \"main\"\nname = \"Main band\"\nmain = true\n\n\
+    [lineups.sets]\nmember1 = \"member1\"\n";
+
+/// The refusal of a roster that keeps none of the roster in use's people.
+const EVERYONE: &str =
+    "the roster keeps none of the people of the roster in use: it would remove them all";
+
+/// `text` in use, `main` playing.
+fn in_use(text: &str) -> RosterState {
+    RosterState {
+        roster: Arc::new(parse(text)),
+        sha256: sha256_hex(text.as_bytes()),
+        active: "main".into(),
+    }
+}
+
+/// #58 review: a valid but wrong roster that keeps none of the people of
+/// the roster in use (another band's file, ids typed anew) is refused as a
+/// problem of the reload: the roster in use stays and nothing is deleted.
+#[tokio::test]
+async fn a_reload_that_removes_everyone_is_refused_and_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let state = AppState::new(test_config(), d);
+    state.set_roster(Some(in_use(PAIR)));
+    state
+        .pin_store
+        .write()
+        .await
+        .set_member_hash("member10", PHC.into())
+        .unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member11");
+    put(&theirs, "member11's");
+    std::fs::write(d.join(ROSTER_FILE), OTHERS).unwrap();
+    assert_eq!(
+        check_file(&state).await,
+        Some(Applied::Refused(vec![EVERYONE.to_string()]))
+    );
+    let s = status(d);
+    assert_eq!(
+        (s.ok, s.applied, s.problems.as_slice()),
+        (false, false, &[EVERYONE.to_string()][..])
+    );
+    assert_eq!(state.roster().unwrap().sha256, sha256_hex(PAIR.as_bytes()));
+    assert_eq!(
+        state.pin_store.read().await.member_hash("member10"),
+        Some(PHC)
+    );
+    assert_eq!(read(&theirs), "member11's");
+}
+
+/// #58 review: the start refuses such a roster.toml against the roster
+/// applied last, so it starts with that one (the fall-back) and deletes
+/// nothing.
+#[test]
+fn a_start_on_a_roster_that_removes_everyone_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let cfg = test_config();
+    let facts = TopologyFacts::from(&test_topology());
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    std::fs::write(d.join(ROSTER_FILE), PAIR).unwrap();
+    load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    LineupStore::new(d).set_applied_roster(PAIR).unwrap();
+    pins.set_member_hash("member10", PHC.into()).unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member11");
+    put(&theirs, "member11's");
+    std::fs::write(d.join(ROSTER_FILE), OTHERS).unwrap();
+    let loaded = load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    assert!(loaded.fallback);
+    assert_eq!(loaded.roster.sha256, sha256_hex(PAIR.as_bytes()));
+    let s = status(d);
+    assert_eq!(
+        (s.applied, s.sha256.as_str(), s.problems.as_slice()),
+        (
+            false,
+            sha256_hex(OTHERS.as_bytes()).as_str(),
+            &[EVERYONE.to_string(), FALLBACK.to_string()][..]
+        )
+    );
+    assert_eq!(pins.member_hash("member10"), Some(PHC));
+    assert_eq!(read(&theirs), "member11's");
+}
+
+/// #58 review: a fall-back start (roster.toml cannot be used) removes
+/// nobody: the roster file has problems, so its removals are not to be
+/// trusted; the next roster that applies does them.
+#[test]
+fn a_fallback_start_removes_nobody() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let cfg = test_config();
+    let facts = TopologyFacts::from(&test_topology());
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let departed = crate::roster_state::tests::departed_text();
+    std::fs::write(d.join(ROSTER_FILE), &departed).unwrap();
+    load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    LineupStore::new(d).set_applied_roster(&departed).unwrap();
+    pins.set_member_hash("member9", PHC.into()).unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member9");
+    put(&theirs, "member9's");
+    std::fs::write(d.join(ROSTER_FILE), "[[people]]\n").unwrap();
+    let loaded = load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    assert!(loaded.fallback);
+    assert_eq!(pins.member_hash("member9"), Some(PHC));
+    assert_eq!(read(&theirs), "member9's");
+    assert!(!status(d).applied);
+    // The next roster that applies removes them.
+    std::fs::write(d.join(ROSTER_FILE), &departed).unwrap();
+    let loaded = load(d, &cfg, &mut pins, Some(&facts)).unwrap().unwrap();
+    assert!(!loaded.fallback);
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!theirs.exists());
+    assert_eq!(status(d).removed, ["member9"]);
+}
+
+/// #58 review: `iem-server roster check` names, ids only, the people of
+/// the roster applied last that the roster would remove (none known
+/// before a roster was applied), and refuses one that removes them all.
+#[test]
+fn the_check_names_whom_the_roster_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let site = d.join("iemmixer.toml");
+    std::fs::write(&site, include_str!("../../../../config/test-site.toml")).unwrap();
+    let file = d.join("roster.new.toml");
+    let check = |text: &str| {
+        std::fs::write(&file, text).unwrap();
+        check_cli(&file, &site)
+    };
+    let r = check(TEXT);
+    assert_eq!((r.ok, r.removes), (true, None), "no roster applied before");
+    let store = LineupStore::new(d);
+    store.set_applied_roster(TEXT).unwrap();
+    let r = check(&without_member11());
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.removes, Some(vec!["member11".to_string()]));
+    assert_eq!(check(TEXT).removes, Some(Vec::new()));
+    store.set_applied_roster(PAIR).unwrap();
+    let r = check(OTHERS);
+    assert!(!r.ok);
+    assert_eq!(r.problems, [EVERYONE]);
+    assert_eq!(
+        r.removes,
+        Some(vec!["member10".to_string(), "member11".to_string()])
+    );
+}
+
+/// #58 review: the `archive/` folder an older server wrote (decision 6's
+/// people archive, overruled by the owner) is deleted where the PIN hashes
+/// it archived are, whoever it holds; without one nothing happens.
+#[test]
+fn an_older_servers_archive_folder_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let old = d.join("archive").join("member9");
+    put(&old.join("photo.jpg"), "jpeg");
+    put(
+        &lineup_file(&old, "main", "presets", "member9"),
+        "member9's",
+    );
+    put(
+        &d.join("archive").join("member11").join("photo.jpg"),
+        "jpeg",
+    );
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let p = follow_people(d, &parse(TEXT), &mut pins, &[]);
+    assert_eq!(p.problems, Vec::<String>::new());
+    assert!(!d.join("archive").exists());
+    let again = follow_people(d, &parse(TEXT), &mut pins, &[]);
+    assert_eq!(again, People::default());
+}
+
 /// #58: follow_people names whom it removed, the removed first, then a
 /// live PIN of no person; with nobody left to remove it names nobody.
 #[test]
@@ -561,6 +748,197 @@ fn follow_people_names_whom_it_removed() {
         "{again:?}"
     );
     assert_eq!(pins.member_hash("member2"), Some(PHC));
+}
+
+/// #58 review: every start and reload looks through the people's data, so
+/// what a person removed from roster.toml while the server was stopped
+/// (with no PIN) left is deleted all the same: the photo and every
+/// lineup's files of an id that is neither a person nor the engineer. A
+/// person's and the engineer's stay, and so does a file whose name is no
+/// person id or that lies outside a lineup's kinds.
+#[test]
+fn follow_people_deletes_what_is_left_of_who_is_no_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let theirs = [
+        lineup_file(d, "main", "presets", "member9"),
+        lineup_file(d, "main", "snapshots", "member9"),
+        lineup_file(d, "youth", "customizations", "member9"),
+    ];
+    for f in &theirs {
+        put(f, "member9's");
+    }
+    let photos = crate::photo_store::PhotoStore::new(d);
+    for id in ["member9", "member2", ENGINEER_ID] {
+        photos.save(id, b"jpeg").unwrap();
+    }
+    let kept = [
+        lineup_file(d, "main", "presets", "member2"),
+        lineup_file(d, "main", "presets", ENGINEER_ID),
+        lineup_file(d, "main", "presets", "Member9"),
+        d.join("lineups/main/presets/member9.tmp"),
+        d.join("lineups/main/member9.json"),
+        d.join("lineups/rosters.kept/presets/member9.json"),
+        d.join("photos/Member9.jpg"),
+        d.join("photos/member9.png"),
+    ];
+    for f in &kept {
+        put(f, "kept");
+    }
+    let departed = crate::roster_state::tests::departed_roster("main");
+    let p = follow_people(d, &departed.roster, &mut pins, &[]);
+    assert_eq!(p.removed, ["member9"]);
+    assert_eq!(p.problems, Vec::<String>::new());
+    for f in &theirs {
+        assert!(!f.exists(), "{}", f.display());
+    }
+    assert!(!photos.exists("member9"));
+    for f in &kept {
+        assert_eq!(read(f), "kept");
+    }
+    assert!(photos.exists("member2") && photos.exists(ENGINEER_ID));
+    // Nothing of theirs left: nobody is removed again.
+    let again = follow_people(d, &departed.roster, &mut pins, &[]);
+    assert!(
+        again.removed.is_empty() && again.problems.is_empty(),
+        "{again:?}"
+    );
+}
+
+/// #58 review: people's data that cannot be looked through (a `photos` file
+/// where the folder is) is named in the problems, and the removals still
+/// run: a live PIN of no person goes (its photo then cannot be looked at
+/// either, so that person is named as well).
+#[test]
+fn a_look_that_fails_is_named_and_the_rest_still_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    put(&d.join("photos"), "a file, no folder");
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    pins.set_member_hash("member9", PHC.into()).unwrap();
+    let departed = crate::roster_state::tests::departed_roster("main");
+    let p = follow_people(d, &departed.roster, &mut pins, &[]);
+    assert_eq!(p.problems.len(), 2, "{p:?}");
+    assert!(
+        p.problems[0].starts_with("the people's photos and files were not looked through: "),
+        "{p:?}"
+    );
+    assert!(
+        p.problems[1].starts_with("person 'member9' was not removed: "),
+        "{p:?}"
+    );
+    assert_eq!(pins.member_hash("member9"), None, "the PIN hash went first");
+}
+
+/// #58 review: a removal that failed part-way (the PIN hash went, a file
+/// could not be deleted) is finished by the next start or reload, which
+/// knows nothing of that person any more.
+#[test]
+fn a_removal_cut_short_is_finished_at_the_next_look() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    pins.set_member_hash("member9", PHC.into()).unwrap();
+    // A directory where member9's presets file of main is.
+    let blocked = lineup_file(d, "main", "presets", "member9");
+    put(&blocked.join("inside"), "in the way");
+    let rest = lineup_file(d, "youth", "snapshots", "member9");
+    put(&rest, "member9's");
+    let departed = crate::roster_state::tests::departed_roster("main");
+    let first = follow_people(d, &departed.roster, &mut pins, &["member9".to_string()]);
+    assert_eq!(first.problems.len(), 1, "{first:?}");
+    assert!(
+        first.problems[0].starts_with("person 'member9' was not removed: "),
+        "{first:?}"
+    );
+    assert_eq!(pins.member_hash("member9"), None);
+    assert!(!rest.exists() && blocked.exists());
+    // What held it is gone (a scanner let go): the next look deletes it.
+    std::fs::remove_dir_all(&blocked).unwrap();
+    put(&blocked, "member9's");
+    let next = follow_people(d, &departed.roster, &mut pins, &[]);
+    assert_eq!(next.removed, ["member9"]);
+    assert_eq!(next.problems, Vec::<String>::new());
+    assert!(!blocked.exists());
+}
+
+/// #58 review: the start deletes what is left of who is no person, and
+/// its status names them as removed.
+#[test]
+fn the_start_deletes_what_is_left_of_who_is_no_person_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let cfg = test_config();
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    let facts = TopologyFacts::from(&test_topology());
+    std::fs::write(
+        d.join(ROSTER_FILE),
+        crate::roster_state::tests::departed_text(),
+    )
+    .unwrap();
+    load(d, &cfg, &mut pins, Some(&facts))
+        .unwrap()
+        .expect("roster mode");
+    // While the server is down, a copy of member9's file comes back.
+    let left = lineup_file(d, "main", "presets", "member9");
+    put(&left, "member9's");
+    load(d, &cfg, &mut pins, Some(&facts))
+        .unwrap()
+        .expect("roster mode");
+    assert!(!left.exists());
+    let s = status(d);
+    assert!(s.ok && s.applied, "{s:?}");
+    assert_eq!(s.removed, ["member9"]);
+}
+
+/// #58 review: a reload deletes what is left of who is no person too, and
+/// names them with the people the roster removed.
+#[tokio::test]
+async fn a_reload_deletes_what_is_left_of_who_is_no_person_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut state = AppState::new(test_config(), d);
+    state.set_roster(Some(crate::roster_state::tests::departed_roster("main")));
+    let _peer = synced(&mut state, MixState::default()).await;
+    let left = lineup_file(d, "youth", "presets", "member9");
+    put(&left, "member9's");
+    let text = drop_member11(&crate::roster_state::tests::departed_text());
+    std::fs::write(d.join(ROSTER_FILE), &text).unwrap();
+    assert_eq!(
+        check_file(&state).await,
+        Some(applied(&[], &["member11", "member9"]))
+    );
+    assert_eq!(status(d).removed, ["member11", "member9"]);
+    assert!(!left.exists());
+}
+
+/// #58 review: a live PIN whose id is no lower-case person id is never
+/// removed (on NTFS its photo and files would be a person's of the same
+/// letters): it stays, named in the problems without its id (P6).
+#[test]
+fn a_pin_entry_that_is_no_lower_case_person_id_is_kept_and_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut pins = PinStore::load(&d.join("secrets")).unwrap();
+    pins.set_member_hash("Member3", PHC.into()).unwrap();
+    let files = [
+        lineup_file(d, "main", "presets", "Member3"),
+        lineup_file(d, "main", "presets", "member3"),
+    ];
+    for f in &files {
+        put(f, "member3's");
+    }
+    let p = follow_people(d, &parse(TEXT), &mut pins, &[]);
+    assert_eq!(p.removed, Vec::<String>::new());
+    assert_eq!(
+        p.problems,
+        ["a PIN hash whose id is no lower-case person id was not removed"]
+    );
+    assert_eq!(pins.member_hash("Member3"), Some(PHC));
+    for f in &files {
+        assert_eq!(read(f), "member3's");
+    }
 }
 
 #[test]
@@ -1762,6 +2140,36 @@ async fn fallen_back(d: &Path) -> (AppState, crate::push::tests::Seen) {
         .add(crate::push::tests::subscription(format!("{base}/201")))
         .unwrap();
     (state, seen)
+}
+
+/// #58 review: a fall-back start removes nobody; once `roster.toml` is the
+/// roster in use again (the same roster: nothing to apply), the removals
+/// it held back run and the status names them.
+#[tokio::test]
+async fn the_removals_a_fallback_held_back_run_once_roster_toml_is_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let departed = crate::roster_state::tests::departed_text();
+    let store = LineupStore::new(d);
+    store.set_active("main", 1).unwrap();
+    store.set_applied_roster(&departed).unwrap();
+    let two = edit(
+        &departed,
+        "name = \"Youth band\"\n",
+        "name = \"Youth band\"\nmain = true\n",
+    );
+    std::fs::write(d.join(ROSTER_FILE), two).unwrap();
+    let theirs = lineup_file(d, "main", "presets", "member9");
+    put(&theirs, "member9's");
+    let state = AppState::new(test_config(), d);
+    assert!(state.fallback.load(Ordering::SeqCst));
+    assert_eq!(read(&theirs), "member9's", "the fall-back removed nobody");
+    std::fs::write(d.join(ROSTER_FILE), &departed).unwrap();
+    assert_eq!(check_file(&state).await, Some(Applied::Unchanged));
+    let s = status(d);
+    assert!(s.ok && s.applied, "{s:?}");
+    assert_eq!(s.removed, ["member9"]);
+    assert!(!theirs.exists());
 }
 
 /// #58 re-review: after a start on the roster applied last, the status

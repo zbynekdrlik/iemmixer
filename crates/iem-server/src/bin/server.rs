@@ -9,8 +9,10 @@
 //!                                   (the mixer app's notification subscriptions)
 //!   iem-server notify --count alarm print the number of those subscriptions
 //!   iem-server roster check <file>  check a roster against the site file: one
-//!                                   JSON line {"ok","problems","sha256"}, exit 0
-//!                                   when it can be installed, 1 when not
+//!                                   JSON line {"ok","problems","sha256","removes"}
+//!                                   (removes: the ids it takes out of the roster
+//!                                   applied last, null before one), exit 0 when
+//!                                   it can be installed, 1 when not
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
