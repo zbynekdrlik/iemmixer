@@ -1,11 +1,13 @@
 //! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
-//! S6: the ASIO backend and the site check). See
-//! `iem-engine --help`.
+//! S6: the ASIO backend and the site check; Gen 3 phase C: the Dante backend
+//! on Linux). See `iem-engine --help`.
 
 use std::process::ExitCode;
 
 use iem_engine::control::Exit;
-use iem_engine::engine::{Command, EngineError, USAGE, check_site, parse_args, render, run};
+use iem_engine::engine::{
+    Command, EngineError, USAGE, check_site, parse_args, render, run, version,
+};
 use tracing_subscriber::EnvFilter;
 
 fn code(e: &EngineError) -> u8 {
@@ -39,8 +41,14 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
+        Ok(Command::Version) => {
+            println!("{}", version());
+            return ExitCode::SUCCESS;
+        }
         Ok(Command::Run(cfg)) => run(cfg).map(|exit| match exit {
             Exit::Shutdown { .. } => 0,
+            // The Dante device stopped serving: restarted by the unit.
+            Exit::Backend(_) => 1,
             Exit::Card(_) => 3,
             Exit::Fault(_) => 70,
         }),

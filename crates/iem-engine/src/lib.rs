@@ -12,11 +12,13 @@
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
 //!   start-up, the crash model without the driver and the offline renderer;
-//!   on Windows the private `asio` module starts the ASIO backend (S6).
-//!   Nothing in the engine measures the stage to gate a switch (#38: only
-//!   the owner's signal decides).
+//!   on Windows the private `asio` module starts the ASIO backend (S6); on
+//!   Linux `dante` hosts our own Dante device and drives the processor on
+//!   its media clock (Gen 3 phase C, #72). Nothing in the engine measures
+//!   the stage to gate a switch (#38: only the owner's signal decides).
 //!
-//! GPL-3.0-or-later: the engine links the MGA limiter port (D1).
+//! GPL-3.0-or-later: the engine links the MGA limiter port (D1) and, on
+//! Linux, the GPL `iem-dante` device (Gen 3 design §3).
 
 #![forbid(unsafe_code)]
 // The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `Processor::process`
@@ -37,6 +39,8 @@ mod asio;
 pub mod cmd;
 pub mod control;
 pub mod core;
+#[cfg(target_os = "linux")]
+pub mod dante;
 pub mod engine;
 pub mod latency;
 pub mod media;

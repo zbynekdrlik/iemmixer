@@ -1,5 +1,6 @@
-//! How a run ends (design note §3.7; S6 §3, §4): the shutdown with its
-//! fade, the fault, the refused card, and the stream's last word.
+//! How a run ends (design note §3.7; S6 §3, §4; Gen 3 phase C): the
+//! shutdown with its fade, the fault, the refused card, the backend that
+//! ended by itself, and the stream's last word.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -81,5 +82,15 @@ impl Control {
         self.save();
         self.release("card refused");
         Exit::Card(why)
+    }
+
+    /// The backend ended by itself (the Dante device stopped serving: its
+    /// flows are gone, so nothing is left to fade): save, release, exit 1,
+    /// which the unit restarts.
+    pub(super) fn backend_ended(&mut self, why: String) -> Exit {
+        error!("the audio backend ended by itself: {why}");
+        self.save();
+        self.release("backend ended");
+        Exit::Backend(why)
     }
 }

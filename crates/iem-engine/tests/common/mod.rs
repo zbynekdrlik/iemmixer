@@ -17,6 +17,10 @@
 //! `process`, its time after it; the overflow bucket included).
 #![allow(dead_code)]
 
+/// The same scenario through the Dante backend's pump (Gen 3 phase C).
+#[cfg(target_os = "linux")]
+pub mod dante;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

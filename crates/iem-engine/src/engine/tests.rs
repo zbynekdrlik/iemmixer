@@ -99,6 +99,182 @@ fn the_backend_the_hold_and_the_s6_commands_parse() {
     }
 }
 
+/// `run --backend dante` with `extra` flags.
+fn dante_line(extra: &str) -> Vec<String> {
+    args(&format!(
+        "run --site s --state-dir d --pipe p --backend dante {extra}"
+    ))
+}
+
+#[test]
+fn dante_needs_its_config_and_one_place() {
+    let Command::Run(cfg) =
+        parse_args(&dante_line("--dante-config dev.toml --dante-iface eth9")).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(cfg.backend, Backend::Dante);
+    assert_eq!(
+        cfg.dante,
+        Some(DanteArgs {
+            config: "dev.toml".into(),
+            place: DantePlace::Iface("eth9".into()),
+            control: PathBuf::from(DANTE_CONTROL),
+        })
+    );
+    assert_eq!((cfg.block, cfg.signal), (32, InputSignal::Silence));
+    let Command::Run(cfg) = parse_args(&dante_line(
+        "--dante-ip 10.0.0.10 --dante-control c.sock --dante-config dev.toml",
+    ))
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        cfg.dante,
+        Some(DanteArgs {
+            config: "dev.toml".into(),
+            place: DantePlace::Ip(Ipv4Addr::new(10, 0, 0, 10)),
+            control: "c.sock".into(),
+        })
+    );
+    for (extra, want) in [
+        ("--dante-iface eth9", "--dante-config"),
+        ("--dante-config dev.toml", "exactly one"),
+        (
+            "--dante-config dev.toml --dante-iface eth9 --dante-ip 10.0.0.10",
+            "exactly one",
+        ),
+        (
+            "--dante-config dev.toml --dante-iface eth9 --dante-iface eth8",
+            "exactly one",
+        ),
+        ("--dante-config dev.toml --dante-ip 10.0.0", "IPv4"),
+        ("--dante-config dev.toml --dante-ip", "needs a value"),
+        ("--dante-config", "needs a value"),
+    ] {
+        let e = parse_args(&dante_line(extra)).unwrap_err();
+        assert!(e.contains(want), "{extra}: {e}");
+    }
+}
+
+#[test]
+fn dante_refuses_block_and_sine() {
+    for extra in ["--block 32", "--block 64", "--sine 440"] {
+        let e = parse_args(&dante_line(&format!(
+            "--dante-config dev.toml --dante-iface eth9 {extra}"
+        )))
+        .unwrap_err();
+        assert!(e.contains("nullrt backend"), "{extra}: {e}");
+        assert!(e.contains("Dante device at 32"), "{extra}: {e}");
+    }
+}
+
+#[test]
+fn dante_flags_need_the_dante_backend() {
+    for backend in ["", "--backend nullrt", "--backend asio"] {
+        for flag in [
+            "--dante-config dev.toml",
+            "--dante-iface eth9",
+            "--dante-ip 10.0.0.10",
+            "--dante-control c.sock",
+        ] {
+            let line = format!("run --site s --state-dir d --pipe p {backend} {flag}");
+            let e = parse_args(&args(&line)).unwrap_err();
+            assert!(e.contains("are for --backend dante"), "{line}: {e}");
+        }
+    }
+    // The other backends carry no device.
+    let Command::Run(cfg) = parse_args(&args("run --site s --state-dir d --pipe p")).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(cfg.dante, None);
+}
+
+#[test]
+fn version_names_the_build() {
+    assert_eq!(parse_args(&args("--version")).unwrap(), Command::Version);
+    let line = version();
+    assert!(
+        line.starts_with(concat!("iem-engine ", env!("CARGO_PKG_VERSION"), "+")),
+        "{line}"
+    );
+    assert_eq!(
+        line,
+        format!("iem-engine {}", crate::control::engine_build())
+    );
+    assert!(USAGE.contains("iem-engine --version"));
+}
+
+/// The device's default control socket is where `iem-dante-dev ctl` looks.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_dante_control_socket_is_the_devices() {
+    assert_eq!(DANTE_CONTROL, iem_dante::ctl::SOCKET);
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn off_linux_dante_is_a_usage_error_before_any_state() {
+    let site = crate::test_support::test_site_path();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = RunConfig::new(
+        site,
+        dir.path().join("state"),
+        dir.path().join("p.sock").to_string_lossy().into_owned(),
+    );
+    cfg.backend = Backend::Dante;
+    cfg.dante = Some(DanteArgs {
+        config: dir.path().join("dev.toml"),
+        place: DantePlace::Iface("eth9".into()),
+        control: dir.path().join("c.sock"),
+    });
+    let e = run_bounded(cfg).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::Usage(m) if m.contains("Linux")),
+        "{e}"
+    );
+    assert!(
+        !dir.path().join("state").exists(),
+        "refused before the state"
+    );
+}
+
+/// On Linux a dante run reaches the device: one without its flags is
+/// refused before any state, one whose config cannot be read is refused
+/// by the device's setup (exit 2), never as "Linux only".
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dante_run_refuses_a_missing_device_and_an_unreadable_config() {
+    let site = crate::test_support::test_site_path();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = RunConfig::new(
+        site,
+        dir.path().join("state"),
+        dir.path().join("p.sock").to_string_lossy().into_owned(),
+    );
+    cfg.backend = Backend::Dante;
+    let e = run_bounded(cfg.clone()).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::Usage(m) if m.contains("--dante-config")),
+        "{e}"
+    );
+    assert!(
+        !dir.path().join("state").exists(),
+        "refused before the state"
+    );
+    cfg.dante = Some(DanteArgs {
+        config: dir.path().join("missing-device.toml"),
+        place: DantePlace::Iface("eth9".into()),
+        control: dir.path().join("c.sock"),
+    });
+    let e = run_bounded(cfg).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::Usage(m) if m.contains("missing-device.toml")),
+        "{e}"
+    );
+}
+
 #[test]
 fn the_memory_lock_is_due_once_five_seconds_in() {
     assert_eq!((LOCK_AFTER, LOCK_EXTRA_MB), (Duration::from_secs(5), 64));

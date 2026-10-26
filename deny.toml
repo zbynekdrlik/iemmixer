@@ -40,7 +40,9 @@ crate = "iem-migrate"
 allow = ["GPL-3.0-or-later"]
 
 # Gen 3 (#72, design §3): our Dante device adapts parts of teodly/inferno
-# (GPL-3.0-or-later OR AGPL-3.0-or-later), so it is GPL; the engine does not link it
+# (GPL-3.0-or-later OR AGPL-3.0-or-later), so it is GPL; from phase C the GPL engine
+# links it on Linux (its Dante backend, plan 2026-10-26 Task 3; already GPL through the
+# limiter); the server, the UI and the guard never do (only iem-server's tests run the engine)
 [[licenses.exceptions]]
 crate = "iem-dante"
 allow = ["GPL-3.0-or-later"]
