@@ -13,9 +13,9 @@
 //! signal and the goodbyes; 1 when the address is not there (yet: an
 //! interface still coming up at boot), the interface's MAC cannot be read,
 //! serving failed or the goodbyes were not confirmed, which the unit
-//! restarts; 2 for the command line, the config, the state file or an
-//! interface without a usable MAC, which it does not
-//! (`RestartPreventExitStatus=2`).
+//! restarts; 2 for the command line, the config, the state file (also one
+//! whose folder cannot be written, found at the start) or an interface
+//! without a usable MAC, which it does not (`RestartPreventExitStatus=2`).
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -41,7 +41,7 @@ mod linux {
         self, BUILD, Command, IfAddr, Options, Sockets, USAGE, VERSION, net_info, parse_args,
         pick_interface, version_line,
     };
-    use iem_dante::device::{Device, DeviceConfig};
+    use iem_dante::device::{Device, DeviceConfig, DeviceState};
     use iem_dante::info::{self, Multicast, NetInfo};
     use iem_dante::{arc, cmc};
     use mdns_sd::{DaemonStatus, IfKind, ServiceDaemon};
@@ -140,6 +140,13 @@ mod linux {
             std::fs::read_to_string(&opts.config).map_err(|e| setup(format!("{path}: {e}")))?;
         let cfg = DeviceConfig::from_toml(&text).map_err(|e| setup(format!("{path}: {e}")))?;
         let device = Device::load(cfg).map_err(setup)?;
+        // Found now, not at the first rename's save (which would be refused).
+        DeviceState::check_writable(&device.cfg.state_file).map_err(|e| {
+            setup(format!(
+                "the state file cannot be written ({e}): a rename could not be saved; \
+                 the folder must be writable by the service's user (StateDirectory=iem-dante)"
+            ))
+        })?;
         // An address not there may come (an interface still coming up at
         // boot): exit 1, which the unit retries.
         let ifa =
