@@ -2772,6 +2772,7 @@ name = "iem-dante"
 version = "2.0.0-dev.43"
 dependencies = [
  "if-addrs",
+ "libc",
  "mdns-sd",
  "serde",
  "tempfile",

@@ -20,8 +20,10 @@
 
 //! iemmixer's own Dante device (Gen 3 design §5.3, phase A): a box that
 //! Dante Controller lists under its own name, with its RX and TX channels,
-//! and whose channel renames stick across restarts. No audio, no clock and
-//! no flows yet (phases B and C); the device never sends PTP.
+//! and whose channel renames stick across restarts. Phase B (plan
+//! `docs/superpowers/plans/2026-10-26-gen3-phase-b-audio-through.md`) adds
+//! the media clock and the audio path, piece by piece; the device never
+//! sends PTP.
 //!
 //! - [`device`]: the config (a private TOML on the box) and the persisted
 //!   names, with Dante's name rules.
@@ -37,6 +39,9 @@
 //!   answered.
 //! - [`announce`]: the mDNS records Dante Controller browses for, and their
 //!   announcer.
+//! - [`clock`]: the media clock: PTP time as `CLOCK_MONOTONIC` + k, k from
+//!   dantesync's time server on the box (the box's one PTP owner), and the
+//!   packets' stamps.
 //! - [`daemon`]: the `iem-dante-dev` binary's command line, its interface
 //!   and address, and the loop that serves the device and announces it
 //!   again after renames.
@@ -46,6 +51,7 @@
 
 pub mod announce;
 pub mod arc;
+pub mod clock;
 pub mod cmc;
 pub mod daemon;
 pub mod device;
