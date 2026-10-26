@@ -1,0 +1,21 @@
+[package]
+name = "iem-dante"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+# Gen 3 (#72, design §3): parts are adapted from teodly/inferno
+# (GPL-3.0-or-later OR AGPL-3.0-or-later, taken under GPL-3.0-or-later), so
+# the crate is GPL. Never a dependency of iem-engine in phase A.
+license = "GPL-3.0-or-later"
+repository.workspace = true
+description = "iemmixer's own Dante device (Gen 3, #72): its config and persisted names, the ARC control codec and server, CMC and the mDNS records"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+# The device config and its state file, as the other crates read TOML.
+toml = "0.9"
+
+[dev-dependencies]
+# The state file's tests (a temporary directory), as the other crates use it.
+tempfile = "3"

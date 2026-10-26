@@ -189,6 +189,9 @@ exclude_re = [
   # `pause` is the real 200 ms wait between read tries: only time shows it,
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
+  # The Dante device's state file (#72): the fsync of its directory after the
+  # rename, unobservable the same way; the rename itself is tested.
+  "iem-dante/src/device\\.rs.*\\bsync_dir\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
