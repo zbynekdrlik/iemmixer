@@ -29,8 +29,8 @@ no queued window preempt starts a second bring-back), stops a kernel trace
 whose `iempc trace` died with this box (its record, iempc_trace.stop_recorded;
 `dev` does too), then runs `iemmode event`, and `iemmode event --direct` when
 the guard is unreachable (exit 4). Right after the flag it also stops the
-Gen 3 device (#72): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-dante`
-beside the PC's switch, waited for at most GEN3_STOP_S (5 s) at the end; a
+Gen 3 stack (#72): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-server
+iem-engine iem-dante` beside the PC's switch, waited for at most GEN3_STOP_S (5 s) at the end; a
 failure or a stop still running then is one warning, never the exit code;
 no GEN3_HOST is one info line. The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no

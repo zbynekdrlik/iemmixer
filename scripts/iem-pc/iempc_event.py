@@ -59,7 +59,7 @@ OWNER_ALARM = ("iempc: the event path did not complete: alarm the owner now with
 # one ssh started right after the flag, beside the PC's switch, and waited for at
 # most GEN3_STOP_S at the end of the path; past it the ssh is left to end by itself.
 GEN3_STOP_S = 5.0
-GEN3_STOP = ("sudo", "-n", "systemctl", "stop", "iem-dante")
+GEN3_STOP = ("sudo", "-n", "systemctl", "stop", "iem-server", "iem-engine", "iem-dante")
 # The stop's output (stdout and stderr) goes into this log in iempc's state
 # folder, never into pipes that close when iempc ends while it runs on; each
 # stop appends under a header line, and a log past GEN3_LOG_MAX is emptied
@@ -194,7 +194,7 @@ def gen3_outcome(stop: Gen3Stop) -> dict:
     except subprocess.TimeoutExpired:
         kept = f"its output goes to {stop.log}" if stop.log else "its output is not kept"
         gen3_warning(f"its stop did not answer within {GEN3_STOP_S:g} s and is left to end by itself ({kept}); "
-                     "read 'systemctl is-active iem-dante' on the box")
+                     "read 'systemctl is-active iem-server iem-engine iem-dante' on the box")
         return {"ok": False, "running": True}
     if code != 0:
         gen3_warning(f"its stop failed (exit {code}): {gen3_tail(stop)}")
@@ -316,7 +316,7 @@ def cmd_event(ctx: Ctx, ip) -> int:
     deadline = event_clock() + EVENT_BUDGET_S
     if dry:
         if ctx.env.get("GEN3_HOST"):
-            gen3_emit({"plan": "systemctl stop iem-dante"})
+            gen3_emit({"plan": "systemctl stop iem-server iem-engine iem-dante"})
         return pc_event(ctx, ip, deadline, dry)
     write_flag()
     # Started after the flag and never waited for here, so the PC's switch is

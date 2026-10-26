@@ -10,7 +10,8 @@ Every second (READ_EVERY_S) it reads `iem-dante-dev ctl status` on the box
 over ssh, as the service's user (the one the control socket admits), and
 computes per-second rates from the differences between two reads (every
 count in the status is cumulative). It runs `sudo -n systemctl stop
-iem-dante` on the box at once and exits 1 when:
+iem-server iem-engine iem-dante` (the whole Gen 3 stack, phase C) on the
+box at once and exits 1 when:
 
 - any (port, peer, opcode) of the requests our device received, or the sum
   past the status's tables (`uncounted`), runs above REQUEST_RATE (20) a
@@ -62,7 +63,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DANTE_BIN = "/opt/iemmixer/bin/iem-dante-dev"
-STOP = ("sudo", "-n", "systemctl", "stop", "iem-dante")
+STOP = ("sudo", "-n", "systemctl", "stop", "iem-server", "iem-engine", "iem-dante")
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=1",
                "-o", "ServerAliveCountMax=5")
 READ_EVERY_S = 1.0
@@ -104,6 +105,10 @@ class Sample:
     tx_live: int
     rx_granted: int
     polls: int
+    # The engine's pump (phase C), when an engine runs: (late, missed,
+    # rebootstraps), cumulative. Reported in the lines, never a trip: the
+    # guard watches our traffic, not the engine's timing.
+    pump: tuple[int, int, int] | None = None
 
 
 def number(doc: dict, key: str) -> int:
@@ -136,7 +141,17 @@ def sample(t0: float, t1: float, status: dict) -> Sample:
                   arc_reads=arc_reads, tx=tx, rx=rx,
                   tx_live=sum(1 for e in entries(status, "tx") if e.get("live") == 1),
                   rx_granted=sum(1 for e in entries(status, "rx") if e.get("granted") == 1),
-                  polls=number(status.get("clock"), "polls"))
+                  polls=number(status.get("clock"), "polls"), pump=pump_counts(status))
+
+
+def pump_counts(status: dict) -> tuple[int, int, int] | None:
+    """The engine pump's late, missed and rebootstraps; None without an
+    `engine` object (the device alone). An engine object of another shape
+    is no sample, as any other part."""
+    engine = status.get("engine")
+    if engine is None:
+        return None
+    return number(engine, "late"), number(engine, "missed"), number(engine, "rebootstraps")
 
 
 def counters(s: Sample) -> dict[tuple, int]:
@@ -360,7 +375,7 @@ class Box:
         if proc.returncode != 0:
             say(f"WARNING: the stop failed (exit {proc.returncode}): {' '.join(out.split())[-300:]}; {hand}")
         else:
-            say("iem-dante stopped")
+            say("the Gen 3 stack stopped")
         return proc.returncode
 
 
@@ -402,7 +417,16 @@ def figures(t: float, tally: Tally, peaks: Peaks, watch: Watch) -> dict:
             "request_rate_max": round(peaks.request_rate, 1), "flow_requests_5s_max": peaks.flow_requests,
             "arc_reads_5s_max": peaks.arc_reads,
             "packet_ratio_max": round(peaks.packet_ratio, 3), "tx_flows": last.tx_live if last else 0,
-            "rx_flows": last.rx_granted if last else 0, "restarts": watch.restarts}
+            "rx_flows": last.rx_granted if last else 0, "restarts": watch.restarts,
+            **pump_figures(last)}
+
+
+def pump_figures(last: Sample | None) -> dict:
+    """The engine pump's counts for a line, none without an engine."""
+    if last is None or last.pump is None:
+        return {}
+    late, missed, rebootstraps = last.pump
+    return {"pump_late": late, "pump_missed": missed, "pump_rebootstraps": rebootstraps}
 
 
 def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: Ending) -> int:
@@ -446,7 +470,7 @@ def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: E
                 tally.reads += 1
                 trip = watch.feed(s)
                 if trip is not None:
-                    say(f"TRIPPED: {trip.kind} {json.dumps(trip.numbers)}: stopping iem-dante")
+                    say(f"TRIPPED: {trip.kind} {json.dumps(trip.numbers)}: stopping the Gen 3 stack")
                     return end(trip.kind, EXIT_TRIPPED, trip, box.stop())
         if clock.now() >= next_line:
             peaks = watch.take_peaks()
