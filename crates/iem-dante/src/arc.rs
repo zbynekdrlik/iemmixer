@@ -81,6 +81,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
 use crate::cmc::PROCESS_ID;
+use crate::ctl::{Requests, header_op};
 use crate::device::{
     Device, DeviceConfig, DeviceState, Subscription, channel_problems, valid_channel_name,
 };
@@ -264,49 +265,6 @@ impl Flows for Running {
     }
 }
 
-/// A device without flows (until the daemon runs them, plan Task 7): no TX
-/// flow, and a manager that keeps the subscriptions and resolves none, so
-/// every subscribed channel reads Unresolved.
-#[derive(Debug)]
-pub struct NoFlows {
-    tx: TxTable,
-    rx: Mutex<Manager>,
-}
-
-impl NoFlows {
-    /// No flows for `device`, its saved subscriptions known.
-    pub fn new(device: &Device) -> Self {
-        let mut rx = Manager::new(
-            &device.cfg,
-            &device.state.name,
-            std::net::Ipv4Addr::UNSPECIFIED,
-            [0; crate::subscribe::MAX_FLOWS],
-        );
-        rx.load(&device.state.subscriptions);
-        rx.changed();
-        NoFlows {
-            tx: TxTable::new(0),
-            rx: Mutex::new(rx),
-        }
-    }
-}
-
-impl Flows for NoFlows {
-    fn view<R>(&self, f: impl FnOnce(&Live<'_>) -> R) -> R {
-        let rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&Live {
-            tx: &self.tx,
-            rx: &rx,
-        })
-    }
-
-    fn subscribe(&self, subs: &[Option<Subscription>]) -> Vec<usize> {
-        let mut rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
-        rx.load(subs);
-        rx.changed()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dir {
     Rx,
@@ -411,13 +369,15 @@ pub fn respond(device: &mut Device, live: &Live<'_>, req: &[u8]) -> ArcOutcome {
 /// server's channel-change notification). Ends only with an error
 /// receiving; a reply that cannot be sent is logged and the server goes
 /// on. Refused and unanswered requests are counted ([`Gaps`]) and their
-/// counts logged as one warning a minute, looked at every [`GAP_CHECK`].
+/// counts logged as one warning a minute, looked at every [`GAP_CHECK`];
+/// every datagram is counted in `requests` (the control socket's status).
 pub async fn serve<F: Flows>(
     sock: UdpSocket,
     shared: Arc<Mutex<Device>>,
     flows: Arc<F>,
     changed: Arc<Notify>,
     rx_changes: Arc<Changes>,
+    requests: Arc<Requests>,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; RECV_BUFFER];
     let mut gaps = Gaps::new(gaps::WINDOW);
@@ -427,6 +387,7 @@ pub async fn serve<F: Flows>(
         let report = tokio::select! {
             got = sock.recv_from(&mut buf) => {
                 let (n, peer) = got?;
+                requests.received(PORT, peer.ip(), header_op(&buf[..n]));
                 let (outcome, moved) = {
                     let mut device = shared.lock().unwrap_or_else(PoisonError::into_inner);
                     let outcome = flows.view(|live| respond(&mut device, live, &buf[..n]));

@@ -174,6 +174,8 @@ struct RxStats {
     keepalive_errors: AtomicU64,
     recv_errors: AtomicU64,
     max_lateness: AtomicU64,
+    /// What the last [`RxShared::take_max_lateness`] took.
+    last_lateness: AtomicU64,
 }
 
 /// One flow slot's counts since the device started (every flow it held).
@@ -323,11 +325,23 @@ impl RxShared {
     }
 
     /// Flow slot `slot`'s largest lateness since the last call, samples
-    /// (the heartbeat's 0x8003, plan Task 6).
+    /// (the heartbeat's 0x8003, plan Task 6); kept for
+    /// [`RxShared::last_lateness`].
     pub fn take_max_lateness(&self, slot: usize) -> u64 {
+        self.lanes.get(slot).map_or(0, |l| {
+            let taken = l.max_lateness.swap(0, Ordering::Relaxed);
+            l.last_lateness.store(taken, Ordering::Relaxed);
+            taken
+        })
+    }
+
+    /// What the last [`RxShared::take_max_lateness`] of flow slot `slot`
+    /// took (the heartbeat's last second), samples: the control socket's
+    /// status reads it and takes nothing (plan Task 7).
+    pub fn last_lateness(&self, slot: usize) -> u64 {
         self.lanes
             .get(slot)
-            .map_or(0, |l| l.max_lateness.swap(0, Ordering::Relaxed))
+            .map_or(0, |l| l.last_lateness.load(Ordering::Relaxed))
     }
 
     /// The receive buffer the kernel gave the flow sockets, bytes.

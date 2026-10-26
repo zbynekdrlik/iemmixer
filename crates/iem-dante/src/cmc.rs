@@ -13,10 +13,12 @@
 
 use std::io;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
+use crate::ctl::{Requests, header_op};
 use crate::wire::{Header, STATUS_OK, reply};
 
 /// CMC's UDP port.
@@ -69,11 +71,13 @@ fn advertisement(ip: Ipv4Addr) -> Vec<u8> {
 }
 
 /// The CMC server for the device at `ip` (the address it is reached at,
-/// which the advertisement names). Ends only with an error receiving.
-pub async fn serve_cmc(sock: UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
+/// which the advertisement names); every datagram counted in `requests`.
+/// Ends only with an error receiving.
+pub async fn serve_cmc(sock: UdpSocket, ip: Ipv4Addr, requests: Arc<Requests>) -> io::Result<()> {
     let mut buf = vec![0u8; RECV_BUFFER];
     loop {
         let (n, peer) = sock.recv_from(&mut buf).await?;
+        requests.received(PORT, peer.ip(), header_op(&buf[..n]));
         if let Some(bytes) = handle_cmc(&buf[..n], ip)
             && let Err(e) = sock.send_to(&bytes, peer).await
         {
@@ -145,7 +149,8 @@ mod tests {
     async fn the_cmc_server_answers_the_advertisement_request() {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
-        let task = tokio::spawn(serve_cmc(sock, IP));
+        let requests = Arc::new(Requests::default());
+        let task = tokio::spawn(serve_cmc(sock, IP, Arc::clone(&requests)));
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         // An unknown request gets no answer; the next one does.
         peer.send_to(&request(0x27ff, 1, 0x1000, 0, &[]), addr)
@@ -165,6 +170,14 @@ mod tests {
             (2, ADVERTISE, STATUS_OK, 22)
         );
         assert_eq!(body[14..18], [10, 0, 0, 10]);
+        // Both datagrams counted for the status, by port, peer and opcode.
+        let counts = requests.counts();
+        let seen: Vec<(u16, usize, u16, u64)> = counts
+            .received
+            .iter()
+            .map(|r| (r.port, r.peer, r.op, r.n))
+            .collect();
+        assert_eq!(seen, [(PORT, 1, 0x1000, 1), (PORT, 1, ADVERTISE, 1)]);
         task.abort();
     }
 }

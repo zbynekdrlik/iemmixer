@@ -56,8 +56,11 @@
 //!   with the thread that sends them, and the RX flows with the thread that
 //!   receives them.
 //! - [`daemon`]: the `iem-dante-dev` binary's command line, its interface
-//!   and address, and the loop that serves the device and announces it
-//!   again after renames.
+//!   and address, the loop that serves the device and announces it again
+//!   after renames, and the running audio side ([`daemon::media`]: the TX
+//!   and RX threads, our RX's manager driven every 250 ms, the stop).
+//! - [`ctl`]: the local control socket: the status (numbers only), the TX
+//!   test sources and the RX checks, set at runtime; the request counts.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
@@ -66,6 +69,7 @@ pub mod announce;
 pub mod arc;
 pub mod clock;
 pub mod cmc;
+pub mod ctl;
 pub mod daemon;
 pub mod device;
 pub mod flows;

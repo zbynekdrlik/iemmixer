@@ -167,6 +167,50 @@ fn agree(a: i64, b: i64) -> bool {
     a.abs_diff(b) <= TOLERANCE_NS.unsigned_abs()
 }
 
+/// What the poller has done so far, for the control socket's status (plan
+/// Task 7): its polls, the re-anchors, and the holdovers (a run of polls in
+/// holdover is one), written by the poller only.
+#[derive(Debug, Default)]
+pub struct ClockStats {
+    polls: AtomicU64,
+    re_anchors: AtomicU32,
+    holdovers: AtomicU32,
+    in_holdover: AtomicBool,
+}
+
+/// [`ClockStats`] read at one moment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClockCounts {
+    pub polls: u64,
+    pub re_anchors: u32,
+    pub holdovers: u32,
+    /// The last poll was in holdover.
+    pub in_holdover: bool,
+}
+
+impl ClockStats {
+    /// One poll's event.
+    pub fn record(&self, ev: Event) {
+        self.polls.fetch_add(1, Ordering::Relaxed);
+        let holdover = ev == Event::Holdover;
+        if self.in_holdover.swap(holdover, Ordering::Relaxed) != holdover && holdover {
+            self.holdovers.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Event::ReAnchored { .. } = ev {
+            self.re_anchors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn counts(&self) -> ClockCounts {
+        ClockCounts {
+            polls: self.polls.load(Ordering::Relaxed),
+            re_anchors: self.re_anchors.load(Ordering::Relaxed),
+            holdovers: self.holdovers.load(Ordering::Relaxed),
+            in_holdover: self.in_holdover.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// One poll of dantesync and what it did (the poller's step; the
 /// `iem-dante-dev clock` lines are made of these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,16 +436,25 @@ mod linux {
     }
 
     /// Polls dantesync on the box (127.0.0.1, [`dsyx::PORT`]) once a second
-    /// and keeps `clock`'s k and `freq` (dantesync's frequency adjustment,
-    /// ppb) up to date; runs until the task ends.
-    pub async fn poll_dantesync(clock: Arc<MonoClock>, freq: Arc<AtomicI32>) {
-        poll(DANTESYNC, clock, freq).await
+    /// and keeps `clock`'s k, `freq` (dantesync's frequency adjustment,
+    /// ppb) and `stats` up to date; runs until the task ends.
+    pub async fn poll_dantesync(
+        clock: Arc<MonoClock>,
+        freq: Arc<AtomicI32>,
+        stats: Arc<ClockStats>,
+    ) {
+        poll(DANTESYNC, clock, freq, stats).await
     }
 
     /// The poller, aimed at `target` (a stand-in server in the tests).
     /// Glue: every decision is [`sample`]'s and [`Tracker`]'s. Logs name
     /// the clock's state, k and deltas in ns, never an address.
-    pub(crate) async fn poll(target: SocketAddr, clock: Arc<MonoClock>, freq: Arc<AtomicI32>) {
+    pub(crate) async fn poll(
+        target: SocketAddr,
+        clock: Arc<MonoClock>,
+        freq: Arc<AtomicI32>,
+        stats: Arc<ClockStats>,
+    ) {
         let mut poller = loop {
             match Poller::connect(target).await {
                 Ok(p) => break p,
@@ -422,6 +475,7 @@ mod linux {
         loop {
             tick.tick().await;
             let p = poller.once(&clock, &freq).await;
+            stats.record(p.event);
             log_event(p.event, last, p.sample, &mut waiting, clock.epoch());
             last = p.event;
         }

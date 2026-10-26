@@ -55,6 +55,7 @@ use tracing::{debug, info, warn};
 
 use super::control::{self, Unread, op, status};
 use crate::arc::gaps::{self, Gap, Gaps};
+use crate::ctl::{Requests, header_op};
 use crate::device::DeviceConfig;
 use crate::media::tx::{FPP_MAX, MAX_FLOWS, TxShared, TxTable, sendable};
 use crate::wire::{Header, WireError, read_u16, reply};
@@ -370,10 +371,15 @@ impl PeerLimit {
 /// The flow-control server: answers every datagram on `sock` (bound to
 /// the device's address, [`control::PORT`]) from `shared`'s table and hands
 /// each change to the TX thread; every [`EXPIRE_CHECK`] keeps heard flows
-/// alive and expires the rest. Ends only with an error receiving; a reply
-/// that cannot be sent is logged and the server goes on. Glue: every
-/// decision is [`answer`]'s and [`TxShared::sync`]'s.
-pub async fn serve(sock: UdpSocket, shared: Arc<TxShared>) -> io::Result<()> {
+/// alive and expires the rest. Every datagram is counted in `requests`
+/// (the control socket's status), over the bound or not. Ends only with an
+/// error receiving; a reply that cannot be sent is logged and the server
+/// goes on. Glue: every decision is [`answer`]'s and [`TxShared::sync`]'s.
+pub async fn serve(
+    sock: UdpSocket,
+    shared: Arc<TxShared>,
+    requests: Arc<Requests>,
+) -> io::Result<()> {
     let mut buf = vec![0u8; RECV_BUFFER];
     let mut gaps = Gaps::new(gaps::WINDOW);
     let mut limit = PeerLimit::new();
@@ -385,6 +391,7 @@ pub async fn serve(sock: UdpSocket, shared: Arc<TxShared>) -> io::Result<()> {
         let report = tokio::select! {
             got = sock.recv_from(&mut buf) => {
                 let (n, peer) = got?;
+                requests.received(control::PORT, peer.ip(), header_op(&buf[..n]));
                 match peer {
                     SocketAddr::V4(from) => {
                         let at = Instant::now();

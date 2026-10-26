@@ -9,6 +9,7 @@ use std::time::Duration;
 use mdns_sd::ServiceInfo;
 use tokio::sync::oneshot;
 
+use super::media::tests::{Unready, media_on, sub};
 use crate::announce::CHAN_SERVICE;
 use crate::arc::op;
 use crate::device::DeviceConfig;
@@ -33,7 +34,112 @@ fn run(config: &str, place: Place) -> Command {
     Command::Run(Options {
         config: PathBuf::from(config),
         place,
+        control: PathBuf::from("/run/iem-dante/control.sock"),
     })
+}
+
+#[test]
+fn a_run_takes_another_control_socket() {
+    let want = Command::Run(Options {
+        config: PathBuf::from("c"),
+        place: Place::Iface("eth9".into()),
+        control: PathBuf::from("/tmp/x/control.sock"),
+    });
+    assert_eq!(
+        parse_args(&args(&[
+            "--control",
+            "/tmp/x/control.sock",
+            "--config",
+            "c",
+            "--iface",
+            "eth9"
+        ])),
+        Ok(want)
+    );
+    for (a, want) in [
+        (
+            &["--config", "c", "--iface", "e", "--control"][..],
+            "--control needs a value",
+        ),
+        (
+            &["--config", "c", "--iface", "e", "--control", ""],
+            "--control needs a path",
+        ),
+        (
+            &[
+                "--config",
+                "c",
+                "--iface",
+                "e",
+                "--control",
+                "a",
+                "--control",
+                "b",
+            ],
+            "given twice",
+        ),
+    ] {
+        let got = parse_args(&args(a)).expect_err(&format!("{a:?} is refused"));
+        assert!(got.contains(want), "{a:?}: {got}");
+    }
+}
+
+#[test]
+fn ctl_takes_a_socket_and_the_request_s_words() {
+    let ctl = |socket: &str, request: &str| Command::Ctl {
+        socket: PathBuf::from(socket),
+        request: request.into(),
+    };
+    let default = "/run/iem-dante/control.sock";
+    for (a, want) in [
+        (&["ctl", "status"][..], ctl(default, "status")),
+        (
+            &["ctl", "source", "1", "sine", "1000", "-20"],
+            ctl(default, "source 1 sine 1000 -20"),
+        ),
+        (
+            &["ctl", "--socket", "/tmp/c.sock", "check", "2", "counter"],
+            ctl("/tmp/c.sock", "check 2 counter"),
+        ),
+        // The daemon judges the words, not the client.
+        (
+            &["ctl", "bogus", "--version"],
+            ctl(default, "bogus --version"),
+        ),
+        (&["ctl", "--help", "status"], Command::Help),
+        (&["ctl", "-h"], Command::Help),
+    ] {
+        assert_eq!(parse_args(&args(a)), Ok(want), "{a:?}");
+    }
+    for (a, want) in [
+        (&["ctl"][..], "the request is missing"),
+        (
+            &["ctl", "--socket", "/tmp/c.sock"],
+            "the request is missing",
+        ),
+        (&["ctl", "--socket"], "--socket needs a path"),
+        (&["ctl", "--socket", "", "status"], "--socket needs a path"),
+    ] {
+        let got = parse_args(&args(a)).expect_err(&format!("{a:?} is refused"));
+        assert!(got.contains(want), "{a:?}: {got}");
+    }
+}
+
+#[test]
+fn a_ctl_answer_succeeds_when_it_is_ok_or_the_status() {
+    for good in ["ok", "ok\n", "{\"clock\":{}}", "{}\n"] {
+        assert!(ctl_succeeded(good), "{good:?}");
+    }
+    for bad in [
+        "",
+        "\n",
+        "error: unknown request",
+        "okay",
+        " ok",
+        "error: ok",
+    ] {
+        assert!(!ctl_succeeded(bad), "{bad:?}");
+    }
 }
 
 #[test]
@@ -591,6 +697,15 @@ impl Log {
     }
 }
 
+/// The browse of the channel records: logged, no record.
+impl Browse for Log {
+    type Events = std::iter::Empty<mdns_sd::ServiceEvent>;
+    fn browse_channels(&self) -> Result<Self::Events, mdns_sd::Error> {
+        self.calls.borrow_mut().push("browse".into());
+        Ok(std::iter::empty())
+    }
+}
+
 impl Registry for Log {
     fn register(&self, info: ServiceInfo) -> Result<(), mdns_sd::Error> {
         if self.allow.get() == 0 {
@@ -643,6 +758,7 @@ struct Loopback {
     arc: SocketAddr,
     cmc: SocketAddr,
     info: SocketAddr,
+    flows: SocketAddr,
     info_rx: UdpSocket,
     beat_rx: UdpSocket,
     multicast: Multicast,
@@ -654,6 +770,7 @@ async fn loopback() -> Loopback {
         arc: bind().await.unwrap(),
         cmc: bind().await.unwrap(),
         info: bind().await.unwrap(),
+        flows: bind().await.unwrap(),
     };
     let (info_rx, beat_rx) = (bind().await.unwrap(), bind().await.unwrap());
     let multicast = Multicast {
@@ -665,11 +782,17 @@ async fn loopback() -> Loopback {
         arc: sockets.arc.local_addr().unwrap(),
         cmc: sockets.cmc.local_addr().unwrap(),
         info: sockets.info.local_addr().unwrap(),
+        flows: sockets.flows.local_addr().unwrap(),
         sockets,
         info_rx,
         beat_rx,
         multicast,
     }
+}
+
+/// The device's audio side on loopback, its clock never ready.
+fn media_of(shared: &Arc<Mutex<Device>>) -> Arc<Media> {
+    media_on(&shared.lock().unwrap(), Arc::new(Unready))
 }
 
 async fn recv(sock: &UdpSocket) -> Vec<u8> {
@@ -729,10 +852,17 @@ async fn the_daemon_announces_answers_and_announces_a_rename_again_until_stopped
         arc: arc_at,
         cmc: cmc_at,
         info: info_at,
+        flows: flows_at,
         info_rx,
         beat_rx,
         multicast,
     } = loopback().await;
+    let media = media_of(&shared);
+    let control_path = dir.path().join("control.sock");
+    let control = crate::ctl::serve_control(
+        crate::ctl::bind_control(&control_path).unwrap(),
+        Arc::clone(&media),
+    );
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let stop = async move {
         stop_rx.await.ok();
@@ -785,6 +915,24 @@ async fn the_daemon_announces_answers_and_announces_a_rename_again_until_stopped
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // Flow control: a stop of a flow we never granted is 0x0103.
+        let stop_req = crate::flows::control::build_stop(4, &[0, 0, 0, 9, 0, 1]);
+        let reply = ask(&peer_socket().await, flows_at, &stop_req).await;
+        assert_eq!(Header::parse(&reply).unwrap().0.op2, 0x0103);
+        // The control socket: a source set, and the status counting every
+        // request above by port and opcode (one peer: loopback).
+        assert_eq!(control_ask(&control_path, "source 1 counter").await, "ok\n");
+        let status = control_ask(&control_path, "status").await;
+        for counted in [
+            "{\"port\":4440,\"peer\":1,\"op\":8211,\"n\":1}",
+            "{\"port\":4455,\"peer\":1,\"op\":257,\"n\":1}",
+            "{\"port\":8700,\"peer\":1,\"op\":19,\"n\":1}",
+            "{\"port\":8700,\"peer\":1,\"op\":97,\"n\":1}",
+            "{\"port\":8800,\"peer\":1,\"op\":4097,\"n\":1}",
+            "\"sources\":[{\"tx\":1,\"source\":\"counter\"}]",
+        ] {
+            assert!(status.contains(counted), "{counted} in {status}");
+        }
         stop_tx.send(()).unwrap();
     };
     let (served, ()) = tokio::time::timeout(BOUND, async {
@@ -795,6 +943,8 @@ async fn the_daemon_announces_answers_and_announces_a_rename_again_until_stopped
                 &mut announcer,
                 net(),
                 multicast,
+                Arc::clone(&media),
+                control,
                 stop
             ),
             peer
@@ -803,6 +953,8 @@ async fn the_daemon_announces_answers_and_announces_a_rename_again_until_stopped
     .await
     .expect("the daemon ends within the bound once stopped");
     served.unwrap();
+    // The stop ended the media threads.
+    assert!(media.tx.stopping() && media.rx.stopping());
     let calls = log.calls();
     assert_eq!(calls.len(), 2 + 16 + 1, "{calls:#?}");
     assert_eq!(
@@ -829,20 +981,47 @@ async fn peer_socket() -> UdpSocket {
     UdpSocket::bind("127.0.0.1:0").await.unwrap()
 }
 
+/// One request line to the control socket at `path`; its answer, bounded.
+async fn control_ask(path: &Path, line: &str) -> String {
+    tokio::time::timeout(BOUND, async {
+        let s = tokio::net::UnixStream::connect(path).await.unwrap();
+        s.writable().await.unwrap();
+        s.try_write(format!("{line}\n").as_bytes()).unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            s.readable().await.unwrap();
+            match s.try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+        String::from_utf8(out).unwrap()
+    })
+    .await
+    .expect("an answer within the bound")
+}
+
 #[tokio::test]
 async fn a_stop_that_has_already_come_ends_the_daemon_after_its_announcement() {
     let dir = tempfile::tempdir().unwrap();
     let log = Log::new(usize::MAX);
     let mut announcer = Announcer::new(log.clone());
     let lo = loopback().await;
+    let shared = device_in(dir.path());
+    let media = media_of(&shared);
     let served = tokio::time::timeout(
         BOUND,
         serve(
             lo.sockets,
-            device_in(dir.path()),
+            shared,
             &mut announcer,
             net(),
             lo.multicast,
+            Arc::clone(&media),
+            std::future::pending(),
             std::future::ready(()),
         ),
     )
@@ -850,6 +1029,61 @@ async fn a_stop_that_has_already_come_ends_the_daemon_after_its_announcement() {
     .expect("within the bound");
     served.unwrap();
     assert_eq!(log.calls().len(), 2 + 16);
+    assert!(media.tx.stopping() && media.rx.stopping());
+}
+
+#[tokio::test]
+async fn the_daemon_browses_at_the_first_subscription_and_stops_after_any_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = device_in(dir.path());
+    {
+        let mut device = shared.lock().unwrap();
+        let cfg = device.cfg.clone();
+        device
+            .state
+            .set_subscription(&cfg, 0, Some(sub("TX 1", "peer-device")));
+    }
+    let log = Log::new(usize::MAX);
+    let mut announcer = Announcer::new(log.clone());
+    let lo = loopback().await;
+    let media = media_of(&shared);
+    // The control server ends once the browse has started: serving ends
+    // with its error, and the stop still runs.
+    let watch = log.clone();
+    let control = async move {
+        let deadline = tokio::time::Instant::now() + BOUND;
+        while !watch.calls().contains(&"browse".to_string()) {
+            assert!(tokio::time::Instant::now() < deadline, "no browse");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Err(io::Error::other("the control test's end"))
+    };
+    let served = tokio::time::timeout(
+        BOUND,
+        serve(
+            lo.sockets,
+            shared,
+            &mut announcer,
+            net(),
+            lo.multicast,
+            Arc::clone(&media),
+            control,
+            std::future::pending(),
+        ),
+    )
+    .await
+    .expect("within the bound");
+    let err = served.unwrap_err();
+    assert!(matches!(err, ServeError::Control(_)), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "the control socket stopped: the control test's end"
+    );
+    let calls = log.calls();
+    assert_eq!(calls.iter().filter(|c| *c == "browse").count(), 1);
+    // The unresolved subscription asked nothing; the threads ended.
+    assert!(media.requests.counts().sent.is_empty());
+    assert!(media.tx.stopping() && media.rx.stopping());
 }
 
 #[tokio::test]
@@ -858,14 +1092,18 @@ async fn a_first_announcement_that_fails_ends_the_daemon_with_its_error() {
     let log = Log::new(0);
     let mut announcer = Announcer::new(log.clone());
     let lo = loopback().await;
+    let shared = device_in(dir.path());
+    let media = media_of(&shared);
     let served = tokio::time::timeout(
         BOUND,
         serve(
             lo.sockets,
-            device_in(dir.path()),
+            shared,
             &mut announcer,
             net(),
             lo.multicast,
+            Arc::clone(&media),
+            std::future::pending(),
             std::future::pending(),
         ),
     )
@@ -874,6 +1112,8 @@ async fn a_first_announcement_that_fails_ends_the_daemon_with_its_error() {
     let err = served.unwrap_err();
     assert!(matches!(err, ServeError::Announce(_)), "{err}");
     assert!(log.calls().is_empty());
+    // Nothing was started.
+    assert!(!media.tx.stopping());
 }
 
 #[tokio::test]
@@ -889,6 +1129,7 @@ async fn an_announcement_that_fails_after_a_rename_ends_the_daemon() {
         let reply = ask(&peer_socket().await, arc_at, &tx_rename(5, b"Mix 5")).await;
         assert_eq!(Header::parse(&reply).unwrap().0.op2, STATUS_OK);
     };
+    let media = media_of(&shared);
     let (served, ()) = tokio::time::timeout(BOUND, async {
         tokio::join!(
             serve(
@@ -897,6 +1138,8 @@ async fn an_announcement_that_fails_after_a_rename_ends_the_daemon() {
                 &mut announcer,
                 net(),
                 lo.multicast,
+                Arc::clone(&media),
+                std::future::pending(),
                 std::future::pending()
             ),
             peer
@@ -904,6 +1147,8 @@ async fn an_announcement_that_fails_after_a_rename_ends_the_daemon() {
     })
     .await
     .expect("the failed announcement ends the daemon within the bound");
+    // A failure after the start still ends the media threads.
+    assert!(media.tx.stopping() && media.rx.stopping());
     let err = served.unwrap_err();
     assert!(matches!(err, ServeError::Announce(_)), "{err}");
     assert!(
@@ -946,5 +1191,13 @@ fn a_server_that_ends_is_an_error_whatever_it_returned() {
     assert_eq!(
         ServeError::Info(io::Error::other("z")).to_string(),
         "the info server stopped: z"
+    );
+    assert_eq!(
+        ServeError::Flows(io::Error::other("f")).to_string(),
+        "the flow-control server stopped: f"
+    );
+    assert_eq!(
+        ServeError::Threads(io::Error::other("t")).to_string(),
+        "the media threads did not start: t"
     );
 }

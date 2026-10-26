@@ -491,12 +491,14 @@ async fn loopback(every: Duration) -> (SocketAddr, UdpSocket, UdpSocket, Multica
 #[tokio::test]
 async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
     let (at, info_rx, beat_rx, to, sock) = loopback(NEVER).await;
+    let requests = Arc::new(Requests::default());
     let task = tokio::spawn(serve_info(
         sock,
         Multicaster::new(identity()),
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
+        Arc::clone(&requests),
     ));
     // At start, as inferno: the board info, the product info, then the
     // first heartbeat at once.
@@ -519,6 +521,21 @@ async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
     let mut buf = [0u8; 64];
     let to_peer = tokio::time::timeout(Duration::from_millis(100), peer.recv_from(&mut buf)).await;
     assert!(to_peer.is_err(), "nothing goes back to the requester");
+    // Every datagram counted for the status, the short one as opcode 0.
+    let seen: Vec<(u16, usize, u16, u64)> = requests
+        .counts()
+        .received
+        .iter()
+        .map(|r| (r.port, r.peer, r.op, r.n))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (REQUEST_PORT, 1, 0x0000, 1),
+            (REQUEST_PORT, 1, 0x0061, 1),
+            (REQUEST_PORT, 1, 0x0081, 1)
+        ]
+    );
     assert!(!task.is_finished());
     task.abort();
 }
@@ -547,6 +564,7 @@ async fn the_server_bounds_its_replies_to_the_info_group() {
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
+        Arc::default(),
     ));
     recv(&info_rx).await;
     recv(&info_rx).await;
@@ -789,6 +807,16 @@ impl Beat for Fixed {
     }
 }
 
+/// A device whose media clock is not ready: the heartbeat is the header
+/// alone.
+struct NoClock;
+
+impl Beat for NoClock {
+    fn records(&self) -> Option<Records> {
+        None
+    }
+}
+
 #[tokio::test]
 async fn the_server_beats_with_its_records_and_notifies_changes() {
     let (_, info_rx, beat_rx, to, sock) = loopback(NEVER).await;
@@ -799,6 +827,7 @@ async fn the_server_beats_with_its_records_and_notifies_changes() {
         to,
         Arc::new(Fixed(Some(records()))),
         Arc::clone(&changes),
+        Arc::default(),
     ));
     recv(&info_rx).await;
     recv(&info_rx).await;
@@ -831,6 +860,7 @@ async fn the_server_sends_a_held_back_notification_within_a_second_or_two() {
         to,
         Arc::new(NoClock),
         Arc::clone(&changes),
+        Arc::default(),
     ));
     recv(&info_rx).await;
     recv(&info_rx).await;
@@ -981,6 +1011,7 @@ async fn the_heartbeat_repeats_at_its_period() {
         to,
         Arc::new(NoClock),
         Arc::new(Changes::default()),
+        Arc::default(),
     ));
     recv(&info_rx).await;
     recv(&info_rx).await;

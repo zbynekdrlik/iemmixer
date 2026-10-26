@@ -17,14 +17,20 @@
 //!   interface, from the box's files the binary reads (its MAC and speed
 //!   in `/sys/class/net/<iface>/`, the routes in `/proc/net/route`).
 //! - [`serve`]: announces the device's records, answers ARC (UDP 4440),
-//!   CMC (UDP 8800) and the info requests (UDP 8700, [`crate::info`]),
-//!   beats every second, and announces again after every saved rename,
-//!   until its stop future ends (the binary's SIGTERM or SIGINT). The
-//!   binary then shuts the mDNS daemon down, which sends the goodbyes.
+//!   CMC (UDP 8800), the info requests (UDP 8700, [`crate::info`]) and
+//!   flow control (UDP 4455, [`crate::flows::server`]), beats every second,
+//!   runs the TX and RX threads and our RX's manager ([`media`]), serves
+//!   the control socket ([`crate::ctl`]), and announces again after every
+//!   saved rename, until its stop future ends (the binary's SIGTERM or
+//!   SIGINT). It then stops every RX flow at its transmitter and ends the
+//!   threads; the binary shuts the mDNS daemon down, which sends the
+//!   goodbyes.
 //!
-//! The device sends no PTP and no audio (phase A). Logs name counts,
-//! ports and channel numbers, never a name or an address: the device and
-//! channel names are the ops repository's (P6).
+//! The device sends no PTP. Logs name counts, ports, flow slots and
+//! channel numbers, never a name or an address: the device and channel
+//! names are the ops repository's (P6).
+
+pub mod media;
 
 use std::future::Future;
 use std::io;
@@ -34,13 +40,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
+use tokio::time::MissedTickBehavior;
 use tracing::info;
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
 use crate::device::Device;
-use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo, NoClock};
-use crate::{arc, cmc, info};
+use crate::flows::client::Client;
+use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo};
+use crate::subscribe::TICK;
+use crate::subscribe::resolve::{Browse, BrowseError, Mdns, Own};
+use crate::{arc, cmc, flows, info};
+use media::{Driver, Media, THREADS_WAIT};
 
 /// The binary's name.
 pub const NAME: &str = "iem-dante-dev";
@@ -55,15 +66,30 @@ pub const BUILD: &str = match option_env!("GITHUB_SHA") {
 
 pub const USAGE: &str = "\
 usage: iem-dante-dev --config <path> (--iface <name> | --ip <IPv4 address>)
+                     [--control <socket path>]
+       iem-dante-dev ctl [--socket <path>] <request>
        iem-dante-dev clock --seconds <n>
        iem-dante-dev --version
 
-Our own Dante device (Gen 3 phase A, #72): ARC on UDP 4440, CMC on UDP 8800
-and the info requests on UDP 8700 at the interface's IPv4 address (replies
-to 224.0.0.231:8702, a heartbeat every second to 224.0.0.233:8708), its
-mDNS records on that interface only, renames saved to the config's state
-file. SIGTERM or SIGINT withdraws the records (mDNS goodbyes), then it
-exits 0. It never sends PTP or audio.
+Our own Dante device (Gen 3, #72): ARC on UDP 4440, CMC on UDP 8800, the
+info requests on UDP 8700 and flow control on UDP 4455 at the interface's
+IPv4 address (info replies to 224.0.0.231:8702, a heartbeat every second to
+224.0.0.233:8708), its mDNS records on that interface only, renames and RX
+subscriptions saved to the config's state file. It sends the TX flows
+receivers ask for and asks transmitters for its subscribed RX channels, on
+PTP time read from dantesync (127.0.0.1:31900); it never sends PTP. Its
+control socket (default /run/iem-dante/control.sock) takes one request
+line a connection. SIGTERM or SIGINT stops every RX flow at its
+transmitter, ends the media threads and withdraws the records (mDNS
+goodbyes), then it exits 0.
+
+ctl: sends one request to the control socket and prints the answer line:
+  status                    the device's numbers, one JSON line
+  source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>
+                            what TX channel tx (from 1) sends
+  check <rx> off|counter|sine <hz>
+                            which checker reads RX channel rx (from 1)
+Exit 0 for ok or the status, 1 for an error answer or no socket.
 
 clock: polls dantesync's time server on the box (127.0.0.1:31900) n times,
 a second apart, as the device's media clock does, and prints one JSON line
@@ -96,6 +122,8 @@ pub enum Place {
 pub struct Options {
     pub config: PathBuf,
     pub place: Place,
+    /// The control socket ([`crate::ctl::SOCKET`] unless `--control`).
+    pub control: PathBuf,
 }
 
 /// What the command line asks for.
@@ -106,22 +134,30 @@ pub enum Command {
     Clock {
         seconds: u32,
     },
+    /// `ctl [--socket <path>] <request>`: one request to the control
+    /// socket, its words joined by spaces.
+    Ctl {
+        socket: PathBuf,
+        request: String,
+    },
     Version,
     Help,
 }
 
 /// The command line (without the program's name). `--version` and
 /// `--help` win wherever they stand; anything else is a usage error.
-/// `clock` first selects the clock's polls ([`Command::Clock`]).
+/// `clock` first selects the clock's polls ([`Command::Clock`]), `ctl` a
+/// control request ([`Command::Ctl`]).
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
-    if let Some((first, rest)) = args.split_first()
-        && first == "clock"
-    {
-        return parse_clock(rest);
+    match args.split_first() {
+        Some((first, rest)) if first == "clock" => return parse_clock(rest),
+        Some((first, rest)) if first == "ctl" => return parse_ctl(rest),
+        _ => {}
     }
     let mut config = None;
     let mut iface = None;
     let mut ip = None;
+    let mut control = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let slot = match arg.as_str() {
@@ -130,6 +166,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--config" => &mut config,
             "--iface" => &mut iface,
             "--ip" => &mut ip,
+            "--control" => &mut control,
             other => return Err(format!("unknown argument {other:?}")),
         };
         let Some(value) = it.next() else {
@@ -147,10 +184,36 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         (None, None) => return Err("one of --iface and --ip is missing".into()),
         (Some(_), Some(_)) => return Err("--iface and --ip together: give one".into()),
     };
+    let control = match control {
+        Some(path) if path.is_empty() => return Err("--control needs a path".into()),
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(crate::ctl::SOCKET),
+    };
     Ok(Command::Run(Options {
         config: PathBuf::from(config),
         place,
+        control,
     }))
+}
+
+/// `ctl`'s own arguments: `--socket <path>` first if at all, then the
+/// request's words (at least one). `--help` first is the usage.
+fn parse_ctl(args: &[String]) -> Result<Command, String> {
+    let (socket, words) = match args {
+        [first, ..] if first == "--help" || first == "-h" => return Ok(Command::Help),
+        [flag, path, words @ ..] if flag == "--socket" && !path.is_empty() => {
+            (PathBuf::from(path), words)
+        }
+        [flag, ..] if flag == "--socket" => return Err("--socket needs a path".into()),
+        words => (PathBuf::from(crate::ctl::SOCKET), words),
+    };
+    if words.is_empty() {
+        return Err("ctl: the request is missing (status, source or check)".into());
+    }
+    Ok(Command::Ctl {
+        socket,
+        request: words.join(" "),
+    })
 }
 
 /// `clock`'s own arguments: `--seconds <n>`, n from 1.
@@ -397,6 +460,13 @@ pub fn host_of(device_name: &str) -> String {
     format!("{device_name}.local.")
 }
 
+/// Whether a control answer line (`iem-dante-dev ctl`'s) says the request
+/// was done: `ok` or the status, not `error: …` (nor nothing at all).
+pub fn ctl_succeeded(answer: &str) -> bool {
+    let answer = answer.trim_end();
+    answer == "ok" || answer.starts_with('{')
+}
+
 /// Why the daemon stopped serving before it was asked to.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -406,6 +476,14 @@ pub enum ServeError {
     Cmc(io::Error),
     #[error("the info server stopped: {0}")]
     Info(io::Error),
+    #[error("the flow-control server stopped: {0}")]
+    Flows(io::Error),
+    #[error("the control socket stopped: {0}")]
+    Control(io::Error),
+    #[error("the media threads did not start: {0}")]
+    Threads(io::Error),
+    #[error("the channel records' browse did not start: {0}")]
+    Browse(#[from] BrowseError),
     #[error("announcing the device: {0}")]
     Announce(#[from] AnnounceError),
 }
@@ -426,75 +504,130 @@ pub fn announce_device<R: Registry>(
 }
 
 /// The device's sockets, each bound to the served address: ARC
-/// ([`arc::PORT`]), CMC ([`cmc::PORT`]) and the info requests
-/// ([`crate::info::REQUEST_PORT`]).
+/// ([`arc::PORT`]), CMC ([`cmc::PORT`]), the info requests
+/// ([`crate::info::REQUEST_PORT`]) and flow control
+/// ([`flows::control::PORT`]).
 #[derive(Debug)]
 pub struct Sockets {
     pub arc: UdpSocket,
     pub cmc: UdpSocket,
     pub info: UdpSocket,
+    pub flows: UdpSocket,
 }
 
 /// Serves the device at `net.ip` until `stop` ends: announces its records
-/// first, then answers ARC, CMC and the info requests on `sockets`, sends
-/// the board and product info, the channel-change notifications and the
-/// heartbeat where `multicast` says (the info server, [`info::serve_info`]),
-/// and announces again after every rename the ARC server saved. No flows
-/// and no media clock yet (plan Task 7 runs them): ARC lists none and
-/// keeps the subscriptions it is given ([`arc::NoFlows`]), the heartbeat
-/// is the header alone ([`NoClock`]). A failed announcement, or an ARC,
-/// CMC or info server that stops, ends it with an error (the service
-/// restarts the daemon; the state file holds every saved rename). The
-/// caller withdraws the records after it returns.
-pub async fn serve<R: Registry>(
+/// first, then answers ARC, CMC, the info requests and flow control on
+/// `sockets` (every datagram counted in `media`'s requests), sends the
+/// board and product info, the channel-change notifications and the
+/// heartbeat with `media`'s records where `multicast` says (the info
+/// server, [`info::serve_info`]), runs `media`'s TX and RX threads and its
+/// manager every [`TICK`] ([`Driver`]: the channel records it resolves are
+/// our own and those of one mDNS browse, started at the first
+/// subscription), serves `control` (the control socket's server, the
+/// binary's [`crate::ctl::serve_control`]), and announces again after every
+/// rename the ARC server saved. A failed announcement or browse, a server
+/// that stops, or threads that do not start end it with an error (the
+/// service restarts the daemon; the state file holds every saved rename and
+/// subscription). Whatever ended it, every RX flow is then stopped at its
+/// transmitter (within [`media::STOP_WAIT`]) and the threads are ended
+/// (waited for [`THREADS_WAIT`]). The caller withdraws the records after
+/// it returns.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve<R: Registry + Browse>(
     sockets: Sockets,
     shared: Arc<Mutex<Device>>,
     announcer: &mut Announcer<R>,
     net: NetInfo,
     multicast: Multicast,
+    media: Arc<Media>,
+    control: impl Future<Output = io::Result<()>>,
     stop: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
     let ip = net.ip;
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(records = n, "mDNS records announced");
-    let (identity, flows) = {
+    let identity = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        (
-            Identity::new(&device.cfg, net),
-            Arc::new(arc::NoFlows::new(&device)),
-        )
+        Identity::new(&device.cfg, net)
     };
+    let threads = media.spawn_threads().map_err(ServeError::Threads)?;
     let rx_changes = Arc::new(Changes::default());
+    let requests = Arc::clone(&media.requests);
+    let (mut driver, mut answers) = Driver::new(
+        Arc::clone(&media),
+        Client::new(media.ip),
+        Arc::clone(&rx_changes),
+    );
     let arc = arc::serve(
         sockets.arc,
         Arc::clone(&shared),
-        flows,
+        Arc::new(media.flows()),
         Arc::clone(&changed),
         Arc::clone(&rx_changes),
+        Arc::clone(&requests),
     );
-    let cmc = cmc::serve_cmc(sockets.cmc, ip);
+    let cmc = cmc::serve_cmc(sockets.cmc, ip, Arc::clone(&requests));
     let info = info::serve_info(
         sockets.info,
         Multicaster::new(identity),
         multicast,
-        Arc::new(NoClock),
+        Arc::new(media.beat()),
         rx_changes,
+        Arc::clone(&requests),
     );
-    tokio::pin!(arc, cmc, info, stop);
-    loop {
+    let flows = flows::server::serve(sockets.flows, Arc::clone(&media.tx), requests);
+    // Our own channels resolve from our records (built again after a
+    // rename), the network's from one browse.
+    let mut resolver = (Own::default(), Mdns::new());
+    let mut own_stale = true;
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tokio::pin!(arc, cmc, info, flows, control, stop);
+    let ended = loop {
         tokio::select! {
             biased;
-            () = &mut stop => return Ok(()),
-            ended = &mut arc => return Err(ServeError::Arc(ended_error(ended))),
-            ended = &mut cmc => return Err(ServeError::Cmc(ended_error(ended))),
-            ended = &mut info => return Err(ServeError::Info(ended_error(ended))),
+            () = &mut stop => break Ok(()),
+            ended = &mut arc => break Err(ServeError::Arc(ended_error(ended))),
+            ended = &mut cmc => break Err(ServeError::Cmc(ended_error(ended))),
+            ended = &mut info => break Err(ServeError::Info(ended_error(ended))),
+            ended = &mut flows => break Err(ServeError::Flows(ended_error(ended))),
+            ended = &mut control => break Err(ServeError::Control(ended_error(ended))),
             () = changed.notified() => {
-                let n = announce_device(&shared, announcer, ip)?;
-                info!(records = n, "mDNS records announced again after a rename");
+                own_stale = true;
+                match announce_device(&shared, announcer, ip) {
+                    Ok(n) => info!(records = n, "mDNS records announced again after a rename"),
+                    Err(e) => break Err(e.into()),
+                }
+            }
+            Some((flow, answer)) = answers.recv() => driver.answered(flow, answer),
+            _ = tick.tick() => {
+                if own_stale {
+                    let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    resolver.0 = Own::new(&device.state, &device.cfg, ip);
+                    own_stale = false;
+                }
+                let subscribed = media
+                    .manager
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .subscribed();
+                if subscribed && !resolver.1.started() {
+                    if let Err(e) = resolver.1.start(announcer.registry()) {
+                        break Err(e.into());
+                    }
+                    info!("mDNS browse of the channel records started");
+                }
+                driver.tick(&resolver);
             }
         }
-    }
+    };
+    // Whatever ended serving: our RX flows end at their transmitters, the
+    // media threads end.
+    driver.stop().await;
+    // One still running is left to end, with a warning.
+    let _ended = threads.stop(&media, THREADS_WAIT).await;
+    ended
 }
 
 /// A server's end as an error: they end only with one.

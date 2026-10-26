@@ -94,6 +94,7 @@ use tracing::{debug, info, warn};
 
 use crate::clock::PtpClock;
 use crate::cmc::{PROCESS_ID, device_id};
+use crate::ctl::{Requests, info_op};
 use crate::device::DeviceConfig;
 use crate::media::rx::{MAX_FLOWS, RxShared};
 use crate::media::tx::TxShared;
@@ -405,22 +406,13 @@ pub trait Beat: Send + Sync {
     fn records(&self) -> Option<Records>;
 }
 
-/// A device without a media clock: the heartbeat is the header alone.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoClock;
-
-impl Beat for NoClock {
-    fn records(&self) -> Option<Records> {
-        None
-    }
-}
-
-/// The running device's records (plan Task 7 builds it): the media clock,
-/// dantesync's frequency adjustment as the clock's poller keeps it, the TX
-/// side (its channels' peaks), the RX side (its rings' peaks, its slots'
-/// lateness) and the manager (which slots hold a granted flow). Each beat
-/// takes the peaks and the lateness, so the next one reports its own
-/// second.
+/// The running device's records ([`crate::daemon::media::Media::beat`]):
+/// the media clock, dantesync's frequency adjustment as the clock's poller
+/// keeps it, the TX side (its channels' peaks), the RX side (its rings'
+/// peaks, its slots' lateness) and the manager (which slots hold a granted
+/// flow). Each beat takes the peaks and the lateness, so the next one
+/// reports its own second (the control socket's status takes neither).
+/// Before the media clock is ready the heartbeat is the header alone.
 #[derive(Clone)]
 pub struct Sources {
     pub clock: Arc<dyn PtpClock>,
@@ -653,15 +645,17 @@ impl Multicast {
 /// beats to `to.heartbeat` every `to.every` with `beat`'s records, the
 /// first beat at once. The socket's address picks the interface the
 /// multicasts leave by (Linux routes a multicast from a bound source
-/// address out of that address's interface). Ends only with an error
-/// receiving; a packet that cannot be sent is logged and the server goes
-/// on.
+/// address out of that address's interface). Every datagram received is
+/// counted in `requests` (the control socket's status). Ends only with an
+/// error receiving; a packet that cannot be sent is logged and the server
+/// goes on.
 pub async fn serve_info(
     sock: UdpSocket,
     mut mc: Multicaster,
     to: Multicast,
     beat: Arc<dyn Beat>,
     changes: Arc<Changes>,
+    requests: Arc<Requests>,
 ) -> io::Result<()> {
     send(&sock, &mc.board_info(), to.info).await;
     send(&sock, &mc.product_info(), to.info).await;
@@ -674,7 +668,8 @@ pub async fn serve_info(
     loop {
         tokio::select! {
             got = sock.recv_from(&mut buf) => {
-                let (n, _) = got?;
+                let (n, peer) = got?;
+                requests.received(REQUEST_PORT, peer.ip(), info_op(&buf[..n]));
                 if let Some(packet) = mc.answer_within(&mut bound, Instant::now(), &buf[..n]) {
                     send(&sock, &packet, to.info).await;
                 }

@@ -19,6 +19,50 @@ use crate::wire::tests::Rng;
 use crate::wire::{HEADER_LEN, Header, MAX_DATAGRAM, read_u16, request, string_at};
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-dante-device.toml");
+
+/// The tests' flows: no TX flow, and a manager that keeps the
+/// subscriptions and resolves none, so every subscribed channel reads
+/// Unresolved (the daemon's are `Running`, `crate::daemon::media`).
+#[derive(Debug)]
+struct NoFlows {
+    tx: TxTable,
+    rx: Mutex<Manager>,
+}
+
+impl NoFlows {
+    /// No flows for `device`, its saved subscriptions known.
+    fn new(device: &Device) -> Self {
+        let mut rx = Manager::new(
+            &device.cfg,
+            &device.state.name,
+            Ipv4Addr::UNSPECIFIED,
+            [0; crate::subscribe::MAX_FLOWS],
+        );
+        rx.load(&device.state.subscriptions);
+        rx.changed();
+        NoFlows {
+            tx: TxTable::new(0),
+            rx: Mutex::new(rx),
+        }
+    }
+}
+
+impl Flows for NoFlows {
+    fn view<R>(&self, f: impl FnOnce(&Live<'_>) -> R) -> R {
+        let rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&Live {
+            tx: &self.tx,
+            rx: &rx,
+        })
+    }
+
+    fn subscribe(&self, subs: &[Option<Subscription>]) -> Vec<usize> {
+        let mut rx = self.rx.lock().unwrap_or_else(PoisonError::into_inner);
+        rx.load(subs);
+        rx.changed()
+    }
+}
+
 /// netaudio's start code; Dante Controller's is 0x2729.
 const NETAUDIO: u16 = 0x27ff;
 const CONTROLLER: u16 = 0x2729;
@@ -2370,6 +2414,7 @@ struct Served {
     flows: Arc<NoFlows>,
     changed: Arc<Notify>,
     rx_changes: Arc<Changes>,
+    requests: Arc<crate::ctl::Requests>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
     _dir: tempfile::TempDir,
 }
@@ -2381,6 +2426,7 @@ async fn served() -> Served {
     let device = Arc::new(Mutex::new(device));
     let changed = Arc::new(Notify::new());
     let rx_changes = Arc::new(Changes::default());
+    let requests = Arc::new(crate::ctl::Requests::default());
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
     let task = tokio::spawn(serve(
@@ -2389,6 +2435,7 @@ async fn served() -> Served {
         flows.clone(),
         changed.clone(),
         rx_changes.clone(),
+        requests.clone(),
     ));
     Served {
         addr,
@@ -2396,6 +2443,7 @@ async fn served() -> Served {
         flows,
         changed,
         rx_changes,
+        requests,
         task,
         _dir: dir,
     }
@@ -2437,6 +2485,19 @@ async fn the_server_answers_two_peers_with_their_own_sequences() {
     seen_b.sort_unstable();
     assert_eq!(seen_a, (100..120).collect::<Vec<u16>>());
     assert_eq!(seen_b, (900..920).collect::<Vec<u16>>());
+    // Every request counted for the status by port, peer (both on one
+    // address: one peer) and opcode.
+    let counted: Vec<(u16, usize, u16, u64)> = s
+        .requests
+        .counts()
+        .received
+        .iter()
+        .map(|r| (r.port, r.peer, r.op, r.n))
+        .collect();
+    assert_eq!(
+        counted,
+        [(PORT, 1, op::COUNTS, 20), (PORT, 1, op::DEVICE_NAME, 20)]
+    );
     s.task.abort();
 }
 
