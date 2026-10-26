@@ -70,6 +70,10 @@
 //! 600 bytes (a TX flow's names are cut to [`MAX_REMOTE_NAME`], ours are 31
 //! at most). Logs name opcodes, sequences and channel numbers, never a
 //! name.
+//!
+//! Our own reads of another device's ARC (a transmitter's channel list, for
+//! a device that publishes no `_netaudio-chan` record, plan Task 9b) are
+//! [`client`]'s: read-only, the same page format.
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -94,6 +98,7 @@ use crate::wire::{
 };
 use gaps::{Gap, Gaps};
 
+pub mod client;
 pub mod gaps;
 
 /// ARC's UDP port.

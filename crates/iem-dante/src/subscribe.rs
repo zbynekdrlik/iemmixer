@@ -59,6 +59,7 @@
 //! [`Manager::rx_route`] (handed over by `RxShared::publish`). Times are the
 //! control side's ns.
 
+pub mod directory;
 pub mod resolve;
 
 use std::collections::BTreeMap;
