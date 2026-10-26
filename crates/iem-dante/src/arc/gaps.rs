@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 
-//! The ARC server's count of the requests it refuses or leaves unanswered
+//! The ARC server's count of the requests it refuses or leaves unanswered,
+//! and of the datagrams whose length field disagrees with their size
 //! (#72, 2026-10-26: Dante Controller asked 0x2200 and 0x2204 about 2 250
 //! times a second while the device refused both). Counted per peer and
 //! opcode and reported at most once a [`WINDOW`]: [`Gaps::record`] and
