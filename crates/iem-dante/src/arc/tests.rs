@@ -69,7 +69,7 @@ fn decode(outcome: ArcOutcome) -> Answer {
     let (bytes, changed) = match outcome {
         ArcOutcome::Reply(bytes) => (bytes, false),
         ArcOutcome::Changed(bytes) => (bytes, true),
-        ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => {
+        ArcOutcome::Ignored | ArcOutcome::Misframed { .. } | ArcOutcome::Unanswered { .. } => {
             panic!("a well-formed request was not answered: {outcome:?}")
         }
     };
@@ -682,6 +682,93 @@ fn an_invalid_rename_keeps_the_name() {
     }
 }
 
+/// A log sink for [`warnings_of`].
+#[derive(Clone, Default)]
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `f` logs at WARN or above on this thread, as text.
+fn warnings_of(f: impl FnOnce()) -> String {
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn a_refused_rename_is_counted_never_a_warning_of_its_own() {
+    // Dante Controller asks again at once what it gets refused: a warning
+    // per request would be a flood. Every refusal is a gap the server's
+    // once-a-minute warning counts (peer, opcode, refused), and no more.
+    let tx: [Vec<u8>; 4] = [
+        tx_rename(0, b"Mix 0"),
+        tx_rename(3, b"Mix.3"),
+        tx_rename(3, b"TX 4"),
+        {
+            let mut high = tx_rename(3, b"Mix 3");
+            high[6..8].copy_from_slice(&200u16.to_be_bytes());
+            high
+        },
+    ];
+    let rx: [Vec<u8>; 3] = [
+        rx_rename(33, b"In 33"),
+        rx_rename(1, b"In@1"),
+        rx_rename(1, b"RX 2"),
+    ];
+    let mut dev = Dev::new(config());
+    let mut gaps = Vec::new();
+    let logged = warnings_of(|| {
+        for k in 0..1_000u16 {
+            for body in &tx {
+                gaps.push(
+                    dev.send(&request(CONTROLLER, k, op::TX_RENAME, 0, body))
+                        .gap(),
+                );
+            }
+            for body in &rx {
+                gaps.push(
+                    dev.send(&request(CONTROLLER, k, op::RX_RENAME, 0, body))
+                        .gap(),
+                );
+            }
+        }
+    });
+    assert_eq!(
+        logged.lines().count(),
+        0,
+        "refused renames logged warnings of their own, the first: {}",
+        logged.lines().next().unwrap_or_default()
+    );
+    assert_eq!(gaps.len(), 7_000);
+    for (i, gap) in gaps.iter().enumerate() {
+        let op1 = if i % 7 < 4 {
+            op::TX_RENAME
+        } else {
+            op::RX_RENAME
+        };
+        assert_eq!(*gap, Some((op1, Gap::Refused)), "{i}");
+    }
+    assert_eq!(dev.state, DeviceState::from_config(&dev.cfg));
+    // The capture works: a warning of the crate's own does show.
+    assert!(warnings_of(|| tracing::warn!("a test warning")).contains("a test warning"));
+}
+
 #[test]
 fn an_invalid_rename_leaves_the_state_file_as_it_was() {
     let dir = tempfile::tempdir().unwrap();
@@ -798,15 +885,67 @@ fn an_opcode_inferno_does_not_answer_gets_no_reply() {
         }
     }
     assert_eq!(dev.state, before);
-    // A datagram that is no request gets no answer at all.
+    // A datagram that is no request gets no answer at all: shorter than the
+    // header it is ignored; one whose length field disagrees is misframed.
     let mut cut = request(NETAUDIO, 13, op::COUNTS, 0, &[]);
     cut.pop();
     assert_eq!(dev.send(&cut), ArcOutcome::Ignored);
     let mut long = request(NETAUDIO, 13, op::COUNTS, 0, &[]);
     long.push(0);
-    assert_eq!(dev.send(&long), ArcOutcome::Ignored);
+    assert_eq!(dev.send(&long), ArcOutcome::Misframed { op1: op::COUNTS });
     assert_eq!(dev.send(&[]), ArcOutcome::Ignored);
     assert_eq!(dev.state, before);
+}
+
+#[test]
+fn a_datagram_whose_length_field_disagrees_is_counted_never_answered() {
+    // The review of PR #78: such a datagram was dropped and never counted,
+    // so a sender whose datagrams we misread (padding, a field we read
+    // wrong) would never show. It is a gap of its own: per peer and the
+    // opcode its header names.
+    let mut dev = Dev::new(config());
+    let before = dev.state.clone();
+    for (op1, body) in [
+        (op::COUNTS, Vec::new()),
+        (op::TX_FLOWS, DC_FIRST_PAGE.to_vec()),
+        (op::TX_RENAME, tx_rename(3, b"Mix 3")),
+        (0x2204, DC_FIRST_PAGE.to_vec()),
+    ] {
+        let good = request(CONTROLLER, 21, op1, 0, &body);
+        let mut padded = good.clone();
+        padded.extend_from_slice(&[0, 0]);
+        let mut cut = good.clone();
+        cut.pop();
+        for datagram in [padded, cut] {
+            if datagram.len() < HEADER_LEN {
+                continue;
+            }
+            let outcome = dev.send(&datagram);
+            assert_eq!(outcome, ArcOutcome::Misframed { op1 }, "{op1:#06x}");
+            assert_eq!(outcome.gap(), Some((op1, Gap::Misframed)), "{op1:#06x}");
+        }
+        // A length field that is neither: larger than any datagram.
+        let mut wrong = good.clone();
+        wrong[2..4].copy_from_slice(&0xffffu16.to_be_bytes());
+        assert_eq!(dev.send(&wrong).gap(), Some((op1, Gap::Misframed)));
+    }
+    // Nothing renamed, and shorter than the header stays uncounted.
+    assert_eq!(dev.state, before);
+    assert_eq!(dev.send(&[0x27, 0x29, 0, 99]).gap(), None);
+}
+
+#[test]
+fn a_misframed_gap_reads_as_misframed() {
+    let report = gaps::Report {
+        entries: vec![gaps::Entry {
+            peer: 1,
+            op1: 0x1000,
+            gap: Gap::Misframed,
+            count: 4,
+        }],
+        uncounted: 0,
+    };
+    assert_eq!(report.to_string(), "peer 1 0x1000 misframed 4");
 }
 
 #[test]

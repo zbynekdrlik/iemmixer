@@ -322,6 +322,58 @@ fn each_known_request_gets_its_reply() {
 }
 
 #[test]
+fn a_burst_of_requests_gets_at_most_ten_replies_a_kind_and_the_next_second_more() {
+    // Each reply goes to the info group every Dante device hears: 1 000
+    // requests in one second of each answered kind get ten replies each,
+    // with sequences that skip none; the next second replies again. Byte 1
+    // (and for 0x13 and 0x77 the last byte) varies, as from a sender that
+    // tries to pass a bound kept per whole opcode.
+    let t0 = Instant::now();
+    let mut mc = Multicaster::new(identity());
+    let mut limit = Limit::new();
+    let kinds = [
+        (0x61, BOARD_INFO),
+        (0xc1, PRODUCT_INFO),
+        (0x13, NETWORK_INFO),
+        (0x77, ANSWER_0077),
+    ];
+    let mut seqs = Vec::new();
+    for (byte, reply_op) in kinds {
+        let mut replies = 0;
+        for k in 0..1_000u16 {
+            let last = if matches!(byte, 0x13 | 0x77) {
+                (k >> 8) as u8
+            } else {
+                0
+            };
+            let req = asking([0x07, k as u8, 0x00, byte, 0, 0, 0, last]);
+            let now = t0 + Duration::from_micros(u64::from(k) * 999);
+            if let Some(p) = mc.answer_within(&mut limit, now, &req) {
+                assert_eq!(p[24..32], reply_op);
+                seqs.push(u16::from_be_bytes([p[4], p[5]]));
+                replies += 1;
+            }
+        }
+        assert_eq!(replies, limit::PER_SPAN, "{byte:#04x}");
+    }
+    assert_eq!(seqs, (1..=40).collect::<Vec<u16>>());
+    let next = t0 + Duration::from_secs(1);
+    assert_eq!(
+        mc.answer_within(&mut limit, next, &captured()),
+        Some(packet(
+            0xffff,
+            41,
+            BOARD_INFO,
+            &board_info_body(b"iem-dante")
+        ))
+    );
+    // A request without a reply is not bounded: it still gets none.
+    let clock = asking([0x07, 0x38, 0x00, 0x21, 0, 0, 0, 0x64]);
+    assert_eq!(mc.answer_within(&mut limit, next, &clock), None);
+    assert_eq!(mc.seq, 42);
+}
+
+#[test]
 fn clock_stats_and_unknown_requests_get_no_reply_and_use_no_sequence() {
     let mut mc = Multicaster::new(identity());
     // inferno sends clock stats only with a clock's frequency offset;
@@ -461,6 +513,61 @@ async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
     let mut buf = [0u8; 64];
     let to_peer = tokio::time::timeout(Duration::from_millis(100), peer.recv_from(&mut buf)).await;
     assert!(to_peer.is_err(), "nothing goes back to the requester");
+    assert!(!task.is_finished());
+    task.abort();
+}
+
+/// Every packet that reaches `sock` until it has been quiet for 300 ms
+/// (bounded by [`BOUND`] in all).
+async fn drain(sock: &UdpSocket) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2048];
+    let end = tokio::time::Instant::now() + BOUND;
+    while let Ok(Ok((n, _))) =
+        tokio::time::timeout(Duration::from_millis(300), sock.recv_from(&mut buf)).await
+    {
+        out.push(buf[..n].to_vec());
+        assert!(tokio::time::Instant::now() < end, "the replies never stop");
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_server_bounds_its_replies_to_the_info_group() {
+    let (at, info_rx, _beat_rx, to, sock) = loopback(NEVER).await;
+    let task = tokio::spawn(serve_info(sock, Multicaster::new(identity()), to));
+    recv(&info_rx).await;
+    recv(&info_rx).await;
+    // A burst of board and network info requests from one sender.
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let started = Instant::now();
+    for k in 0..1_000u16 {
+        for byte in [0x61, 0x13] {
+            peer.send_to(&asking([0x07, k as u8, 0x00, byte, 0, 0, 0, 0]), at)
+                .await
+                .unwrap();
+        }
+    }
+    let replies = drain(&info_rx).await;
+    // At most ten of each kind in any second: the whole run took this long.
+    let seconds = started.elapsed().saturating_sub(Duration::from_millis(300));
+    let bound = limit::PER_SPAN * (1 + seconds.as_secs() as usize);
+    for opcode in [BOARD_INFO, NETWORK_INFO] {
+        let n = replies.iter().filter(|p| p[24..32] == opcode).count();
+        assert!((1..=bound).contains(&n), "{n} replies, at most {bound}");
+    }
+    assert_eq!(
+        replies.len(),
+        replies
+            .iter()
+            .filter(|p| p[24..32] == BOARD_INFO || p[24..32] == NETWORK_INFO)
+            .count()
+    );
+    // A second later it answers again.
+    tokio::time::sleep(limit::SPAN).await;
+    peer.send_to(&captured(), at).await.unwrap();
+    let again = recv(&info_rx).await;
+    assert_eq!(again[24..32], BOARD_INFO);
     assert!(!task.is_finished());
     task.abort();
 }

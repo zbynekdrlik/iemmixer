@@ -276,6 +276,63 @@ fn a_save_into_a_missing_directory_fails_naming_the_file() {
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 }
 
+/// The names in `dir`, sorted.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_writable_state_folder_passes_the_check_and_keeps_nothing_of_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    // No state file yet: the check leaves the folder empty.
+    DeviceState::check_writable(&cfg.state_file).unwrap();
+    assert_eq!(listing(dir.path()), Vec::<String>::new());
+    // A state file and a temporary file a crash left: the state stays as it
+    // was, the leftover goes (save would overwrite it anyway).
+    let state = DeviceState::from_config(&cfg);
+    state.save(&cfg.state_file).unwrap();
+    let saved = fs::read(&cfg.state_file).unwrap();
+    fs::write(dir.path().join("state.toml.tmp"), b"a torn write").unwrap();
+    DeviceState::check_writable(&cfg.state_file).unwrap();
+    assert_eq!(listing(dir.path()), ["state.toml"]);
+    assert_eq!(fs::read(&cfg.state_file).unwrap(), saved);
+}
+
+#[test]
+fn a_state_folder_that_cannot_be_written_fails_the_check_naming_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // A folder that is not there, and a file where the folder should be:
+    // refused whoever runs the test (root too).
+    let missing = dir.path().join("missing").join("state.toml");
+    let blocker = dir.path().join("a-file");
+    fs::write(&blocker, b"not a folder").unwrap();
+    let under_a_file = blocker.join("state.toml");
+    for path in [&missing, &under_a_file] {
+        let err = DeviceState::check_writable(path).unwrap_err();
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "{err}"
+        );
+    }
+    assert_eq!(
+        DeviceState::check_writable(&missing).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        DeviceState::check_writable(Path::new("/"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(listing(dir.path()), ["a-file"]);
+}
+
 #[test]
 fn the_config_is_checked_field_by_field() {
     let cases = [

@@ -36,7 +36,9 @@
 //! among them), to a request whose op2 is not 0, and to a body inferno
 //! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
 //! 0x3010 whose items are cut, 0x3014 under 6): [`ArcOutcome::Unanswered`].
-//! A datagram that is no request ([`Header::parse`]) is dropped. Refused
+//! A datagram that is no request ([`Header::parse`]) is dropped; one whose
+//! length field disagrees with its size is counted as well
+//! ([`ArcOutcome::Misframed`]). Refused
 //! ([`STATUS_ERROR`]), changing nothing: a rename that renames nothing, a
 //! page request without its first item, 0x2201 and 0x2202. A rename is all
 //! or nothing: one invalid name refuses the whole request (inferno renames
@@ -62,7 +64,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::device::{Device, DeviceConfig, DeviceState, channel_problems, valid_channel_name};
 use crate::wire::{
-    Body, HEADER_LEN, Header, STATUS_ERROR, STATUS_MORE, STATUS_OK, read_u16, reply, string_at,
+    Body, HEADER_LEN, Header, STATUS_ERROR, STATUS_MORE, STATUS_OK, WireError, read_u16, reply,
+    string_at,
 };
 use gaps::{Gap, Gaps};
 
@@ -140,17 +143,23 @@ pub enum ArcOutcome {
     Changed(Vec<u8>),
     /// A request inferno leaves unanswered: no reply.
     Unanswered { op1: u16 },
-    /// Not a request (too short, or a length field that disagrees): no reply.
+    /// A datagram whose length field disagrees with its size (`op1` as its
+    /// header's bytes 6–7 say): no request, no reply, but counted
+    /// ([`Gap::Misframed`]), so a sender we misread shows in the warning.
+    Misframed { op1: u16 },
+    /// Shorter than the header: no request, no reply.
     Ignored,
 }
 
 impl ArcOutcome {
     /// What [`gaps::Gaps`] counts of this outcome: the opcode of a request
-    /// left unanswered or refused ([`STATUS_ERROR`]); `None` for any other
-    /// answer and for a datagram that is no request.
+    /// left unanswered or refused ([`STATUS_ERROR`]), or of a datagram whose
+    /// length field disagrees; `None` for any other answer and for a
+    /// datagram shorter than the header.
     pub fn gap(&self) -> Option<(u16, Gap)> {
         match self {
             ArcOutcome::Unanswered { op1 } => Some((*op1, Gap::Unanswered)),
+            ArcOutcome::Misframed { op1 } => Some((*op1, Gap::Misframed)),
             ArcOutcome::Reply(bytes) => match Header::parse(bytes) {
                 Ok((h, _)) if h.op2 == STATUS_ERROR => Some((h.op1, Gap::Refused)),
                 _ => None,
@@ -181,7 +190,14 @@ impl Dir {
 pub fn handle(state: &mut DeviceState, cfg: &DeviceConfig, req: &[u8]) -> ArcOutcome {
     let (h, body) = match Header::parse(req) {
         Ok(parsed) => parsed,
-        Err(e) => {
+        Err(e @ WireError::Length { .. }) => {
+            // The header is there (Length comes only after it was read):
+            // its opcode names the datagram in the gap guard's count.
+            let op1 = read_u16(req, 6).unwrap_or(0);
+            debug!(error = %e, op = format_args!("{op1:#06x}"), "ARC datagram dropped, counted");
+            return ArcOutcome::Misframed { op1 };
+        }
+        Err(e @ WireError::Short(_)) => {
             debug!(error = %e, "ARC datagram dropped");
             return ArcOutcome::Ignored;
         }
@@ -269,7 +285,9 @@ pub async fn serve(
                     .gap()
                     .and_then(|(op1, gap)| gaps.record(Instant::now(), peer.ip(), op1, gap));
                 let sent = match outcome {
-                    ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => None,
+                    ArcOutcome::Ignored
+                    | ArcOutcome::Misframed { .. }
+                    | ArcOutcome::Unanswered { .. } => None,
                     ArcOutcome::Reply(bytes) => Some((bytes, false)),
                     ArcOutcome::Changed(bytes) => Some((bytes, true)),
                 };
@@ -533,7 +551,10 @@ fn descriptor(fields: &[u16]) -> Vec<u8> {
 }
 
 /// 0x2013 and 0x3001: `[?, count]`, then `count` items (TX: `0, channel,
-/// name offset`; RX: `channel, name offset`), the names behind them.
+/// name offset`; RX: `channel, name offset`), the names behind them. A
+/// refusal's reason is a debug line only: the refusal is a gap the server's
+/// once-a-minute warning counts, and Dante Controller asks again at once,
+/// so a warning per request would be a flood.
 fn rename(
     h: &Header,
     req: &[u8],
@@ -560,11 +581,11 @@ fn rename(
             .checked_sub(1)
             .filter(|&i| i < proposed.len())
         else {
-            warn!(dir = label, channel = id, "rename refused: no such channel");
+            debug!(dir = label, channel = id, "rename refused: no such channel");
             return refuse(h, "no such channel");
         };
         let Some(name) = string_at(req, offset) else {
-            warn!(
+            debug!(
                 dir = label,
                 channel = id,
                 "rename refused: no name at its offset"
@@ -577,7 +598,7 @@ fn rename(
             name
         };
         if !valid_channel_name(name) {
-            warn!(
+            debug!(
                 dir = label,
                 channel = id,
                 "rename refused: not a valid Dante channel name"
@@ -593,7 +614,7 @@ fn rename(
         (dir == Dir::Tx).then_some(defaults.as_slice()),
     );
     if !problems.is_empty() {
-        warn!(dir = label, problems = %problems.join("; "), "rename refused");
+        debug!(dir = label, problems = %problems.join("; "), "rename refused");
         return refuse(h, "the names would clash");
     }
     let ok: &[u8] = match dir {

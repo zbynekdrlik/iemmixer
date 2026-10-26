@@ -282,20 +282,26 @@ impl DeviceState {
         out
     }
 
+    /// Whether [`DeviceState::save`] can write `path`, asked at the daemon's
+    /// start so a folder it cannot write is found then, not at the first
+    /// rename: the temporary file `save` writes beside it is created and
+    /// removed again. An error names the file; `path` itself is never
+    /// touched.
+    pub fn check_writable(path: &Path) -> io::Result<()> {
+        let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let tmp = temporary(path).map_err(named)?;
+        fs::File::create(&tmp)
+            .and_then(|file| file.sync_all())
+            .and_then(|()| fs::remove_file(&tmp))
+            .map_err(named)
+    }
+
     /// Writes the state to `path`: a synced temporary file beside it, then a
     /// rename over it and a sync of the directory, so a crash leaves the old
     /// state or the new one, never a torn file.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
-        let file_name = path.file_name().ok_or_else(|| {
-            named(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a file path",
-            ))
-        })?;
-        let mut tmp_name = file_name.to_os_string();
-        tmp_name.push(".tmp");
-        let tmp = path.with_file_name(tmp_name);
+        let tmp = temporary(path).map_err(named)?;
         let text = toml::to_string(self).map_err(io::Error::other)?;
         let written = write_synced(&tmp, text.as_bytes())
             .and_then(|()| fs::rename(&tmp, path))
@@ -306,6 +312,17 @@ impl DeviceState {
         }
         written.map_err(named)
     }
+}
+
+/// The temporary file [`DeviceState::save`] writes beside `path`
+/// (`<name>.tmp`); an error for a path that is no file path.
+fn temporary(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file path"))?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    Ok(path.with_file_name(tmp_name))
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
