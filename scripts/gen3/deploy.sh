@@ -25,8 +25,10 @@ set -euo pipefail
 # - The binary, the unit (beside this script), the config, the interface
 #   (written as /etc/iemmixer/iem-dante.env) and the drop-in naming the box's
 #   user (the ssh user, never root) go by scp into ~/.cache/iem-dante-deploy
-#   on the box, then `sudo -n install` puts each in place, and `sudo -n
-#   systemctl` reloads, enables and restarts iem-dante.
+#   on the box, then `sudo -n install` puts each in place (the drop-in
+#   before the unit, so a failure between them never leaves a unit without
+#   its User=), and `sudo -n systemctl` reloads, enables and restarts
+#   iem-dante.
 # - Read back: the installed binary's sha256, its --version, and `systemctl
 #   is-active iem-dante` after GEN3_SETTLE_S (3) seconds, which must say
 #   active.
@@ -160,8 +162,8 @@ echo "deploy.sh: copied to the box's ~/$STAGE"
 refuse_event "copied to ~/$STAGE, nothing installed"
 ssh "${SSH_OPTS[@]}" "$host" "set -e
 sudo -n install -D -m 0755 $STAGE/iem-dante-dev $BIN
-sudo -n install -D -m 0644 $STAGE/iem-dante.service $UNIT
 sudo -n install -D -m 0644 $STAGE/10-user.conf $DROPIN
+sudo -n install -D -m 0644 $STAGE/iem-dante.service $UNIT
 sudo -n install -D -m 0644 $STAGE/dante-device.toml $CONFIG
 sudo -n install -D -m 0644 $STAGE/iem-dante.env $ENVFILE
 sudo -n systemctl daemon-reload
