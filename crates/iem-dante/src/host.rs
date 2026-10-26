@@ -113,16 +113,16 @@ pub fn read_config(path: &Path) -> Result<DeviceConfig, HostError> {
 
 /// The device of `cfg` with its state file loaded, whose folder must be
 /// writable now (found at the start, not at the first rename's save, which
-/// would be refused): [`HostError::Setup`] otherwise.
+/// would be refused; checked before the load, which saves a state it
+/// fitted to the config's channel counts): [`HostError::Setup`] otherwise.
 pub fn load_device(cfg: DeviceConfig) -> Result<Device, HostError> {
-    let device = Device::load(cfg).map_err(setup)?;
-    DeviceState::check_writable(&device.cfg.state_file).map_err(|e| {
+    DeviceState::check_writable(&cfg.state_file).map_err(|e| {
         setup(format!(
             "the state file cannot be written ({e}): a rename could not be saved; \
              the folder must be writable by the service's user (StateDirectory=iem-dante)"
         ))
     })?;
-    Ok(device)
+    Device::load(cfg).map_err(setup)
 }
 
 /// The box's IPv4 addresses, by interface.

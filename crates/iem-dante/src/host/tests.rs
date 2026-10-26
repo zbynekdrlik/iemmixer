@@ -115,6 +115,43 @@ fn a_device_loads_only_with_a_writable_state_folder() {
 }
 
 #[test]
+fn a_device_follows_a_config_whose_channel_counts_changed() {
+    // Live 1 (#72): phase C's config gave the device more channels than
+    // its state file held, and the start was refused with exit 2.
+    let dir = tempfile::tempdir().unwrap();
+    let (_, cfg) = config_in(dir.path());
+    let fewer = DeviceConfig {
+        rx: cfg.rx[..8].to_vec(),
+        tx: cfg.tx[..4].to_vec(),
+        ..cfg.clone()
+    };
+    let mut state = DeviceState::from_config(&fewer);
+    state.rx[2] = "Return 3".into();
+    state.save(&cfg.state_file).unwrap();
+    let device = load_device(cfg.clone()).unwrap();
+    assert_eq!(device.state.rx.len(), 32);
+    assert_eq!(device.state.tx, cfg.tx);
+    assert_eq!(device.state.rx[2], "Return 3");
+    // Saved: the next start reads the same, with nothing left to fit.
+    let saved = std::fs::read(&cfg.state_file).unwrap();
+    assert_eq!(load_device(cfg.clone()).unwrap(), device);
+    assert_eq!(std::fs::read(&cfg.state_file).unwrap(), saved);
+    // A cut that would drop a rename: the setup error (exit 2), by kind
+    // and number, the file kept.
+    let mut more = DeviceState::from_config(&cfg);
+    more.tx.push("zyxq 17".into());
+    more.save(&cfg.state_file).unwrap();
+    let kept = std::fs::read(&cfg.state_file).unwrap();
+    let why = setup_error(load_device(cfg.clone()).unwrap_err());
+    assert!(
+        why.contains("a renamed TX channel past the config's count (channel 17)"),
+        "{why}"
+    );
+    assert!(!why.contains("zyxq"), "{why} echoes a name");
+    assert_eq!(std::fs::read(&cfg.state_file).unwrap(), kept);
+}
+
+#[test]
 fn the_box_s_interfaces_include_the_loopback_address() {
     let all = interfaces().unwrap();
     assert!(

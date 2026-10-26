@@ -24,6 +24,11 @@
 //!   subscribed channels by number (`[[subscriptions]]`, `rx` from 1); a
 //!   state without any is written as phase A wrote it, so a phase A file
 //!   loads unchanged.
+//! - The state follows the config's channel counts (#72 phase C, Live 1: a
+//!   config whose counts change is a deliberate act): a state file with
+//!   fewer channels gets the new ones at the config's names, one with more
+//!   is cut where nothing of its own would go ([`DeviceState::fit`]), and
+//!   the fitted state is saved at once.
 //! - Problems name a field and a channel number, never a name: the channel
 //!   names may be the band's labels (P6), and no log may hold one.
 
@@ -33,6 +38,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 /// The longest device or channel name, in bytes: Dante Controller ignores a
 /// device with a longer name (inferno's `device_info.rs`), and Dante's
@@ -207,6 +213,29 @@ pub(crate) fn channel_problems(
     out
 }
 
+/// The first channel past the config's `defaults` (its number, from 1)
+/// whose name in `names` is not its default name ([`default_past`]):
+/// a cut there would drop a rename.
+fn renamed_past(names: &[String], defaults: &[String]) -> Option<usize> {
+    (defaults.len()..names.len())
+        .find(|&i| default_past(defaults, i + 1).as_deref() != Some(names[i].as_str()))
+        .map(|i| i + 1)
+}
+
+/// Channel `n`'s default name past the config's `defaults` (`n` above
+/// their count; the config names no such channel): the config's numbering
+/// carried on, when its last name ends in its own channel number (`RX 32`
+/// → `RX 33`; `064` → `065`, the digits' width kept); `None` when it does
+/// not, or the config has no channel there: no default is known, so any
+/// name past the count counts as a rename.
+fn default_past(defaults: &[String], n: usize) -> Option<String> {
+    let last = defaults.last()?;
+    let prefix = last.trim_end_matches(|c: char| c.is_ascii_digit());
+    let digits = &last[prefix.len()..];
+    let numbered = digits.parse::<usize>().ok()? == defaults.len();
+    numbered.then(|| format!("{prefix}{n:0width$}", width = digits.len()))
+}
+
 /// The running device: its config and the names it lists now. The ARC
 /// server changes the names; the mDNS records are built from both.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,7 +246,8 @@ pub struct Device {
 
 impl Device {
     /// The device as it starts: `cfg`, with the names of its state file
-    /// (the config's when there is none; [`DeviceState::load_or_default`]).
+    /// (the config's when there is none; one with other channel counts
+    /// fitted to `cfg` and saved; [`DeviceState::load_or_default`]).
     pub fn load(cfg: DeviceConfig) -> io::Result<Self> {
         let state = DeviceState::load_or_default(&cfg)?;
         Ok(Self { cfg, state })
@@ -255,6 +285,14 @@ pub struct DeviceState {
     pub subscriptions: Vec<Option<Subscription>>,
 }
 
+/// What [`DeviceState::fit`] changed: each direction's channel count
+/// before and after (the config's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refit {
+    pub rx: (usize, usize),
+    pub tx: (usize, usize),
+}
+
 impl DeviceState {
     /// The config's names, no subscription.
     pub fn from_config(cfg: &DeviceConfig) -> Self {
@@ -289,9 +327,13 @@ impl DeviceState {
         true
     }
 
-    /// The state file's names, or the config's when there is no file. A file
-    /// that cannot be read or does not fit the config is an error naming
-    /// the file: never silently cut or padded.
+    /// The state file's names, or the config's when there is no file
+    /// (nothing written then). A file with other channel counts than the
+    /// config's is fitted to them ([`DeviceState::fit`]) and, once it holds,
+    /// saved over the file at once, so the next start reads a matching one
+    /// (one info line, the counts only). A file that cannot be read, cannot
+    /// be fitted or does not hold is an error naming the file, the file
+    /// left as it was; so is a fitted state that cannot be saved.
     pub fn load_or_default(cfg: &DeviceConfig) -> io::Result<Self> {
         let path = &cfg.state_file;
         let text = match fs::read_to_string(path) {
@@ -310,15 +352,89 @@ impl DeviceState {
         // The file lists the subscribed channels up to the highest; the
         // state holds one entry per RX channel.
         if !state.subscriptions.is_empty() {
-            let len = state.subscriptions.len().max(cfg.rx.len());
+            let len = state.subscriptions.len().max(state.rx.len());
             state.subscriptions.resize(len, None);
         }
+        let refit = state
+            .fit(cfg)
+            .map_err(|problems| invalid(problems.join("; ")))?;
         let problems = state.problems(cfg);
-        if problems.is_empty() {
-            Ok(state)
-        } else {
-            Err(invalid(problems.join("; ")))
+        if !problems.is_empty() {
+            return Err(invalid(problems.join("; ")));
         }
+        if let Some(refit) = refit {
+            state.save(path)?;
+            info!(
+                rx_before = refit.rx.0,
+                rx_after = refit.rx.1,
+                tx_before = refit.tx.0,
+                tx_after = refit.tx.1,
+                "the device state follows the config's channel counts (saved)"
+            );
+        }
+        Ok(state)
+    }
+
+    /// Fits the channel lists to `cfg`'s counts (#72 phase C, Live 1: a
+    /// config whose counts change is a deliberate act). A direction with
+    /// fewer channels than the config gets the config's names for the new
+    /// ones (no subscription); its channels keep their names and
+    /// subscriptions. One with more is cut to the config's count, but only
+    /// when every channel cut off is at its default name
+    /// ([`default_past`]) and, for RX, no subscription past the count is
+    /// held: else nothing changes and the problems name the kind and the
+    /// first channel by number (never a name). `None` when the counts
+    /// already fit.
+    pub fn fit(&mut self, cfg: &DeviceConfig) -> Result<Option<Refit>, Vec<String>> {
+        let refit = Refit {
+            rx: (self.rx.len(), cfg.rx.len()),
+            tx: (self.tx.len(), cfg.tx.len()),
+        };
+        if refit.rx.0 == refit.rx.1 && refit.tx.0 == refit.tx.1 {
+            return Ok(None);
+        }
+        let cuts_rx = refit.rx.0 > refit.rx.1;
+        let mut out = Vec::new();
+        for (dir, names, defaults) in [("RX", &self.rx, &cfg.rx), ("TX", &self.tx, &cfg.tx)] {
+            if let Some(n) = renamed_past(names, defaults) {
+                out.push(format!(
+                    "{} {dir} channels, the config {}: \
+                     a renamed {dir} channel past the config's count (channel {n})",
+                    names.len(),
+                    defaults.len()
+                ));
+            }
+        }
+        // A fit that does not cut RX leaves a subscription past the RX
+        // count to `problems` (the file's own fault, refused as before).
+        let subscribed = (self.subscriptions.iter().enumerate())
+            .skip(cfg.rx.len())
+            .find(|(_, sub)| sub.is_some());
+        if let Some((i, _)) = subscribed.filter(|_| cuts_rx) {
+            out.push(format!(
+                "{} RX channels, the config {}: \
+                 a subscribed RX channel past the config's count (channel {})",
+                self.rx.len(),
+                cfg.rx.len(),
+                i + 1
+            ));
+        }
+        if !out.is_empty() {
+            return Err(out);
+        }
+        for (names, defaults) in [(&mut self.rx, &cfg.rx), (&mut self.tx, &cfg.tx)] {
+            names.truncate(defaults.len());
+            let kept = names.len();
+            names.extend_from_slice(&defaults[kept..]);
+        }
+        // One subscription entry per RX channel, or none.
+        if cuts_rx {
+            self.subscriptions.truncate(cfg.rx.len());
+        } else if !self.subscriptions.is_empty() {
+            let len = self.subscriptions.len().max(cfg.rx.len());
+            self.subscriptions.resize(len, None);
+        }
+        Ok(Some(refit))
     }
 
     /// Whether these names fit `cfg`: its channel counts, Dante's name

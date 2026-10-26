@@ -154,32 +154,43 @@ fn a_missing_state_is_the_config() {
 }
 
 #[test]
-fn a_state_that_does_not_fit_the_config_is_refused() {
+fn a_state_that_cannot_follow_the_config_is_refused() {
+    // A config with fewer channels cuts the state only where nothing of
+    // its own would go (#72): a channel past the config's count that
+    // carries a rename refuses the start, by number and kind.
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_in(dir.path());
     let path = cfg.state_file.display().to_string();
 
-    let mut fewer = DeviceState::from_config(&cfg);
-    fewer.tx.pop();
-    fewer.save(&cfg.state_file).unwrap();
+    let mut more_tx = DeviceState::from_config(&cfg);
+    more_tx.tx.push("zyxq 17".into());
+    more_tx.save(&cfg.state_file).unwrap();
     let err = DeviceState::load_or_default(&cfg).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     let message = err.to_string();
     assert!(message.contains(&path), "{message}");
     assert!(
-        message.contains("15 TX channels, the config 16"),
+        message.contains(
+            "17 TX channels, the config 16: \
+             a renamed TX channel past the config's count (channel 17)"
+        ),
         "{message}"
     );
+    assert!(!message.contains("zyxq"), "{message} echoes a name");
 
-    let mut more = DeviceState::from_config(&cfg);
-    more.rx.push("RX 33".into());
-    more.save(&cfg.state_file).unwrap();
+    let mut more_rx = DeviceState::from_config(&cfg);
+    more_rx.rx.push("zyxq 33".into());
+    more_rx.save(&cfg.state_file).unwrap();
     let message = DeviceState::load_or_default(&cfg).unwrap_err().to_string();
     assert!(message.contains(&path), "{message}");
     assert!(
-        message.contains("33 RX channels, the config 32"),
+        message.contains(
+            "33 RX channels, the config 32: \
+             a renamed RX channel past the config's count (channel 33)"
+        ),
         "{message}"
     );
+    assert!(!message.contains("zyxq"), "{message} echoes a name");
 }
 
 #[test]
@@ -636,4 +647,339 @@ fn a_subscription_to_an_invalid_name_is_refused_by_number() {
         assert!(message.contains(want), "{message} lacks {want:?}");
         assert!(!message.contains("zyxq"), "{message} echoes a name");
     }
+}
+
+// ---- A config whose channel counts changed (#72 phase C, Live 1) ----
+
+/// The test device with `rx` RX and `tx` TX channels, named as the test
+/// config names its channels (`RX n`, `TX n`), its state file in `dir`.
+fn config_sized(dir: &Path, rx: usize, tx: usize) -> DeviceConfig {
+    DeviceConfig {
+        rx: (1..=rx).map(|n| format!("RX {n}")).collect(),
+        tx: (1..=tx).map(|n| format!("TX {n}")).collect(),
+        ..config_in(dir)
+    }
+}
+
+#[test]
+fn a_state_follows_a_config_with_more_channels() {
+    // Live 1 (#72, 2026-10-26): phase B's state (32 RX, 16 TX) under phase
+    // C's config (136 RX, 96 TX) refused the engine's start with exit 2.
+    let dir = tempfile::tempdir().unwrap();
+    let phase_b = config_in(dir.path());
+    let mut state = DeviceState::from_config(&phase_b);
+    state.rx[2] = "Return 3".into();
+    assert!(state.set_subscription(&phase_b, 4, Some(sub("TX 2", "peer-device"))));
+    state.save(&phase_b.state_file).unwrap();
+
+    let phase_c = config_sized(dir.path(), 136, 96);
+    let device = Device::load(phase_c.clone()).expect("the device starts on the grown config");
+    let grown = &device.state;
+    // RX 3's name and RX 5's subscription stay.
+    assert_eq!(grown.rx[2], "Return 3");
+    assert_eq!(grown.subscription(4), Some(&sub("TX 2", "peer-device")));
+    // Every other channel, the new ones too, at the config's name.
+    assert_eq!(grown.rx.len(), 136);
+    for (i, name) in grown.rx.iter().enumerate().filter(|&(i, _)| i != 2) {
+        assert_eq!(name, &phase_c.rx[i], "RX channel {}", i + 1);
+    }
+    assert_eq!(grown.tx, phase_c.tx);
+    // No other subscription; one entry per RX channel.
+    assert_eq!(grown.subscriptions.len(), 136);
+    assert_eq!(grown.subscriptions.iter().flatten().count(), 1);
+    assert_eq!(grown.name, "test-device");
+    assert!(grown.problems(&phase_c).is_empty());
+}
+
+/// The state file as written, read without fitting it to any config.
+fn written(cfg: &DeviceConfig) -> DeviceState {
+    toml::from_str(&fs::read_to_string(&cfg.state_file).unwrap()).unwrap()
+}
+
+#[test]
+fn the_grown_state_is_saved_so_the_next_start_reads_a_matching_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let phase_b = config_in(dir.path());
+    let mut state = DeviceState::from_config(&phase_b);
+    state.rx[2] = "Return 3".into();
+    state.tx[1] = "Mix 2".into();
+    assert!(state.set_subscription(&phase_b, 4, Some(sub("TX 2", "peer-device"))));
+    state.save(&phase_b.state_file).unwrap();
+
+    let phase_c = config_sized(dir.path(), 136, 96);
+    let grown = DeviceState::load_or_default(&phase_c).unwrap();
+    assert_eq!(grown.tx[1], "Mix 2");
+    // The file now holds the config's counts, the rename and the
+    // subscription in it.
+    let file = written(&phase_c);
+    assert_eq!((file.rx.len(), file.tx.len()), (136, 96));
+    assert_eq!(file.rx[2], "Return 3");
+    assert_eq!(file.tx[1], "Mix 2");
+    assert_eq!(file.rx[135], "RX 136");
+    assert_eq!(file.tx[95], "TX 96");
+    assert_eq!(file.subscription(4), Some(&sub("TX 2", "peer-device")));
+    // The next start reads it as it is, and writes nothing.
+    let saved = fs::read(&phase_c.state_file).unwrap();
+    assert_eq!(DeviceState::load_or_default(&phase_c).unwrap(), grown);
+    assert_eq!(fs::read(&phase_c.state_file).unwrap(), saved);
+    assert_eq!(listing(dir.path()), ["state.toml"]);
+}
+
+#[test]
+fn a_state_without_subscriptions_grows_without_any() {
+    let dir = tempfile::tempdir().unwrap();
+    let phase_b = config_in(dir.path());
+    DeviceState::from_config(&phase_b)
+        .save(&phase_b.state_file)
+        .unwrap();
+    let phase_c = config_sized(dir.path(), 136, 96);
+    let grown = DeviceState::load_or_default(&phase_c).unwrap();
+    assert_eq!(grown, DeviceState::from_config(&phase_c));
+    assert!(grown.subscriptions.is_empty());
+    let text = fs::read_to_string(&phase_c.state_file).unwrap();
+    assert!(!text.contains("subscriptions"), "{text}");
+}
+
+#[test]
+fn a_state_follows_a_config_whose_tx_count_alone_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    let mut state = DeviceState::from_config(&cfg);
+    assert!(state.set_subscription(&cfg, 4, Some(sub("TX 2", "peer-device"))));
+    state.save(&cfg.state_file).unwrap();
+    // More TX channels, the same RX ones.
+    let more_tx = config_sized(dir.path(), 32, 96);
+    let grown = DeviceState::load_or_default(&more_tx).unwrap();
+    assert_eq!(grown.tx, more_tx.tx);
+    assert_eq!(grown.rx, cfg.rx);
+    assert_eq!(grown.subscriptions.len(), 32);
+    assert_eq!(grown.subscription(4), Some(&sub("TX 2", "peer-device")));
+    assert_eq!(written(&more_tx).tx.len(), 96);
+
+    // A subscription past the RX channels is the file's own fault, refused
+    // as before even while the TX count changes.
+    let entry = "\n[[subscriptions]]\nrx = 33\ntx_channel = \"zyxqchan\"\n\
+                 tx_device = \"zyxqdev\"\n";
+    fs::write(&cfg.state_file, format!("{}{entry}", phase_a_state())).unwrap();
+    let before = fs::read(&cfg.state_file).unwrap();
+    let message = DeviceState::load_or_default(&more_tx)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("a subscription of RX channel 33, the config has 32 RX channels"),
+        "{message}"
+    );
+    assert!(!message.contains("zyxq"), "{message} echoes a name");
+    assert_eq!(fs::read(&cfg.state_file).unwrap(), before);
+}
+
+#[test]
+fn a_state_is_cut_to_a_config_with_fewer_channels_when_nothing_of_its_own_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    let wide = config_sized(dir.path(), 40, 20);
+    let mut state = DeviceState::from_config(&wide);
+    state.rx[2] = "Return 3".into();
+    state.tx[15] = "Mix 16".into();
+    assert!(state.set_subscription(&wide, 31, Some(sub("TX 2", "peer-device"))));
+    state.save(&wide.state_file).unwrap();
+
+    let narrow = config_in(dir.path());
+    let cut = DeviceState::load_or_default(&narrow).unwrap();
+    assert_eq!(cut.rx.len(), 32);
+    assert_eq!(cut.tx.len(), 16);
+    assert_eq!(cut.rx[2], "Return 3");
+    assert_eq!(cut.tx[15], "Mix 16");
+    assert_eq!(cut.subscriptions.len(), 32);
+    assert_eq!(cut.subscription(31), Some(&sub("TX 2", "peer-device")));
+    // Saved: the file holds the config's counts.
+    let file = written(&narrow);
+    assert_eq!((file.rx.len(), file.tx.len()), (32, 16));
+    assert_eq!(DeviceState::load_or_default(&narrow).unwrap(), cut);
+
+    // In memory too: one subscription entry per RX channel after the cut.
+    let mut state = DeviceState::from_config(&wide);
+    assert!(state.set_subscription(&wide, 0, Some(sub("TX 1", "peer-device"))));
+    assert_eq!(state.subscriptions.len(), 40);
+    assert_eq!(
+        state.fit(&narrow),
+        Ok(Some(Refit {
+            rx: (40, 32),
+            tx: (20, 16)
+        }))
+    );
+    assert_eq!(state.subscriptions.len(), 32);
+    assert_eq!(state.rx, narrow.rx);
+    assert_eq!(state.tx, narrow.tx);
+    assert!(state.problems(&narrow).is_empty());
+}
+
+#[test]
+fn a_cut_that_would_drop_a_rename_or_a_subscription_is_refused_by_kind_and_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let wide = config_sized(dir.path(), 40, 20);
+    let narrow = config_in(dir.path());
+    let path = narrow.state_file.display().to_string();
+    let renamed_rx = "40 RX channels, the config 32: \
+                      a renamed RX channel past the config's count (channel 34)";
+    let renamed_tx = "20 TX channels, the config 16: \
+                      a renamed TX channel past the config's count (channel 18)";
+    let subscribed = "40 RX channels, the config 32: \
+                      a subscribed RX channel past the config's count (channel 35)";
+    type Edit = fn(&mut DeviceState, &DeviceConfig);
+    let cases: [(Edit, &[&str]); 4] = [
+        (
+            |s, _| {
+                s.rx[33] = "zyxq 34".into();
+                s.rx[37] = "zyxq 38".into();
+            },
+            &[renamed_rx],
+        ),
+        (|s, _| s.tx[17] = "zyxq 18".into(), &[renamed_tx]),
+        (
+            |s, c| assert!(s.set_subscription(c, 34, Some(sub("zyxq", "zyxq-dev")))),
+            &[subscribed],
+        ),
+        (
+            |s, c| {
+                s.rx[33] = "zyxq 34".into();
+                s.tx[17] = "zyxq 18".into();
+                assert!(s.set_subscription(c, 34, Some(sub("zyxq", "zyxq-dev"))));
+            },
+            &[renamed_rx, renamed_tx, subscribed],
+        ),
+    ];
+    for (edit, want) in cases {
+        let mut state = DeviceState::from_config(&wide);
+        edit(&mut state, &wide);
+        state.save(&narrow.state_file).unwrap();
+        let before = fs::read(&narrow.state_file).unwrap();
+        let err = DeviceState::load_or_default(&narrow).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert_eq!(message, format!("{path}: {}", want.join("; ")));
+        assert!(!message.contains("zyxq"), "{message} echoes a name");
+        // The file stays as it was.
+        assert_eq!(fs::read(&narrow.state_file).unwrap(), before);
+        // In memory: refused, nothing changed.
+        let kept = state.clone();
+        assert_eq!(
+            state.fit(&narrow),
+            Err(want.iter().map(|w| w.to_string()).collect())
+        );
+        assert_eq!(state, kept);
+    }
+}
+
+#[test]
+fn a_state_with_the_config_s_counts_is_left_as_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    let mut state = DeviceState::from_config(&cfg);
+    state.rx[2] = "Return 3".into();
+    assert!(state.set_subscription(&cfg, 4, Some(sub("TX 2", "peer-device"))));
+    let kept = state.clone();
+    assert_eq!(state.fit(&cfg), Ok(None));
+    assert_eq!(state, kept);
+    // Loading it writes nothing: a hand-written comment stays.
+    state.save(&cfg.state_file).unwrap();
+    let text = format!(
+        "# zyxq kept\n{}",
+        fs::read_to_string(&cfg.state_file).unwrap()
+    );
+    fs::write(&cfg.state_file, &text).unwrap();
+    assert_eq!(DeviceState::load_or_default(&cfg).unwrap(), kept);
+    assert_eq!(fs::read_to_string(&cfg.state_file).unwrap(), text);
+}
+
+#[test]
+fn a_channel_past_the_config_has_its_numbering_as_default_name() {
+    let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+    let rx = names(&["RX 1", "RX 2", "RX 3"]);
+    assert_eq!(default_past(&rx, 4).as_deref(), Some("RX 4"));
+    assert_eq!(default_past(&rx, 100).as_deref(), Some("RX 100"));
+    // Leading zeros keep the digits' width.
+    let padded = names(&["001", "002", "003"]);
+    assert_eq!(default_past(&padded, 4).as_deref(), Some("004"));
+    assert_eq!(default_past(&padded, 1000).as_deref(), Some("1000"));
+    let ten: Vec<String> = (1..=10).map(|n| format!("Out {n}")).collect();
+    assert_eq!(default_past(&ten, 11).as_deref(), Some("Out 11"));
+    // No numbering to carry on: no default is known.
+    for list in [
+        names(&[]),
+        names(&["Kick", "Snare"]),
+        names(&["RX 1", "RX 5"]),
+        names(&["RX 2"]),
+        names(&["99999999999999999999999"]),
+    ] {
+        assert_eq!(default_past(&list, 9), None, "{list:?}");
+        // So a cut there counts as a rename, whatever the name.
+        let mut longer = list.clone();
+        longer.push("RX 9".into());
+        assert_eq!(renamed_past(&longer, &list), Some(list.len() + 1));
+    }
+    // Defaults only past the count: nothing is renamed; fewer names, none.
+    assert_eq!(
+        renamed_past(&names(&["RX 1", "RX 2", "RX 3", "RX 4"]), &rx),
+        None
+    );
+    assert_eq!(renamed_past(&names(&["RX 1"]), &rx), None);
+    assert_eq!(
+        renamed_past(&names(&["RX 1", "RX 2", "RX 3", "RX 4", "RX 6"]), &rx),
+        Some(5)
+    );
+}
+
+/// A log sink for [`logged`].
+#[derive(Clone, Default)]
+struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl io::Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `f` logs at INFO or above on this thread, as text.
+fn logged(f: impl FnOnce()) -> String {
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn a_fitted_state_is_logged_once_by_its_counts_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let phase_b = config_in(dir.path());
+    let mut state = DeviceState::from_config(&phase_b);
+    state.rx[2] = "zyxq 3".into();
+    assert!(state.set_subscription(&phase_b, 4, Some(sub("zyxq", "zyxq-dev"))));
+    state.save(&phase_b.state_file).unwrap();
+    let phase_c = config_sized(dir.path(), 136, 96);
+    let log = logged(|| {
+        DeviceState::load_or_default(&phase_c).unwrap();
+    });
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(
+        log.contains("rx_before=32 rx_after=136 tx_before=16 tx_after=96"),
+        "{log}"
+    );
+    assert!(!log.contains("zyxq"), "{log} names a name");
+    assert!(!log.contains(&dir.path().display().to_string()), "{log}");
+    // The next start fits nothing and logs nothing.
+    let log = logged(|| {
+        DeviceState::load_or_default(&phase_c).unwrap();
+    });
+    assert_eq!(log, "");
 }
