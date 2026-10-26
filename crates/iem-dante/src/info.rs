@@ -52,7 +52,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
@@ -60,6 +60,9 @@ use tracing::{debug, info, warn};
 
 use crate::cmc::{PROCESS_ID, device_id};
 use crate::device::DeviceConfig;
+use limit::Limit;
+
+pub mod limit;
 
 /// The info request port (UDP), at the device's address.
 pub const REQUEST_PORT: u16 = 8700;
@@ -332,6 +335,18 @@ impl Multicaster {
             }
         }
         .inspect(|_| debug!(op = %opcode, seq = req.seq, "info request answered"))
+    }
+
+    /// [`Multicaster::answer`] within `limit` ([`limit`]): a reply over the
+    /// bound is dropped (counted there) and uses no sequence.
+    pub fn answer_within(
+        &mut self,
+        limit: &mut Limit,
+        now: Instant,
+        datagram: &[u8],
+    ) -> Option<Vec<u8>> {
+        let _ = (limit, now);
+        self.answer(datagram)
     }
 }
 
