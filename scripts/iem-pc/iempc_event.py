@@ -64,16 +64,44 @@ class Gen3Stop:
     deadline: float
 
 
+def gen3_say(text: str) -> None:
+    """One Gen 3 line on stderr; never raises (a closed stderr raises
+    BrokenPipeError, a closed stream ValueError): the line is lost, the
+    event path is not."""
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except Exception:   # airuleset:script-ok stderr itself failed, no channel is left for the line; the event path goes on
+        return
+
+
 def gen3_warning(text: str) -> None:
-    print(f"iempc: WARNING: the Gen 3 device: {text}; the event path goes on", file=sys.stderr, flush=True)
+    gen3_say(f"iempc: WARNING: the Gen 3 device: {text}; the event path goes on")
+
+
+def gen3_emit(doc: dict) -> None:
+    """The Gen 3 stop's JSON line; one that cannot be written is a warning."""
+    try:
+        emit({"gen3_stop": doc})
+    except Exception as e:   # nothing of the Gen 3 stop may reach the event path
+        gen3_warning(f"its report could not be written ({e})")
 
 
 def start_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
     """Starts the Gen 3 device's stop, never waiting for it. No GEN3_HOST: one
-    info line, no ssh. Nothing here raises: a stop that cannot start is a warning."""
+    info line, no ssh. Never raises (the event path's flag is written before
+    it and the PC's switch runs after it whatever it does): a stop that cannot
+    start, for whatever reason, is a warning."""
+    try:
+        return launch_gen3_stop(env)
+    except Exception as e:   # Popen's ValueError (a NUL byte), its OSError, anything
+        gen3_warning(f"its stop could not start ({e}): not stopped")
+        return None
+
+
+def launch_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
     host = env.get("GEN3_HOST", "")
     if not host:
-        print("iempc: no GEN3_HOST in the private env: no Gen 3 device to stop", file=sys.stderr, flush=True)
+        gen3_say("iempc: no GEN3_HOST in the private env: no Gen 3 device to stop")
         return None
     if host.startswith("-"):
         gen3_warning("GEN3_HOST must be an ssh destination, not an option: not stopped")
@@ -81,12 +109,8 @@ def start_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
     bound = max(1, math.ceil(GEN3_STOP_S))
     cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={bound}", "-o", "ServerAliveInterval=1",
            "-o", f"ServerAliveCountMax={bound}", host, *GEN3_STOP]
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8", errors="replace")
-    except OSError as e:
-        gen3_warning(f"its stop could not start ({e}): not stopped")
-        return None
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
     return Gen3Stop(proc, time.monotonic() + GEN3_STOP_S)
 
 
@@ -98,21 +122,26 @@ def end_gen3_stop(stop: Gen3Stop | None) -> None:
     if stop is None:
         return
     try:
+        doc = gen3_outcome(stop)
+    except Exception as e:   # nothing of the Gen 3 stop may reach the event path
+        gen3_warning(f"its stop could not be read ({e})")
+        doc = {"ok": False, "error": str(e)[-500:]}
+    gen3_emit(doc)
+
+
+def gen3_outcome(stop: Gen3Stop) -> dict:
+    """The stop's report, warning when it failed or did not answer in time."""
+    try:
         # A floor, so a stop that already ended past the bound is still read.
         _, err = stop.proc.communicate(timeout=max(stop.deadline - time.monotonic(), 0.1))
     except subprocess.TimeoutExpired:
         gen3_warning(f"its stop did not answer within {GEN3_STOP_S:g} s and is left to end by itself; read "
                      "'systemctl is-active iem-dante' on the box")
-        emit({"gen3_stop": {"ok": False, "running": True}})
-        return
-    except (OSError, ValueError) as e:
-        gen3_warning(f"its stop could not be read ({e})")
-        emit({"gen3_stop": {"ok": False, "error": str(e)[-500:]}})
-        return
+        return {"ok": False, "running": True}
     code = stop.proc.returncode
     if code != 0:
         gen3_warning(f"its stop failed (exit {code}): {' '.join((err or '').split())[-500:]}")
-    emit({"gen3_stop": {"ok": code == 0, "exit": code}})
+    return {"ok": code == 0, "exit": code}
 
 
 def ensure_flag() -> bool:
@@ -230,11 +259,13 @@ def cmd_event(ctx: Ctx, ip) -> int:
     deadline = event_clock() + EVENT_BUDGET_S
     if dry:
         if ctx.env.get("GEN3_HOST"):
-            emit({"gen3_stop": {"plan": "systemctl stop iem-dante"}})
+            gen3_emit({"plan": "systemctl stop iem-dante"})
         return pc_event(ctx, ip, deadline, dry)
     write_flag()
-    # Started now and never waited for here, so the PC's switch is not delayed;
-    # collected at the end, whatever the PC's path did.
+    # Started after the flag and never waited for here, so the PC's switch is
+    # not delayed; collected at the end, whatever the PC's path did. Neither
+    # raises, so the PC's switch always runs and its exit code (or its
+    # StepError) is what the event path ends with.
     stop = start_gen3_stop(ctx.env)
     try:
         return pc_event(ctx, ip, deadline, dry)
