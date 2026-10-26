@@ -528,6 +528,20 @@ class Gen3StopTests(Base):
         self.assertLess(log.index("attempt 1"), log.index("attempt 2"))
         self.assertEqual(log.count("gen3 stop started"), 2, log)
 
+    def test_a_log_that_cannot_be_opened_never_keeps_the_stop_from_running(self) -> None:
+        blocker = self.tmp / "a-file"
+        blocker.write_text("a file where the state folder should be", encoding="utf-8")
+        self.patch(STATE_DIR=blocker / "state")
+        self.gen3_host()
+        self.ssh_program(0)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.ssh_args()), 1)
+        self.assertEqual(docs[-1], {"gen3_stop": {"ok": True, "exit": 0}})
+        warnings = self.gen3_warnings(err)
+        self.assertEqual(len(warnings), 1, err)
+        self.assertIn("its log could not be opened", warnings[0])
+
     def ssh_args(self) -> list[list[str]]:
         if not self.ssh_log.exists():
             return []
