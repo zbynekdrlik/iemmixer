@@ -72,6 +72,9 @@ fn strings_that_end_on_a_multiple_of_8_get_no_padding_and_empty_slots_are_id_0()
     assert_eq!(&bytes[56..64], b"flow-12\0");
     assert_eq!(&bytes[64..66], &[0x08, 0x02]);
     assert_eq!(read_u16(&bytes, 10 + 16), Some(0), "the empty slot");
+    // 0x1c + 2n after the ids: with one channel 2n and 2 + n differ (with
+    // the two of `request()` they do not; PR #79's mutation gate).
+    assert_eq!(read_u16(&bytes, 10 + 18), Some(0x1c + 2));
     assert_eq!(bytes.len(), 72);
     assert_eq!(parse_request(&bytes), Ok(req));
 }

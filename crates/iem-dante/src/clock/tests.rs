@@ -464,9 +464,13 @@ mod linux {
         assert!(slept >= Duration::from_millis(29), "{slept:?}");
         assert!(slept < Duration::from_secs(2), "{slept:?}");
         assert!(c.now_ns().unwrap() >= target);
-        // A past time returns at once.
-        let slept = sleeps_for(c.clone(), target - 1_000_000_000);
-        assert!(slept < Duration::from_millis(20), "{slept:?}");
+        // A past time returns at once: an hour back, so a sleep that read it
+        // as anything but past would outlast the bound by far. Bounded at
+        // 1 s, not tens of ms: under a mutation shard's load the thread's
+        // own start and wake took more than 20 ms, and this test then
+        // "caught" mutants of unrelated modules (PR #79, shards 96, 178).
+        let slept = sleeps_for(c.clone(), target - HOUR as u64);
+        assert!(slept < Duration::from_secs(1), "{slept:?}");
         // A negative k: the same. Smaller than the time since boot, which a
         // fresh CI runner keeps under an hour (CI run 40289615289: k = -1 h
         // made the PTP time negative, so now_ns was None).
