@@ -10,8 +10,11 @@ set -euo pipefail
 #             --iface <the box's Dante interface>
 #
 # - Dev time only: refused while the "ide event" flag exists (iempc's
-#   EVENT-NOW: $IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW), and
-#   checked again right before anything is installed.
+#   EVENT-NOW: $IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW),
+#   checked again right before anything is installed, and once more right
+#   after the restart: a flag that came during the install (its stop ran
+#   before the restart started the device again) stops iem-dante again and
+#   fails the deploy.
 # - "ide event" stops the device with `ssh <GEN3_HOST> sudo -n systemctl
 #   stop iem-dante` (iempc_event): a --host that is not the GEN3_HOST of
 #   iempc's private env ($PC_ENV, else ~/.config/iemmixer/iem-pc.env) is a
@@ -165,6 +168,14 @@ sudo -n systemctl daemon-reload
 sudo -n systemctl enable iem-dante
 sudo -n systemctl restart iem-dante"
 echo "deploy.sh: installed; iem-dante restarted"
+
+# "ide event" may have come between the check above and the restart: its
+# stop then ran first and the restart started the device again.
+if [ -e "$flag" ]; then
+  ssh "${SSH_OPTS[@]}" "$host" sudo -n systemctl stop iem-dante ||
+    die "$flag appeared during the install: an event is on, and the stop of iem-dante after the restart failed: it may still run; stop it on the box (sudo systemctl stop iem-dante)"
+  die "$flag appeared during the install: an event is on; iem-dante stopped again, nothing read back; deploy again in dev time"
+fi
 
 installed="$(ssh "${SSH_OPTS[@]}" "$host" sha256sum "$BIN" | cut -d' ' -f1)"
 [ "$installed" = "$sha256" ] || die "the installed binary's sha256 is $installed, not $sha256"
