@@ -87,15 +87,18 @@ def ordinary(t: float) -> dict:
     Dante Controller's opening (each list asked three times in the first
     second) and then one ask per 10 s, the info and CMC requests, the card's
     one flow request, our flow requests to a transmitter that refuses (one
-    per 9 s, the manager's bound), a TX flow at fpp 16 and an RX flow at fpp
-    32, each a few packets off the exact rate either way."""
+    per 9 s, the manager's bound) and our ARC reads of its channels (one per
+    9 s, the directory's bound, each a 0x1000, four 0x2000 pages and one
+    0x2010 page), a TX flow at fpp 16 and an RX flow at fpp 32, each a few
+    packets off the exact rate either way."""
     s = int(t)
     arc = {(ARC, 1, op): (3 if t >= 1 else 0) + s // 10 for op in (0x1000, 0x1002, 0x2000, 0x2200, 0x2204, 0x3000)}
     jitter = 20 if s % 2 else -20
     return status(
         requests=[*arc.items(), ((INFO, 1, 0x61), 1 + s // 10), ((CMC, 2, 0x1001), s // 5),
                   ((FLOWS, 2, 0x0100), 1 if t >= 5 else 0)],
-        sent=[((3, 0x0100), 1 + s // 9), ((3, 0x0101), 0)],
+        sent=[((3, 0x0100), 1 + s // 9), ((3, 0x0101), 0), ((3, 0x1000), 1 + s // 9),
+              ((3, 0x2000), 4 * (1 + s // 9)), ((3, 0x2010), 1 + s // 9)],
         tx=[(1, 16, max(0, round(t * RATE / 16) + jitter))],
         rx=[(1, 32, max(0, round(t * RATE / 32) - jitter))],
         polls=s)
@@ -166,6 +169,7 @@ class WatchTests(unittest.TestCase):
             t += max(length, rng.uniform(0.8, 1.6))
         self.assertEqual(watch.restarts, 0)
         self.assertLessEqual(watch.peaks.flow_requests, 1)
+        self.assertLessEqual(watch.peaks.arc_reads, 1)
 
     def test_a_steady_19_a_second_never_reads_above_20_whatever_the_reads_take(self) -> None:
         # The rate divides by the widest gap two statuses can have, so a read
@@ -189,6 +193,23 @@ class WatchTests(unittest.TestCase):
         t, trip, _ = first_trip(twice, 60)
         self.assertEqual((t, trip.kind), (6.0, "flow_requests"))
         self.assertEqual(trip.numbers, {"peer": 6, "requests": 2, "within_s": 5.0})
+
+    def test_two_of_our_arc_reads_of_a_peer_within_5_s_trip(self) -> None:
+        def twice(t: float) -> dict:
+            doc = ordinary(t)
+            doc["sent"].append({"peer": 7, "op": 0x1000, "n": (1 if t >= 3 else 0) + (1 if t >= 7 else 0)})
+            return doc
+        t, trip, _ = first_trip(twice, 60)
+        self.assertEqual((t, trip.kind), (7.0, "arc_reads"))
+        self.assertEqual(trip.numbers, {"peer": 7, "reads": 2, "within_s": 5.0})
+
+    def test_arc_reads_six_seconds_apart_or_their_pages_never_trip(self) -> None:
+        def apart(t: float) -> dict:
+            doc = ordinary(t)
+            doc["sent"].append({"peer": 7, "op": 0x1000, "n": (1 if t >= 3 else 0) + (1 if t >= 9 else 0)})
+            doc["sent"].append({"peer": 7, "op": 0x2000, "n": 32 * int(t)})   # pages are not reads
+            return doc
+        self.assertEqual(first_trip(apart, 60)[:2], (None, None))
 
     def test_flow_requests_six_seconds_apart_or_stops_never_trip(self) -> None:
         def apart(t: float) -> dict:
@@ -337,6 +358,7 @@ class GuardTests(unittest.TestCase):
         line, end = docs[0], docs[-1]
         self.assertEqual((line["reads"], line["failed"], line["tx_flows"], line["rx_flows"]), (11, 0, 1, 1))
         self.assertEqual((end["end"], end["reads"], end["flow_requests_5s_max"]), ("seconds", 25, 1))
+        self.assertEqual(end["arc_reads_5s_max"], 1)
         self.assertLess(end["packet_ratio_max"], 1.25)
         self.assertLessEqual(end["request_rate_max"], 3.0)
         # Numbers only: keys, numbers and the end's fixed word.

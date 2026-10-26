@@ -288,7 +288,8 @@ struct FakeDaemon {
 
 impl Browse for FakeDaemon {
     type Events = mpsc::IntoIter<ServiceEvent>;
-    fn browse_channels(&self) -> Result<Self::Events, mdns_sd::Error> {
+    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
+        assert_eq!(service, CHAN_SERVICE);
         self.browses.set(self.browses.get() + 1);
         self.events
             .borrow_mut()
@@ -356,4 +357,61 @@ fn instance_names_are_dante_s_case_aside() {
         instance("Peer-Device", "TX 3"),
         "tx 3@peer-device._netaudio-chan._udp.local."
     );
+}
+
+#[test]
+fn a_device_is_named_while_any_of_its_channel_records_is_kept() {
+    let mut a = Adverts::default();
+    assert!(!a.names_device("peer-device"));
+    a.apply(&resolved_event("TX 3@Peer-Device", "10.0.0.11"));
+    a.apply(&resolved_event("TX 4@peer-device", "10.0.0.11"));
+    // A record again (refreshed) is still one record of the device.
+    a.apply(&resolved_event("TX 3@peer-device", "10.0.0.12"));
+    assert!(a.names_device("PEER-device"));
+    assert!(!a.names_device("other-device"));
+    assert!(!a.names_device("peer"));
+    let gone = |channel: &str| {
+        ServiceEvent::ServiceRemoved(
+            CHAN_SERVICE.to_string(),
+            format!("{channel}@peer-device.{CHAN_SERVICE}"),
+        )
+    };
+    assert_eq!(a.apply(&gone("TX 3")), Applied::Removed);
+    assert!(a.names_device("peer-device"));
+    assert_eq!(a.apply(&gone("TX 3")), Applied::Ignored);
+    assert!(a.names_device("peer-device"));
+    assert_eq!(a.apply(&gone("TX 4")), Applied::Removed);
+    assert!(!a.names_device("peer-device"));
+    // The device is the name's part after its '@', before the service.
+    assert_eq!(
+        device_of(&instance("peer-device", "TX 1")),
+        Some("peer-device")
+    );
+    assert_eq!(
+        device_of("tx 1@peer-device._netaudio-arc._udp.local."),
+        None
+    );
+    assert_eq!(device_of(&format!("peer-device.{CHAN_SERVICE}")), None);
+    assert_eq!(device_of(&format!("x@peer-device{CHAN_SERVICE}")), None);
+}
+
+#[test]
+fn mdns_names_a_device_its_browse_found() {
+    let (send, events) = mpsc::channel();
+    let daemon = FakeDaemon {
+        browses: std::cell::Cell::new(0),
+        events: std::cell::RefCell::new(Some(events)),
+    };
+    let mut mdns = Mdns::new();
+    assert!(!mdns.names_device("peer-device"));
+    mdns.start(&daemon).unwrap();
+    send.send(resolved_event("TX 3@peer-device", "10.0.0.11"))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !mdns.names_device("peer-device") {
+        assert!(std::time::Instant::now() < deadline, "never named");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    drop(send);
+    mdns.join_within(std::time::Duration::from_secs(5));
 }

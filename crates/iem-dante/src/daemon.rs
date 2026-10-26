@@ -49,7 +49,8 @@ use crate::device::Device;
 use crate::flows::client::Client;
 use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo};
 use crate::subscribe::TICK;
-use crate::subscribe::resolve::{Browse, BrowseError, Mdns, Own};
+use crate::subscribe::directory::Network;
+use crate::subscribe::resolve::{Browse, BrowseError, Own};
 use crate::{arc, cmc, flows, info};
 use media::{Driver, Media, THREADS_WAIT};
 
@@ -523,7 +524,9 @@ pub struct Sockets {
 /// server, [`info::serve_info`]), runs `media`'s TX and RX threads and its
 /// manager every [`TICK`] ([`Driver`]: the channel records it resolves are
 /// our own and those of one mDNS browse, started at the first
-/// subscription), serves `control` (the control socket's server, the
+/// subscription; a device no channel record names is read through its ARC,
+/// [`Network`], whose browses and reader start once a lookup reached
+/// them), serves `control` (the control socket's server, the
 /// binary's [`crate::ctl::serve_control`]), and announces again after every
 /// rename the ARC server saved. A failed announcement or browse, a server
 /// that stops, or threads that do not start end it with an error (the
@@ -578,8 +581,9 @@ pub async fn serve<R: Registry + Browse>(
     );
     let flows = flows::server::serve(sockets.flows, Arc::clone(&media.tx), requests);
     // Our own channels resolve from our records (built again after a
-    // rename), the network's from one browse.
-    let mut resolver = (Own::default(), Mdns::new());
+    // rename), the network's from one browse of the channel records, and a
+    // device that publishes none through its ARC.
+    let mut resolver = (Own::default(), Network::default());
     let mut own_stale = true;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -612,11 +616,18 @@ pub async fn serve<R: Registry + Browse>(
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .subscribed();
-                if subscribed && !resolver.1.started() {
-                    if let Err(e) = resolver.1.start(announcer.registry()) {
+                if subscribed && !resolver.1.chan.started() {
+                    if let Err(e) = resolver.1.chan.start(announcer.registry()) {
                         break Err(e.into());
                     }
                     info!("mDNS browse of the channel records started");
+                }
+                let arc = &mut resolver.1.arc;
+                if arc.asked() && !arc.started() {
+                    if let Err(e) = arc.start(announcer.registry(), ip, Arc::clone(&media.requests)) {
+                        break Err(e.into());
+                    }
+                    info!("mDNS browses of the ARC and flow-control records and the ARC reader started");
                 }
                 driver.tick(&resolver);
             }

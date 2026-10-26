@@ -18,6 +18,9 @@ iem-dante` on the box at once and exits 1 when:
   Controller settles at one per 10 s;
 - our own flow requests (`sent`, opcode 256) to one peer come more than one
   within FLOW_SPAN_S (5 s): the manager's bound is one per 9 s;
+- our own ARC reads of a transmitter's channels (`sent`, opcode 4096, once a
+  directory read) of one peer come more than one within FLOW_SPAN_S: the
+  directory's bound is one per 9 s from the last read's end (plan Task 9b);
 - a TX or an RX flow passes PACKET_MARGIN (1.25) x rate / fpp packets a
   second.
 
@@ -71,6 +74,8 @@ SUSTAIN_S = 3.0
 FLOW_REQUEST = 0x0100   # `sent`'s opcode of our flow requests (0x0101: stops)
 FLOW_SPAN_S = 5.0
 FLOW_REQUESTS_MAX = 1   # within FLOW_SPAN_S, to one peer
+ARC_READ = 0x1000   # `sent`'s opcode once an ARC directory read (its pages: 0x2000, 0x2010)
+ARC_READS_MAX = 1   # within FLOW_SPAN_S, of one peer
 PACKET_MARGIN = 1.25
 RATES = (44100, 48000, 88200, 96000, 176400, 192000)
 UNCOUNTED = ("uncounted",)
@@ -93,6 +98,7 @@ class Sample:
     u: float
     requests: dict[tuple, int]   # (port, peer, op) -> n, and UNCOUNTED -> uncounted
     flow_requests: dict[int, int]   # peer -> our flow requests
+    arc_reads: dict[int, int]   # peer -> our ARC directory reads
     tx: dict[int, tuple[int, int]]   # flow -> (fpp, packets)
     rx: dict[int, tuple[int, int]]
     tx_live: int
@@ -122,9 +128,12 @@ def sample(t0: float, t1: float, status: dict) -> Sample:
     requests[UNCOUNTED] = number(status, "uncounted")
     flow_requests = {number(e, "peer"): number(e, "n") for e in entries(status, "sent")
                      if number(e, "op") == FLOW_REQUEST}
+    arc_reads = {number(e, "peer"): number(e, "n") for e in entries(status, "sent")
+                 if number(e, "op") == ARC_READ}
     tx = {number(e, "flow"): (number(e, "fpp"), number(e, "packets")) for e in entries(status, "tx")}
     rx = {number(e, "flow"): (number(e, "fpp"), number(e, "packets")) for e in entries(status, "rx")}
-    return Sample(t=(t0 + t1) / 2, u=(t1 - t0) / 2, requests=requests, flow_requests=flow_requests, tx=tx, rx=rx,
+    return Sample(t=(t0 + t1) / 2, u=(t1 - t0) / 2, requests=requests, flow_requests=flow_requests,
+                  arc_reads=arc_reads, tx=tx, rx=rx,
                   tx_live=sum(1 for e in entries(status, "tx") if e.get("live") == 1),
                   rx_granted=sum(1 for e in entries(status, "rx") if e.get("granted") == 1),
                   polls=number(status.get("clock"), "polls"))
@@ -135,6 +144,7 @@ def counters(s: Sample) -> dict[tuple, int]:
     device started again."""
     out: dict[tuple, int] = {("req", *k): n for k, n in s.requests.items()}
     out.update({("sent", p): n for p, n in s.flow_requests.items()})
+    out.update({("arc", p): n for p, n in s.arc_reads.items()})
     out.update({("tx", f): v[1] for f, v in s.tx.items()})
     out.update({("rx", f): v[1] for f, v in s.rx.items()})
     out[("polls",)] = s.polls
@@ -150,7 +160,7 @@ def went_back(a: Sample, b: Sample) -> bool:
 
 @dataclass(frozen=True)
 class Trip:
-    kind: str   # requests, flow_requests or packets
+    kind: str   # requests, flow_requests, arc_reads or packets
     numbers: dict
 
 
@@ -160,6 +170,7 @@ class Peaks:
     request_rate: float = 0.0
     flow_requests: int = 0
     packet_ratio: float = 0.0
+    arc_reads: int = 0
 
 
 @dataclass
@@ -203,6 +214,12 @@ class Watch:
     def flows(self, s: Sample) -> Trip | None:
         self.recent = [a for a in self.recent if (s.t + s.u) - (a.t - a.u) <= FLOW_SPAN_S] + [s]
         for a in self.recent[:-1]:
+            for peer, n in sorted(s.arc_reads.items()):
+                more = n - a.arc_reads.get(peer, 0)
+                self.peaks.arc_reads = max(self.peaks.arc_reads, more)
+                if more > ARC_READS_MAX:
+                    span = (s.t + s.u) - (a.t - a.u)
+                    return Trip("arc_reads", {"peer": peer, "reads": more, "within_s": round(span, 1)})
             for peer, n in sorted(s.flow_requests.items()):
                 more = n - a.flow_requests.get(peer, 0)
                 self.peaks.flow_requests = max(self.peaks.flow_requests, more)
@@ -370,17 +387,20 @@ class Tally:
     request_rate: float = 0.0
     flow_requests: int = 0
     packet_ratio: float = 0.0
+    arc_reads: int = 0
 
     def add(self, p: Peaks) -> None:
         self.request_rate = max(self.request_rate, p.request_rate)
         self.flow_requests = max(self.flow_requests, p.flow_requests)
         self.packet_ratio = max(self.packet_ratio, p.packet_ratio)
+        self.arc_reads = max(self.arc_reads, p.arc_reads)
 
 
 def figures(t: float, tally: Tally, peaks: Peaks, watch: Watch) -> dict:
     last = watch.last
     return {"t_s": round(t, 1), "reads": tally.reads, "failed": tally.failed,
             "request_rate_max": round(peaks.request_rate, 1), "flow_requests_5s_max": peaks.flow_requests,
+            "arc_reads_5s_max": peaks.arc_reads,
             "packet_ratio_max": round(peaks.packet_ratio, 3), "tx_flows": last.tx_live if last else 0,
             "rx_flows": last.rx_granted if last else 0, "restarts": watch.restarts}
 
@@ -393,7 +413,8 @@ def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: E
 
     def end(word: str, code: int, trip: Trip | None = None, stop: int | None = None) -> int:
         tally.add(watch.take_peaks())
-        doc = figures(clock.now() - start, tally, Peaks(tally.request_rate, tally.flow_requests, tally.packet_ratio),
+        doc = figures(clock.now() - start, tally, Peaks(tally.request_rate, tally.flow_requests, tally.packet_ratio,
+                                                                  tally.arc_reads),
                       watch)
         doc = {"end": word, **doc}
         if trip is not None:

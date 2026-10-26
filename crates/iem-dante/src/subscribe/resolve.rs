@@ -30,6 +30,11 @@
 //!   query of ours. Nothing here queries per lookup or per retry.
 //! - [`Own`]: our own device's channels, from the records it announces
 //!   (a subscription to our own TX is resolved without the network).
+//!
+//! A device no channel record names ([`Adverts::names_device`]) is read
+//! through its ARC instead ([`super::directory`], plan Task 9b: the band's
+//! Yamaha Dante cards publish no `_netaudio-chan` record); [`Browse`] starts
+//! that directory's browses too.
 
 use std::collections::HashMap;
 use std::io;
@@ -133,18 +138,22 @@ fn int(s: &str) -> Option<u64> {
     }
 }
 
-/// A resolved record's name (case aside) and channel: its lowest IPv4
-/// address (one interface's, as our daemon listens on one) and its port.
-pub fn from_resolved(r: &ResolvedService) -> Result<(String, Advertised), AdvertError> {
-    let ip = r
-        .get_addresses()
+/// A resolved record's lowest IPv4 address (one interface's, as our daemon
+/// listens on one).
+pub fn lowest_ipv4(r: &ResolvedService) -> Option<Ipv4Addr> {
+    r.get_addresses()
         .iter()
         .filter_map(|a| match a.to_ip_addr() {
             IpAddr::V4(v4) => Some(v4),
             IpAddr::V6(_) => None,
         })
         .min()
-        .ok_or(AdvertError::NoAddress)?;
+}
+
+/// A resolved record's name (case aside) and channel: its lowest IPv4
+/// address ([`lowest_ipv4`]) and its port.
+pub fn from_resolved(r: &ResolvedService) -> Result<(String, Advertised), AdvertError> {
+    let ip = lowest_ipv4(r).ok_or(AdvertError::NoAddress)?;
     let advertised = parse(
         |key| r.get_property_val_str(key),
         SocketAddrV4::new(ip, r.get_port()),
@@ -185,10 +194,21 @@ pub enum Applied {
     Ignored,
 }
 
-/// The channel records known, by name (case aside).
+/// The channel records known, by name (case aside), and how many each
+/// device has.
 #[derive(Debug, Default)]
 pub struct Adverts {
     map: HashMap<String, Advertised>,
+    devices: HashMap<String, usize>,
+}
+
+/// The device a channel record's name (as [`instance`] writes it) names.
+fn device_of(name: &str) -> Option<&str> {
+    let (_, device) = name
+        .strip_suffix(CHAN_SERVICE)?
+        .strip_suffix('.')?
+        .rsplit_once('@')?;
+    Some(device)
 }
 
 impl Adverts {
@@ -202,14 +222,26 @@ impl Adverts {
                 if self.map.len() >= MAX_ADVERTS && !self.map.contains_key(&name) {
                     return Applied::Ignored;
                 }
+                if let Some(device) = device_of(&name).filter(|_| !self.map.contains_key(&name)) {
+                    *self.devices.entry(device.to_string()).or_default() += 1;
+                }
                 self.map.insert(name, a);
                 Applied::Resolved
             }
             ServiceEvent::ServiceRemoved(_, fullname) => {
-                match self.map.remove(&fullname.to_ascii_lowercase()) {
-                    Some(_) => Applied::Removed,
-                    None => Applied::Ignored,
+                let name = fullname.to_ascii_lowercase();
+                if self.map.remove(&name).is_none() {
+                    return Applied::Ignored;
                 }
+                if let Some(device) = device_of(&name)
+                    && let Some(n) = self.devices.get_mut(device)
+                {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.devices.remove(device);
+                    }
+                }
+                Applied::Removed
             }
             _ => Applied::Ignored,
         }
@@ -218,6 +250,13 @@ impl Adverts {
     /// The record of `channel` on `device`.
     pub fn get(&self, device: &str, channel: &str) -> Option<Advertised> {
         self.map.get(&instance(device, channel)).copied()
+    }
+
+    /// Whether any channel record names `device` (case aside): such a
+    /// device resolves through its records only, never through its ARC
+    /// ([`crate::subscribe::directory::Network`]).
+    pub fn names_device(&self, device: &str) -> bool {
+        self.devices.contains_key(&device.to_ascii_lowercase())
     }
 
     pub fn len(&self) -> usize {
@@ -263,19 +302,20 @@ impl Resolver for Own {
     }
 }
 
-/// Where the browse's events come from: the mDNS daemon, or a test's
+/// Where a browse's events come from: the mDNS daemon, or a test's
 /// channel.
 pub trait Browse {
     type Events: Iterator<Item = ServiceEvent> + Send + 'static;
-    /// Starts browsing `_netaudio-chan`; the events end when the daemon
+    /// Starts browsing `service` (`_netaudio-chan`, and for the ARC reads
+    /// `_netaudio-arc` and `_netaudio-dbc`); the events end when the daemon
     /// does.
-    fn browse_channels(&self) -> Result<Self::Events, mdns_sd::Error>;
+    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error>;
 }
 
 impl Browse for ServiceDaemon {
     type Events = <mdns_sd::Receiver<ServiceEvent> as IntoIterator>::IntoIter;
-    fn browse_channels(&self) -> Result<Self::Events, mdns_sd::Error> {
-        Ok(self.browse(CHAN_SERVICE)?.into_iter())
+    fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
+        Ok(ServiceDaemon::browse(self, service)?.into_iter())
     }
 }
 
@@ -306,7 +346,7 @@ impl Mdns {
         if self.thread.is_some() {
             return Ok(false);
         }
-        let events = daemon.browse_channels()?;
+        let events = daemon.browse(CHAN_SERVICE)?;
         let adverts = Arc::clone(&self.adverts);
         let thread = std::thread::Builder::new()
             .name("dante-mdns-chan".to_string())
@@ -317,6 +357,14 @@ impl Mdns {
 
     pub fn started(&self) -> bool {
         self.thread.is_some()
+    }
+
+    /// Whether any channel record names `device` ([`Adverts::names_device`]).
+    pub fn names_device(&self, device: &str) -> bool {
+        self.adverts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .names_device(device)
     }
 
     /// Waits for the thread to end (the daemon's events ended), at most

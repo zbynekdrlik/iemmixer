@@ -21,8 +21,9 @@
 //! (the request is never echoed back). Settings answer `ok`.
 //!
 //! [`Requests`] counts every datagram the device's servers receive by port,
-//! peer and opcode, and our own flow requests and stops by peer, cumulative
-//! for the device's life: the live guard (plan Task 8) reads their rates
+//! peer and opcode, and our own flow requests and stops and our ARC reads of
+//! other devices (`crate::subscribe::directory`) by peer and opcode,
+//! cumulative for the device's life: the live guard (plan Task 8) reads their rates
 //! from the status every second. A peer is named by an id only (1 for the
 //! first seen, the same id for the device's life; [`MAX_PEERS`], then 0),
 //! the status's own, shared by what we receive and what we send.
@@ -235,8 +236,9 @@ pub struct Received {
     pub n: u64,
 }
 
-/// One count of what our RX sent: flow-control requests (`op` 0x0100) and
-/// stops (0x0101) to `peer`.
+/// One count of what our RX sent to `peer`: flow-control requests (`op`
+/// 0x0100) and stops (0x0101), and the ARC reads of a transmitter's channels
+/// (0x1000 once a directory read, 0x2000 and 0x2010 once a page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sent {
     pub peer: usize,
@@ -306,8 +308,8 @@ impl Requests {
         id
     }
 
-    /// One flow-control datagram of ours to `peer` with opcode `op`;
-    /// returns the peer's id.
+    /// One datagram of ours to `peer` with opcode `op` (a flow-control
+    /// request or stop, an ARC read); returns the peer's id.
     pub fn sent(&self, peer: IpAddr, op: u16) -> usize {
         let mut t = lock(&self.0);
         let id = t.peer_id(peer);
@@ -563,7 +565,9 @@ impl Json {
 /// - `requests`: `[{port, peer, op, n}]`, every datagram the device
 ///   received (ARC 4440, flow control 4455, info 8700, CMC 8800; `op` as
 ///   [`header_op`] and [`info_op`] read it); `sent`: `[{peer, op, n}]`, our
-///   RX's flow requests (256) and stops (257); `uncounted`: past the tables.
+///   RX's flow requests (256) and stops (257), and its ARC reads of
+///   transmitters' channels (4096 once a directory read, 8192 and 8208 once
+///   a page); `uncounted`: past the tables.
 /// - `tx`: each TX flow slot that has or had a flow: `flow`, `live` (a flow
 ///   that sends), `fpp`, `channels`, `packets`, `send_errors`, `keepalives`,
 ///   `rebootstraps`, `holes` (echo samples the ring did not hold).
