@@ -7,13 +7,18 @@
 //! - [`parse_args`]: `--config <path>` and one of `--iface <name>` or `--ip
 //!   <IPv4>`; `--version` ([`version_line`]: the workspace version and the
 //!   build's commit, CI's `GITHUB_SHA`, "local" otherwise).
-//! - [`pick_ipv4`]: the one IPv4 address the device serves on, from the
-//!   box's interface list: ARC and CMC bind it, the mDNS records point at
-//!   it and are sent on its interface only.
-//! - [`serve`]: announces the device's records, answers ARC (UDP 4440) and
-//!   CMC (UDP 8800) and announces again after every saved rename, until
-//!   its stop future ends (the binary's SIGTERM or SIGINT). The binary then
-//!   shuts the mDNS daemon down, which sends the goodbyes.
+//! - [`pick_interface`]: the interface and its one IPv4 address the device
+//!   serves on, from the box's interface list: ARC, CMC and the info
+//!   server bind the address, the mDNS records point at it and are sent on
+//!   its interface only.
+//! - [`net_info`]: what the info server's network info says about that
+//!   interface, from the box's files the binary reads (its MAC and speed
+//!   in `/sys/class/net/<iface>/`, the routes in `/proc/net/route`).
+//! - [`serve`]: announces the device's records, answers ARC (UDP 4440),
+//!   CMC (UDP 8800) and the info requests (UDP 8700, [`crate::info`]),
+//!   beats every second, and announces again after every saved rename,
+//!   until its stop future ends (the binary's SIGTERM or SIGINT). The
+//!   binary then shuts the mDNS daemon down, which sends the goodbyes.
 //!
 //! The device sends no PTP and no audio (phase A). Logs name counts,
 //! ports and channel numbers, never a name or an address: the device and
@@ -31,6 +36,7 @@ use tracing::info;
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::device::Device;
+use crate::info::{Multicast, NetInfo};
 use crate::{arc, cmc};
 
 /// The binary's name.
@@ -48,10 +54,12 @@ pub const USAGE: &str = "\
 usage: iem-dante-dev --config <path> (--iface <name> | --ip <IPv4 address>)
        iem-dante-dev --version
 
-Our own Dante device (Gen 3 phase A, #72): ARC on UDP 4440 and CMC on UDP
-8800 at the interface's IPv4 address, its mDNS records on that interface
-only, renames saved to the config's state file. SIGTERM or SIGINT withdraws
-the records (mDNS goodbyes), then it exits 0. It never sends PTP or audio.";
+Our own Dante device (Gen 3 phase A, #72): ARC on UDP 4440, CMC on UDP 8800
+and the info requests on UDP 8700 at the interface's IPv4 address (replies
+to 224.0.0.231:8702, a heartbeat every second to 224.0.0.233:8708), its
+mDNS records on that interface only, renames saved to the config's state
+file. SIGTERM or SIGINT withdraws the records (mDNS goodbyes), then it
+exits 0. It never sends PTP or audio.";
 
 /// What `--version` prints: the name, the version and the build.
 pub fn version_line() -> String {
@@ -142,22 +150,20 @@ fn refuse_unreachable(ip: Ipv4Addr) -> Result<(), String> {
 pub struct IfAddr {
     pub name: String,
     pub ip: Ipv4Addr,
+    pub netmask: Ipv4Addr,
 }
 
-/// The address the device serves on: the named interface's one IPv4
-/// address, or the given address when an interface holds it. An interface
-/// with no or several IPv4 addresses, an address no interface holds, and
-/// a loopback address are refused (the errors name neither).
-pub fn pick_ipv4(place: &Place, addrs: &[IfAddr]) -> Result<Ipv4Addr, String> {
-    let ip = match place {
+/// The interface and address the device serves on: the named interface's
+/// one IPv4 address, or the given address on the (first) interface that
+/// holds it. An interface with no or several IPv4 addresses, an address no
+/// interface holds, and a loopback address are refused (the errors name
+/// neither).
+pub fn pick_interface(place: &Place, addrs: &[IfAddr]) -> Result<IfAddr, String> {
+    let picked = match place {
         Place::Iface(name) => {
-            let mine: Vec<Ipv4Addr> = addrs
-                .iter()
-                .filter(|a| &a.name == name)
-                .map(|a| a.ip)
-                .collect();
+            let mine: Vec<&IfAddr> = addrs.iter().filter(|a| &a.name == name).collect();
             match mine[..] {
-                [ip] => ip,
+                [one] => one,
                 [] => return Err("no such interface, or it has no IPv4 address".into()),
                 _ => {
                     return Err(format!(
@@ -167,15 +173,41 @@ pub fn pick_ipv4(place: &Place, addrs: &[IfAddr]) -> Result<Ipv4Addr, String> {
                 }
             }
         }
-        Place::Ip(ip) => {
-            if !addrs.iter().any(|a| a.ip == *ip) {
-                return Err("no interface of this box holds the address".into());
-            }
-            *ip
-        }
+        Place::Ip(ip) => addrs
+            .iter()
+            .find(|a| a.ip == *ip)
+            .ok_or("no interface of this box holds the address")?,
     };
-    refuse_unreachable(ip)?;
-    Ok(ip)
+    refuse_unreachable(picked.ip)?;
+    Ok(picked.clone())
+}
+
+/// The interface's MAC from its `/sys/class/net/<iface>/address` text
+/// (`aa:bb:cc:dd:ee:ff`); `None` for anything else or all zeros.
+pub fn parse_mac(_text: &str) -> Option<[u8; 6]> {
+    todo!()
+}
+
+/// The link speed in Mbit/s from `/sys/class/net/<iface>/speed`, 0 when
+/// unknown, at most 10 000 (inferno's).
+pub fn link_speed(_text: Option<&str>) -> u16 {
+    todo!()
+}
+
+/// The interface's default gateway from `/proc/net/route`, 0.0.0.0 for
+/// none.
+pub fn default_gateway(_routes: &str, _ifa: &IfAddr) -> Ipv4Addr {
+    todo!()
+}
+
+/// What the info server's network info says about `ifa`.
+pub fn net_info(
+    _ifa: &IfAddr,
+    _mac: &str,
+    _speed: Option<&str>,
+    _routes: Option<&str>,
+) -> Result<NetInfo, String> {
+    todo!()
 }
 
 /// The mDNS host the device's records point at: its name's `.local.` host
@@ -191,6 +223,8 @@ pub enum ServeError {
     Arc(io::Error),
     #[error("the CMC server stopped: {0}")]
     Cmc(io::Error),
+    #[error("the info server stopped: {0}")]
+    Info(io::Error),
     #[error("announcing the device: {0}")]
     Announce(#[from] AnnounceError),
 }
@@ -210,25 +244,31 @@ pub fn announce_device<R: Registry>(
     Ok(recs.len())
 }
 
-/// Serves the device at `ip` until `stop` ends: announces its records
-/// first, then answers ARC on `arc_sock` and CMC on `cmc_sock`, and
-/// announces again after every rename the ARC server saved. A failed
-/// announcement, or an ARC or CMC server that stops, ends it with an error
-/// (the service restarts the daemon; the state file holds every saved
-/// rename). The caller withdraws the records after it returns.
+/// The device's sockets, each bound to the served address: ARC
+/// ([`arc::PORT`]), CMC ([`cmc::PORT`]) and the info requests
+/// ([`crate::info::REQUEST_PORT`]).
+#[derive(Debug)]
+pub struct Sockets {
+    pub arc: UdpSocket,
+    pub cmc: UdpSocket,
+    pub info: UdpSocket,
+}
+
+/// Serves the device at `net.ip` until `stop` ends.
 pub async fn serve<R: Registry>(
-    arc_sock: UdpSocket,
-    cmc_sock: UdpSocket,
+    sockets: Sockets,
     shared: Arc<Mutex<Device>>,
     announcer: &mut Announcer<R>,
-    ip: Ipv4Addr,
+    net: NetInfo,
+    _multicast: Multicast,
     stop: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
+    let ip = net.ip;
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(records = n, "mDNS records announced");
-    let arc = arc::serve(arc_sock, Arc::clone(&shared), Arc::clone(&changed));
-    let cmc = cmc::serve_cmc(cmc_sock, ip);
+    let arc = arc::serve(sockets.arc, Arc::clone(&shared), Arc::clone(&changed));
+    let cmc = cmc::serve_cmc(sockets.cmc, ip);
     tokio::pin!(arc, cmc, stop);
     loop {
         tokio::select! {
