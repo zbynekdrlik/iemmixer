@@ -455,15 +455,34 @@ mod linux {
             .expect("sleep_until returned within 5 s")
     }
 
+    /// `sleep_until` of the clock's time `ahead_ns` later, both read on the
+    /// sleeping thread: how long it slept, and whether the clock had
+    /// reached the time when it woke. Taken on the thread, so the time its
+    /// start took never counts (under a mutation shard's load it took
+    /// milliseconds, and a 30 ms target set before the spawn left less than
+    /// 29 ms to sleep: PR #79, shard 89).
+    fn sleeps_ahead(c: Arc<MonoClock>, ahead_ns: u64) -> (Duration, bool) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let target = c.now_ns().unwrap() + ahead_ns;
+            let t0 = Instant::now();
+            c.sleep_until(target);
+            let slept = t0.elapsed();
+            let _ = tx.send((slept, c.now_ns().unwrap() >= target));
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("sleep_until returned within 5 s")
+    }
+
     #[test]
     fn the_mono_clock_sleeps_until_a_ptp_time() {
         let c = Arc::new(MonoClock::new());
         c.set_k(HOUR);
-        let target = c.now_ns().unwrap() + 30_000_000;
-        let slept = sleeps_for(c.clone(), target);
+        let (slept, reached) = sleeps_ahead(c.clone(), 30_000_000);
         assert!(slept >= Duration::from_millis(29), "{slept:?}");
         assert!(slept < Duration::from_secs(2), "{slept:?}");
-        assert!(c.now_ns().unwrap() >= target);
+        assert!(reached, "woke before the time asked");
+        let target = c.now_ns().unwrap();
         // A past time returns at once: an hour back, so a sleep that read it
         // as anything but past would outlast the bound by far. Bounded at
         // 1 s, not tens of ms: under a mutation shard's load the thread's
@@ -475,10 +494,10 @@ mod linux {
         // fresh CI runner keeps under an hour (CI run 40289615289: k = -1 h
         // made the PTP time negative, so now_ns was None).
         c.set_k(-1_000_000);
-        let target = c.now_ns().unwrap() + 30_000_000;
-        let slept = sleeps_for(c.clone(), target);
+        let (slept, reached) = sleeps_ahead(c.clone(), 30_000_000);
         assert!(slept >= Duration::from_millis(29), "{slept:?}");
         assert!(slept < Duration::from_secs(2), "{slept:?}");
+        assert!(reached, "woke before the time asked");
         // Before the clock is ready: a short nap, whatever the time asked.
         let c = Arc::new(MonoClock::new());
         let slept = sleeps_for(c, u64::MAX);

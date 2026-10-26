@@ -236,7 +236,7 @@ exclude_re = [
   # joins, so nothing but timing tells it apart; a thread left running is a
   # warning, never killed. `spawn_threads`, the driver, the checks and the
   # control socket's accept loop stay mutated.
-  "iem-dante/src/daemon/media\\.rs.*<impl Threads>::stop",
+  "iem-dante/src/daemon/media\\.rs.*\\bThreads::stop\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
