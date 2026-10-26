@@ -374,6 +374,7 @@ class Gen3StopTests(Base):
         self.ssh_log = self.tmp / "ssh.log"
         self.ssh_done = self.tmp / "ssh.done"
         self.ssh_flag = self.tmp / "ssh.flag"
+        self.ssh_sid = self.tmp / "ssh.sid"
 
     def gen3_host(self, host: str = HOST) -> None:
         ip.env_path().write_text(ip.env_path().read_text(encoding="utf-8") + f"GEN3_HOST={host}\n", encoding="utf-8")
@@ -384,14 +385,15 @@ class Gen3StopTests(Base):
         ip.env_path().write_text(text, encoding="utf-8")
 
     def ssh_program(self, code: int, delay: float = 0.0, err: str = "") -> None:
-        """A stand-in `ssh` first on PATH: logs its arguments and whether the
-        EVENT-NOW flag exists at start, takes `delay` seconds, marks its end,
-        writes `err` and exits with `code`."""
+        """A stand-in `ssh` first on PATH: logs its arguments, its session and
+        whether the EVENT-NOW flag exists at start, takes `delay` seconds,
+        marks its end, writes `err` and exits with `code`."""
         d = self.tmp / "ssh-bin"
         d.mkdir(exist_ok=True)
         p = d / "ssh"
         p.write_text(f"#!{sys.executable}\nimport os, sys, time\n"
                      f"open({str(self.ssh_flag)!r}, 'a').write(repr(os.path.exists({str(ip.EVENT_NOW)!r})) + '\\n')\n"
+                     f"open({str(self.ssh_sid)!r}, 'w').write(str(os.getsid(0)))\n"
                      f"open({str(self.ssh_log)!r}, 'a').write(repr(sys.argv[1:]) + '\\n')\n"
                      f"time.sleep({delay})\nopen({str(self.ssh_done)!r}, 'a').write('ended\\n')\n"
                      f"sys.stderr.write({err!r})\nsys.exit({code})\n", encoding="utf-8")
@@ -480,6 +482,51 @@ class Gen3StopTests(Base):
                 self.assertIn("could not be written", warnings[0])
                 if reply is down:
                     self.assertIn("alarm the owner now", err.getvalue())
+
+    def gen3_log(self) -> Path:
+        return ip.STATE_DIR / "gen3-stop.log"
+
+    def wait_for_text(self, path: Path, text: str, within: float = 15.0) -> str:
+        deadline = time.monotonic() + within
+        seen = ""
+        while time.monotonic() < deadline:
+            seen = path.read_text(encoding="utf-8") if path.exists() else ""
+            if text in seen:
+                break
+            time.sleep(0.02)
+        return seen
+
+    def test_a_stop_left_running_writes_into_a_log_that_outlives_the_event_path(self) -> None:
+        # Its output goes into iempc's state folder, never into a pipe that
+        # closes when iempc ends; in a session of its own, so the end of the
+        # terminal (a hang-up) never reaches it.
+        self.gen3_host()
+        self.ssh_program(0, delay=1.0, err="ssh: a late line\n")
+        self.patch(GEN3_STOP_S=0.2)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1], {"gen3_stop": {"ok": False, "running": True}})
+        warnings = self.gen3_warnings(err)
+        self.assertEqual(len(warnings), 1, err)
+        self.assertIn(str(self.gen3_log()), warnings[0])
+        self.assertTrue(self.wait_for(self.ssh_done), "the ssh stand-in never ended")
+        self.assertIn("ssh: a late line", self.wait_for_text(self.gen3_log(), "ssh: a late line"))
+        self.assertNotEqual(int(self.ssh_sid.read_text(encoding="utf-8")), os.getsid(0))
+
+    def test_each_stop_appends_to_the_log_and_its_warning_names_only_its_own_output(self) -> None:
+        self.gen3_host()
+        for n in (1, 2):
+            self.ssh_program(255, err=f"ssh: attempt {n} found no route\n")
+            code, docs, err = self.run_main("event")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(docs[-1], {"gen3_stop": {"ok": False, "exit": 255}})
+            warnings = self.gen3_warnings(err)
+            self.assertEqual(len(warnings), 1, err)
+            self.assertIn(f"attempt {n} found no route", warnings[0])
+            self.assertNotIn(f"attempt {3 - n}", warnings[0])
+        log = self.gen3_log().read_text(encoding="utf-8")
+        self.assertLess(log.index("attempt 1"), log.index("attempt 2"))
+        self.assertEqual(log.count("gen3 stop started"), 2, log)
 
     def ssh_args(self) -> list[list[str]]:
         if not self.ssh_log.exists():
