@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 
-//! The audio path's pure parts (Gen 3 phase B, plan Task 3): the packet
-//! codec, the jitter ring of an RX channel, the TX test sources and the
-//! checkers of what comes back. No sockets and no threads here (Tasks 4
-//! and 5 add them).
+//! The audio path (Gen 3 phase B): the packet codec, the jitter ring of an
+//! RX channel, the TX test sources and the checkers of what comes back
+//! (plan Task 3, pure), and the TX flows with their thread ([`tx`], plan
+//! Task 4).
 //!
 //! The hot path: [`packet`]'s write and read, [`ring::Ring`]'s write and
 //! read, every [`source::Source`] and both checkers in [`check`] allocate
@@ -20,3 +20,4 @@ pub mod check;
 pub mod packet;
 pub mod ring;
 pub mod source;
+pub mod tx;
