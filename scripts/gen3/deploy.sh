@@ -20,8 +20,9 @@ set -euo pipefail
 #   iempc's private env ($PC_ENV, else ~/.config/iemmixer/iem-pc.env) is a
 #   warning, an env without GEN3_HOST too; and before anything is copied
 #   the box's sudo must allow that stop (`sudo -n -l`), else refused.
-# - The artifact must have the given sha256 (the CI job `dante-bin` prints
-#   it; the artifact is `iem-dante-dev-<sha>`).
+# - The artifact must have the given sha256 (the CI job `gen3-bin` uploads
+#   the bundle `gen3-bundle-<sha>`: pass its `iem-dante-dev` and that file's
+#   sum from the bundle's SHA256SUMS).
 # - The binary, the unit (beside this script), the config, the interface
 #   (written as /etc/iemmixer/iem-dante.env) and the drop-in naming the box's
 #   user (the ssh user, never root) go by scp into ~/.cache/iem-dante-deploy

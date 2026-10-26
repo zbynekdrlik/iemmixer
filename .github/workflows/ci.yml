@@ -222,41 +222,137 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  dante-bin:
-    name: dante-bin
-    # The Gen 3 device daemon (#72 phase A) for scripts/gen3/deploy.sh: built
-    # for x86_64 Linux on every push and pull request, uploaded only from a
-    # push to dev or main, as the bundle is.
-    needs: [test]
+  gen3-bin:
+    name: gen3-bin
+    # The Gen 3 box's bundle (#72 phase C, plan Task 5) for scripts/gen3/deploy.sh:
+    # the engine (it hosts our Dante device), the server with the UI, the
+    # standalone device and the soak client (its token mint), built for
+    # x86_64 Linux on every push and pull request and checked as they ship,
+    # uploaded only from a push to dev or main, as the PC's bundle is.
+    needs: [test, wasm]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The e2e job's three release builds plus the device's (about 3 min on a
+    # warm cache), then checks of seconds.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wasm-dist
+          path: crates/iem-ui/dist
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Build iem-dante-dev (release, x86_64 Linux)
-        run: cargo build --locked --release -p iem-dante --bin iem-dante-dev
-      - name: The binary is x86-64 and names this build
+      - name: Build the engine, the soak client, the device and the server (release, x86_64 Linux)
+        # The server as the box runs it (plan choice 4): the e2e job's
+        # features, plain HTTP, the UI from wasm-dist embedded.
         run: |
           set -euo pipefail
-          bin=target/release/iem-dante-dev
-          file -b "$bin" | grep -Eq '^ELF 64-bit LSB (pie )?executable, x86-64' \
-            || { echo "::error::$bin is not an x86-64 ELF executable: $(file -b "$bin")"; exit 1; }
-          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "iem-dante") | .version')"
-          said="$("$bin" --version)"
+          cargo build --locked --release -p iem-engine -p iem-soakclient
+          cargo build --locked --release -p iem-dante --bin iem-dante-dev
+          cargo build --locked --release -p iem-server --features standalone,audio
+      - name: Stage the bundle (the checks below run the staged copies)
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/gen3-bundle"
+          mkdir -p "$b"
+          cp target/release/iem-engine target/release/iem-server target/release/iem-dante-dev target/release/iem-soakclient "$b/"
+      - name: Each binary is x86-64; the device and the engine name this build
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/gen3-bundle"
+          for name in iem-engine iem-server iem-dante-dev iem-soakclient; do
+            kind="$(file -b "$b/$name")"
+            echo "$name: $kind"
+            grep -Eq '^ELF 64-bit LSB (pie )?executable, x86-64' <<< "$kind" \
+              || { echo "::error::$name is not an x86-64 ELF executable: $kind"; exit 1; }
+          done
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          dante="$(jq -r '.packages[] | select(.name == "iem-dante") | .version' <<< "$metadata")"
+          engine="$(jq -r '.packages[] | select(.name == "iem-engine") | .version' <<< "$metadata")"
+          said="$("$b/iem-dante-dev" --version)"
           echo "$said"
-          [ "$said" = "iem-dante-dev ${version} ${GITHUB_SHA}" ] \
-            || { echo "::error::--version says '$said', not 'iem-dante-dev ${version} ${GITHUB_SHA}'"; exit 1; }
-          sha256sum "$bin"
+          [ "$said" = "iem-dante-dev ${dante} ${GITHUB_SHA}" ] \
+            || { echo "::error::iem-dante-dev --version says '$said', not 'iem-dante-dev ${dante} ${GITHUB_SHA}'"; exit 1; }
+          said="$("$b/iem-engine" --version)"
+          echo "$said"
+          [ "$said" = "iem-engine ${engine}+${GITHUB_SHA}" ] \
+            || { echo "::error::iem-engine --version says '$said', not 'iem-engine ${engine}+${GITHUB_SHA}'"; exit 1; }
+      - name: The server names this build on a scratch copy of the test site, then stops on SIGTERM with exit 0
+        # The box's data (plan choice 4): the public test site and roster in a
+        # folder of their own (the server writes its secrets beside them), a
+        # free port, an engine socket nobody serves (the server keeps trying
+        # to reach it; /api/version answers without it). The git_hash is the
+        # checkout's `git rev-parse --short HEAD` (iem-core's build.rs), so a
+        # prefix of GITHUB_SHA. The stop is a request (I8): SIGTERM, then a
+        # bounded wait for the exit; a server still running after it fails
+        # the step, never force-ended.
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/gen3-bundle"
+          site="$(mktemp -d "$RUNNER_TEMP/gen3-site.XXXXXX")"
+          cp config/test-site.toml "$site/iemmixer.toml"
+          cp config/test-roster.toml "$site/roster.toml"
+          port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("0.0.0.0", 0)); print(s.getsockname()[1]); s.close()')"
+          IEMMIXER_CONFIG="$site/iemmixer.toml" IEMMIXER_ENGINE_PIPE="$site/engine.sock" PORT="$port" RUST_LOG=info \
+            "$b/iem-server" > "$site/server.log" 2>&1 &
+          pid=$!
+          # Any early exit of this step asks the server to stop as well.
+          trap 'kill -TERM "$pid" 2> /dev/null || true' EXIT
+          answer=""
+          for i in $(seq 1 30); do
+            if answer="$(curl -sf "http://127.0.0.1:${port}/api/version")"; then echo "server answered after ${i}s"; break; fi
+            if ! kill -0 "$pid" 2> /dev/null; then
+              cat "$site/server.log"
+              echo "::error::iem-server ended before it answered /api/version"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ -z "$answer" ]; then
+            cat "$site/server.log"
+            echo "::error::iem-server did not answer /api/version within 30 s"
+            exit 1
+          fi
+          echo "$answer"
+          hash="$(jq -r '.git_hash' <<< "$answer")"
+          [[ "$hash" =~ ^[0-9a-f]{7,40}$ && "$GITHUB_SHA" == "$hash"* ]] \
+            || { echo "::error::/api/version's git_hash '$hash' is not a prefix of ${GITHUB_SHA}"; exit 1; }
+          kill -TERM "$pid"
+          for i in $(seq 1 15); do
+            if ! kill -0 "$pid" 2> /dev/null; then break; fi
+            if [ "$i" -eq 15 ]; then
+              cat "$site/server.log"
+              echo "::error::iem-server still runs 15 s after SIGTERM"
+              exit 1
+            fi
+            sleep 1
+          done
+          trap - EXIT
+          status=0
+          wait "$pid" || status=$?
+          if [ "$status" -ne 0 ]; then
+            cat "$site/server.log"
+            echo "::error::iem-server exited $status after SIGTERM, not 0"
+            exit 1
+          fi
+          echo "iem-server stopped on SIGTERM with exit 0"
+      - name: BUILD and SHA256SUMS
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/gen3-bundle"
+          printf '%s\n' "$GITHUB_SHA" > "$b/BUILD"
+          (cd "$b" && sha256sum iem-engine iem-server iem-dante-dev iem-soakclient BUILD > SHA256SUMS)
+          cat "$b/SHA256SUMS"
+          (cd "$b" && sha256sum --check --strict SHA256SUMS)
       - name: Upload (dev/main pushes only)
         if: github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: iem-dante-dev-${{ github.sha }}
-          path: target/release/iem-dante-dev
+          name: gen3-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/gen3-bundle
           retention-days: 14
           if-no-files-found: error
 
