@@ -28,10 +28,15 @@
 //! - [`wire`]: the request/response datagram ARC and CMC share.
 //! - [`arc`]: the control server on UDP 4440: names, channel lists,
 //!   renames.
+//! - [`cmc`]: the advertisement on UDP 8800.
+//! - [`announce`]: the mDNS records Dante Controller browses for, and their
+//!   announcer.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
 
+pub mod announce;
 pub mod arc;
+pub mod cmc;
 pub mod device;
 pub mod wire;

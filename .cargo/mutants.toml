@@ -196,6 +196,12 @@ exclude_re = [
   # refused rename's problems are logged, never answered); the rename's
   # decisions are tested by direction.
   "iem-dante/src/arc\\.rs.*replace Dir::label -> ",
+  # The mDNS daemon's side of the announcer (#72): two calls into mdns-sd's
+  # multicast daemon, which the unit tests never start (it would announce the
+  # test records on the build machine's network). The announcer's decisions
+  # are tested through a fake registry; the plan's live check (Task 6) sees
+  # the records in Dante Controller.
+  "iem-dante/src/announce\\.rs.*<impl Registry for ServiceDaemon>",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
