@@ -909,9 +909,12 @@ impl Transmitter {
                     fpp,
                     |f, s| frames[s][f],
                 );
+                // A datagram socket sends the datagram whole or not at all
+                // (the packet fits one: `wire::MAX_DATAGRAM`), so the byte
+                // count says nothing more than `Ok`.
                 let counter = match socket.send_to(&packet[..n], dest) {
-                    Ok(sent) if sent == n => &stats.packets,
-                    _ => &stats.send_errors,
+                    Ok(_) => &stats.packets,
+                    Err(_) => &stats.send_errors,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
             }
