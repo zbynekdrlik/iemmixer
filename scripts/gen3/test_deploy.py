@@ -173,8 +173,12 @@ class DeployTests(unittest.TestCase):
         install = remote[3].splitlines()
         self.assertEqual(install[0], "set -e")
         self.assertTrue(all(line.startswith("sudo -n ") for line in install[1:]), install)
-        self.assertEqual(install[-3:], ["sudo -n systemctl daemon-reload", "sudo -n systemctl enable iem-dante",
+        # Disabled, then restarted: a reboot of the box never starts the
+        # device (phase B, plan Task 7); nothing enables it.
+        self.assertEqual(install[-3:], ["sudo -n systemctl daemon-reload", "sudo -n systemctl disable iem-dante",
                                         "sudo -n systemctl restart iem-dante"])
+        self.assertFalse(any(" enable " in line for line in install), install)
+        self.assertIn("not enabled at boot", r.stdout)
         self.assertEqual(remote[4:], ["sha256sum /opt/iemmixer/bin/iem-dante-dev",
                                       "/opt/iemmixer/bin/iem-dante-dev --version", "systemctl is-active iem-dante"])
         self.assertNotIn("WARNING", r.stderr)
@@ -183,6 +187,15 @@ class DeployTests(unittest.TestCase):
         self.assertIn(f"iem-dante-dev 2.0.0-dev.41 {'a' * 40}", last)
         self.assertIn(f"sha256 {self.sha}", last)
         self.assertIn("iem-dante active", last)
+
+    def test_the_unit_allows_fifo_keeps_a_private_runtime_folder_and_never_kills(self) -> None:
+        unit = UNIT.read_text(encoding="utf-8").splitlines()
+        service = unit[unit.index("[Service]"):unit.index("[Install]")]
+        for line in ("LimitRTPRIO=80", "RuntimeDirectory=iem-dante", "RuntimeDirectoryMode=0700",
+                     "StateDirectory=iem-dante", "TimeoutStopSec=10", "SendSIGKILL=no", "RestartPreventExitStatus=2"):
+            self.assertIn(line, service)
+        exec_start = next(line for line in service if line.startswith("ExecStart="))
+        self.assertIn("--control /run/iem-dante/control.sock", exec_start)
 
     def test_the_event_flag_refuses_before_any_call(self) -> None:
         self.flag.parent.mkdir()

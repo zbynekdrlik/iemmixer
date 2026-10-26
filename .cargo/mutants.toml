@@ -228,6 +228,15 @@ exclude_re = [
   # `TxTable`) stay mutated: the loopback and thread tests in media/tx run
   # them.
   "iem-dante/src/media/tx\\.rs.*\\bask_realtime\\b",
+  # The daemon's wait for its TX and RX threads at the stop (#72 phase B,
+  # plan Task 7): it sets both stop flags (tested: `stopping()` after it)
+  # and then only waits, a 1 ms nap a pass, for threads that end within one
+  # of their own waits (33 ms; their loops' ends are tested in media/tx and
+  # media/rx). A changed wait condition (`!`, `&&`) still returns after the
+  # joins, so nothing but timing tells it apart; a thread left running is a
+  # warning, never killed. `spawn_threads`, the driver, the checks and the
+  # control socket's accept loop stay mutated.
+  "iem-dante/src/daemon/media\\.rs.*<impl Threads>::stop",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).

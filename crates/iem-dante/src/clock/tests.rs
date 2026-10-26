@@ -265,6 +265,36 @@ fn an_unlock_after_ready_is_holdover_and_keeps_k() {
 }
 
 #[test]
+fn the_status_counts_polls_re_anchors_and_holdover_runs() {
+    let stats = ClockStats::default();
+    assert_eq!(stats.counts(), ClockCounts::default());
+    let held = |stats: &ClockStats| stats.counts().in_holdover;
+    stats.record(Event::NotReady);
+    stats.record(Event::Ready { k_ns: K });
+    assert!(!held(&stats));
+    // Two polls in holdover in a row are one holdover.
+    stats.record(Event::Holdover);
+    assert!(held(&stats));
+    stats.record(Event::Holdover);
+    assert_eq!(stats.counts().holdovers, 1);
+    stats.record(Event::Held);
+    assert!(!held(&stats));
+    stats.record(Event::Holdover);
+    stats.record(Event::ReAnchored { delta_ns: 25_000 });
+    assert_eq!(
+        stats.counts(),
+        ClockCounts {
+            polls: 7,
+            re_anchors: 1,
+            holdovers: 2,
+            in_holdover: false
+        }
+    );
+    stats.record(Event::ReAnchored { delta_ns: -25_000 });
+    assert_eq!(stats.counts().re_anchors, 2);
+}
+
+#[test]
 fn media_time_survives_years_of_uptime() {
     // Ten years of a grandmaster's uptime at 96 kHz.
     let ten_years_ns: u64 = 10 * 365 * 86_400 * 1_000_000_000;
@@ -478,14 +508,28 @@ mod linux {
         });
         let clock = Arc::new(MonoClock::new());
         let freq = Arc::new(AtomicI32::new(0));
-        let polling = tokio::spawn(crate::clock::linux::poll(addr, clock.clone(), freq.clone()));
+        let stats = Arc::new(ClockStats::default());
+        let polling = tokio::spawn(crate::clock::linux::poll(
+            addr,
+            clock.clone(),
+            freq.clone(),
+            stats.clone(),
+        ));
         let t0 = Instant::now();
-        while clock.k_ns().is_none() && t0.elapsed() < Duration::from_secs(5) {
+        while stats.counts().polls == 0 && t0.elapsed() < Duration::from_secs(5) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         polling.abort();
         serving.abort();
         assert!(clock.k_ns().is_some(), "ready within 5 s");
+        // The status's counts: the poll that made the clock ready (another
+        // a second later at most), no re-anchor, no holdover.
+        let counts = stats.counts();
+        assert!((1..=2).contains(&counts.polls), "{counts:?}");
+        assert_eq!(
+            (counts.re_anchors, counts.holdovers, counts.in_holdover),
+            (0, 0, false)
+        );
         assert_eq!(freq.load(Ordering::Relaxed), -750);
         // PTP now = the box's wall less D, within the loop's few ms.
         let ptp = clock.now_ns().unwrap() as i64;
@@ -609,7 +653,13 @@ mod linux {
         let addr = server.local_addr().unwrap();
         let clock = Arc::new(MonoClock::new());
         let freq = Arc::new(AtomicI32::new(7));
-        let polling = tokio::spawn(crate::clock::linux::poll(addr, clock.clone(), freq.clone()));
+        let stats = Arc::new(ClockStats::default());
+        let polling = tokio::spawn(crate::clock::linux::poll(
+            addr,
+            clock.clone(),
+            freq.clone(),
+            stats,
+        ));
         let mut buf = [0u8; 128];
         for _ in 0..2 {
             let got =

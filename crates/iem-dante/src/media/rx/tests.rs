@@ -232,9 +232,14 @@ fn frames_of_24_bit_big_endian_land_at_their_stamps_across_the_seconds_wrap() {
             assert_eq!(got.to_vec(), want, "ring {ring} at {p0}");
         }
         // The largest lateness: the first packet's, 100 samples; then reset.
+        // The status reads what the last take took, and takes nothing.
+        assert_eq!(s.last_lateness(5), 0);
         assert_eq!(s.take_max_lateness(5), 100);
+        assert_eq!((s.last_lateness(5), s.last_lateness(5)), (100, 100));
         assert_eq!(s.take_max_lateness(5), 0);
+        assert_eq!(s.last_lateness(5), 0);
         assert_eq!(s.take_max_lateness(99), 0);
+        assert_eq!(s.last_lateness(99), 0);
         // The manager's view of the packets; nothing failed; slot 5 read
         // out.
         assert_eq!(s.packets()[5], 3);

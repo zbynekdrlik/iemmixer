@@ -782,7 +782,8 @@ async fn the_server_answers_the_requester_and_hands_the_flow_to_the_tx_thread() 
     let shared = Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings, 7).unwrap());
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server = sock.local_addr().unwrap();
-    let task = tokio::spawn(serve(sock, Arc::clone(&shared)));
+    let requests = Arc::new(Requests::default());
+    let task = tokio::spawn(serve(sock, Arc::clone(&shared), Arc::clone(&requests)));
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let SocketAddr::V4(rx) = client.local_addr().unwrap() else {
         panic!("an IPv4 socket");
@@ -807,6 +808,14 @@ async fn the_server_answers_the_requester_and_hands_the_flow_to_the_tx_thread() 
         (h.seq, h.op1, h.op2, body.len()),
         (5, op::REQUEST, status::OK, 6)
     );
+    // Both datagrams counted for the status, the unanswered reply too.
+    let seen: Vec<(u16, usize, u16, u64)> = requests
+        .counts()
+        .received
+        .iter()
+        .map(|r| (r.port, r.peer, r.op, r.n))
+        .collect();
+    assert_eq!(seen, [(control::PORT, 1, op::REQUEST, 2)]);
     // The plan reached the TX side: its packets come to the requester.
     // The first pass reads the plan and starts the schedule; 0.7 ms later
     // (67 samples) the first packet is due, within the 1 ms latency.

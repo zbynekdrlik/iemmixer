@@ -27,8 +27,10 @@ set -euo pipefail
 #   user (the ssh user, never root) go by scp into ~/.cache/iem-dante-deploy
 #   on the box, then `sudo -n install` puts each in place (the drop-in
 #   before the unit, so a failure between them never leaves a unit without
-#   its User=), and `sudo -n systemctl` reloads, enables and restarts
-#   iem-dante.
+#   its User=), and `sudo -n systemctl` reloads, disables and restarts
+#   iem-dante: from phase B (plan Task 7) the device sends and receives
+#   audio, so a reboot of the box never starts it (an enabled unit of an
+#   earlier deploy is disabled).
 # - Read back: the installed binary's sha256, its --version, and `systemctl
 #   is-active iem-dante` after GEN3_SETTLE_S (3) seconds, which must say
 #   active.
@@ -167,9 +169,9 @@ sudo -n install -D -m 0644 $STAGE/iem-dante.service $UNIT
 sudo -n install -D -m 0644 $STAGE/dante-device.toml $CONFIG
 sudo -n install -D -m 0644 $STAGE/iem-dante.env $ENVFILE
 sudo -n systemctl daemon-reload
-sudo -n systemctl enable iem-dante
+sudo -n systemctl disable iem-dante
 sudo -n systemctl restart iem-dante"
-echo "deploy.sh: installed; iem-dante restarted"
+echo "deploy.sh: installed; iem-dante restarted (not enabled at boot)"
 
 # "ide event" may have come between the check above and the restart: its
 # stop then ran first and the restart started the device again.
