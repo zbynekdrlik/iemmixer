@@ -994,12 +994,27 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
     let mut late = [0u32; 32];
     late[0] = 300;
     assert_eq!(r.lateness, late);
+    // Every slot's second was taken, the second slot's too (no grant): the
+    // largest in samples and the packets' least in ns (300 samples,
+    // 3 125 000 ns).
+    for slot in 0..2 {
+        assert_eq!(rx.last_lateness(slot), 300, "slot {slot}");
+        assert_eq!(
+            rx.last_min_lateness_ns(slot),
+            Some(3_125_000),
+            "slot {slot}"
+        );
+    }
     // The next beat has its own second: the peaks and lateness were taken.
     freq.store(77, Ordering::Relaxed);
     let r = sources.records().unwrap();
     assert_eq!(r.freq_ppb, 77);
     assert_eq!(r.rx_peaks, vec![255; 32]);
     assert_eq!(r.lateness, [0; 32]);
+    for slot in 0..2 {
+        assert_eq!(rx.last_lateness(slot), 0, "slot {slot}");
+        assert_eq!(rx.last_min_lateness_ns(slot), None, "slot {slot}");
+    }
 }
 
 #[tokio::test]

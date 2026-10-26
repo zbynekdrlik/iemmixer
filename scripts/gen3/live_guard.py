@@ -30,6 +30,16 @@ event" stops the service), when --seconds have passed, or on SIGTERM, SIGINT
 or SIGHUP. It prints one numbers-only JSON line every 10 s (LINE_EVERY_S) and
 one at its end (`end`: why it ended, a fixed word; the trip's numbers).
 
+The packets' judge (#72 phase D, plan
+docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 3): each RX
+flow's `lateness_min_ns` in the status (the least lateness of the
+heartbeat's last second in ns: our clock against the stamps the
+grandmaster's time put on the audio) goes into the lines as `judge`, one
+entry per RX flow that had one in the line's reads: `flow`, `min_ns` and
+`max_ns` (the smallest and the largest of those seconds), `last_ns` (the
+last read's) and `reads` (how many reads had one); the end's line over the
+whole run. Reported, never a trip; no `judge` when no RX flow had one.
+
 The rates never read high from the ssh's own timing: a read's status was
 taken somewhere between the read's start and its end, so a rate divides by
 the widest the gap between two statuses can be (the later read's end minus
@@ -109,6 +119,10 @@ class Sample:
     # rebootstraps), cumulative. Reported in the lines, never a trip: the
     # guard watches our traffic, not the engine's timing.
     pump: tuple[int, int, int] | None = None
+    # The packets' judge (phase D): RX flow -> the least lateness of the
+    # heartbeat's last second, ns, for the flows whose status has one.
+    # Reported in the lines, never a trip.
+    judge: dict[int, int] = field(default_factory=dict)
 
 
 def number(doc: dict, key: str) -> int:
@@ -137,11 +151,13 @@ def sample(t0: float, t1: float, status: dict) -> Sample:
                  if number(e, "op") == ARC_READ}
     tx = {number(e, "flow"): (number(e, "fpp"), number(e, "packets")) for e in entries(status, "tx")}
     rx = {number(e, "flow"): (number(e, "fpp"), number(e, "packets")) for e in entries(status, "rx")}
+    judge = {number(e, "flow"): number(e, "lateness_min_ns") for e in entries(status, "rx")
+             if "lateness_min_ns" in e}
     return Sample(t=(t0 + t1) / 2, u=(t1 - t0) / 2, requests=requests, flow_requests=flow_requests,
                   arc_reads=arc_reads, tx=tx, rx=rx,
                   tx_live=sum(1 for e in entries(status, "tx") if e.get("live") == 1),
                   rx_granted=sum(1 for e in entries(status, "rx") if e.get("granted") == 1),
-                  polls=number(status.get("clock"), "polls"), pump=pump_counts(status))
+                  polls=number(status.get("clock"), "polls"), pump=pump_counts(status), judge=judge)
 
 
 def pump_counts(status: dict) -> tuple[int, int, int] | None:
@@ -179,13 +195,37 @@ class Trip:
     numbers: dict
 
 
+@dataclass(frozen=True)
+class Least:
+    """One RX flow's judge over some reads: the smallest and the largest of
+    the seconds' least lateness read (ns), the last read's, and how many
+    reads had one."""
+    min_ns: int
+    max_ns: int
+    last_ns: int
+    reads: int
+
+    def then(self, later: Least) -> Least:
+        """This one and `later` (the reads after it) together."""
+        return Least(min(self.min_ns, later.min_ns), max(self.max_ns, later.max_ns), later.last_ns,
+                     self.reads + later.reads)
+
+
+def judged(into: dict[int, Least], later: dict[int, Least]) -> None:
+    """Adds `later`'s judge (per RX flow) to `into`."""
+    for flow, least in later.items():
+        into[flow] = into[flow].then(least) if flow in into else least
+
+
 @dataclass
 class Peaks:
-    """The largest values seen since the last line (what the lines print)."""
+    """The largest values seen since the last line (what the lines print),
+    and the packets' judge of the reads since then."""
     request_rate: float = 0.0
     flow_requests: int = 0
     packet_ratio: float = 0.0
     arc_reads: int = 0
+    judge: dict[int, Least] = field(default_factory=dict)
 
 
 @dataclass
@@ -200,6 +240,7 @@ class Watch:
     restarts: int = 0
 
     def feed(self, s: Sample) -> Trip | None:
+        judged(self.peaks.judge, {flow: Least(ns, ns, ns, 1) for flow, ns in s.judge.items()})
         a = self.last
         if a is not None and s.t + s.u <= a.t - a.u:
             return None   # no time between them (a clock that did not move): wait for the next
@@ -403,12 +444,14 @@ class Tally:
     flow_requests: int = 0
     packet_ratio: float = 0.0
     arc_reads: int = 0
+    judge: dict[int, Least] = field(default_factory=dict)
 
     def add(self, p: Peaks) -> None:
         self.request_rate = max(self.request_rate, p.request_rate)
         self.flow_requests = max(self.flow_requests, p.flow_requests)
         self.packet_ratio = max(self.packet_ratio, p.packet_ratio)
         self.arc_reads = max(self.arc_reads, p.arc_reads)
+        judged(self.judge, p.judge)
 
 
 def figures(t: float, tally: Tally, peaks: Peaks, watch: Watch) -> dict:
@@ -418,7 +461,7 @@ def figures(t: float, tally: Tally, peaks: Peaks, watch: Watch) -> dict:
             "arc_reads_5s_max": peaks.arc_reads,
             "packet_ratio_max": round(peaks.packet_ratio, 3), "tx_flows": last.tx_live if last else 0,
             "rx_flows": last.rx_granted if last else 0, "restarts": watch.restarts,
-            **pump_figures(last)}
+            **pump_figures(last), **judge_figures(peaks.judge)}
 
 
 def pump_figures(last: Sample | None) -> dict:
@@ -427,6 +470,15 @@ def pump_figures(last: Sample | None) -> dict:
         return {}
     late, missed, rebootstraps = last.pump
     return {"pump_late": late, "pump_missed": missed, "pump_rebootstraps": rebootstraps}
+
+
+def judge_figures(judge: dict[int, Least]) -> dict:
+    """The packets' judge for a line: one entry per RX flow, by flow; none
+    without one."""
+    if not judge:
+        return {}
+    return {"judge": [{"flow": flow, "min_ns": j.min_ns, "max_ns": j.max_ns, "last_ns": j.last_ns,
+                       "reads": j.reads} for flow, j in sorted(judge.items())]}
 
 
 def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: Ending) -> int:
@@ -438,7 +490,7 @@ def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: E
     def end(word: str, code: int, trip: Trip | None = None, stop: int | None = None) -> int:
         tally.add(watch.take_peaks())
         doc = figures(clock.now() - start, tally, Peaks(tally.request_rate, tally.flow_requests, tally.packet_ratio,
-                                                                  tally.arc_reads),
+                                                                  tally.arc_reads, tally.judge),
                       watch)
         doc = {"end": word, **doc}
         if trip is not None:

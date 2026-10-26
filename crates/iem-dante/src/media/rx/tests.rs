@@ -250,6 +250,96 @@ fn frames_of_24_bit_big_endian_land_at_their_stamps_across_the_seconds_wrap() {
 }
 
 #[test]
+fn the_least_lateness_of_a_second_is_kept_in_ns() {
+    // 1000 s of media time: whole ns at every sample position used here.
+    let p0 = 1_000 * u64::from(RATE);
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    publish(
+        &s,
+        &[(2, plan(LOOPBACK, 1, true, 1))],
+        &[(0, RxRoute { flow: 2, slot: 0 })],
+    );
+    let t = transmitter(LOOPBACK);
+    // Our clock 7 ns past sample p0 + 100 (ns_of rounds up: 1 041 667).
+    let now = ns_of(p0 + 100, RATE) + 7;
+    assert_eq!(now, 1_000_001_041_674);
+    // Packets 100, 36 and 68 samples late: the least is p0 + 64's, its
+    // stamp 666 667 ns into the second (rounded up), in ns, not samples.
+    for pos in [p0, p0 + 64, p0 + 32] {
+        t.send_to(&packet_at(pos, 1, 1), slot_addr(&s, 2)).unwrap();
+    }
+    pump(&mut rx, 2, 3, Some(now), 0);
+    // Nothing taken yet: the status's second is none.
+    assert_eq!(s.last_min_lateness_ns(2), None);
+    assert_eq!(s.take_max_lateness(2), 100);
+    assert_eq!(s.last_min_lateness_ns(2), Some(375_007));
+    // Read twice, taken once: the status takes nothing.
+    assert_eq!(s.last_min_lateness_ns(2), Some(375_007));
+    // The next second has its own least, even when it is larger.
+    t.send_to(&packet_at(p0 + 10, 1, 1), slot_addr(&s, 2))
+        .unwrap();
+    pump(&mut rx, 2, 4, Some(now), 0);
+    assert_eq!(s.last_min_lateness_ns(2), Some(375_007));
+    assert_eq!(s.take_max_lateness(2), 90);
+    assert_eq!(s.last_min_lateness_ns(2), Some(1_041_674 - 104_167));
+    // A packet stamped after our now is 0 late: a least of 0, not none.
+    for pos in [p0 + 50, p0 + 200] {
+        t.send_to(&packet_at(pos, 1, 1), slot_addr(&s, 2)).unwrap();
+    }
+    pump(&mut rx, 2, 6, Some(now), 0);
+    assert_eq!(s.take_max_lateness(2), 50);
+    assert_eq!(s.last_min_lateness_ns(2), Some(0));
+    // Only its own slot judged.
+    assert_eq!(s.take_max_lateness(1), 0);
+    assert_eq!(s.last_min_lateness_ns(1), None);
+}
+
+#[test]
+fn a_second_without_packets_has_no_least_lateness() {
+    let s = shared(1);
+    let mut rx = Receiver::new(Arc::clone(&s)).unwrap();
+    // A fresh slot, a taken one and one past the slots: none.
+    assert_eq!(s.last_min_lateness_ns(0), None);
+    assert_eq!(s.take_max_lateness(0), 0);
+    assert_eq!(s.last_min_lateness_ns(0), None);
+    assert_eq!(s.take_max_lateness(MAX_FLOWS), 0);
+    assert_eq!(s.last_min_lateness_ns(MAX_FLOWS), None);
+    publish(
+        &s,
+        &[(0, plan(LOOPBACK, 1, true, 1))],
+        &[(0, RxRoute { flow: 0, slot: 0 })],
+    );
+    let t = transmitter(LOOPBACK);
+    // A packet read before our clock is ready is not placed: not judged.
+    t.send_to(&packet_at(5_000, 1, 1), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 1, None, 0);
+    s.take_max_lateness(0);
+    assert_eq!(s.last_min_lateness_ns(0), None);
+    // A placed one is; the second after it, without a packet, is none.
+    t.send_to(&packet_at(5_000, 1, 1), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 2, Some(ns_of(5_096, RATE)), 0);
+    s.take_max_lateness(0);
+    assert_eq!(
+        s.last_min_lateness_ns(0),
+        Some(ns_of(5_096, RATE) - ns_of(5_000, RATE))
+    );
+    s.take_max_lateness(0);
+    assert_eq!(s.last_min_lateness_ns(0), None);
+    // A stray datagram (another address's) is no packet of the flow.
+    let other = transmitter(Ipv4Addr::new(127, 0, 0, 2));
+    other
+        .send_to(&packet_at(5_000, 1, 1), slot_addr(&s, 0))
+        .unwrap();
+    pump(&mut rx, 0, 3, Some(ns_of(5_096, RATE)), 0);
+    assert_eq!(s.lane(0).stray, 1);
+    s.take_max_lateness(0);
+    assert_eq!(s.last_min_lateness_ns(0), None);
+}
+
+#[test]
 fn routes_leave_before_the_plans_change_and_join_after() {
     let s = shared(2);
     let r = |flow| RxRoute { flow, slot: 0 };
