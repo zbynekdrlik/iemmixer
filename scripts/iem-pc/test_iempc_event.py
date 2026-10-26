@@ -4,7 +4,9 @@ test_iempc.py, #36). They reuse iempc_test_support's fakes (FakePc stands in
 for ssh); every value is synthetic."""
 from __future__ import annotations
 
+import ast
 import json
+import os
 import sys
 import threading
 import time
@@ -338,6 +340,143 @@ class EventSignalTests(Base):
         self.pc.replies[("event", "--signal")] = (2, "", "iemmode: no command")
         code, _, _ = self.run_main("event")
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (2, [["event", "--signal"]]))
+
+
+class Gen3StopTests(Base):
+    """"ide event" also takes the Gen 3 device off the network (#72, design
+    §5.5): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-dante`, started
+    right after the flag beside the PC's switch, waited for at most
+    GEN3_STOP_S at the end. It never delays the PC and never changes the
+    event's exit code; a stand-in `ssh` first on PATH plays the box."""
+
+    HOST = "tester@gen3.test"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ssh_log = self.tmp / "ssh.log"
+        self.ssh_done = self.tmp / "ssh.done"
+
+    def gen3_host(self, host: str = HOST) -> None:
+        ip.env_path().write_text(ip.env_path().read_text(encoding="utf-8") + f"GEN3_HOST={host}\n", encoding="utf-8")
+
+    def ssh_program(self, code: int, delay: float = 0.0, err: str = "") -> None:
+        """A stand-in `ssh` first on PATH: logs its arguments at start, takes
+        `delay` seconds, marks its end, writes `err` and exits with `code`."""
+        d = self.tmp / "ssh-bin"
+        d.mkdir(exist_ok=True)
+        p = d / "ssh"
+        p.write_text(f"#!{sys.executable}\nimport sys, time\n"
+                     f"open({str(self.ssh_log)!r}, 'a').write(repr(sys.argv[1:]) + '\\n')\n"
+                     f"time.sleep({delay})\nopen({str(self.ssh_done)!r}, 'a').write('ended\\n')\n"
+                     f"sys.stderr.write({err!r})\nsys.exit({code})\n", encoding="utf-8")
+        p.chmod(0o755)
+        self.set_path(f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    def ssh_args(self) -> list[list[str]]:
+        if not self.ssh_log.exists():
+            return []
+        return [ast.literal_eval(line) for line in self.ssh_log.read_text(encoding="utf-8").splitlines()]
+
+    def wait_for(self, path: Path, within: float = 15.0) -> bool:
+        deadline = time.monotonic() + within
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return path.exists()
+
+    def test_the_event_stops_the_gen3_device_and_never_waits_for_it(self) -> None:
+        self.gen3_host()
+        self.ssh_program(0, delay=3)
+        self.patch(GEN3_STOP_S=0.3)
+        seen = []
+
+        def switch():
+            # The stop runs beside the PC's switch: its ssh has started while
+            # iemmode event is still on, and it has not ended (it hangs).
+            seen.append((self.wait_for(self.ssh_log, 2.0), self.ssh_done.exists()))
+            return 0, OK
+
+        self.pc.replies[("event", "--signal")] = switch
+        t = time.monotonic()
+        code, docs, err = self.run_main("event")
+        took = time.monotonic() - t
+        still_running = not self.ssh_done.exists()
+        self.assertEqual((code, seen), (0, [(True, False)]), err)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
+        self.assertTrue(still_running)
+        self.assertLess(took, 2.0)   # cut at its 0.3 s bound, never the 3 s it hangs
+        self.assertEqual(docs[-1], {"gen3_stop": {"ok": False, "running": True}})
+        warnings = [line for line in err.splitlines() if "WARNING" in line and "Gen 3" in line]
+        self.assertEqual(len(warnings), 1, err)
+        self.assertNotIn("alarm the owner", err)
+        # Left to end by itself (never force-ended), it was the one stop asked for.
+        self.assertTrue(self.wait_for(self.ssh_done), "the ssh stand-in never ended")
+        args = self.ssh_args()
+        self.assertEqual(len(args), 1, args)
+        self.assertIn("BatchMode=yes", args[0])
+        self.assertEqual(args[0][-6:], [self.HOST, "sudo", "-n", "systemctl", "stop", "iem-dante"])
+
+    def test_a_stop_that_answers_is_reported_and_warns_nothing(self) -> None:
+        self.gen3_host()
+        self.ssh_program(0)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[-1], {"gen3_stop": {"ok": True, "exit": 0}})
+        self.assertNotIn("WARNING", err)
+        self.assertEqual(len(self.ssh_args()), 1)
+
+    def test_a_failed_stop_is_one_warning_and_never_changes_the_exit_code(self) -> None:
+        self.gen3_host()
+        self.ssh_program(255, err="ssh: connect to the box: no route\n")
+        for pc_exit in (0, 1):
+            self.pc.replies[("event", "--signal")] = (pc_exit, OK)
+            code, docs, err = self.run_main("event")
+            self.assertEqual(code, pc_exit, err)
+            self.assertEqual(docs[-1], {"gen3_stop": {"ok": False, "exit": 255}})
+            warnings = [line for line in err.splitlines() if "WARNING" in line and "Gen 3" in line]
+            self.assertEqual(len(warnings), 1, err)
+            self.assertIn("exit 255", warnings[0])
+            self.assertIn("no route", warnings[0])
+
+    def test_the_stop_is_collected_when_the_pc_path_fails(self) -> None:
+        # An unreachable PC still ends the event path with the owner alarm; the
+        # Gen 3 stop started beside it is answered all the same.
+        self.gen3_host()
+        self.ssh_program(0)
+
+        def down():
+            raise ip.StepError("ssh failed (exit 255): no route")
+
+        self.pc.replies[("event", "--signal")] = down
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 1)
+        self.assertIn("alarm the owner now", err)
+        self.assertIn({"gen3_stop": {"ok": True, "exit": 0}}, docs)
+
+    def test_no_gen3_host_means_no_ssh_and_one_info_line(self) -> None:
+        self.ssh_program(0)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ssh_args(), [])
+        self.assertEqual([d for d in docs if "gen3_stop" in d], [])
+        self.assertNotIn("WARNING", err)
+        self.assertEqual(len([line for line in err.splitlines() if "GEN3_HOST" in line]), 1, err)
+
+    def test_a_gen3_host_that_is_an_option_is_refused_with_a_warning(self) -> None:
+        self.gen3_host("-oProxyCommand=true")
+        self.ssh_program(0)
+        code, _, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ssh_args(), [])
+        self.assertIn("GEN3_HOST", err)
+        self.assertIn("WARNING", err)
+
+    def test_a_dry_run_stops_nothing(self) -> None:
+        self.gen3_host()
+        self.ssh_program(0)
+        code, docs, err = self.run_main("event", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ssh_args(), [])
+        self.assertIn({"gen3_stop": {"plan": "systemctl stop iem-dante"}}, docs)
 
 
 if __name__ == "__main__":
