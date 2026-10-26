@@ -437,8 +437,10 @@ mod linux {
         // A past time returns at once.
         let slept = sleeps_for(c.clone(), target - 1_000_000_000);
         assert!(slept < Duration::from_millis(20), "{slept:?}");
-        // A negative k: the same.
-        c.set_k(-HOUR);
+        // A negative k: the same. Smaller than the time since boot, which a
+        // fresh CI runner keeps under an hour (CI run 40289615289: k = -1 h
+        // made the PTP time negative, so now_ns was None).
+        c.set_k(-1_000_000);
         let target = c.now_ns().unwrap() + 30_000_000;
         let slept = sleeps_for(c.clone(), target);
         assert!(slept >= Duration::from_millis(29), "{slept:?}");
