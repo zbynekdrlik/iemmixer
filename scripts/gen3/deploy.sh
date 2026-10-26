@@ -332,10 +332,23 @@ if [ "$start" = engine ]; then
 else
   started=(iem-dante)
 fi
+# reset-failed only what systemd holds: a unit installed and never started
+# (or long inactive) is not in its memory, and reset-failed of one fails
+# ("not loaded"; Live 1 of phase C); such a unit has no start count to reset.
+held=()
+while read -r unit _; do
+  case "$unit" in
+    iem-dante.service | iem-engine.service | iem-server.service) held+=("${unit%.service}") ;;
+  esac
+done < <(ssh "${SSH_OPTS[@]}" "$host" "systemctl list-units --all --plain --no-legend --full iem-dante.service iem-engine.service iem-server.service")
+reset=""
+if [ "${#held[@]}" -gt 0 ]; then
+  reset="sudo -n systemctl reset-failed ${held[*]}"
+fi
 ssh "${SSH_OPTS[@]}" "$host" "set -e
 sudo -n systemctl daemon-reload
-sudo -n systemctl disable iem-dante iem-engine iem-server
-sudo -n systemctl reset-failed iem-dante iem-engine iem-server
+sudo -n systemctl disable iem-dante iem-engine iem-server${reset:+
+$reset}
 sudo -n systemctl start ${started[*]}"
 echo "deploy.sh: started ${started[*]} (none enabled at boot)"
 

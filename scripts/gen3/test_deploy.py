@@ -374,12 +374,14 @@ class DeployTests(unittest.TestCase):
             "dir tester 0700 /var/lib/iemmixer/site",
             "user 0600 /var/lib/iemmixer/site/iemmixer.toml", "user 0600 /var/lib/iemmixer/site/roster.toml"])
         # The order: the stack's stop allowed, stopped, nothing left running,
-        # the copy, the sums again on the box, the install, the start, the
-        # read back.
+        # the copy, the sums again on the box, the install, the units systemd
+        # holds (read only, for reset-failed), the start, the read back.
         self.assertEqual(self.kinds(), [
             "id -un", f"sudo -n -l systemctl stop iem-server iem-engine iem-dante", STOP,
             "systemctl is-active iem-server iem-engine iem-dante", f"mkdir -p {STAGE}", "scp",
-            f"cd {STAGE} && sha256sum --check --strict --quiet SHA256SUMS", "set -e", "set -e",
+            f"cd {STAGE} && sha256sum --check --strict --quiet SHA256SUMS", "set -e",
+            "systemctl list-units --all --plain --no-legend --full iem-dante.service iem-engine.service "
+            "iem-server.service", "set -e",
             "sha256sum " + " ".join(f"/opt/iemmixer/bin/{n}" for n in BINARIES),
             "/opt/iemmixer/bin/iem-engine --version", "/opt/iemmixer/bin/iem-dante-dev --version",
             "systemctl is-active iem-engine iem-server", "curl -sf --max-time 5 http://127.0.0.1:8080/api/version"])
@@ -401,11 +403,11 @@ class DeployTests(unittest.TestCase):
             "sudo -n install -d -o tester -m 0700 /var/lib/iemmixer/site",
             f"install -m 0600 {STAGE}/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml",
             f"install -m 0600 {STAGE}/roster.toml /var/lib/iemmixer/site/roster.toml"])
-        # Disabled, the start count reset, then started: nothing enables any
-        # unit, so a reboot of the box never starts the stack.
-        self.assertEqual(remote[7].splitlines()[1:], [
+        # Disabled, then started: nothing enables any unit, so a reboot of the
+        # box never starts the stack. The stop left nothing systemd holds, so
+        # no reset-failed (a failed unit's is test_a_unit_that_failed_...).
+        self.assertEqual(remote[8].splitlines()[1:], [
             "sudo -n systemctl daemon-reload", "sudo -n systemctl disable iem-dante iem-engine iem-server",
-            "sudo -n systemctl reset-failed iem-dante iem-engine iem-server",
             "sudo -n systemctl start iem-engine iem-server"])
         self.assertFalse(any(" enable " in command for command in remote), remote)
         # The copy: the bundle's six files and the box's own files, one scp.
