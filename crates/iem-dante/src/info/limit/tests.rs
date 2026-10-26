@@ -159,7 +159,11 @@ fn a_flood_of_every_kind_is_one_report_a_minute_with_every_drop_counted() {
         }
     }
     reports.extend(limit.flush(t0 + ms(180_000) + REPORT_EVERY));
-    assert_eq!(answered, 4 * 10 * 180, "ten a second per kind");
+    assert_eq!(
+        answered,
+        BOUNDED.len() as u64 * 10 * 180,
+        "ten a second per kind"
+    );
     let counted: u64 = reports.iter().map(Dropped::total).sum();
     assert_eq!(counted, dropped);
     assert!((3..=4).contains(&reports.len()), "{}", reports.len());
@@ -180,4 +184,30 @@ fn a_report_reads_as_kinds_opcodes_and_counts() {
         "0x61 board info 990, 0xc1 product info 3, 0x13 network info 5, 0x77 1"
     );
     assert_eq!(report.total(), 999);
+}
+
+#[test]
+fn room_says_what_allow_would_and_counts_nothing() {
+    let t0 = Instant::now();
+    let mut limit = Limit::new();
+    for i in 0..10 {
+        assert!(limit.room(t0 + ms(i), Kind::ChannelChange));
+        assert!(limit.allow(t0 + ms(i), Kind::ChannelChange));
+    }
+    // The bound is reached: room says no, as often as asked, and nothing is
+    // a drop (the notification waits, it is never dropped).
+    for i in 10..1_000 {
+        assert!(!limit.room(t0 + ms(i), Kind::ChannelChange), "{i}");
+    }
+    assert_eq!(limit.flush(t0 + ms(1_000) + REPORT_EVERY), None);
+    // A span after the oldest of the ten: room again.
+    assert!(limit.room(t0 + SPAN, Kind::ChannelChange));
+    // The other kinds were never touched; a kind without a reply always may.
+    assert!(limit.room(t0, Kind::BoardInfo));
+    assert!(limit.room(t0, Kind::Unknown));
+    // A drop of the notification's kind, where allow is asked anyway, reads
+    // as its name.
+    assert!(!limit.allow(t0 + ms(999), Kind::ChannelChange));
+    let report = limit.flush(t0 + ms(999) + REPORT_EVERY).unwrap();
+    assert_eq!(report.to_string(), "channel change 1");
 }

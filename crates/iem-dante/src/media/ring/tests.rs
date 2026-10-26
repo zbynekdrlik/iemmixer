@@ -17,6 +17,27 @@ fn read(ring: &Ring, pos: u64, n: usize) -> (Vec<i32>, Read) {
     (out, r)
 }
 
+#[test]
+fn the_loudest_sample_stored_is_kept_until_taken() {
+    let ring = Ring::new();
+    assert_eq!(ring.take_peak(), 0);
+    ring.write_at(T, &[100, -7_000, 300]);
+    ring.write_at(T + 3, &[6_999]);
+    assert_eq!(ring.take_peak(), 7_000);
+    assert_eq!(ring.take_peak(), 0, "taken");
+    // The most negative sample's magnitude is 2^31.
+    ring.write_at(T + 4, &[i32::MIN, i32::MAX]);
+    assert_eq!(ring.take_peak(), 1 << 31);
+    // Only what is stored counts: a late write is not.
+    let mut out = [0; 8];
+    ring.read_at(T + 8, &mut out);
+    assert_eq!(ring.write_at(T, &[-9_000]).late, 1);
+    assert_eq!(ring.take_peak(), 0);
+    // Nor an early one.
+    assert_eq!(ring.write_at(T + 16 + SLOTS as u64, &[9_000]).early, 1);
+    assert_eq!(ring.take_peak(), 0);
+}
+
 /// Review Focus 3, the pure part: a packet stamped T carries the source's
 /// samples T…T+fpp−1; RX places it by its stamp across the 32-bit seconds
 /// wrap and a grandmaster up for decades; the echo sends RX T − F at T.

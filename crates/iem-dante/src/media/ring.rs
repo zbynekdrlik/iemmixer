@@ -22,12 +22,14 @@
 //! - A write [`SLOTS`] or more ahead of the reader would overwrite samples
 //!   it has not read yet: early, not written, counted (a stamp far in the
 //!   future). Before the first read nothing is late or early.
+//! - The largest magnitude stored is kept until [`Ring::take_peak`] (the
+//!   heartbeat's peaks, once a second): one atomic per write.
 //!
 //! Known limit: positions 2⁴⁸ apart (93 years at 96 kHz) share a slot and
 //! a lap, and the lap `u32::MAX` (positions from 2⁴⁸ − 2¹⁶, by then) is
 //! the empty slot's.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// The ring's slots.
 pub const SLOTS: usize = 1 << 16;
@@ -73,6 +75,8 @@ pub struct Ring {
     late: AtomicU64,
     duplicate: AtomicU64,
     early: AtomicU64,
+    /// The largest magnitude stored since the last take.
+    peak: AtomicU32,
 }
 
 impl Default for Ring {
@@ -92,6 +96,7 @@ impl Ring {
             late: AtomicU64::new(0),
             duplicate: AtomicU64::new(0),
             early: AtomicU64::new(0),
+            peak: AtomicU32::new(0),
         }
     }
 
@@ -99,6 +104,7 @@ impl Ring {
     pub fn write_at(&self, pos: u64, samples: &[i32]) -> Write {
         let reader = self.read_end.load(Ordering::Relaxed);
         let mut w = Write::default();
+        let mut peak = 0;
         for (i, &sample) in samples.iter().enumerate() {
             let p = pos.wrapping_add(i as u64);
             if p < reader {
@@ -113,8 +119,10 @@ impl Ring {
                     w.written += 1;
                 }
                 slot.store(word(p, sample), Ordering::Relaxed);
+                peak = peak.max(sample.unsigned_abs());
             }
         }
+        self.peak.fetch_max(peak, Ordering::Relaxed);
         self.written.fetch_add(w.written as u64, Ordering::Relaxed);
         self.late.fetch_add(w.late as u64, Ordering::Relaxed);
         self.duplicate
@@ -140,6 +148,11 @@ impl Ring {
             .fetch_max(pos.wrapping_add(out.len() as u64), Ordering::Relaxed);
         self.holes.fetch_add(holes as u64, Ordering::Relaxed);
         Read { holes }
+    }
+
+    /// The largest magnitude stored since the last call (0 for none).
+    pub fn take_peak(&self) -> u32 {
+        self.peak.swap(0, Ordering::Relaxed)
     }
 
     pub fn counters(&self) -> Counters {

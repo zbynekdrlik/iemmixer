@@ -39,7 +39,7 @@ use tracing::info;
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
 use crate::device::Device;
-use crate::info::{Identity, Multicast, Multicaster, NetInfo};
+use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo, NoClock};
 use crate::{arc, cmc, info};
 
 /// The binary's name.
@@ -437,9 +437,12 @@ pub struct Sockets {
 
 /// Serves the device at `net.ip` until `stop` ends: announces its records
 /// first, then answers ARC, CMC and the info requests on `sockets`, sends
-/// the board and product info and the heartbeat where `multicast` says
-/// (the info server, [`info::serve_info`]), and announces again after
-/// every rename the ARC server saved. A failed announcement, or an ARC,
+/// the board and product info, the channel-change notifications and the
+/// heartbeat where `multicast` says (the info server, [`info::serve_info`]),
+/// and announces again after every rename the ARC server saved. No flows
+/// and no media clock yet (plan Task 7 runs them): ARC lists none and
+/// keeps the subscriptions it is given ([`arc::NoFlows`]), the heartbeat
+/// is the header alone ([`NoClock`]). A failed announcement, or an ARC,
 /// CMC or info server that stops, ends it with an error (the service
 /// restarts the daemon; the state file holds every saved rename). The
 /// caller withdraws the records after it returns.
@@ -455,13 +458,29 @@ pub async fn serve<R: Registry>(
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(records = n, "mDNS records announced");
-    let identity = {
+    let (identity, flows) = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        Identity::new(&device.cfg, net)
+        (
+            Identity::new(&device.cfg, net),
+            Arc::new(arc::NoFlows::new(&device)),
+        )
     };
-    let arc = arc::serve(sockets.arc, Arc::clone(&shared), Arc::clone(&changed));
+    let rx_changes = Arc::new(Changes::default());
+    let arc = arc::serve(
+        sockets.arc,
+        Arc::clone(&shared),
+        flows,
+        Arc::clone(&changed),
+        Arc::clone(&rx_changes),
+    );
     let cmc = cmc::serve_cmc(sockets.cmc, ip);
-    let info = info::serve_info(sockets.info, Multicaster::new(identity), multicast);
+    let info = info::serve_info(
+        sockets.info,
+        Multicaster::new(identity),
+        multicast,
+        Arc::new(NoClock),
+        rx_changes,
+    );
     tokio::pin!(arc, cmc, info, stop);
     loop {
         tokio::select! {

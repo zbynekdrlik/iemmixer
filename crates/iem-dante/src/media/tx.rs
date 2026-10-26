@@ -24,7 +24,9 @@
 //!   table sits behind a mutex only the control side takes; the TX thread
 //!   reads each slot's [`Plan`] and each TX channel's [`Source`] from
 //!   seqlocked atomics (never blocking: a read that meets a write keeps the
-//!   last copy), and counts per slot what it sent and heard in atomics.
+//!   last copy), and counts per slot what it sent and heard in atomics,
+//!   and per TX channel the largest magnitude sent (the heartbeat's peaks,
+//!   [`TxShared::take_peak`]).
 //!   One UDP socket per slot, bound to the device's address: the flow's
 //!   audio goes from it to the receiver, and the receiver's keepalives come
 //!   back to it (only the receiver's own address counts, as a connected
@@ -498,6 +500,9 @@ pub struct TxShared {
     sockets: Box<[UdpSocket]>,
     rings: Arc<[Ring]>,
     lanes: [LaneStats; MAX_FLOWS],
+    /// Each TX channel's largest magnitude sent since the last take (the
+    /// heartbeat's peaks).
+    peaks: Box<[AtomicU32]>,
     stop: AtomicBool,
     base: Instant,
 }
@@ -516,6 +521,7 @@ impl TxShared {
             .collect::<io::Result<Box<[UdpSocket]>>>()?;
         Ok(TxShared {
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
+            peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
             cfg,
             control: Mutex::new(Control {
                 table: TxTable::new(seed),
@@ -583,6 +589,14 @@ impl TxShared {
     /// TX channel `tx`'s source (from 0).
     pub fn source(&self, tx: usize) -> Option<Source> {
         Some(source_from(self.sources.get(tx)?.read()?.1))
+    }
+
+    /// TX channel `tx`'s largest magnitude sent since the last call (from
+    /// 0; 0 when nothing was sent, or no such channel).
+    pub fn take_peak(&self, tx: usize) -> u32 {
+        self.peaks
+            .get(tx)
+            .map_or(0, |p| p.swap(0, Ordering::Relaxed))
     }
 
     /// Slot `slot`'s counts.
@@ -873,9 +887,13 @@ impl Transmitter {
                     let out = &mut frame[..fpp];
                     match usize::from(id)
                         .checked_sub(1)
-                        .and_then(|i| sources.get_mut(i))
+                        .and_then(|i| Some((sources.get_mut(i)?, shared.peaks.get(i)?)))
                     {
-                        Some(source) => holes += source.fill(stamp, *rate, out, rings).holes,
+                        Some((source, peak)) => {
+                            holes += source.fill(stamp, *rate, out, rings).holes;
+                            let loudest = out.iter().fold(0, |m: u32, s| m.max(s.unsigned_abs()));
+                            peak.fetch_max(loudest, Ordering::Relaxed);
+                        }
                         None => out.fill(0),
                     }
                 }

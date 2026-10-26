@@ -565,6 +565,31 @@ fn statuses_move_unresolved_in_progress_receiving() {
 }
 
 #[test]
+fn a_changed_subscription_reads_unresolved_before_the_next_tick() {
+    // ARC 0x3010 sets a subscription and Dante Controller reads 0x3000
+    // right after (plan Task 6): until the next tick the channel's route
+    // still points at the flow of its old subscription, whose status is
+    // not the new one's.
+    let net = peer_network();
+    let mut m = manager();
+    m.set(4, Some(sub("TX 3", "peer-device")));
+    let r = requests(&m.tick(0, &NONE, &net));
+    m.answered(r[0].0, Answer::Granted(handle(0, 1)), 100 * MS);
+    let mut heard = NONE;
+    heard[0] = 3;
+    m.tick(200 * MS, &heard, &net);
+    assert_eq!(m.status(4), Some(SubStatus::Receiving));
+    assert_eq!(m.changed(), [4]);
+    // Another TX channel of the same transmitter: not received yet.
+    m.set(4, Some(sub("TX 5", "peer-device")));
+    assert_eq!(m.status(4), Some(SubStatus::Unresolved));
+    assert_eq!(m.changed(), [4]);
+    // The same subscription again changes nothing.
+    m.set(4, Some(sub("TX 5", "peer-device")));
+    assert_eq!(m.changed(), Vec::<usize>::new());
+}
+
+#[test]
 fn a_transmitter_we_cannot_receive_is_never_asked() {
     let net = Fake::default();
     // Another sample rate.
