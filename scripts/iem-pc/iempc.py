@@ -16,8 +16,10 @@ the shadow imports' summary (`shadow-report`: iempc_shadow.py, read-only), a
 roster file onto the PC (`roster-install`: iempc_roster.py, the server config
 from the guard's own pc.toml), the IEM card's Dante labels as a sheet, and
 written onto the card by its IP with `--apply` (`dante-labels`:
-iempc_dante.py and dante_card.py, no PC call; DANTE_IEM_HOST below), and
-the hand-over of an open S1a window.
+iempc_dante.py and dante_card.py, no PC call; DANTE_IEM_HOST below), the
+loop through the IEM card that proves the Gen 3 device's TX sample-exact
+(`gen3-loop`: iempc_gen3.py, GEN3_HOST below; #72), and the hand-over of an
+open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -84,7 +86,8 @@ DANTE_IEM_NAME and NETAUDIO_PYTHON (optional: the IEM card's unicast IPv4
 address, its expected Dante device name and the netaudio venv's python, an
 executable file; `dante-labels --apply` refuses without all three, the
 sheet reads the card with them), and GEN3_HOST (optional: the Gen 3 box's
-ssh destination, whose `iem-dante` service `event` stops; #72).
+ssh destination, whose `iem-dante` service `event` stops and whose device
+`gen3-loop` drives; #72).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -108,6 +111,7 @@ import iempc_core as core
 import iempc_cutover
 import iempc_dante
 import iempc_event
+import iempc_gen3
 import iempc_live
 import iempc_roster
 import iempc_shadow
@@ -248,6 +252,12 @@ def cmd_trace(ctx: Ctx) -> int:
     return iempc_trace.trace(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_loop(ctx: Ctx) -> int:
+    """The loop through the IEM card that proves the Gen 3 device's TX; the code lives in iempc_gen3.py (#72)."""
+    iempc_live.refuse_while_running(sys.modules[__name__], "gen3-loop")   # it restarts the engine in a HIL job
+    return iempc_gen3.run(ctx, sys.modules[__name__])
+
+
 def cmd_dispatch_hil(ctx: Ctx) -> int:
     """The ops hil.yml dispatch; the code lives in iempc_bundle.py (#36)."""
     return iempc_bundle.cmd_dispatch_hil(ctx, sys.modules[__name__])
@@ -303,6 +313,7 @@ COMMANDS: dict[str, Spec] = {
     "roster-install": Spec(cmd_roster_install, pc=True, dev_time=True, locked=True),
     # No PC call (a sheet); dev time and locked like the renames it is for (design §10).
     "dante-labels": Spec(cmd_dante_labels, pc=False, dev_time=True, locked=True),
+    "gen3-loop": Spec(cmd_gen3_loop, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -357,6 +368,18 @@ def build_parser() -> argparse.ArgumentParser:
     labels.add_argument("--apply", action="store_true",
                         help="write the labels that differ onto the IEM card (DANTE_IEM_* and NETAUDIO_PYTHON in the "
                              "private env), then read them back")
+    loop = sub.add_parser("gen3-loop")
+    loop.add_argument("--offsets", required=True,
+                      help=f"F1,F2: the two echo offsets of TX 1 behind RX 1, 1..{iempc_gen3.OFFSET_MAX} samples")
+    loop.add_argument("--bursts", type=int, required=True,
+                      help=f"test-signal bursts at each offset, {iempc_gen3.BURSTS_MIN}..{iempc_gen3.BURSTS_MAX}")
+    loop.add_argument("--slot", type=int, required=True,
+                      help="the card's spare HIL output whose return the Gen 3 device echoes (never printed)")
+    loop.add_argument("--input", default=iempc_gen3.INPUT_DEFAULT, help="the engine input the test signal replaces")
+    loop.add_argument("--dbfs", type=float, default=iempc_gen3.DBFS_DEFAULT,
+                      help=f"the test signal's level, at most {iempc_gen3.DBFS_MAX:g}")
+    loop.add_argument("--ttl", type=float, default=iempc_gen3.TTL_DEFAULT,
+                      help=f"each burst's length in seconds, at most {iempc_gen3.TTL_MAX:g}")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")
