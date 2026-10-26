@@ -22,9 +22,10 @@
 //!   runs the TX and RX threads and our RX's manager ([`media`]), serves
 //!   the control socket ([`crate::ctl`]), and announces again after every
 //!   saved rename, until its stop future ends (the binary's SIGTERM or
-//!   SIGINT). It then stops every RX flow at its transmitter and ends the
-//!   threads; the binary shuts the mDNS daemon down, which sends the
-//!   goodbyes.
+//!   SIGINT). It then stops every RX flow at its transmitter, serving flow
+//!   control until the stops are done (a flow from our own TX is stopped at
+//!   our own server), and ends the threads; the binary shuts the mDNS
+//!   daemon down, which sends the goodbyes.
 //!
 //! The device sends no PTP. Logs name counts, ports, flow slots and
 //! channel numbers, never a name or an address: the device and channel
@@ -41,7 +42,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio::time::MissedTickBehavior;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
@@ -532,7 +533,9 @@ pub struct Sockets {
 /// that stops, or threads that do not start end it with an error (the
 /// service restarts the daemon; the state file holds every saved rename and
 /// subscription). Whatever ended it, every RX flow is then stopped at its
-/// transmitter (within [`media::STOP_WAIT`]) and the threads are ended
+/// transmitter (within [`media::STOP_WAIT`]), our own flow-control server
+/// still served meanwhile unless it is what ended (a flow from our own TX,
+/// a self-loop, is stopped there and answered), and the threads are ended
 /// (waited for [`THREADS_WAIT`]). The caller withdraws the records after
 /// it returns.
 #[allow(clippy::too_many_arguments)]
@@ -634,8 +637,25 @@ pub async fn serve<R: Registry + Browse>(
         }
     };
     // Whatever ended serving: our RX flows end at their transmitters, the
-    // media threads end.
-    driver.stop().await;
+    // media threads end. Our own flow-control server is served until the
+    // stops are done (unless it is what ended, or it ends meanwhile): a
+    // flow from our own TX (a self-loop) is stopped there and answered.
+    let mut flows_served = !matches!(ended, Err(ServeError::Flows(_)));
+    let stopped = driver.stop();
+    tokio::pin!(stopped);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut stopped => break,
+            gone = &mut flows, if flows_served => {
+                flows_served = false;
+                warn!(
+                    error = %ended_error(gone),
+                    "the flow-control server stopped during the stop"
+                );
+            }
+        }
+    }
     // One still running is left to end, with a warning.
     let _ended = threads.stop(&media, THREADS_WAIT).await;
     ended
