@@ -589,7 +589,10 @@ impl Json {
 ///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order`, `late`, `unplaced`, `lateness` (the largest in the
 ///   heartbeat's last second, samples; the status takes nothing),
-///   `keepalives`, `keepalive_errors`, `recv_errors`; `rx_poll_errors`.
+///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
+///   that second in ns, our clock's now less the packets' own stamps; absent
+///   for a second without a placed packet), `keepalives`,
+///   `keepalive_errors`, `recv_errors`; `rx_poll_errors`.
 /// - `channels`: each RX channel subscribed or whose ring counted anything
 ///   (written, or read by the echo or a check): `rx`, `status`
 ///   (ARC 0x3000's code, 0 without a subscription), its ring's `written`,
@@ -736,6 +739,9 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("late", lane.late);
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
+        if let Some(ns) = media.rx.last_min_lateness_ns(slot) {
+            j.num("lateness_min_ns", ns);
+        }
         j.num("keepalives", lane.keepalives);
         j.num("keepalive_errors", lane.keepalive_errors);
         j.num("recv_errors", lane.recv_errors);

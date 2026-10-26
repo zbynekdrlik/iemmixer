@@ -104,6 +104,30 @@ def ordinary(t: float) -> dict:
         polls=s)
 
 
+def judged(t: int) -> dict:
+    """Ordinary traffic with the packets' judge: RX flow 1's least lateness
+    250 000 to 253 000 ns, the seconds in turn, and from 5 s a second RX flow
+    at 900 000 ns."""
+    doc = ordinary(t)
+    doc["rx"][0]["lateness_min_ns"] = 250_000 + 1_000 * (t % 4)
+    if t >= 5:
+        doc["rx"].append({**doc["rx"][0], "flow": 2, "packets": (t - 5) * RATE // 32,
+                          "lateness_min_ns": 900_000})
+    return doc
+
+
+def numbers_only(test: unittest.TestCase, value, where="") -> None:
+    """Every leaf of a line is a number (keys aside)."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            numbers_only(test, v, f"{where}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            numbers_only(test, v, f"{where}[{i}]")
+    else:
+        test.assertIn(type(value), (int, float), where)
+
+
 def loop(t: float, per_second: int = 2250, key=(ARC, 1, 0x2204)) -> dict:
     """Ordinary traffic plus one (port, peer, opcode) asked `per_second`."""
     doc = ordinary(t)
@@ -254,10 +278,41 @@ class WatchTests(unittest.TestCase):
         self.assertEqual((t, trip.kind, watch.restarts), (13.0, "requests", 1))
 
     def test_a_status_of_another_shape_is_no_sample(self) -> None:
+        rx = ordinary(1)["rx"][0]
         for broken in ({"requests": "none"}, {"uncounted": -1}, {"clock": None}, {"tx": [{"flow": 1}]},
-                       {"sent": [{"peer": "1", "op": 256, "n": 1}]}):
+                       {"sent": [{"peer": "1", "op": 256, "n": 1}]},
+                       {"rx": [{**rx, "lateness_min_ns": -1}]}, {"rx": [{**rx, "lateness_min_ns": "1"}]},
+                       {"rx": [{**rx, "lateness_min_ns": None}]}, {"rx": [{**rx, "lateness_min_ns": 1.5}]}):
             with self.assertRaises(ValueError, msg=broken):
                 lg.sample(0.0, 0.1, {**status(), **broken})
+
+    def test_the_judge_keeps_each_rx_flow_s_seconds_and_never_trips(self) -> None:
+        watch = lg.Watch(RATE)
+        for t in range(8):
+            self.assertIsNone(feed(watch, judged(t), float(t)))
+        self.assertEqual(watch.peaks.judge, {1: lg.Least(250_000, 253_000, 253_000, 8),
+                                             2: lg.Least(900_000, 900_000, 900_000, 3)})
+        # A line takes them: the next one has its own reads.
+        self.assertEqual(len(watch.take_peaks().judge), 2)
+        self.assertEqual(watch.peaks.judge, {})
+        # A flow without one in a read (a second without a packet) is not read.
+        doc = judged(9)
+        del doc["rx"][1]["lateness_min_ns"]
+        self.assertIsNone(feed(watch, doc, 9.0))
+        self.assertEqual(watch.peaks.judge, {1: lg.Least(251_000, 251_000, 251_000, 1)})
+        # Whatever the clock reads, never a trip: ten seconds late, then 0.
+        for t, ns in ((10, 10_000_000_000), (11, 0)):
+            doc = ordinary(t)
+            doc["rx"][0]["lateness_min_ns"] = ns
+            self.assertIsNone(feed(watch, doc, float(t)))
+        self.assertEqual(watch.peaks.judge, {1: lg.Least(0, 10_000_000_000, 0, 3)})
+
+    def test_judges_join_across_lines(self) -> None:
+        a = {1: lg.Least(5, 9, 7, 2)}
+        lg.judged(a, {1: lg.Least(3, 6, 6, 1), 2: lg.Least(4, 4, 4, 1)})
+        self.assertEqual(a, {1: lg.Least(3, 9, 6, 3), 2: lg.Least(4, 4, 4, 1)})
+        lg.judged(a, {1: lg.Least(8, 12, 10, 4)})
+        self.assertEqual(a[1], lg.Least(3, 12, 10, 7))
 
     def test_a_read_at_the_same_moment_is_waited_past(self) -> None:
         watch = lg.Watch(RATE)
@@ -365,6 +420,26 @@ class GuardTests(unittest.TestCase):
         for doc in docs:
             for key, value in doc.items():
                 self.assertTrue(type(value) in (int, float) or (key == "end" and value in ("seconds",)), (key, value))
+        # No RX flow had a judge: no `judge`.
+        self.assertFalse(any("judge" in d for d in docs), docs)
+
+    def test_the_judge_is_in_the_lines_per_rx_flow_and_never_trips(self) -> None:
+        self.plan([judged(t) for t in range(15)])
+        code, docs, err = self.guard("--seconds", "12")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(self.STOP, self.commands())
+        line, end = docs[0], docs[-1]
+        self.assertEqual((line["t_s"], line["reads"], end["end"], end["reads"]), (10.0, 11, "seconds", 12))
+        # The 10 s line: its 11 reads (0 ... 10 s); flow 2 from 5 s.
+        self.assertEqual(line["judge"], [
+            {"flow": 1, "min_ns": 250_000, "max_ns": 253_000, "last_ns": 252_000, "reads": 11},
+            {"flow": 2, "min_ns": 900_000, "max_ns": 900_000, "last_ns": 900_000, "reads": 6}])
+        # The end's line: the whole run.
+        self.assertEqual(end["judge"], [
+            {"flow": 1, "min_ns": 250_000, "max_ns": 253_000, "last_ns": 253_000, "reads": 12},
+            {"flow": 2, "min_ns": 900_000, "max_ns": 900_000, "last_ns": 900_000, "reads": 7}])
+        for doc in docs:
+            numbers_only(self, {k: v for k, v in doc.items() if k != "end"})
 
     def test_the_engine_s_pump_counts_are_reported_and_never_trip(self) -> None:
         def with_engine(t: int) -> dict:

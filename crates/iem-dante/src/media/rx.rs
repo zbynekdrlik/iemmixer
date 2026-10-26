@@ -33,16 +33,23 @@
 //!   until read; one later than the flow's latency counts `late`, one
 //!   before the end of the last `out_of_order`. Before our clock is ready a
 //!   packet is read and counted but placed nowhere (`unplaced`).
+//! - The packets' judge (phase D, plan Task 3): the least lateness of each
+//!   flow slot's placed packets in ns (our clock's now in ns less the
+//!   packet's own stamp in ns), kept until read, so each heartbeat second
+//!   has its own ([`RxShared::last_min_lateness_ns`]). Every Dante packet
+//!   carries its sender's PTP-locked media time, so the least of a second
+//!   measures the box's clock against the grandmaster's from the audio
+//!   itself, with no tool of either side in between.
 //! - Keepalives: `13 37` from the slot's socket to the address its audio
 //!   comes from, every [`KEEPALIVE_NS`] (four a second, never more: a late
 //!   one moves the schedule on, it never catches up), only for a flow its
 //!   transmitter granted and whose audio came within [`LIVE_NS`]. Nothing
 //!   is ever sent to a source that sent no audio of a granted flow.
 //!
-//! The per-packet path (the receive, the parse, the ring writes, a
-//! keepalive's send) allocates nothing, takes no lock and logs nothing
-//! (`tests/hot_path.rs`); every count is an atomic of its slot
-//! ([`RxCounts`]).
+//! The per-packet path (the receive, the parse, the ring writes, the
+//! judge's one `fetch_min`, a keepalive's send) allocates nothing, takes no
+//! lock and logs nothing (`tests/hot_path.rs`); every count is an atomic of
+//! its slot ([`RxCounts`]).
 
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -56,7 +63,7 @@ use tracing::{info, warn};
 
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::Ring;
-use super::tx::{Cell, MAX_CHANNELS, ask_realtime};
+use super::tx::{Cell, MAX_CHANNELS, ask_realtime, ns_of};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
@@ -84,6 +91,10 @@ pub const RX_PRIORITY: i32 = 45;
 const FRAMES_MAX: usize = (MAX_DATAGRAM - MEDIA_HEADER) / 2;
 /// A datagram read; one longer than [`MAX_DATAGRAM`] is refused.
 const BUFFER: usize = 2048;
+
+/// A least lateness that holds none: no packet placed since it was last
+/// taken. A lateness of `u64::MAX` ns (585 years) reads as none too.
+const NO_LATENESS: u64 = u64::MAX;
 
 /// What the RX thread receives in one flow slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -176,6 +187,21 @@ struct RxStats {
     max_lateness: AtomicU64,
     /// What the last [`RxShared::take_max_lateness`] took.
     last_lateness: AtomicU64,
+    /// The packets' judge: the least lateness in ns since the last take.
+    min_lateness_ns: Least,
+    /// What the last [`RxShared::take_max_lateness`] took of it.
+    last_min_lateness_ns: Least,
+}
+
+/// An atomic least, ns: [`NO_LATENESS`] until a value is put in
+/// (`fetch_min`, one per placed packet).
+#[derive(Debug)]
+struct Least(AtomicU64);
+
+impl Default for Least {
+    fn default() -> Self {
+        Least(AtomicU64::new(NO_LATENESS))
+    }
 }
 
 /// One flow slot's counts since the device started (every flow it held).
@@ -336,9 +362,13 @@ impl RxShared {
 
     /// Flow slot `slot`'s largest lateness since the last call, samples
     /// (the heartbeat's 0x8003, plan Task 6); kept for
-    /// [`RxShared::last_lateness`].
+    /// [`RxShared::last_lateness`]. It also takes the packets' least
+    /// lateness in ns, kept for [`RxShared::last_min_lateness_ns`], so the
+    /// heartbeat's second is both of theirs.
     pub fn take_max_lateness(&self, slot: usize) -> u64 {
         self.lanes.get(slot).map_or(0, |l| {
+            let least = l.min_lateness_ns.0.swap(NO_LATENESS, Ordering::Relaxed);
+            l.last_min_lateness_ns.0.store(least, Ordering::Relaxed);
             let taken = l.max_lateness.swap(0, Ordering::Relaxed);
             l.last_lateness.store(taken, Ordering::Relaxed);
             taken
@@ -352,6 +382,22 @@ impl RxShared {
         self.lanes
             .get(slot)
             .map_or(0, |l| l.last_lateness.load(Ordering::Relaxed))
+    }
+
+    /// The packets' judge of flow slot `slot` (phase D, plan Task 3): the
+    /// least lateness in ns of the packets placed in the heartbeat's last
+    /// second (what the last [`RxShared::take_max_lateness`] took: our
+    /// clock's now in ns less each packet's own stamp in ns, 0 for a packet
+    /// stamped after our now); `None` for a second without a placed packet.
+    /// The control socket's status reads it and takes nothing.
+    pub fn last_min_lateness_ns(&self, slot: usize) -> Option<u64> {
+        let least = self
+            .lanes
+            .get(slot)?
+            .last_min_lateness_ns
+            .0
+            .load(Ordering::Relaxed);
+        (least != NO_LATENESS).then_some(least)
     }
 
     /// The receive buffer the kernel gave the flow sockets, bytes.
@@ -576,7 +622,7 @@ impl Receiver {
         };
         let rate = shared.rate;
         let rings: &[Ring] = &shared.rings;
-        let now = now_ns.map(|ns| clock::to_samples(ns, rate));
+        let now = now_ns.map(|ns| (ns, clock::to_samples(ns, rate)));
         let count = |a: &AtomicU64| {
             a.fetch_add(1, Ordering::Relaxed);
         };
@@ -619,13 +665,18 @@ impl Receiver {
             count(&stats.packets);
             lane.source = Some(from);
             lane.heard = Some(mono);
-            let Some(now) = now else {
+            let Some((now_ns, now)) = now else {
                 count(&stats.unplaced);
                 continue;
             };
             let pos = clock::from_stamp(secs, sub, rate, now);
             let lateness = now.saturating_sub(pos);
             stats.max_lateness.fetch_max(lateness, Ordering::Relaxed);
+            // The judge: the packet's own stamp in ns against our now in ns.
+            stats
+                .min_lateness_ns
+                .0
+                .fetch_min(now_ns.saturating_sub(ns_of(pos, rate)), Ordering::Relaxed);
             if lateness > u64::from(lane.plan.latency) {
                 count(&stats.late);
             }

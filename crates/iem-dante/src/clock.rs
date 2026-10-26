@@ -30,7 +30,10 @@
 //!
 //! dantesync measures no path delay, so this clock trails the grandmaster
 //! by the one-way delay (0.1–0.5 ms): the safe side for TX, and it shows in
-//! the RX lateness. Phase D replaces dantesync with our own follower.
+//! the RX lateness. dantesync stays the box's one PTP owner (the owner's
+//! decision of 2026-10-26, #72); phase D measures this clock against the
+//! grandmaster's from the received packets' own stamps (the packets'
+//! judge, [`crate::media::rx::RxShared::last_min_lateness_ns`]).
 
 pub mod dsyx;
 
