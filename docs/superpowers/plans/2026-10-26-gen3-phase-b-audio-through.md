@@ -239,11 +239,11 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
 
 ### Task 9: Live 1 — Dante Controller with flows, and the self-loop
 
-- [ ] **Step 1:** Deploy the CI artifact (Task 7's push) with `deploy.sh`; start `live_guard.py` for the whole session.
-- [ ] **Step 2:** With Dante Controller open on its PC, capture the requests on the box for 2 minutes. Expected: the phase A table plus the flow lists, then about one request every 10 s, no gap but `0x2204`.
-- [ ] **Step 3:** Self-loop: netaudio (aimed at our device as the receiver) subscribes RX 2 to our TX 2; `ctl source 2 counter`. Over 10 minutes the counter check shows 0 mismatch, dropout and slip, and holes, late packets and re-anchors are 0. TX packets a second = rate / fpp.
-- [ ] **Step 4:** Restart the service: the subscription comes back from the state file and the counter check resumes clean. Then `sudo systemctl stop iem-dante` with the flow live: the stop is within bounds, and `status` before it showed the stop.
-- [ ] **Step 5:** Unsubscribe RX 2; record the numbers on #72.
+- [x] **Step 1:** Deploy the CI artifact (Task 7's push) with `deploy.sh`; start `live_guard.py` for the whole session.
+- [x] **Step 2:** With Dante Controller open on its PC, capture the requests on the box for 2 minutes. Expected: the phase A table plus the flow lists, then about one request every 10 s, no gap but `0x2204`.
+- [x] **Step 3:** Self-loop: netaudio (aimed at our device as the receiver) subscribes RX 2 to our TX 2; `ctl source 2 counter`. Over 10 minutes the counter check shows 0 mismatch, dropout and slip, and holes, late packets and re-anchors are 0. TX packets a second = rate / fpp.
+- [x] **Step 4:** Restart the service: the subscription comes back from the state file and the counter check resumes clean. Then `sudo systemctl stop iem-dante` with the flow live: the stop is within bounds, and `status` before it showed the stop.
+- [x] **Step 5:** Unsubscribe RX 2; record the numbers on #72.
 
 ### Task 9b: resolve a transmitter's channels through its ARC
 
@@ -268,34 +268,34 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
 
 **fpp and latency (the flow request needs them, ARC names neither):** the card answers 0x1000/0x2000/0x2010 with no frames per packet and no latency (the captures; netaudio reads neither from them). fpp 16, fixed (`fpp_min = fpp_max`): the card's performance property 0x0210 reads 16, most likely its transmit frames per packet (evidence, not proof); inferno's receiver asks the transmitter's most; a 4-slot flow of 16 frames is 201 bytes at 24 bits, far inside one datagram. `nchan` 4: the card's own flows to a rack carry 4 slots; a transmitter that takes 8 takes 4. Latency: the transmitter's is not known, so `latency_ns` 0 and the manager plays out at ours (`max(its, ours)`; the card's configured latency 0.25 ms is below any we run).
 
-- [ ] **Step 1:** Tests:
+- [x] **Step 1:** Tests:
   - `arc/client`: the IEM card's replies (captured 2026-10-26, names replaced by synthetic ones of the same byte length, the 0x2010 channel ids by synthetic ones; every offset, count, flag and length kept) read as 128 channels with ids, rate 96 000, 24 bits and default names over four 0x2000 pages (three `0x8112`), and the 24 named ones from one 0x2010 page, in exactly 6 requests; our own server's pages (31-byte names, early `0x8112` ends) read back as its channels; the page rules (a full OK page asks the next, count 0 and `MAX_PAGES` end it, a malformed page or a refusal fails the read); `Udp` on loopback (another sequence skipped, the wait bounded, every request counted).
   - `subscribe/directory`: N lookups for one device → one read; a dead device over 10 simulated minutes of lookups every 250 ms → at most 12 reads of one request, never two within 9 s; a name not listed → reads bounded the same way; an old directory read again once; no read before `SETTLE`, without a `_netaudio-dbc` record, or for a device a channel record names; `(Own, Network)`: our records, then `_netaudio-chan`, then ARC; the manager asks the ARC-resolved transmitter for a 4-slot flow at fpp 16 on its `_netaudio-dbc` port; `ArcDirectory` on loopback against our own ARC server (the lookup answers once the read is done, requests counted).
   - The daemon starts each browse once (chan, arc, dbc).
   - `live_guard.py`: our ARC reads (`sent` op 0x1000, one per directory read) to one peer more than one within 5 s trip it, like our flow requests.
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green (test, clippy, coverage floor, `mutants-list`). Commit: `feat(dante): resolve a transmitter's channels through its ARC (#72)`.
+- [x] **Step 2:** Implement.
+- [x] **Step 3:** Push; CI green (test, clippy, coverage floor, `mutants-list`). Commit: `feat(dante): resolve a transmitter's channels through its ARC (#72)`.
 
 ### Task 10: Live 2 — receiving a real device's channel
 
-- [ ] **Step 1:** After "event skončil": `iempc dev`; the PC in a HIL job.
-- [ ] **Step 2:** netaudio (aimed at our device) subscribes RX 1 to the card's spare HIL TX X. The card publishes no channel record, so RX 1 resolves through its ARC (Task 9b). Expected: about 5 s after the device saw the card's records, one directory read (`sent`: 0x1000 once, 0x2000 four times, 0x2010 once to the card's peer id; the info line `a transmitter's channels read through its ARC` with channels 128, requests 6), then one flow request (op 256) for 4 slots at fpp 16 to the card's `_netaudio-dbc` port; the card answers it with a handle, RX 1 reads Receiving, and keepalives go out 4 a second. No further 0x1000 while RX 1 receives.
-- [ ] **Step 3:** `iemmode test-signal` on spare X (sine, at most −20 dBFS), 5 bursts. Expected: `SineCheck` shows no discontinuity and holes are 0. Lateness lies between −1 ms and the flow latency (our clock agrees with the card's to within the path delay).
-- [ ] **Step 4:** Keep a P6-scrubbed capture of our request and the card's reply as a test fixture (`flows/control` tests). Unsubscribe: our stop goes out, and the card's TX flow list (ARC 0x2200, read only) no longer has our flow.
-- [ ] **Step 5:** Commit the fixture: `test(dante): pin a real transmitter's flow reply (#72)`; record on #72.
+- [x] **Step 1:** After "event skončil": `iempc dev`; the PC in a HIL job.
+- [x] **Step 2:** netaudio (aimed at our device) subscribes RX 1 to the card's spare HIL TX X. The card publishes no channel record, so RX 1 resolves through its ARC (Task 9b). Expected: about 5 s after the device saw the card's records, one directory read (`sent`: 0x1000 once, 0x2000 four times, 0x2010 once to the card's peer id; the info line `a transmitter's channels read through its ARC` with channels 128, requests 6), then one flow request (op 256) for 4 slots at fpp 16 to the card's `_netaudio-dbc` port; the card answers it with a handle, RX 1 reads Receiving, and keepalives go out 4 a second. No further 0x1000 while RX 1 receives.
+- [x] **Step 3:** `iemmode test-signal` on spare X (sine, at most −20 dBFS), 5 bursts. Expected: `SineCheck` shows no discontinuity and holes are 0. Lateness lies between −1 ms and the flow latency (our clock agrees with the card's to within the path delay).
+- [x] **Step 4:** Keep a P6-scrubbed capture of our request and the card's reply as a test fixture (`flows/control` tests). Unsubscribe: our stop goes out, and the card's TX flow list (ARC 0x2200, read only) no longer has our flow.
+- [x] **Step 5:** Commit the fixture: `test(dante): pin a real transmitter's flow reply (#72)`; record on #72.
 
 ### Task 11: Live 3 — the loop through the IEM card (phase B done)
 
-- [ ] **Step 1:** Read only, before: the card's spare return X subscription (to restore) and its RX latency.
-- [ ] **Step 2:** RX 1 subscribed to the card's spare HIL TX X again (Task 10; resolved through the card's ARC, Task 9b), `ctl source 1 echo 1 F1`.
-- [ ] **Step 3: The owner's one action**, asked once as a self-contained Slovak `❓` block: in Dante Controller, subscribe the IEM card's spare HIL return X to our test device's TX 1 for the test; after the test, set it back to what Step 1 read. Wait for the owner's go; nothing else in this task changes the card.
-- [ ] **Step 4:** Expected after the subscription:
+- [x] **Step 1:** Read only, before: the card's spare return X subscription (to restore) and its RX latency.
+- [x] **Step 2:** RX 1 subscribed to the card's spare HIL TX X again (Task 10; resolved through the card's ARC, Task 9b), `ctl source 1 echo 1 F1`.
+- [x] **Step 3: The owner's one action**, asked once as a self-contained Slovak `❓` block: in Dante Controller, subscribe the IEM card's spare HIL return X to our test device's TX 1 for the test; after the test, set it back to what Step 1 read. Wait for the owner's go; nothing else in this task changes the card.
+- [x] **Step 4:** Expected after the subscription:
   - the card requests a flow from us (one 4455 request, a handle, keepalives 4 a second);
   - its RX X reads Receiving (ARC 0x3000 on the card, read only), and its 0x3200 names the flow latency.
   Keep the card's request, scrubbed, as a fixture for Task 4's parser.
-- [ ] **Step 5:** `iempc gen3-loop --offsets 192,229 --bursts 5 --slot X`. Pass: five equal round trips at each offset, 37 samples apart. Our status shows no hole, late packet or re-anchor; the live guard did not trip.
-- [ ] **Step 6:** The owner sets the return back; read it back equal to Step 1. Unsubscribe RX 1; `ctl source 1 silence`; stop the service.
-- [ ] **Step 7:** Record on #72 (numbers only) and tick phase B. Update `.claude/rules/gen3.md` (clock, flows, subscriptions, control socket, guard, loop). Commit: `docs(rules): gen3 phase B (#72)`.
+- [x] **Step 5:** `iempc gen3-loop --offsets 192,229 --bursts 5 --slot X`. Pass: five equal round trips at each offset, 37 samples apart. Our status shows no hole, late packet or re-anchor; the live guard did not trip.
+- [x] **Step 6:** The owner sets the return back; read it back equal to Step 1. Unsubscribe RX 1; `ctl source 1 silence`; stop the service.
+- [x] **Step 7:** Record on #72 (numbers only) and tick phase B. Update `.claude/rules/gen3.md` (clock, flows, subscriptions, control socket, guard, loop). Commit: `docs(rules): gen3 phase B (#72)`.
 
 ## Risks
 
