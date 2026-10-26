@@ -18,7 +18,9 @@ from the guard's own pc.toml), the IEM card's Dante labels as a sheet, and
 written onto the card by its IP with `--apply` (`dante-labels`:
 iempc_dante.py and dante_card.py, no PC call; DANTE_IEM_HOST below), the
 loop through the IEM card that proves the Gen 3 device's TX sample-exact
-(`gen3-loop`: iempc_gen3.py, GEN3_HOST below; #72), and the hand-over of an
+(`gen3-loop`: iempc_gen3.py, GEN3_HOST below; #72), the same loop through a
+member's mix in the box's engine with the browser in it (`gen3-mix`:
+iempc_gen3.py, GEN3_HOST and GEN3_UI_URL below; #72), and the hand-over of an
 open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
@@ -85,9 +87,10 @@ values and shortcut names `name.lnk` in the desktop user's Startup folder;
 DANTE_IEM_NAME and NETAUDIO_PYTHON (optional: the IEM card's unicast IPv4
 address, its expected Dante device name and the netaudio venv's python, an
 executable file; `dante-labels --apply` refuses without all three, the
-sheet reads the card with them), and GEN3_HOST (optional: the Gen 3 box's
-ssh destination, whose `iem-dante` service `event` stops and whose device
-`gen3-loop` drives; #72).
+sheet reads the card with them), GEN3_HOST (optional: the Gen 3 box's ssh
+destination, whose stack `event` stops and whose device `gen3-loop` and
+`gen3-mix` drive; #72) and GEN3_UI_URL (optional: the box's UI,
+`http://<box>:8080/`, the browser's origin in `gen3-mix`).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -258,6 +261,13 @@ def cmd_gen3_loop(ctx: Ctx) -> int:
     return iempc_gen3.run(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_mix(ctx: Ctx) -> int:
+    """The loop through the IEM card and a member's mix in the Gen 3 box's engine, the browser in it; the code lives
+    in iempc_gen3.py (#72)."""
+    iempc_live.refuse_while_running(sys.modules[__name__], "gen3-mix")   # it restarts the engine in a HIL job
+    return iempc_gen3.run_mix(ctx, sys.modules[__name__])
+
+
 def cmd_dispatch_hil(ctx: Ctx) -> int:
     """The ops hil.yml dispatch; the code lives in iempc_bundle.py (#36)."""
     return iempc_bundle.cmd_dispatch_hil(ctx, sys.modules[__name__])
@@ -314,6 +324,7 @@ COMMANDS: dict[str, Spec] = {
     # No PC call (a sheet); dev time and locked like the renames it is for (design §10).
     "dante-labels": Spec(cmd_dante_labels, pc=False, dev_time=True, locked=True),
     "gen3-loop": Spec(cmd_gen3_loop, pc=True, dev_time=True, locked=True),
+    "gen3-mix": Spec(cmd_gen3_mix, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -380,6 +391,20 @@ def build_parser() -> argparse.ArgumentParser:
                       help=f"the test signal's level, at most {iempc_gen3.DBFS_MAX:g}")
     loop.add_argument("--ttl", type=float, default=iempc_gen3.TTL_DEFAULT,
                       help=f"each burst's length in seconds, at most {iempc_gen3.TTL_MAX:g}")
+    mix = sub.add_parser("gen3-mix")
+    mix.add_argument("--slot", type=int, required=True,
+                     help="the card's spare HIL output our RX R receives (never printed)")
+    mix.add_argument("--member", required=True,
+                     help="a person of the test roster: T is their mix's first TX, the browser opens their page")
+    mix.add_argument("--box-input", required=True,
+                     help="an input of the test site's [engine] table: R is its first RX, the browser opens it")
+    mix.add_argument("--bursts", type=int, required=True,
+                     help=f"test-signal bursts per phase, {iempc_gen3.BURSTS_MIN}..{iempc_gen3.BURSTS_MAX}")
+    mix.add_argument("--input", default=iempc_gen3.INPUT_DEFAULT, help="the engine input the test signal replaces")
+    mix.add_argument("--dbfs", type=float, default=iempc_gen3.DBFS_DEFAULT,
+                     help=f"the test signal's level, at most {iempc_gen3.DBFS_MAX:g}")
+    mix.add_argument("--ttl", type=float, default=iempc_gen3.TTL_DEFAULT,
+                     help=f"each burst's length in seconds, at most {iempc_gen3.TTL_MAX:g}")
     trace = sub.add_parser("trace")
     trace.add_argument("--label", required=True, help="the run's name: 1 to 40 of a-z 0-9 -")
     trace.add_argument("--seconds", type=int, required=True, help="how long the kernel trace runs")

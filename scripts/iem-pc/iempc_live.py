@@ -117,7 +117,9 @@ RUNNING = {"activate": ("no activation", "the activation restarts the engine (no
            "roster-install": ("no roster install", "the reload closes every person's mixer socket "
                                                    "(nothing was installed)"),
            "gen3-loop": ("no loop test", "it restarts the engine in a HIL job and its test signal silences every "
-                                         "mix's TX (nothing was changed)")}
+                                         "mix's TX (nothing was changed)"),
+           "gen3-mix": ("no mix test", "it restarts the engine in a HIL job and its test signal silences every "
+                                       "mix's TX (nothing was changed)")}
 
 
 def live_refusal(reply, sha: str) -> str | None:
@@ -280,14 +282,14 @@ def refuse_while_live(ip, command: str) -> None:
 
 def refuse_while_running(ip, command: str) -> None:
     """`activate`, `dispatch-hil`, `trace`, `roster-install` (not its dry
-    run) and `gen3-loop` first, before any call: refused while a live run
-    (named first) or a soak of this dev entry may still run. An activation
-    restarts the engine (inside the live run's HIL job too), a HIL run begins
-    its own job and restarts it, a kernel trace weighs on the times both
-    measure, a roster reload closes every person's mixer socket (4003), the
-    soak client's and the live run's too, the Gen 3 loop test restarts the
-    engine in a HIL job. `dev` (the owner's "event skončil") and `event` are
-    never refused."""
+    run), `gen3-loop` and `gen3-mix` first, before any call: refused while a
+    live run (named first) or a soak of this dev entry may still run. An
+    activation restarts the engine (inside the live run's HIL job too), a HIL
+    run begins its own job and restarts it, a kernel trace weighs on the
+    times both measure, a roster reload closes every person's mixer socket
+    (4003), the soak client's and the live run's too, the Gen 3 loop and mix
+    tests restart the engine in a HIL job. `dev` (the owner's "event
+    skončil") and `event` are never refused."""
     entry, now = ip.current_entry(), dt.datetime.now().astimezone()
     head, tail = RUNNING[command]
     d = running_live(ip, entry, now)

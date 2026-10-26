@@ -115,16 +115,19 @@ def check_sha(text: str) -> str:
 
 # ---- waits (the EVENT-NOW discipline of spike_window.py) ----
 
-def guarded(cmd: list[str], stdin: str, timeout: float, event: str) -> str:
+def guarded(cmd: list[str], stdin: str, timeout: float, event: str, *, env: dict[str, str] | None = None,
+            cwd: str | None = None) -> str:
     """Runs `cmd` and checks the "ide event" flag every POLL_S seconds.
     event="abandon": a read-only call is left to end by itself and EventNow
     is raised at once; "finish": a changing call completes, then EventNow;
     "ignore": the pre-emption itself, or a read-only call started while the
     flag already existed. A flag seen once counts even when it is gone by the
     end. Past `timeout` the call is left running and StillRunning is raised.
-    Never ends anything by force."""
+    Never ends anything by force. `env` (the whole environment) and `cwd`
+    default to this process's (the Gen 3 browser step's LIVE_* values,
+    iempc_gen3)."""
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            encoding="utf-8", errors="replace")
+                            encoding="utf-8", errors="replace", env=env, cwd=cwd)
     deadline = time.monotonic() + timeout
     seen = False
     data: str | None = stdin
