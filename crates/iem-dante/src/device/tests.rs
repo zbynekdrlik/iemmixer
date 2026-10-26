@@ -154,32 +154,43 @@ fn a_missing_state_is_the_config() {
 }
 
 #[test]
-fn a_state_that_does_not_fit_the_config_is_refused() {
+fn a_state_that_cannot_follow_the_config_is_refused() {
+    // A config with fewer channels cuts the state only where nothing of
+    // its own would go (#72): a channel past the config's count that
+    // carries a rename refuses the start, by number and kind.
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_in(dir.path());
     let path = cfg.state_file.display().to_string();
 
-    let mut fewer = DeviceState::from_config(&cfg);
-    fewer.tx.pop();
-    fewer.save(&cfg.state_file).unwrap();
+    let mut more_tx = DeviceState::from_config(&cfg);
+    more_tx.tx.push("zyxq 17".into());
+    more_tx.save(&cfg.state_file).unwrap();
     let err = DeviceState::load_or_default(&cfg).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     let message = err.to_string();
     assert!(message.contains(&path), "{message}");
     assert!(
-        message.contains("15 TX channels, the config 16"),
+        message.contains(
+            "17 TX channels, the config 16: \
+             a renamed TX channel past the config's count (channel 17)"
+        ),
         "{message}"
     );
+    assert!(!message.contains("zyxq"), "{message} echoes a name");
 
-    let mut more = DeviceState::from_config(&cfg);
-    more.rx.push("RX 33".into());
-    more.save(&cfg.state_file).unwrap();
+    let mut more_rx = DeviceState::from_config(&cfg);
+    more_rx.rx.push("zyxq 33".into());
+    more_rx.save(&cfg.state_file).unwrap();
     let message = DeviceState::load_or_default(&cfg).unwrap_err().to_string();
     assert!(message.contains(&path), "{message}");
     assert!(
-        message.contains("33 RX channels, the config 32"),
+        message.contains(
+            "33 RX channels, the config 32: \
+             a renamed RX channel past the config's count (channel 33)"
+        ),
         "{message}"
     );
+    assert!(!message.contains("zyxq"), "{message} echoes a name");
 }
 
 #[test]
@@ -636,4 +647,46 @@ fn a_subscription_to_an_invalid_name_is_refused_by_number() {
         assert!(message.contains(want), "{message} lacks {want:?}");
         assert!(!message.contains("zyxq"), "{message} echoes a name");
     }
+}
+
+// ---- A config whose channel counts changed (#72 phase C, Live 1) ----
+
+/// The test device with `rx` RX and `tx` TX channels, named as the test
+/// config names its channels (`RX n`, `TX n`), its state file in `dir`.
+fn config_sized(dir: &Path, rx: usize, tx: usize) -> DeviceConfig {
+    DeviceConfig {
+        rx: (1..=rx).map(|n| format!("RX {n}")).collect(),
+        tx: (1..=tx).map(|n| format!("TX {n}")).collect(),
+        ..config_in(dir)
+    }
+}
+
+#[test]
+fn a_state_follows_a_config_with_more_channels() {
+    // Live 1 (#72, 2026-10-26): phase B's state (32 RX, 16 TX) under phase
+    // C's config (136 RX, 96 TX) refused the engine's start with exit 2.
+    let dir = tempfile::tempdir().unwrap();
+    let phase_b = config_in(dir.path());
+    let mut state = DeviceState::from_config(&phase_b);
+    state.rx[2] = "Return 3".into();
+    assert!(state.set_subscription(&phase_b, 4, Some(sub("TX 2", "peer-device"))));
+    state.save(&phase_b.state_file).unwrap();
+
+    let phase_c = config_sized(dir.path(), 136, 96);
+    let device = Device::load(phase_c.clone()).expect("the device starts on the grown config");
+    let grown = &device.state;
+    // RX 3's name and RX 5's subscription stay.
+    assert_eq!(grown.rx[2], "Return 3");
+    assert_eq!(grown.subscription(4), Some(&sub("TX 2", "peer-device")));
+    // Every other channel, the new ones too, at the config's name.
+    assert_eq!(grown.rx.len(), 136);
+    for (i, name) in grown.rx.iter().enumerate().filter(|&(i, _)| i != 2) {
+        assert_eq!(name, &phase_c.rx[i], "RX channel {}", i + 1);
+    }
+    assert_eq!(grown.tx, phase_c.tx);
+    // No other subscription; one entry per RX channel.
+    assert_eq!(grown.subscriptions.len(), 136);
+    assert_eq!(grown.subscriptions.iter().flatten().count(), 1);
+    assert_eq!(grown.name, "test-device");
+    assert!(grown.problems(&phase_c).is_empty());
 }
