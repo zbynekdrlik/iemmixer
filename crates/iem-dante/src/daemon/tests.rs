@@ -6,13 +6,14 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use mdns_sd::ServiceInfo;
+use mdns_sd::{ServiceEvent, ServiceInfo};
 use tokio::sync::oneshot;
 
+use super::media::STOP_WAIT;
 use super::media::tests::{Unready, media_on, sub};
-use crate::announce::CHAN_SERVICE;
+use crate::announce::{CHAN_SERVICE, ServiceRecord};
 use crate::arc::op;
-use crate::device::DeviceConfig;
+use crate::device::{DeviceConfig, DeviceState};
 use crate::wire::{Header, STATUS_OK, request};
 
 const TEST_DEVICE: &str = include_str!("../../../../config/test-dante-device.toml");
@@ -677,11 +678,13 @@ fn the_records_point_at_the_device_names_local_host() {
 }
 
 /// The mDNS daemon's place: logs every registration and withdrawal, and
-/// refuses registrations after `allow` of them.
+/// refuses registrations after `allow` of them; its browse of the channel
+/// records finds `chan`.
 #[derive(Clone)]
 struct Log {
     calls: Rc<RefCell<Vec<String>>>,
     allow: Rc<Cell<usize>>,
+    chan: Rc<Vec<ServiceInfo>>,
 }
 
 impl Log {
@@ -689,6 +692,15 @@ impl Log {
         Self {
             calls: Rc::default(),
             allow: Rc::new(Cell::new(allow)),
+            chan: Rc::default(),
+        }
+    }
+
+    /// The same, its browse of the channel records finding `chan`.
+    fn with_chan(self, chan: Vec<ServiceInfo>) -> Self {
+        Self {
+            chan: Rc::new(chan),
+            ..self
         }
     }
 
@@ -698,12 +710,23 @@ impl Log {
 }
 
 /// A browse (the channel records, the ARC and flow-control records):
-/// logged with its service, no record.
+/// logged with its service; the channel records' finds `chan`, the others
+/// no record.
 impl Browse for Log {
-    type Events = std::iter::Empty<mdns_sd::ServiceEvent>;
+    type Events = std::vec::IntoIter<ServiceEvent>;
     fn browse(&self, service: &str) -> Result<Self::Events, mdns_sd::Error> {
         self.calls.borrow_mut().push(format!("browse {service}"));
-        Ok(std::iter::empty())
+        let found: Vec<ServiceEvent> = if service == CHAN_SERVICE {
+            self.chan
+                .iter()
+                .map(|info| {
+                    ServiceEvent::ServiceResolved(Box::new(info.clone().as_resolved_service()))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(found.into_iter())
     }
 }
 
@@ -1095,6 +1118,129 @@ async fn the_daemon_browses_at_the_first_subscription_and_stops_after_any_end() 
     assert_eq!(browses, BROWSES);
     // The unresolved subscription asked nothing; the threads ended.
     assert!(media.requests.counts().sent.is_empty());
+    assert!(media.tx.stopping() && media.rx.stopping());
+}
+
+/// Our own flow control under another name: a transmitter whose channel
+/// records are our own TX channels at our own flow-control socket. (`Own`
+/// resolves our own name to the served address's port 4455, which the
+/// tests' loopback sockets cannot take; these records reach the same
+/// server.)
+const LOOP: &str = "loop-device";
+
+/// [`LOOP`]'s channel records: our own TX channels at `flows`, our
+/// flow-control socket.
+fn loop_records(shared: &Mutex<Device>, flows: SocketAddr) -> Vec<ServiceInfo> {
+    let device = shared.lock().unwrap();
+    let state = DeviceState {
+        name: LOOP.into(),
+        ..device.state.clone()
+    };
+    let at = v4(flows);
+    crate::announce::records(&state, &device.cfg, &host_of(LOOP), *at.ip())
+        .into_iter()
+        .filter(|r| r.service == CHAN_SERVICE)
+        .map(|r| {
+            ServiceRecord {
+                port: at.port(),
+                ..r
+            }
+            .info()
+            .unwrap()
+        })
+        .collect()
+}
+
+/// Whether our manager holds the grant of RX 1's flow.
+fn rx1_granted(media: &Media) -> bool {
+    let m = media.manager.lock().unwrap();
+    m.rx_route(0).is_some_and(|r| m.rx_plan(r.flow).live)
+}
+
+#[tokio::test]
+async fn our_stop_of_a_flow_from_our_own_tx_is_answered_by_our_own_flow_control() {
+    // Live 1 (#72, 2026-10-26): RX 1 received our own TX 1 (a self-loop).
+    // At the stop our stop went to our own flow-control server, no longer
+    // served: never answered, the stop waited all of STOP_WAIT, and our TX
+    // kept the flow until it expired.
+    let dir = tempfile::tempdir().unwrap();
+    let shared = device_in(dir.path());
+    {
+        let mut device = shared.lock().unwrap();
+        let cfg = device.cfg.clone();
+        device
+            .state
+            .set_subscription(&cfg, 0, Some(sub("TX 1", LOOP)));
+    }
+    let lo = loopback().await;
+    let log = Log::new(usize::MAX).with_chan(loop_records(&shared, lo.flows));
+    let mut announcer = Announcer::new(log);
+    let media = media_of(&shared);
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let stop = async move {
+        stop_rx.await.ok();
+    };
+    let watch = Arc::clone(&media);
+    let peer = async move {
+        let deadline = tokio::time::Instant::now() + BOUND;
+        while !rx1_granted(&watch) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "RX 1's flow was never granted"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Our own TX granted it: the self-loop.
+        assert_eq!(watch.tx.lock().table.flows().count(), 1);
+        stop_tx.send(()).unwrap();
+        tokio::time::Instant::now()
+    };
+    let (served, stopped_at) = tokio::time::timeout(BOUND, async {
+        tokio::join!(
+            serve(
+                lo.sockets,
+                Arc::clone(&shared),
+                &mut announcer,
+                net(),
+                lo.multicast,
+                Arc::clone(&media),
+                std::future::pending(),
+                stop
+            ),
+            peer
+        )
+    })
+    .await
+    .expect("the daemon ends within the bound once stopped");
+    // Measured on this task, which ran both the stop's signal and serve.
+    let took = stopped_at.elapsed();
+    served.unwrap();
+    // Our stop reached our own flow-control server, which ended the flow…
+    let left: Vec<usize> = media
+        .tx
+        .lock()
+        .table
+        .flows()
+        .map(|(slot, _)| slot)
+        .collect();
+    assert!(
+        left.is_empty(),
+        "our TX still holds the flows of slots {left:?}"
+    );
+    // …and answered it: the stop did not wait for its bound.
+    assert!(
+        took < STOP_WAIT * 7 / 10,
+        "the daemon ended {took:?} after its stop"
+    );
+    // One request and one stop, both to our own flow control (peer 1).
+    let sent = |op, n| crate::ctl::Sent { peer: 1, op, n };
+    assert_eq!(
+        media.requests.counts().sent,
+        [
+            sent(crate::flows::control::op::REQUEST, 1),
+            sent(crate::flows::control::op::STOP, 1)
+        ]
+    );
     assert!(media.tx.stopping() && media.rx.stopping());
 }
 
