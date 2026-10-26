@@ -7,7 +7,11 @@
 // Changes Copyright (C) 2026 iemmixer contributors.
 
 //! ARC, Dante's control protocol on UDP 4440, for phase A: the device's
-//! names, its channel counts and lists, and channel renames.
+//! names, its channel counts and lists, and channel renames. Every opcode
+//! inferno's server answers is answered as inferno answers it with no flows
+//! and no subscriptions (a request Dante Controller gets refused it asks
+//! again at once: #72, 2026-10-26, 0x2200 and 0x2204 about 2 250 times a
+//! second while both were refused).
 //!
 //! | op1 | answer |
 //! |---|---|
@@ -18,15 +22,28 @@
 //! | 0x2000 | TX channels with their default names, paged |
 //! | 0x2010 | TX channels' current names, paged |
 //! | 0x2013 | TX rename |
+//! | 0x2200 | TX flows: an empty page of [`FLOW_PAGE`] slots, status OK |
+//! | 0x2201, 0x2202 | create, delete a multicast TX flow: nothing to create or delete, refused (inferno's answer without flows) |
+//! | 0x2320 | status [`STATUS_2320`], no body (inferno's "???") |
 //! | 0x3000 | RX channels with their names, paged; no subscriptions |
 //! | 0x3001 | RX rename |
+//! | 0x3010 | subscribe or unsubscribe RX channels: OK, no body; phase A subscribes nothing |
+//! | 0x3014 | netaudio's unsubscribe: OK, no body |
+//! | 0x3200 | RX flows: an empty page of [`FLOW_PAGE`] slots, status OK |
 //! | 0x3300 | the fixed 8 bytes that keep Dante Controller from a clock-domain warning |
 //!
-//! Anything else, and any request whose op2 is not 0, is refused
-//! ([`STATUS_ERROR`]) and changes nothing; a datagram that is no request
-//! ([`Header::parse`]) is dropped. A rename is all or nothing: one invalid
-//! name refuses the whole request. An empty name is Dante's reset to the
-//! channel's default name (netaudio's `reset_channel_name` sends one).
+//! No reply, as from inferno, to any other opcode (0x2204 and 0x1001
+//! among them), to a request whose op2 is not 0, and to a body inferno
+//! fails to read before it answers (0x2201 under 2 bytes, 0x2202 under 4,
+//! 0x3010 whose items are cut, 0x3014 under 6): [`ArcOutcome::Unanswered`].
+//! A datagram that is no request ([`Header::parse`]) is dropped. Refused
+//! ([`STATUS_ERROR`]), changing nothing: a rename that renames nothing, a
+//! page request without its first item, 0x2201 and 0x2202. A rename is all
+//! or nothing: one invalid name refuses the whole request (inferno renames
+//! the valid ones). An empty name is Dante's reset to the channel's default
+//! name (netaudio's `reset_channel_name` sends one). Every refused or
+//! unanswered request is counted per peer and opcode ([`gaps`]); the server
+//! logs the counts as one warning a minute.
 //!
 //! Pages hold 32 TX or 16 RX channels, as real devices answer (netaudio
 //! steps through pages by those counts, Dante Controller by the count each
@@ -36,18 +53,26 @@
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 
 use crate::device::{Device, DeviceConfig, DeviceState, channel_problems, valid_channel_name};
 use crate::wire::{
     Body, HEADER_LEN, Header, STATUS_ERROR, STATUS_MORE, STATUS_OK, read_u16, reply, string_at,
 };
+use gaps::{Gap, Gaps};
+
+pub mod gaps;
 
 /// ARC's UDP port.
 pub const PORT: u16 = 4440;
+/// How often the server looks whether a minute of [`Gaps`] is to be
+/// reported.
+pub const GAP_CHECK: Duration = Duration::from_secs(1);
 
 /// The opcodes (op1) phase A answers.
 pub mod op {
@@ -61,10 +86,26 @@ pub mod op {
     pub const TX_CHANNELS: u16 = 0x2000;
     pub const TX_NAMES: u16 = 0x2010;
     pub const TX_RENAME: u16 = 0x2013;
+    pub const TX_FLOWS: u16 = 0x2200;
+    pub const TX_MULTICAST_CREATE: u16 = 0x2201;
+    pub const TX_MULTICAST_DELETE: u16 = 0x2202;
+    /// Asked by Dante Controller; inferno answers status
+    /// [`STATUS_2320`](super::STATUS_2320) and no body.
+    pub const OP_2320: u16 = 0x2320;
     pub const RX_CHANNELS: u16 = 0x3000;
     pub const RX_RENAME: u16 = 0x3001;
+    pub const RX_SUBSCRIBE: u16 = 0x3010;
+    /// netaudio's unsubscribe.
+    pub const RX_UNSUBSCRIBE: u16 = 0x3014;
+    pub const RX_FLOWS: u16 = 0x3200;
     pub const CLOCK: u16 = 0x3300;
 }
+
+/// The slots of a flow list's page (0x2200, 0x3200): inferno's 32 flows,
+/// at most 16 a page.
+pub const FLOW_PAGE: u8 = 16;
+/// inferno's status for 0x2320 ("???" in its source).
+pub const STATUS_2320: u16 = 0x0030;
 
 /// TX channels per page.
 pub const TX_PAGE: usize = 32;
@@ -97,8 +138,26 @@ pub enum ArcOutcome {
     /// Send this reply; the state changed, so the caller saves it and
     /// announces the new mDNS records.
     Changed(Vec<u8>),
+    /// A request inferno leaves unanswered: no reply.
+    Unanswered { op1: u16 },
     /// Not a request (too short, or a length field that disagrees): no reply.
     Ignored,
+}
+
+impl ArcOutcome {
+    /// What [`gaps::Gaps`] counts of this outcome: the opcode of a request
+    /// left unanswered or refused ([`STATUS_ERROR`]); `None` for any other
+    /// answer and for a datagram that is no request.
+    pub fn gap(&self) -> Option<(u16, Gap)> {
+        match self {
+            ArcOutcome::Unanswered { op1 } => Some((*op1, Gap::Unanswered)),
+            ArcOutcome::Reply(bytes) => match Header::parse(bytes) {
+                Ok((h, _)) if h.op2 == STATUS_ERROR => Some((h.op1, Gap::Refused)),
+                _ => None,
+            },
+            ArcOutcome::Changed(_) | ArcOutcome::Ignored => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +192,7 @@ pub fn handle(state: &mut DeviceState, cfg: &DeviceConfig, req: &[u8]) -> ArcOut
         "ARC request"
     );
     if h.op2 != 0 {
-        return refuse(&h, "op2 is not 0");
+        return unanswered(&h, "op2 is not 0");
     }
     let ok = |body: &[u8]| ArcOutcome::Reply(reply(&h, STATUS_OK, body));
     match h.op1 {
@@ -151,8 +210,14 @@ pub fn handle(state: &mut DeviceState, cfg: &DeviceConfig, req: &[u8]) -> ArcOut
         op::TX_RENAME => rename(&h, body, state, cfg, Dir::Tx),
         op::RX_CHANNELS => rx_channels(&h, body, state, cfg),
         op::RX_RENAME => rename(&h, body, state, cfg, Dir::Rx),
+        op::TX_FLOWS | op::RX_FLOWS => no_flows(&h, body),
+        op::TX_MULTICAST_CREATE => no_multicast(&h, body, 2),
+        op::TX_MULTICAST_DELETE => no_multicast(&h, body, 4),
+        op::OP_2320 => ArcOutcome::Reply(reply(&h, STATUS_2320, &[])),
+        op::RX_SUBSCRIBE => subscribe(&h, body),
+        op::RX_UNSUBSCRIBE => unsubscribe(&h, body),
         op::CLOCK => ok(&CLOCK_REPLY),
-        _ => refuse(&h, "opcode not handled in phase A"),
+        _ => unanswered(&h, "an opcode inferno does not answer"),
     }
 }
 
@@ -180,29 +245,52 @@ pub fn respond(device: &mut Device, req: &[u8]) -> ArcOutcome {
 /// The ARC server: answers every datagram on `sock` from the shared device
 /// and signals `changed` after each saved change (the mDNS announcer waits
 /// on it). Ends only with an error receiving; a reply that cannot be sent
-/// is logged and the server goes on.
+/// is logged and the server goes on. Refused and unanswered requests are
+/// counted ([`Gaps`]) and their counts logged as one warning a minute,
+/// looked at every [`GAP_CHECK`].
 pub async fn serve(
     sock: UdpSocket,
     shared: Arc<Mutex<Device>>,
     changed: Arc<Notify>,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; RECV_BUFFER];
+    let mut gaps = Gaps::new(gaps::WINDOW);
+    let mut check = tokio::time::interval(GAP_CHECK);
+    check.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        let (n, peer) = sock.recv_from(&mut buf).await?;
-        let outcome = {
-            let mut device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-            respond(&mut device, &buf[..n])
+        let report = tokio::select! {
+            got = sock.recv_from(&mut buf) => {
+                let (n, peer) = got?;
+                let outcome = {
+                    let mut device = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    respond(&mut device, &buf[..n])
+                };
+                let report = outcome
+                    .gap()
+                    .and_then(|(op1, gap)| gaps.record(Instant::now(), peer.ip(), op1, gap));
+                let sent = match outcome {
+                    ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => None,
+                    ArcOutcome::Reply(bytes) => Some((bytes, false)),
+                    ArcOutcome::Changed(bytes) => Some((bytes, true)),
+                };
+                if let Some((bytes, is_change)) = sent {
+                    if let Err(e) = sock.send_to(&bytes, peer).await {
+                        warn!(error = %e, "an ARC reply could not be sent");
+                    }
+                    if is_change {
+                        changed.notify_one();
+                    }
+                }
+                report
+            }
+            _ = check.tick() => gaps.flush(Instant::now()),
         };
-        let (bytes, is_change) = match outcome {
-            ArcOutcome::Ignored => continue,
-            ArcOutcome::Reply(bytes) => (bytes, false),
-            ArcOutcome::Changed(bytes) => (bytes, true),
-        };
-        if let Err(e) = sock.send_to(&bytes, peer).await {
-            warn!(error = %e, "an ARC reply could not be sent");
-        }
-        if is_change {
-            changed.notify_one();
+        if let Some(report) = report {
+            warn!(
+                requests = report.requests(),
+                counts = %report,
+                "ARC requests refused or not answered in a minute (peer id, opcode)"
+            );
         }
     }
 }
@@ -215,6 +303,94 @@ fn refuse(h: &Header, why: &str) -> ArcOutcome {
         "ARC request refused"
     );
     ArcOutcome::Reply(reply(h, STATUS_ERROR, &[]))
+}
+
+/// No reply, as inferno sends none.
+fn unanswered(h: &Header, why: &str) -> ArcOutcome {
+    debug!(
+        op = format_args!("{:#06x}", h.op1),
+        seq = h.seq,
+        why,
+        "ARC request not answered"
+    );
+    ArcOutcome::Unanswered { op1: h.op1 }
+}
+
+/// The first item a page request names (from 1), in its body's bytes 2–3
+/// (inferno's `extract_start_index`); `None` without one.
+fn first_item(req: &[u8]) -> Option<u16> {
+    read_u16(req, 2).filter(|&first| first > 0)
+}
+
+/// 0x2200 and 0x3200 with no flows: inferno's page of [`FLOW_PAGE`] empty
+/// two-byte slots, none used, status OK, for any first flow; refused
+/// without one, as a channel list.
+fn no_flows(h: &Header, req: &[u8]) -> ArcOutcome {
+    if first_item(req).is_none() {
+        return refuse(h, "a flow list request without its first flow");
+    }
+    let mut out = Body::new();
+    out.u8(FLOW_PAGE);
+    out.u8(0);
+    out.zeros(2 * usize::from(FLOW_PAGE));
+    ArcOutcome::Reply(reply(h, STATUS_OK, &out.into_vec()))
+}
+
+/// 0x2201 and 0x2202 with no flows: inferno creates or deletes nothing and
+/// refuses. A body shorter than `readable` bytes inferno fails to read
+/// before it answers: no reply.
+fn no_multicast(h: &Header, req: &[u8], readable: usize) -> ArcOutcome {
+    if req.len() < readable {
+        return unanswered(h, "a multicast flow request too short to read");
+    }
+    refuse(h, "no multicast flows in phase A")
+}
+
+/// The local channels of 0x3010's items (6 bytes each: local channel, TX
+/// channel name offset, TX device name offset), read as inferno's
+/// `deserialize_items` reads them: `min(count, len / 6)` items after the
+/// first two bytes. `None` where inferno fails: under 2 bytes, or those
+/// items running past the end.
+fn subscription_channels(req: &[u8]) -> Option<Vec<u16>> {
+    const ITEM: usize = 6;
+    let count = usize::from(*req.get(1)?).min(req.len() / ITEM);
+    let items = req.get(2..)?.get(..count * ITEM)?;
+    let (items, _) = items.as_chunks::<ITEM>();
+    Some(
+        items
+            .iter()
+            .map(|item| u16::from_be_bytes([item[0], item[1]]))
+            .collect(),
+    )
+}
+
+/// 0x3010: inferno answers OK, no body, to every request it can read, also
+/// for a channel it passes over. Phase A has no subscriptions: nothing
+/// changes, the RX list goes on showing none.
+fn subscribe(h: &Header, req: &[u8]) -> ArcOutcome {
+    let Some(channels) = subscription_channels(req) else {
+        return unanswered(h, "a subscription request whose items are cut");
+    };
+    info!(
+        seq = h.seq,
+        channels = ?channels,
+        "RX subscription request: phase A subscribes nothing"
+    );
+    ArcOutcome::Reply(reply(h, STATUS_OK, &[]))
+}
+
+/// 0x3014, netaudio's unsubscribe (`0001 0000 <local channel>`): OK, no
+/// body; nothing is subscribed. Under 6 bytes inferno fails to read it: no
+/// reply.
+fn unsubscribe(h: &Header, req: &[u8]) -> ArcOutcome {
+    let Some(channel) = read_u16(req, 4) else {
+        return unanswered(h, "an unsubscribe request without its channel");
+    };
+    info!(
+        seq = h.seq,
+        channel, "RX unsubscribe request: nothing is subscribed in phase A"
+    );
+    ArcOutcome::Reply(reply(h, STATUS_OK, &[]))
 }
 
 /// A count or a channel number as the wire's u16 (the config allows far
@@ -297,7 +473,7 @@ fn page(
     item: usize,
     mut write: impl FnMut(usize, &mut Body) -> Vec<u8>,
 ) -> ArcOutcome {
-    let Some(first) = read_u16(req, 2).filter(|&first| first > 0) else {
+    let Some(first) = first_item(req) else {
         return refuse(h, "a page request without its first channel");
     };
     let start = usize::from(first) - 1;

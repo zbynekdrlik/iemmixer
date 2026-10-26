@@ -27,7 +27,9 @@
 //!   names, with Dante's name rules.
 //! - [`wire`]: the request/response datagram ARC and CMC share.
 //! - [`arc`]: the control server on UDP 4440: names, channel lists,
-//!   renames.
+//!   renames, the empty flow lists; every opcode inferno answers is
+//!   answered as inferno answers it, the rest get no reply and are counted
+//!   in one warning a minute.
 //! - [`cmc`]: the advertisement on UDP 8800.
 //! - [`info`]: the info requests on UDP 8700 (replies to the info group
 //!   224.0.0.231:8702) and the heartbeat every second to 224.0.0.233:8708;
