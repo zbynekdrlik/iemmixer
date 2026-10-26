@@ -36,8 +36,8 @@ use tracing::info;
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::device::Device;
-use crate::info::{Multicast, NetInfo};
-use crate::{arc, cmc};
+use crate::info::{Identity, Multicast, Multicaster, NetInfo};
+use crate::{arc, cmc, info};
 
 /// The binary's name.
 pub const NAME: &str = "iem-dante-dev";
@@ -182,32 +182,91 @@ pub fn pick_interface(place: &Place, addrs: &[IfAddr]) -> Result<IfAddr, String>
     Ok(picked.clone())
 }
 
+/// The fastest link the network info names, in Mbit/s (inferno's clamp).
+const MAX_LINK_SPEED: i64 = 10_000;
+/// `/proc/net/route` flags: the route is up, and goes through a gateway.
+const RTF_UP: u32 = 0x0001;
+const RTF_GATEWAY: u32 = 0x0002;
+
 /// The interface's MAC from its `/sys/class/net/<iface>/address` text
-/// (`aa:bb:cc:dd:ee:ff`); `None` for anything else or all zeros.
-pub fn parse_mac(_text: &str) -> Option<[u8; 6]> {
-    todo!()
+/// (`aa:bb:cc:dd:ee:ff`, either case); `None` for anything else, and for
+/// all zeros (an interface without a hardware address).
+pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
+    let mut mac = [0u8; 6];
+    let mut parts = text.trim().split(':');
+    for byte in &mut mac {
+        let part = parts.next()?;
+        if part.len() != 2 || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        *byte = u8::from_str_radix(part, 16).ok()?;
+    }
+    if parts.next().is_some() || mac == [0; 6] {
+        return None;
+    }
+    Some(mac)
 }
 
-/// The link speed in Mbit/s from `/sys/class/net/<iface>/speed`, 0 when
-/// unknown, at most 10 000 (inferno's).
-pub fn link_speed(_text: Option<&str>) -> u16 {
-    todo!()
+/// The link speed in Mbit/s from `/sys/class/net/<iface>/speed`: 0 when
+/// it is unknown (the kernel's -1, no file while the link is down, or
+/// anything else), at most 10 000, as inferno reports it.
+pub fn link_speed(text: Option<&str>) -> u16 {
+    let mbit = text.and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(0);
+    u16::try_from(mbit.clamp(0, MAX_LINK_SPEED)).unwrap_or(0)
 }
 
-/// The interface's default gateway from `/proc/net/route`, 0.0.0.0 for
-/// none.
-pub fn default_gateway(_routes: &str, _ifa: &IfAddr) -> Ipv4Addr {
-    todo!()
+/// The interface's default gateway from `/proc/net/route`: the first
+/// default route of `ifa` (destination and mask 0, up, through a gateway)
+/// whose gateway lies in the interface's subnet, as inferno takes the
+/// interface's gateway; 0.0.0.0 for none (a Dante network often has none).
+pub fn default_gateway(routes: &str, ifa: &IfAddr) -> Ipv4Addr {
+    let subnet = |a: Ipv4Addr| a.to_bits() & ifa.netmask.to_bits();
+    routes
+        .lines()
+        .filter_map(|line| default_route(line, &ifa.name))
+        .find(|gateway| subnet(*gateway) == subnet(ifa.ip))
+        .unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
-/// What the info server's network info says about `ifa`.
+/// The gateway of `line` when it is a default route of interface `name`
+/// that is up and goes through a gateway. The kernel prints the addresses
+/// as the hex of their bytes read in the host's order.
+fn default_route(line: &str, name: &str) -> Option<Ipv4Addr> {
+    // Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let [iface, destination, gateway, flags, _, _, _, mask, ..] = fields[..] else {
+        return None;
+    };
+    let hex = |s: &str| u32::from_str_radix(s, 16).ok();
+    let wanted = RTF_UP | RTF_GATEWAY;
+    let is_default = iface == name
+        && hex(destination)? == 0
+        && hex(mask)? == 0
+        && (hex(flags)? & wanted) == wanted;
+    if !is_default {
+        return None;
+    }
+    Some(Ipv4Addr::from(hex(gateway)?.to_ne_bytes()))
+}
+
+/// What the info server's network info says about `ifa`, from the text of
+/// its MAC file, its speed file and the route table (the binary reads
+/// them; the speed and the routes may be missing). An interface without a
+/// usable MAC is refused.
 pub fn net_info(
-    _ifa: &IfAddr,
-    _mac: &str,
-    _speed: Option<&str>,
-    _routes: Option<&str>,
+    ifa: &IfAddr,
+    mac: &str,
+    speed: Option<&str>,
+    routes: Option<&str>,
 ) -> Result<NetInfo, String> {
-    todo!()
+    let mac = parse_mac(mac).ok_or("the interface has no usable MAC address")?;
+    Ok(NetInfo {
+        mac,
+        ip: ifa.ip,
+        netmask: ifa.netmask,
+        gateway: routes.map_or(Ipv4Addr::UNSPECIFIED, |r| default_gateway(r, ifa)),
+        link_speed: link_speed(speed),
+    })
 }
 
 /// The mDNS host the device's records point at: its name's `.local.` host
@@ -254,28 +313,41 @@ pub struct Sockets {
     pub info: UdpSocket,
 }
 
-/// Serves the device at `net.ip` until `stop` ends.
+/// Serves the device at `net.ip` until `stop` ends: announces its records
+/// first, then answers ARC, CMC and the info requests on `sockets`, sends
+/// the board and product info and the heartbeat where `multicast` says
+/// (the info server, [`info::serve_info`]), and announces again after
+/// every rename the ARC server saved. A failed announcement, or an ARC,
+/// CMC or info server that stops, ends it with an error (the service
+/// restarts the daemon; the state file holds every saved rename). The
+/// caller withdraws the records after it returns.
 pub async fn serve<R: Registry>(
     sockets: Sockets,
     shared: Arc<Mutex<Device>>,
     announcer: &mut Announcer<R>,
     net: NetInfo,
-    _multicast: Multicast,
+    multicast: Multicast,
     stop: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
     let ip = net.ip;
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(records = n, "mDNS records announced");
+    let identity = {
+        let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        Identity::new(&device.cfg, net)
+    };
     let arc = arc::serve(sockets.arc, Arc::clone(&shared), Arc::clone(&changed));
     let cmc = cmc::serve_cmc(sockets.cmc, ip);
-    tokio::pin!(arc, cmc, stop);
+    let info = info::serve_info(sockets.info, Multicaster::new(identity), multicast);
+    tokio::pin!(arc, cmc, info, stop);
     loop {
         tokio::select! {
             biased;
             () = &mut stop => return Ok(()),
             ended = &mut arc => return Err(ServeError::Arc(ended_error(ended))),
             ended = &mut cmc => return Err(ServeError::Cmc(ended_error(ended))),
+            ended = &mut info => return Err(ServeError::Info(ended_error(ended))),
             () = changed.notified() => {
                 let n = announce_device(&shared, announcer, ip)?;
                 info!(records = n, "mDNS records announced again after a rename");
