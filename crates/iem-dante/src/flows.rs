@@ -13,9 +13,14 @@
 //!   server on UDP 4455 that feeds the TX flow table
 //!   ([`crate::media::tx::TxTable`]).
 //!
+//! - [`client`]: our own requests to a transmitter (the RX side, plan Task
+//!   5): a flow of its channels to one of our flow sockets, and its stop.
+//!
 //! The TX flows themselves (the table, the schedule and the thread that
-//! sends) are [`crate::media::tx`]. Our own requests to other transmitters
-//! (the RX side) are plan Task 5.
+//! sends) are [`crate::media::tx`]; our RX flows are
+//! [`crate::subscribe::Manager`]'s (when to ask) and [`crate::media::rx`]'s
+//! (the thread that receives).
 
+pub mod client;
 pub mod control;
 pub mod server;
