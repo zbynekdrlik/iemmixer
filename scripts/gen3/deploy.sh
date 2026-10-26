@@ -12,6 +12,11 @@ set -euo pipefail
 # - Dev time only: refused while the "ide event" flag exists (iempc's
 #   EVENT-NOW: $IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW), and
 #   checked again right before anything is installed.
+# - "ide event" stops the device with `ssh <GEN3_HOST> sudo -n systemctl
+#   stop iem-dante` (iempc_event): a --host that is not the GEN3_HOST of
+#   iempc's private env ($PC_ENV, else ~/.config/iemmixer/iem-pc.env) is a
+#   warning, an env without GEN3_HOST too; and before anything is copied
+#   the box's sudo must allow that stop (`sudo -n -l`), else refused.
 # - The artifact must have the given sha256 (the CI job `dante-bin` prints
 #   it; the artifact is `iem-dante-dev-<sha>`).
 # - The binary, the unit (beside this script), the config, the interface
@@ -38,6 +43,39 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
 die() {
   echo "deploy.sh: $*" >&2
   exit 1
+}
+
+warn() {
+  echo "deploy.sh: WARNING: $*" >&2
+}
+
+# $1 without its leading and trailing white space.
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# Sets gen3_host to the GEN3_HOST of the env file $1, read as iempc's
+# load_env reads it (comments and blank lines skipped, KEY=VALUE split at the
+# first '=', both stripped, the value's quotes stripped, the last line of a
+# key winning); fails when the file has none.
+gen3_host_of() {
+  local line key value found=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim "$line")"
+    case "$line" in '' | '#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="$(trim "${line%%=*}")"
+    [ "$key" = GEN3_HOST ] || continue
+    value="$(trim "${line#*=}")"
+    while [[ "$value" == \"* ]]; do value="${value#\"}"; done
+    while [[ "$value" == *\" ]]; do value="${value%\"}"; done
+    gen3_host="$value"
+    found=0
+  done < "$1"
+  return "$found"
 }
 
 usage() {
@@ -78,6 +116,17 @@ refuse_event() {
 }
 refuse_event "nothing was copied"
 
+# The host "ide event" stops (values never printed: this output may be pasted).
+pc_env="${PC_ENV:-$HOME/.config/iemmixer/iem-pc.env}"
+if [ -f "$pc_env" ]; then
+  gen3_host=""
+  if ! gen3_host_of "$pc_env"; then
+    warn "iempc's private env has no GEN3_HOST: \"ide event\" stops no Gen 3 device; add GEN3_HOST=<this --host> to it"
+  elif [ "$gen3_host" != "$host" ]; then
+    warn "--host is not the GEN3_HOST of iempc's private env: \"ide event\" stops the device on GEN3_HOST, not on this host; make them the same"
+  fi
+fi
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 unit="$here/iem-dante.service"
 [ -f "$unit" ] || die "$unit is missing"
@@ -87,6 +136,10 @@ actual="$(sha256sum "$artifact" | cut -d' ' -f1)"
 user="$(ssh "${SSH_OPTS[@]}" "$host" id -un)"
 [[ "$user" =~ ^[a-z_][a-z0-9_.-]*$ ]] || die "the box's user is not a plain user name: nothing was copied"
 [ "$user" != root ] || die "the service runs as the box's admin user, not root: nothing was copied"
+# "ide event" stops the device with exactly this command (iempc_event's
+# GEN3_STOP): a device it could not stop is never installed.
+ssh "${SSH_OPTS[@]}" "$host" sudo -n -l systemctl stop iem-dante > /dev/null ||
+  die "the box's sudo does not allow 'sudo -n systemctl stop iem-dante', which \"ide event\" runs: add it to the sudoers rule (.claude/rules/gen3.md, Deploy): nothing was copied"
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
