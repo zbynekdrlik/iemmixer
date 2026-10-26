@@ -253,6 +253,50 @@ fn a_handle_is_the_slot_then_the_cookie_big_endian() {
     assert_eq!(split(&handle(u32::MAX, 0)), (u32::MAX, 0));
 }
 
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Captured live on 2026-10-26 (#72, Live 2) between our device and a
+/// Yamaha Dante card: our stop of the card's earlier grant and its OK, our
+/// request for one of its TX channels in four slots at fpp 16 and its
+/// grant. P6: our device's name is replaced by one of the same length, our
+/// address by 10.0.0.10 and the channel's id by the synthetic map's 94;
+/// every other byte is as captured.
+#[test]
+fn a_real_card_took_these_datagrams_and_its_grant_carries_the_handle() {
+    let req = FlowRequest {
+        rx_host: "test-device-01".to_string(),
+        rx_flow_name: "2_0".to_string(),
+        sample_rate: 96_000,
+        bits: 24,
+        channels: vec![Some(94), None, None, None],
+        fpp: 16,
+        rx: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 10), 0xeaad),
+    };
+    let request = unhex(concat!(
+        "1102005800030100000000380001770000000018000100040050005e00000000",
+        "000000240a00000200100047000000000000000000000000746573742d646576",
+        "6963652d303100325f300000000000000802eaad0a00000a",
+    ));
+    assert_eq!(build_request(3, &req), request);
+    assert_eq!(parse_request(&request), Ok(req));
+    // The card's grant: OK, the handle, then 8 bytes we do not read.
+    let grant = unhex("11020018000301000001000501d3c7ea0001000100000000");
+    let (h, body) = Header::parse(&grant).unwrap();
+    assert_eq!((h.start, h.seq, h.op1, h.op2), (START, 3, op::REQUEST, 1));
+    assert_eq!(reply_handle(body), Some([0, 5, 1, 0xd3, 0xc7, 0xea]));
+    // Our stop of the grant before it, and the card's OK, no body.
+    let stop = unhex("11020010000201010000000501d3c7e9");
+    assert_eq!(build_stop(2, &[0, 5, 1, 0xd3, 0xc7, 0xe9]), stop);
+    let ok = unhex("1102000a000201010001");
+    let (h, body) = Header::parse(&ok).unwrap();
+    assert_eq!((h.seq, h.op1, h.op2, body.len()), (2, op::STOP, 1, 0));
+}
+
 #[test]
 fn the_reply_s_handle_is_its_first_6_bytes() {
     assert_eq!(reply_handle(&[1, 2, 3, 4, 5, 6]), Some([1, 2, 3, 4, 5, 6]));
