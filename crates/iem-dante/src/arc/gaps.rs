@@ -33,6 +33,8 @@ pub enum Gap {
     Refused,
     /// Not answered at all.
     Unanswered,
+    /// No request: its length field disagrees with its size.
+    Misframed,
 }
 
 /// One (peer, opcode, gap) count of a window.
@@ -65,6 +67,7 @@ impl Gap {
         match self {
             Gap::Refused => "refused",
             Gap::Unanswered => "unanswered",
+            Gap::Misframed => "misframed",
         }
     }
 }

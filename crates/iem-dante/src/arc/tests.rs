@@ -69,7 +69,7 @@ fn decode(outcome: ArcOutcome) -> Answer {
     let (bytes, changed) = match outcome {
         ArcOutcome::Reply(bytes) => (bytes, false),
         ArcOutcome::Changed(bytes) => (bytes, true),
-        ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => {
+        ArcOutcome::Ignored | ArcOutcome::Misframed { .. } | ArcOutcome::Unanswered { .. } => {
             panic!("a well-formed request was not answered: {outcome:?}")
         }
     };
@@ -885,15 +885,67 @@ fn an_opcode_inferno_does_not_answer_gets_no_reply() {
         }
     }
     assert_eq!(dev.state, before);
-    // A datagram that is no request gets no answer at all.
+    // A datagram that is no request gets no answer at all: shorter than the
+    // header it is ignored; one whose length field disagrees is misframed.
     let mut cut = request(NETAUDIO, 13, op::COUNTS, 0, &[]);
     cut.pop();
     assert_eq!(dev.send(&cut), ArcOutcome::Ignored);
     let mut long = request(NETAUDIO, 13, op::COUNTS, 0, &[]);
     long.push(0);
-    assert_eq!(dev.send(&long), ArcOutcome::Ignored);
+    assert_eq!(dev.send(&long), ArcOutcome::Misframed { op1: op::COUNTS });
     assert_eq!(dev.send(&[]), ArcOutcome::Ignored);
     assert_eq!(dev.state, before);
+}
+
+#[test]
+fn a_datagram_whose_length_field_disagrees_is_counted_never_answered() {
+    // The review of PR #78: such a datagram was dropped and never counted,
+    // so a sender whose datagrams we misread (padding, a field we read
+    // wrong) would never show. It is a gap of its own: per peer and the
+    // opcode its header names.
+    let mut dev = Dev::new(config());
+    let before = dev.state.clone();
+    for (op1, body) in [
+        (op::COUNTS, Vec::new()),
+        (op::TX_FLOWS, DC_FIRST_PAGE.to_vec()),
+        (op::TX_RENAME, tx_rename(3, b"Mix 3")),
+        (0x2204, DC_FIRST_PAGE.to_vec()),
+    ] {
+        let good = request(CONTROLLER, 21, op1, 0, &body);
+        let mut padded = good.clone();
+        padded.extend_from_slice(&[0, 0]);
+        let mut cut = good.clone();
+        cut.pop();
+        for datagram in [padded, cut] {
+            if datagram.len() < HEADER_LEN {
+                continue;
+            }
+            let outcome = dev.send(&datagram);
+            assert_eq!(outcome, ArcOutcome::Misframed { op1 }, "{op1:#06x}");
+            assert_eq!(outcome.gap(), Some((op1, Gap::Misframed)), "{op1:#06x}");
+        }
+        // A length field that is neither: larger than any datagram.
+        let mut wrong = good.clone();
+        wrong[2..4].copy_from_slice(&0xffffu16.to_be_bytes());
+        assert_eq!(dev.send(&wrong).gap(), Some((op1, Gap::Misframed)));
+    }
+    // Nothing renamed, and shorter than the header stays uncounted.
+    assert_eq!(dev.state, before);
+    assert_eq!(dev.send(&[0x27, 0x29, 0, 99]).gap(), None);
+}
+
+#[test]
+fn a_misframed_gap_reads_as_misframed() {
+    let report = gaps::Report {
+        entries: vec![gaps::Entry {
+            peer: 1,
+            op1: 0x1000,
+            gap: Gap::Misframed,
+            count: 4,
+        }],
+        uncounted: 0,
+    };
+    assert_eq!(report.to_string(), "peer 1 0x1000 misframed 4");
 }
 
 #[test]

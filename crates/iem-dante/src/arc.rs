@@ -140,7 +140,11 @@ pub enum ArcOutcome {
     Changed(Vec<u8>),
     /// A request inferno leaves unanswered: no reply.
     Unanswered { op1: u16 },
-    /// Not a request (too short, or a length field that disagrees): no reply.
+    /// A datagram whose length field disagrees with its size (`op1` as its
+    /// header's bytes 6–7 say): no request, no reply, but counted
+    /// ([`Gap::Misframed`]), so a sender we misread shows in the warning.
+    Misframed { op1: u16 },
+    /// Shorter than the header: no request, no reply.
     Ignored,
 }
 
@@ -155,7 +159,7 @@ impl ArcOutcome {
                 Ok((h, _)) if h.op2 == STATUS_ERROR => Some((h.op1, Gap::Refused)),
                 _ => None,
             },
-            ArcOutcome::Changed(_) | ArcOutcome::Ignored => None,
+            ArcOutcome::Changed(_) | ArcOutcome::Misframed { .. } | ArcOutcome::Ignored => None,
         }
     }
 }
@@ -269,7 +273,9 @@ pub async fn serve(
                     .gap()
                     .and_then(|(op1, gap)| gaps.record(Instant::now(), peer.ip(), op1, gap));
                 let sent = match outcome {
-                    ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => None,
+                    ArcOutcome::Ignored
+                    | ArcOutcome::Misframed { .. }
+                    | ArcOutcome::Unanswered { .. } => None,
                     ArcOutcome::Reply(bytes) => Some((bytes, false)),
                     ArcOutcome::Changed(bytes) => Some((bytes, true)),
                 };
