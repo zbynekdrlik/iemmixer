@@ -5,6 +5,8 @@ for ssh); every value is synthetic."""
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import json
 import os
 import sys
@@ -14,7 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from iempc_test_support import OK, SHA, Base, FakeClock, ip  # noqa: E402
+from iempc_test_support import ENV, OK, SHA, Base, FakeClock, ip  # noqa: E402
 
 
 class FlagTests(Base):
@@ -342,6 +344,22 @@ class EventSignalTests(Base):
         self.assertEqual((code, [c[1] for c in self.pc.calls]), (2, [["event", "--signal"]]))
 
 
+class Breaks(io.StringIO):
+    """A stream whose writes holding one of `words` fail as a write to a
+    closed pipe does (BrokenPipeError); it keeps every other write."""
+
+    def __init__(self, *words: str) -> None:
+        super().__init__()
+        self.words = words
+        self.broken = 0
+
+    def write(self, s: str) -> int:
+        if any(w in s for w in self.words):
+            self.broken += 1
+            raise BrokenPipeError(32, "Broken pipe")
+        return super().write(s)
+
+
 class Gen3StopTests(Base):
     """"ide event" also takes the Gen 3 device off the network (#72, design
     §5.5): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-dante`, started
@@ -355,22 +373,113 @@ class Gen3StopTests(Base):
         super().setUp()
         self.ssh_log = self.tmp / "ssh.log"
         self.ssh_done = self.tmp / "ssh.done"
+        self.ssh_flag = self.tmp / "ssh.flag"
 
     def gen3_host(self, host: str = HOST) -> None:
         ip.env_path().write_text(ip.env_path().read_text(encoding="utf-8") + f"GEN3_HOST={host}\n", encoding="utf-8")
 
+    def gen3_env(self, host: str | None) -> None:
+        """The private env with `host` as its GEN3_HOST, or none."""
+        text = "".join(f"{k}={v}\n" for k, v in ENV.items()) + (f"GEN3_HOST={host}\n" if host is not None else "")
+        ip.env_path().write_text(text, encoding="utf-8")
+
     def ssh_program(self, code: int, delay: float = 0.0, err: str = "") -> None:
-        """A stand-in `ssh` first on PATH: logs its arguments at start, takes
-        `delay` seconds, marks its end, writes `err` and exits with `code`."""
+        """A stand-in `ssh` first on PATH: logs its arguments and whether the
+        EVENT-NOW flag exists at start, takes `delay` seconds, marks its end,
+        writes `err` and exits with `code`."""
         d = self.tmp / "ssh-bin"
         d.mkdir(exist_ok=True)
         p = d / "ssh"
-        p.write_text(f"#!{sys.executable}\nimport sys, time\n"
+        p.write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                     f"open({str(self.ssh_flag)!r}, 'a').write(repr(os.path.exists({str(ip.EVENT_NOW)!r})) + '\\n')\n"
                      f"open({str(self.ssh_log)!r}, 'a').write(repr(sys.argv[1:]) + '\\n')\n"
                      f"time.sleep({delay})\nopen({str(self.ssh_done)!r}, 'a').write('ended\\n')\n"
                      f"sys.stderr.write({err!r})\nsys.exit({code})\n", encoding="utf-8")
         p.chmod(0o755)
         self.set_path(f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    def run_streams(self, *argv: str, out: io.StringIO, err: io.StringIO) -> int:
+        """`iempc` with its own stdout and stderr streams (run_main's are plain)."""
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            return ip.main(list(argv))
+
+    def gen3_warnings(self, err: str) -> list[str]:
+        return [line for line in err.splitlines() if "WARNING" in line and "Gen 3" in line]
+
+    def test_the_flag_exists_when_the_stop_starts(self) -> None:
+        self.gen3_host()
+        self.ssh_program(0)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[0], {"flag": str(ip.EVENT_NOW), "written": True})
+        self.assertEqual(self.ssh_flag.read_text(encoding="utf-8"), "True\n")
+
+    def test_a_stop_popen_refuses_never_stops_the_event_path(self) -> None:
+        # The env file's bytes are kept: a NUL in GEN3_HOST makes Popen raise
+        # ValueError ("embedded null byte"), not OSError.
+        self.gen3_env("tester@gen3" + chr(0) + ".test")
+        self.ssh_program(0)
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[0], {"flag": str(ip.EVENT_NOW), "written": True})
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
+        self.assertEqual(self.ssh_args(), [])
+        warnings = self.gen3_warnings(err)
+        self.assertEqual(len(warnings), 1, err)
+        self.assertIn("could not start", warnings[0])
+        self.assertNotIn("alarm the owner", err)
+
+    def test_ssh_missing_from_path_never_stops_the_event_path(self) -> None:
+        self.gen3_host()
+        empty = self.tmp / "no-programs"
+        empty.mkdir()
+        self.set_path(str(empty))
+        code, docs, err = self.run_main("event")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
+        warnings = self.gen3_warnings(err)
+        self.assertEqual(len(warnings), 1, err)
+        self.assertIn("could not start", warnings[0])
+        self.assertEqual([d for d in docs if "gen3_stop" in d], [])
+
+    def test_a_closed_stderr_never_stops_the_event_path(self) -> None:
+        # Every Gen 3 line (the info line, a warning at the start, a warning
+        # at the end) meets a closed pipe; the PC's own lines still go out.
+        for host, code_ssh in ((None, 0), ("-oProxyCommand=true", 0), (self.HOST, 255)):
+            with self.subTest(host=host):
+                self.gen3_env(host)
+                self.ssh_program(code_ssh, err="ssh: no route\n")
+                self.pc.calls.clear()
+                out, err = io.StringIO(), Breaks("Gen 3", "GEN3_HOST")
+                code = self.run_streams("event", out=out, err=err)
+                self.assertEqual(code, 0, err.getvalue())
+                self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
+                self.assertGreaterEqual(err.broken, 1)
+                docs = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+                if host == self.HOST:
+                    self.assertEqual(docs[-1], {"gen3_stop": {"ok": False, "exit": 255}})
+
+    def test_a_failure_in_the_end_phase_never_changes_the_exit_code(self) -> None:
+        # The stop's report meets a closed stdout: the PC's exit code stays,
+        # a failed PC path still ends with its owner alarm.
+        self.gen3_host()
+        self.ssh_program(0)
+
+        def down():
+            raise ip.StepError("ssh failed (exit 255): no route")
+
+        for reply, want in (((0, OK), 0), ((1, OK), 1), (down, 1)):
+            with self.subTest(want=want, reply=reply):
+                self.pc.replies[("event", "--signal")] = reply
+                out, err = Breaks('"gen3_stop"'), io.StringIO()
+                code = self.run_streams("event", out=out, err=err)
+                self.assertEqual(code, want, err.getvalue())
+                self.assertEqual(out.broken, 1)
+                warnings = self.gen3_warnings(err.getvalue())
+                self.assertEqual(len(warnings), 1, err.getvalue())
+                self.assertIn("could not be written", warnings[0])
+                if reply is down:
+                    self.assertIn("alarm the owner now", err.getvalue())
 
     def ssh_args(self) -> list[list[str]]:
         if not self.ssh_log.exists():
