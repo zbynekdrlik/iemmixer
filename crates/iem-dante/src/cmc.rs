@@ -24,8 +24,8 @@ pub const PORT: u16 = 8800;
 /// The advertisement request.
 pub const ADVERTISE: u16 = 0x1001;
 /// The info request port the advertisement names (inferno's
-/// `INFO_REQUEST_PORT`); phase A does not serve it.
-pub const INFO_REQUEST_PORT: u16 = 8700;
+/// `INFO_REQUEST_PORT`), served by [`crate::info`].
+pub const INFO_REQUEST_PORT: u16 = crate::info::REQUEST_PORT;
 /// The device's process id (inferno's default): one device on the box.
 pub const PROCESS_ID: u16 = 0;
 const RECV_BUFFER: usize = 2048;

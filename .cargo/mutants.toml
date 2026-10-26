@@ -98,9 +98,10 @@ exclude_globs = [
   # test there could catch its mutant.
   "crates/iem-soakclient/src/main.rs",
   # iem-dante-dev (#72 phase A): Linux glue (the config and state files, the
-  # interface list, the sockets, the mDNS daemon on one interface, SIGTERM
-  # and SIGINT, the goodbyes) around the mutated iem_dante::daemon, which
-  # holds every decision (parse_args, pick_ipv4, announce_device, serve).
+  # interface list and its MAC, speed and route files, the sockets, the mDNS
+  # daemon on one interface, SIGTERM and SIGINT, the goodbyes) around the
+  # mutated iem_dante::daemon, which holds every decision (parse_args,
+  # pick_interface, net_info, announce_device, serve).
   # The unit tests never start mdns-sd's multicast daemon; the plan's live
   # check (Task 6) runs the binary on the box.
   "crates/iem-dante/src/bin/**",

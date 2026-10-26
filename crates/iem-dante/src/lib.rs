@@ -29,10 +29,15 @@
 //! - [`arc`]: the control server on UDP 4440: names, channel lists,
 //!   renames.
 //! - [`cmc`]: the advertisement on UDP 8800.
+//! - [`info`]: the info requests on UDP 8700 (replies to the info group
+//!   224.0.0.231:8702) and the heartbeat every second to 224.0.0.233:8708;
+//!   Dante Controller goes on to ARC only once its board info request is
+//!   answered.
 //! - [`announce`]: the mDNS records Dante Controller browses for, and their
 //!   announcer.
-//! - [`daemon`]: the `iem-dante-dev` binary's command line, its address and
-//!   the loop that serves the device and announces it again after renames.
+//! - [`daemon`]: the `iem-dante-dev` binary's command line, its interface
+//!   and address, and the loop that serves the device and announces it
+//!   again after renames.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
@@ -42,4 +47,5 @@ pub mod arc;
 pub mod cmc;
 pub mod daemon;
 pub mod device;
+pub mod info;
 pub mod wire;
