@@ -297,6 +297,31 @@ fn a_real_card_took_these_datagrams_and_its_grant_carries_the_handle() {
     assert_eq!((h.seq, h.op1, h.op2, body.len()), (2, op::STOP, 1, 0));
 }
 
+/// A Yamaha Dante card's own request to us, captured live on 2026-10-26
+/// (#72, Live 3: its spare return subscribed to our TX 1): our TX 1 in four
+/// slots at fpp 32, 24-bit, 96 kHz, to its port 0x3817. P6: the card's name
+/// is replaced by one of the same length and its address by 10.0.0.11;
+/// every other byte is as captured. We read it, and write it back the same.
+#[test]
+fn a_real_card_s_request_reads_and_writes_back_byte_for_byte() {
+    let request = unhex(concat!(
+        "1102005000000100000000380001770000000018000100040048000100000000",
+        "000000240a00000200200043000000000000000000000000746573742d636172",
+        "6431003900000000080238170a00000b",
+    ));
+    let want = FlowRequest {
+        rx_host: "test-card1".to_string(),
+        rx_flow_name: "9".to_string(),
+        sample_rate: 96_000,
+        bits: 24,
+        channels: vec![Some(1), None, None, None],
+        fpp: 32,
+        rx: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 11), 0x3817),
+    };
+    assert_eq!(parse_request(&request), Ok(want.clone()));
+    assert_eq!(build_request(0, &want), request);
+}
+
 #[test]
 fn the_reply_s_handle_is_its_first_6_bytes() {
     assert_eq!(reply_handle(&[1, 2, 3, 4, 5, 6]), Some([1, 2, 3, 4, 5, 6]));
