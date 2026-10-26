@@ -1189,13 +1189,32 @@ mod socket {
     }
 
     #[tokio::test]
-    async fn the_control_socket_is_the_service_user_s_and_replaces_a_stale_one() {
+    async fn the_control_socket_is_0660() {
+        // Phase D: the service user's socket, open to its group (the admin
+        // user's `ctl status`, the live guard, health); who may reach it at
+        // all is the 0750 runtime folder's group. Whatever the umask.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = bind_control(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_socket());
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o660);
+        // A stale socket replaced is 0660 again.
+        drop(listener);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let again = bind_control(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o660);
+        drop(again);
+    }
+
+    #[tokio::test]
+    async fn the_control_socket_serves_and_replaces_a_stale_one() {
         let (dir, media) = media();
         let path = dir.path().join("control.sock");
         let listener = bind_control(&path).unwrap();
         let meta = std::fs::symlink_metadata(&path).unwrap();
         assert!(meta.file_type().is_socket());
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // Served: a client gets its answer.
         let server = tokio::spawn(serve_control(listener, Arc::clone(&media)));
         let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();

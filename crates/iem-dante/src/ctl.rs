@@ -3,8 +3,10 @@
 
 //! The device's local control socket (Gen 3 phase B, plan Task 7):
 //! [`SOCKET`] in the unit's runtime directory (`RuntimeDirectory=iem-dante`,
-//! mode 0700; the socket itself 0600, [`bind_control`]): the service's user
-//! only. One request a connection, one line each way ([`session`]);
+//! mode 0750; the socket itself 0660, [`bind_control`]): the service user
+//! and its group (phase D: the box's admin user is in the group `iemmixer`,
+//! for `ctl status`, the live guard and health). One request a connection,
+//! one line each way ([`session`]);
 //! `iem-dante-dev ctl <request>` is the client.
 //!
 //! - `status`: one JSON line, numbers only: keys and a few fixed words
@@ -869,7 +871,8 @@ mod socket {
 
     /// Listens at `path`: a socket an earlier run left there is replaced;
     /// anything else there is refused (never removed). The socket is the
-    /// service's user's only (0600).
+    /// service user's and its group's (0660, whatever the umask): who may
+    /// reach it at all is the runtime folder's (0750) group.
     pub fn bind_control(path: &Path) -> io::Result<UnixListener> {
         if let Ok(m) = std::fs::symlink_metadata(path) {
             if !m.file_type().is_socket() {
@@ -882,7 +885,7 @@ mod socket {
         }
         // Nothing there, or a path that cannot be read: the bind says why.
         let listener = UnixListener::bind(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
         Ok(listener)
     }
 

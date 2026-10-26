@@ -2,13 +2,15 @@
 # phase C, plan docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md
 # Task 6): `iem-engine run --backend dante`, installed by scripts/gen3/deploy.sh;
 # rules in .claude/rules/gen3.md and .claude/rules/engine.md.
-# Public repository (P6): the box's user and its interface come from two files
-# deploy.sh writes on the box, never from here: the drop-in
-# /etc/systemd/system/iem-engine.service.d/10-user.conf (User=) and
-# /etc/iemmixer/iem-dante.env (IEM_DANTE_IFACE=, the standalone device's too).
-# The site is the public synthetic test band deploy.sh copies into
-# /var/lib/iemmixer/site; the device's names are the ops repository's device
-# config.
+# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
+# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# user without login or home, not site data), and a unit that stays down
+# raises one alarm (iem-alarm@.service).
+# Public repository (P6): the box's interface comes from a file deploy.sh
+# writes on the box, never from here: /etc/iemmixer/iem-dante.env
+# (IEM_DANTE_IFACE=, the standalone device's too). The site is the public
+# synthetic test band deploy.sh copies into /var/lib/iemmixer/site; the
+# device's names are the ops repository's device config.
 #
 # Never enabled at boot (deploy.sh disables it): a reboot of the box never
 # brings our flows back unattended. "ide event" stops it (iempc event: ssh
@@ -19,7 +21,7 @@
 # by itself, so the two have no ordering and stop in parallel.
 
 [Unit]
-Description=iemmixer Gen 3 engine with its Dante device (phase C)
+Description=iemmixer Gen 3 engine with its Dante device (phase D: the service user)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 Wants=network-online.target
 After=network-online.target
@@ -29,17 +31,27 @@ Conflicts=iem-dante.service
 # (manual starts count too; deploy.sh resets the count before its start).
 StartLimitIntervalSec=600
 StartLimitBurst=3
+# Down for good (start-limit-hit, exit 2 or 3, a stop past its bound): one
+# alarm. RestartMode=direct keeps a restart out of `failed`, so a restart
+# raises none.
+OnFailure=iem-alarm@%n.service
 
 [Service]
 Type=exec
+User=iemmixer
+Group=iemmixer
 EnvironmentFile=/etc/iemmixer/iem-dante.env
 ExecStart=/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/iemmixer/site/iemmixer.toml --state-dir /var/lib/iemmixer/engine --pipe /run/iemmixer/engine.sock --dante-config /etc/iemmixer/dante-device.toml --dante-iface ${IEM_DANTE_IFACE}
 # Exit 1 (the device stopped serving, an I/O error) and 75 (the state folder
-# still locked by an engine that just ended) are restarted; 2 (the command
-# line, the site, the device's config or state file) and 3 (a site channel the
-# device lacks, a rate other than 96 kHz) are not.
+# still locked by an engine that just ended) are restarted, after 1 s growing
+# to 10 s in four steps; 2 (the command line, the site, the device's config or
+# state file) and 3 (a site channel the device lacks, a rate other than
+# 96 kHz) are not.
 Restart=on-failure
-RestartSec=2
+RestartSec=1
+RestartSteps=4
+RestartMaxDelaySec=10
+RestartMode=direct
 RestartPreventExitStatus=2 3
 # A stop is SIGTERM and a bounded wait (I8): the engine's shutdown saves,
 # fades, stops our RX flows at their transmitters (within 1 s), ends the pump
@@ -49,19 +61,21 @@ TimeoutStopSec=10
 SendSIGKILL=no
 # /var/lib/iemmixer (the site folder deploy.sh fills, the engine's state in
 # engine/) and /var/lib/iem-dante (the device's state file and its
-# subscriptions, where phase B's device kept them), owned by the service's user.
+# subscriptions, where phase B's device kept them), owned by the service user.
 StateDirectory=iemmixer iem-dante
 # /run/iemmixer (the engine's pipes, engine.sock and engine.sock.media) and
 # /run/iem-dante (the device's control socket at its phase B path, so
-# `iem-dante-dev ctl status` reads the engine-hosted device), the service's
-# user's only; gone when the service stops.
+# `iem-dante-dev ctl status` reads the engine-hosted device), the service
+# user's, open to its group (0750; the socket 0660): the admin user, in the
+# group `iemmixer`, reaches the control socket; gone when the service stops.
 RuntimeDirectory=iemmixer iem-dante
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0750
 # The device's TX and RX threads ask for SCHED_FIFO 45 and the engine's pump
 # for 40 (below dantesync's 50); without this limit they run at normal
 # priority and say so once.
 LimitRTPRIO=80
-# No capability: every port is above 1024 (the device's, see iem-dante.service).
+# No capability: every port is above 1024 (the device's, see iem-dante.service;
+# dantesync is the box's one PTP owner, our device never opens UDP 319/320).
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes
