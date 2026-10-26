@@ -220,9 +220,9 @@
 
 - [ ] **Step 1:** Read only, before: the card's two spare HIL returns' subscriptions (to restore) and its RX latency.
 - [ ] **Step 2:** Our RX R (the box input's channel, as `gen3-mix` reads it) subscribed to the card's spare HIL TX X (resolved through the card's ARC, phase B Task 9b); R reads Receiving.
-- [ ] **Step 3: The owner's one action**, asked once as a self-contained Slovak `❓` block: in Dante Controller, subscribe both of the IEM card's spare HIL returns to our test device's TX T for the test, and set them back to what Step 1 read afterwards. Wait for the go; nothing else in this task changes the card.
+- [ ] **Step 3:** Subscribe both of the IEM card's spare HIL returns to our test device's TX T for the test, with a raw ARC 0x3010 to the card in dev time (phase B Task 11's way, the owner's #72 exception and the ROZHODNUTÉ of 2026-10-26: no owner click); nothing else of the card changes.
 - [ ] **Step 4:** `iempc gen3-mix --slot X --member <id> --box-input <id> --bursts 5` (a member who plays in the box's active band, mix without peers). Pass as Task 8 states; the live guard did not trip. Record D, the echo and engine round trips, and the round trip less D against phase B's base, as phase F's starting numbers.
-- [ ] **Step 5:** The owner sets the returns back; read back equal to Step 1. Unsubscribe R; spec "closes"; stop the stack.
+- [ ] **Step 5:** Set the returns back to what Step 1 read (the same raw 0x3010, each to its own spare TX); read back equal to Step 1. Unsubscribe R; spec "closes"; stop the stack.
 - [ ] **Step 6:** Record on #72 (numbers only) and tick phase C. Update `.claude/rules/gen3.md` (phase C: `stream`, `host`, the units, deploy, `gen3-mix`; its `paths:` gain `crates/iem-engine/src/dante.rs`, `crates/iem-engine/src/dante/**`, `crates/iem-engine/tests/dante_loopback.rs`, `e2e/tests/gen3/**`, `e2e/playwright.gen3.config.ts`), `.claude/rules/engine.md` (the Dante backend, `Ending::Stop`/`Backend`, the allowlist), and the CLAUDE.md router's Gen 3 line. Commit: `docs(rules): gen3 phase C (#72)`.
 
 ## Risks
