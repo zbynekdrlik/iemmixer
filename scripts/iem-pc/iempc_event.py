@@ -233,7 +233,8 @@ def cmd_event(ctx: Ctx, ip) -> int:
             emit({"gen3_stop": {"plan": "systemctl stop iem-dante"}})
         return pc_event(ctx, ip, deadline, dry)
     write_flag()
-    # Beside the PC's switch, never before it: collected at the end, whatever the path did.
+    # Started now and never waited for here, so the PC's switch is not delayed;
+    # collected at the end, whatever the PC's path did.
     stop = start_gen3_stop(ctx.env)
     try:
         return pc_event(ctx, ip, deadline, dry)
