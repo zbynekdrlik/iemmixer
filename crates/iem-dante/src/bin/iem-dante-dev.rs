@@ -16,6 +16,13 @@
 //! restarts; 2 for the command line, the config, the state file (also one
 //! whose folder cannot be written, found at the start) or an interface
 //! without a usable MAC, which it does not (`RestartPreventExitStatus=2`).
+//!
+//! `iem-dante-dev clock --seconds <n>` (phase B, plan Task 2) serves
+//! nothing: it polls dantesync's time server on the box n times, a second
+//! apart, with the media clock's own poller (`iem_dante::clock::Poller`),
+//! and prints each poll as one JSON line, numbers only
+//! (`iem_dante::daemon::ClockLines`). Exit 0 after the n lines, 1 when it
+//! has no socket or stdout closes, 2 for the command line.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -31,15 +38,18 @@ fn main() -> std::process::ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fmt::Display;
+    use std::io::Write;
     use std::net::IpAddr;
     use std::process::ExitCode;
+    use std::sync::atomic::AtomicI32;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use iem_dante::announce::Announcer;
+    use iem_dante::clock::{DANTESYNC, MonoClock, POLL, Poller};
     use iem_dante::daemon::{
-        self, BUILD, Command, IfAddr, Options, Sockets, USAGE, VERSION, net_info, parse_args,
-        pick_interface, version_line,
+        self, BUILD, ClockLines, Command, IfAddr, Options, Sockets, USAGE, VERSION, net_info,
+        parse_args, pick_interface, version_line,
     };
     use iem_dante::device::{Device, DeviceConfig, DeviceState};
     use iem_dante::info::{self, Multicast, NetInfo};
@@ -47,6 +57,7 @@ mod linux {
     use mdns_sd::{DaemonStatus, IfKind, ServiceDaemon};
     use tokio::net::UdpSocket;
     use tokio::signal::unix::{SignalKind, signal};
+    use tokio::time::MissedTickBehavior;
     use tracing::{error, info};
     use tracing_subscriber::EnvFilter;
 
@@ -80,6 +91,7 @@ mod linux {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
+            Ok(Command::Clock { seconds }) => return clock(seconds),
             Ok(Command::Run(opts)) => opts,
             Err(msg) => {
                 eprintln!("iem-dante-dev: {msg}\n\n{USAGE}");
@@ -104,6 +116,45 @@ mod linux {
                 ExitCode::from(1)
             }
         }
+    }
+
+    /// `clock --seconds <n>`: n polls of dantesync's time server, a second
+    /// apart (the first at once), each one line on stdout; no log.
+    fn clock(seconds: u32) -> ExitCode {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("iem-dante-dev clock: no runtime: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        rt.block_on(async {
+            let mut poller = match Poller::connect(DANTESYNC).await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("iem-dante-dev clock: no socket to dantesync's time server: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let clock = MonoClock::new();
+            let freq = AtomicI32::new(0);
+            let mut lines = ClockLines::new();
+            let mut tick = tokio::time::interval(POLL);
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            for t_s in 0..seconds {
+                tick.tick().await;
+                let polled = poller.once(&clock, &freq).await;
+                let line = lines.line(t_s, &polled);
+                if let Err(e) = writeln!(std::io::stdout(), "{line}") {
+                    eprintln!("iem-dante-dev clock: stdout: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+            ExitCode::SUCCESS
+        })
     }
 
     /// The box's IPv4 addresses, by interface.
