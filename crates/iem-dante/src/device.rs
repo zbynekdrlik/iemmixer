@@ -198,6 +198,23 @@ pub(crate) fn channel_problems(
     out
 }
 
+/// The running device: its config and the names it lists now. The ARC
+/// server changes the names; the mDNS records are built from both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    pub cfg: DeviceConfig,
+    pub state: DeviceState,
+}
+
+impl Device {
+    /// The device as it starts: `cfg`, with the names of its state file
+    /// (the config's when there is none; [`DeviceState::load_or_default`]).
+    pub fn load(cfg: DeviceConfig) -> io::Result<Self> {
+        let state = DeviceState::load_or_default(&cfg)?;
+        Ok(Self { cfg, state })
+    }
+}
+
 /// The names the device lists now: the config's until Dante Controller
 /// renames a channel, then the state file's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

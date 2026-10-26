@@ -227,8 +227,12 @@ fn a_body_writer_hands_out_packet_offsets() {
     body.zeros(2);
     body.set_u8(10, 9);
     body.set_u16(11, 0xa0b0);
+    body.set_bytes(14, &[0xc1, 0xc2, 0xc3]);
     assert_eq!(body.offset(), 22);
     let bytes = body.into_vec();
-    assert_eq!(bytes, [9, 0xa0, 0xb0, 3, 4, 5, 6, b'a', b'b', 0, 0, 0]);
+    assert_eq!(
+        bytes,
+        [9, 0xa0, 0xb0, 3, 0xc1, 0xc2, 0xc3, b'a', b'b', 0, 0, 0]
+    );
     assert_eq!(string_at(&bytes, at), Some("ab"));
 }

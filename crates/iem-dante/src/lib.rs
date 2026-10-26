@@ -26,9 +26,12 @@
 //! - [`device`]: the config (a private TOML on the box) and the persisted
 //!   names, with Dante's name rules.
 //! - [`wire`]: the request/response datagram ARC and CMC share.
+//! - [`arc`]: the control server on UDP 4440: names, channel lists,
+//!   renames.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
 
+pub mod arc;
 pub mod device;
 pub mod wire;

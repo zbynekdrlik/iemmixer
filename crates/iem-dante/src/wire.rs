@@ -182,8 +182,13 @@ impl Body {
 
     /// Overwrites the two bytes at packet offset `at`, already written.
     pub fn set_u16(&mut self, at: u16, value: u16) {
+        self.set_bytes(at, &value.to_be_bytes());
+    }
+
+    /// Overwrites `bytes.len()` bytes at packet offset `at`, already written.
+    pub fn set_bytes(&mut self, at: u16, bytes: &[u8]) {
         let at = usize::from(at) - HEADER_LEN;
-        self.bytes[at..at + 2].copy_from_slice(&value.to_be_bytes());
+        self.bytes[at..at + bytes.len()].copy_from_slice(bytes);
     }
 
     pub fn into_vec(self) -> Vec<u8> {

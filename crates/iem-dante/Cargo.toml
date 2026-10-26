@@ -13,9 +13,15 @@ description = "iemmixer's own Dante device (Gen 3, #72): its config and persiste
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
+# The ARC server's UDP socket and the change signal to the mDNS announcer;
+# already in the lockfile through iem-server.
+tokio = { version = "1", features = ["net", "sync"] }
 # The device config and its state file, as the other crates read TOML.
 toml = "0.9"
+tracing = "0.1"
 
 [dev-dependencies]
 # The state file's tests (a temporary directory), as the other crates use it.
 tempfile = "3"
+# The socket tests: a runtime, #[tokio::test] and bounded waits.
+tokio = { version = "1", features = ["macros", "rt", "time"] }
