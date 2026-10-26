@@ -238,11 +238,14 @@ fn default_route(line: &str, name: &str) -> Option<Ipv4Addr> {
         return None;
     };
     let hex = |s: &str| u32::from_str_radix(s, 16).ok();
-    let wanted = RTF_UP | RTF_GATEWAY;
+    let flags = hex(flags)?;
+    // Each flag on its own: a mask joining the two bits with `|` gave
+    // cargo-mutants an equivalent `^` (0x1 ^ 0x2 is 0x1 | 0x2).
     let is_default = iface == name
         && hex(destination)? == 0
         && hex(mask)? == 0
-        && (hex(flags)? & wanted) == wanted;
+        && flags & RTF_UP != 0
+        && flags & RTF_GATEWAY != 0;
     if !is_default {
         return None;
     }
