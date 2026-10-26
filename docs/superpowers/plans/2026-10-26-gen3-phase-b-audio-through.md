@@ -74,16 +74,16 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
   - `pub fn to_samples(ptp_ns: u64, rate: u32) -> u64`, `pub fn stamp(samples: u64, rate: u32) -> (u32, u32)`, `pub fn from_stamp(secs: u32, sub: u32, rate: u32, near: u64) -> u64` (the full sample index nearest `near`)
   - `pub async fn poll_dantesync(clock: Arc<MonoClock>, freq: Arc<AtomicI32>)`: 127.0.0.1:31900 once a second, a 200 ms reply timeout; logs ready, re-anchor (delta ns), holdover, never an address
 
-- [ ] **Step 0:** First commit: bump `[workspace.package].version` above `main` (`2.0.0-dev.43` if main is still `.42`). Commit: `chore: bump version to 2.0.0-dev.43 (#72)`.
-- [ ] **Step 1:** Tests:
+- [x] **Step 0:** First commit: bump `[workspace.package].version` above `main` (`2.0.0-dev.43` if main is still `.42`). Commit: `chore: bump version to 2.0.0-dev.43 (#72)`.
+- [x] **Step 1:** Tests:
   - `the_dsyx_reply_reads_as_dantesync_writes_it`: base and extension bytes laid out as dantesync's `build_response` and `encode_extension` write them (offsets from `time_server.rs`, values from its tests).
   - `a_64_byte_reply_has_no_date_state`, `a_wrong_magic_or_request_id_is_refused`, `random_replies_never_panic`.
   - `k_is_wall_minus_d_minus_mono`; `a_date_step_moves_wall_and_d_together_and_k_stays` (±200 ms).
   - `no_anchor_within_two_seconds_of_a_scheduled_step`, `none_while_a_slew_runs`, `not_locked_is_not_ready`.
   - `one_odd_poll_is_held_three_re_anchor` with the delta; `an_unlock_after_ready_is_holdover_and_keeps_k`.
   - `media_time_survives_years_of_uptime` (u128, no overflow), `stamps_split_and_join_across_the_seconds_wrap` at 96 kHz.
-- [ ] **Step 2:** Implement. The poller is glue (excluded from mutation per function, with a reason); every decision is in `sample` and `Tracker`.
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): the media clock from dantesync's time server (#72)`.
+- [x] **Step 2:** Implement. The poller is glue (excluded from mutation per function, with a reason); every decision is in `sample` and `Tracker`.
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): the media clock from dantesync's time server (#72)`.
 
 ### Task 2: dantesync on the Gen 3 box, and the baseline reads
 
@@ -92,15 +92,15 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
 - Modify: `crates/iem-dante/src/daemon.rs`, `src/bin/iem-dante-dev.rs` (`iem-dante-dev clock --seconds <n>`: one JSON line a poll, numbers only), `.github/workflows/ci.yml` only if the `integrity` job lists test files
 - Private: `iemmixer-ops/site/gen3-dantesync.json` (the follower config), `GEN3_DANTESYNC_*` keys in the private env
 
-- [ ] **Step 1:** Read, never change: the fleet's pinned dantesync version (camera-box's `DANTESYNC_VERSION_PIN`) and that release's `dantesync-linux-amd64` sha256.
-- [ ] **Step 2:** The script, run from the dev box against `GEN3_HOST`:
+- [x] **Step 1:** Read, never change: the fleet's pinned dantesync version (camera-box's `DANTESYNC_VERSION_PIN`) and that release's `dantesync-linux-amd64` sha256.
+- [x] **Step 2:** The script, run from the dev box against `GEN3_HOST`:
   - refuses while `EVENT-NOW` exists, and when anything already holds UDP 319/320 or a PTP daemon (ptp4l, phc2sys, statime) is installed;
   - installs the pinned binary by sha256 (never "latest", never a source build), `/etc/dantesync/config.json` from the private file: a follower (`ntp_server` = the fleet's NTP master, `gm_allowlist` = the audio grandmaster, NTP server mode off), and the unit as dantesync's `install.sh` writes it; disables the other time services as `install.sh` does;
   - reads back `dantesync --version`, `systemctl is-active dantesync`, then (after a settle) a local `DSYX` reply: locked, the extension present, and the HTTP status (8898) `date_authority` follower with the allowed grandmaster.
-- [ ] **Step 3:** Python tests with a stand-in ssh: the event flag, a busy 319, a wrong sha256, a missing extension each refuse with a reason and change nothing after the refusal.
-- [ ] **Step 4:** Live: run it; then `iem-dante-dev clock --seconds 1800` on the box. Expected: ready within minutes of dantesync's lock, no re-anchor, k within 20 µs over 30 min.
-- [ ] **Step 5:** Baseline reads (design §5.5), read only: the card's latency setting and its spare X's advertised `rate`, `enc`, `fpp`, `latency_ns` (mDNS TXT). Set our private config's `latency_ns` to 2 ms or the card's value if higher. Record the numbers (no names) on #72.
-- [ ] **Step 6:** Commit: `feat(gen3): install dantesync as the box's PTP follower (#72)`.
+- [x] **Step 3:** Python tests with a stand-in ssh: the event flag, a busy 319, a wrong sha256, a missing extension each refuse with a reason and change nothing after the refusal.
+- [x] **Step 4:** Live: run it; then `iem-dante-dev clock --seconds 1800` on the box. Expected: ready within minutes of dantesync's lock, no re-anchor, k within 20 µs over 30 min.
+- [x] **Step 5:** Baseline reads (design §5.5), read only: the card's latency setting and its spare X's advertised `rate`, `enc`, `fpp`, `latency_ns` (mDNS TXT). Set our private config's `latency_ns` to 2 ms or the card's value if higher. Record the numbers (no names) on #72.
+- [x] **Step 6:** Commit: `feat(gen3): install dantesync as the box's PTP follower (#72)`.
 
 ### Task 3: Audio packets, the jitter ring, TX sources and checkers (`media`)
 
@@ -115,14 +115,14 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
   - `source::Source { Silence, Counter, Sine { hz: f64, dbfs: f64 }, Echo { rx: usize, offset: u32 } }` with `fill(&mut self, stamp: u64, out: &mut [i32], rings: &[Ring]) -> Fill { holes }`. Counter: `(stamp mod 65536) << 8`, a self-describing ramp at about −42 dBFS; Sine capped at −20 dBFS (the HIL rule); Echo reads ring `rx` at `stamp − offset`.
   - `check::CounterCheck` (songplayer's loop vocabulary: `mismatch`, `dropout`, `slip(k)`, `no_return`; meters `checked`, `blind`) and `check::SineCheck` (known frequency; a residual jump is a `discontinuity`).
 
-- [ ] **Step 1:** Tests:
+- [x] **Step 1:** Tests:
   - packet: round trips at 16, 24, 32 bits; `24_bit_is_big_endian_and_sign_extended`; `the_header_is_byte_2_then_seconds_then_samples`; `a_ragged_or_short_packet_is_refused` and 10 000 seeded random buffers never panic.
   - ring: `samples_land_at_their_stamps`, `a_missing_packet_reads_as_a_hole`, `a_packet_behind_the_reader_is_late_not_written`, `a_duplicate_is_counted_and_harmless`, `a_wrapped_slot_never_reads_stale`.
   - source: `the_counter_names_its_own_stamp`, `the_sine_never_exceeds_minus_20_dbfs`, `echo_is_the_rx_sample_offset_earlier`, `echo_of_a_hole_is_silence_and_counted`.
   - check: a clean counter has no event; one dropped frame is one `dropout`; a shift by k is `slip(k)`; a changed value is `mismatch`; silence is `blind`; a clean sine has no discontinuity and one repeated sample is found.
   - `tests/hot_path.rs`: packet write/read, ring write/read, every source and both checkers under `assert_no_alloc`.
-- [ ] **Step 2:** Implement. The ring may adapt inferno's `ring_buffer.rs` hole handling (origin header).
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): audio packets, the jitter ring, test sources and checkers (#72)`.
+- [x] **Step 2:** Implement. The ring may adapt inferno's `ring_buffer.rs` hole handling (origin header).
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): audio packets, the jitter ring, test sources and checkers (#72)`.
 
 ### Task 4: Flow control on UDP 4455 and our TX flows
 
@@ -137,15 +137,15 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
   - `tx::spawn(clock: Arc<dyn PtpClock>, shared: Arc<TxShared>) -> JoinHandle<()>`: sends the packet stamped T at T + fpp duration + `TX_MARGIN` (250 µs) from a socket connected to the receiver; reads keepalives non-blocking every 33 ms; nothing is sent before the clock is ready.
 - Answers (inferno's, with the deviations named): a sample rate other than ours → 0x0301; a TX channel id past our channels, fpp 0 or above 256, or a packet that would not fit one datagram → 0x0302 once (inferno answers 0x0302 and then a handle for a bad channel, and loops on fpp 0); no free slot → 0x0315; stop or update of an unknown handle → 0x0103; a body of 16 bytes or less, a missing string or channel ids past the end, an unknown op1 or op2 ≠ 0 → no reply (inferno logs or panics), counted.
 
-- [ ] **Step 1:** Tests:
+- [x] **Step 1:** Tests:
   - `our_request_is_byte_for_byte_inferno_s` (strings offset `0x26 + 2n + 10`, `0x0802`, the 8-byte alignment, 12 zero bytes) and parses back equal.
   - One test per answer above, each checking the table did or did not change.
   - `the_33rd_flow_is_too_many`, `a_second_request_for_one_destination_keeps_its_handle`, `update_revives_an_expired_flow`.
   - Keepalive: a datagram at 3.9 s keeps the flow, none for 4 s expires it.
   - Schedule: the first stamp is a multiple of fpp; `nothing_is_sent_before_stamp_plus_fpp`; a lag beyond the latency re-bootstraps once; a new clock epoch re-bootstraps; packets per second = rate / fpp.
   - `random_datagrams_never_panic` (10 000 seeded, 0–600 bytes).
-- [ ] **Step 2:** Implement. `serve` and the TX thread's loop are glue (per-function `exclude_re` with reasons); the struct-field deletion mutants are killed by tests.
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): flow control on UDP 4455 and the TX flows (#72)`.
+- [x] **Step 2:** Implement. `serve` and the TX thread's loop are glue (per-function `exclude_re` with reasons); the struct-field deletion mutants are killed by tests.
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): flow control on UDP 4455 and the TX flows (#72)`.
 
 ### Task 5: Our RX: subscriptions, the flow-control client, receiving
 
@@ -162,12 +162,12 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
   - `client::request_flow(to, req) -> Result<Handle, ClientError>` (reply matched by op1 and sequence, as inferno), `client::stop_flow(to, handle)`.
   - `rx::spawn(clock, shared) -> JoinHandle<()>`: one thread, `mio::Poll` over up to 32 flow sockets (ephemeral ports on our address, 4 MB receive buffers); each datagram: stamp → sample index near now → the subscribed channels' rings; `13 37` to the audio's source every 250 ms per flow; per flow: packets, refused, out of order, late beyond the latency, the largest lateness since the last heartbeat (inferno's 0x8003).
 
-- [ ] **Step 1:** Tests:
+- [x] **Step 1:** Tests:
   - `a_phase_a_state_file_loads_without_subscriptions`; `a_subscription_survives_a_restart`; `a_wrong_length_list_is_refused`.
   - Manager: grouping and sharing; `a_refusing_transmitter_gets_one_request_per_9_s` over 10 simulated minutes (Review Focus 1); `a_silent_transmitter_never_has_two_requests_in_flight`; `a_flow_without_packets_is_stopped_and_resolved_again`; `removing_the_last_channel_stops_its_flow`; statuses move Unresolved → InProgress → Receiving.
   - RX: frames of 24-bit big-endian land at their stamps across the seconds wrap; garbage never panics; keepalives are 4 a second per flow.
-- [ ] **Step 2:** Implement (the manager adapts inferno's `channels_subscriber.rs` resolve and scan rules; origin header).
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): RX subscriptions, the flow-control client and receiving (#72)`.
+- [x] **Step 2:** Implement (the manager adapts inferno's `channels_subscriber.rs` resolve and scan rules; origin header).
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): RX subscriptions, the flow-control client and receiving (#72)`.
 
 ### Task 6: ARC and info for flows and subscriptions
 
@@ -190,9 +190,9 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
 - The channel-change notification `07 2a 01 02` (inferno's bitmask) after a status change or an RX rename, inside the info bound as its own kind.
 - Clock stats (`07 xx 00 21`) stay unanswered: inferno answers them only from its PTP daemon's master-clock file.
 
-- [ ] **Step 1:** Tests: each new reply pinned to inferno's serializer layout; `every_opcode_inferno_answers_is_answered_as_inferno_answers_it` also with two TX and two RX flows; `pages_with_the_longest_names_fit_and_list_everything_once`; `a_subscribe_is_unresolved_at_once_and_saved_first`; `a_failed_save_refuses_and_undoes`; heartbeat bytes pinned with and without a clock; the notification is bounded.
-- [ ] **Step 2:** Implement; ARC's `handle` stays pure (a subscription change is `ArcOutcome::Changed`; the daemon tells the manager, as it tells the announcer).
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): ARC flow lists, subscriptions and the heartbeat's clock records (#72)`.
+- [x] **Step 1:** Tests: each new reply pinned to inferno's serializer layout; `every_opcode_inferno_answers_is_answered_as_inferno_answers_it` also with two TX and two RX flows; `pages_with_the_longest_names_fit_and_list_everything_once`; `a_subscribe_is_unresolved_at_once_and_saved_first`; `a_failed_save_refuses_and_undoes`; heartbeat bytes pinned with and without a clock; the notification is bounded.
+- [x] **Step 2:** Implement; ARC's `handle` stays pure (a subscription change is `ArcOutcome::Changed`; the daemon tells the manager, as it tells the announcer).
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): ARC flow lists, subscriptions and the heartbeat's clock records (#72)`.
 
 ### Task 7: The daemon: wiring, local control, stop, unit, deploy
 
@@ -210,13 +210,13 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
 - Stop: SIGTERM or SIGINT stops each RX flow at its transmitter (`0x0101`, all within 1 s), ends the threads, sends the goodbyes and exits 0, inside the unit's 10 s.
 - Unit: `LimitRTPRIO=80`, `RuntimeDirectory=iem-dante`. `deploy.sh` runs `systemctl disable` (in place of `enable`) and `restart`: a box reboot never starts the device. The sudoers rule swaps `enable` for `disable`.
 
-- [ ] **Step 1:** Tests:
+- [x] **Step 1:** Tests:
   - `tests/loopback.rs` (Linux, `ManualClock`, 127.0.0.1): our client requests a flow from our server, TX 1 sends the counter, RX 1 receives it. One simulated second has no mismatch, dropout or slip, then the stop releases the flow. Every wait is bounded.
   - `a_stop_with_a_silent_transmitter_ends_within_1_s`.
   - Control: each request parses; a bad one is an error line; the status is numbers only (no string field but fixed words).
   - `deploy.sh` tests: `disable` then `restart`; the refusals from phase A unchanged.
-- [ ] **Step 2:** Implement; thread spawning and the socket accept loop are glue with reasons in `.cargo/mutants.toml`.
-- [ ] **Step 3:** Push; CI green; `mutants-list` within the shard matrix (resize it before the PR if not). Open the dev→main PR (auto-merge when every gate is green). Commit: `feat(dante): the daemon's flows, control socket and stop (#72)`.
+- [x] **Step 2:** Implement; thread spawning and the socket accept loop are glue with reasons in `.cargo/mutants.toml`.
+- [x] **Step 3:** Push; CI green; `mutants-list` within the shard matrix (resize it before the PR if not). Open the dev→main PR (auto-merge when every gate is green). Commit: `feat(dante): the daemon's flows, control socket and stop (#72)`.
 
 ### Task 8: The live guard and the loop driver
 
@@ -224,18 +224,18 @@ Picked: the last row. Our RX 1 subscribes to the card's spare HIL TX X (ours to 
 - Create: `scripts/gen3/live_guard.py`, `scripts/gen3/test_live_guard.py`, `scripts/iem-pc/iempc_gen3.py`, `scripts/iem-pc/test_iempc_gen3.py`
 - Modify: `scripts/iem-pc/iempc.py` (the `gen3-loop` command: dev time, locked)
 
-- [ ] **Step 1:** `live_guard.py` (dev box): every second reads `iem-dante-dev ctl status` over ssh. It runs `sudo -n systemctl stop iem-dante` at once and exits 1 when:
+- [x] **Step 1:** `live_guard.py` (dev box): every second reads `iem-dante-dev ctl status` over ssh. It runs `sudo -n systemctl stop iem-dante` at once and exits 1 when:
   - any (port, peer, opcode) exceeds 20 requests a second for 3 s (phase A's loop was 2 250 a second; Dante Controller settles at one per 10 s);
   - our own flow requests exceed one per 5 s to a peer;
   - a TX or RX flow passes 1.25 × rate / fpp packets a second.
   It exits 0 when `EVENT-NOW` appears (the event's own stop runs). It prints a numbers-only line every 10 s and a summary.
-- [ ] **Step 2:** `iempc gen3-loop --offsets F1,F2 --bursts N --slot X` (refused outside dev time, like every PC command):
+- [x] **Step 2:** `iempc gen3-loop --offsets F1,F2 --bursts N --slot X` (refused outside dev time, like every PC command):
   - `iemmode job-begin`;
   - for each offset: `ctl source 1 echo 1 F` on the Gen 3 box, then N times `iemmode test-signal` on spare X only, reading `loopback_samples` from `iemmode status` after each;
   - `iemmode job-end`.
   It prints a JSON verdict, numbers only: pass when the N values at each offset are equal and their difference is F2 − F1, and our status shows no hole, late packet or re-anchor in the window.
-- [ ] **Step 3:** Python tests with stand-in ssh: a loop trips the stop within 3 s; ordinary traffic never trips it; the flag exits 0; the loop verdict passes only the exact shape; a job-begin refusal ends with no source change.
-- [ ] **Step 4:** Commit: `feat(gen3): the live guard and the loop driver (#72)`.
+- [x] **Step 3:** Python tests with stand-in ssh: a loop trips the stop within 3 s; ordinary traffic never trips it; the flag exits 0; the loop verdict passes only the exact shape; a job-begin refusal ends with no source change.
+- [x] **Step 4:** Commit: `feat(gen3): the live guard and the loop driver (#72)`.
 
 ### Task 9: Live 1 — Dante Controller with flows, and the self-loop
 
