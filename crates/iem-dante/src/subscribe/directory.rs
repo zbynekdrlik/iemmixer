@@ -581,8 +581,11 @@ impl Drop for ArcDirectory {
     }
 }
 
-/// Asks the reader to stop and wakes it.
+/// Asks the reader to stop and wakes it, under the book's lock: the reader
+/// holds it from its look at the stop to its wait, so the stop never lands
+/// in between and is lost.
 fn ask_stop(shared: &Shared) {
+    let _book = lock(&shared.book);
     shared.stop.store(true, Ordering::Relaxed);
     shared.wake.notify_all();
 }
