@@ -16,6 +16,23 @@
 //! restarts; 2 for the command line, the config, the state file (also one
 //! whose folder cannot be written, found at the start) or an interface
 //! without a usable MAC, which it does not (`RestartPreventExitStatus=2`).
+//!
+//! `iem-dante-dev clock --seconds <n>` (phase B, plan Task 2) serves
+//! nothing: it polls dantesync's time server on the box n times, a second
+//! apart, with the media clock's own poller (`iem_dante::clock::Poller`),
+//! and prints each poll as one JSON line, numbers only
+//! (`iem_dante::daemon::ClockLines`). Exit 0 after the n lines, 1 when it
+//! has no socket or stdout closes, 2 for the command line.
+//!
+//! Phase B (plan Task 7): the device also runs the media clock's poller of
+//! dantesync, flow control on UDP 4455, the TX and RX threads and our RX's
+//! manager (`iem_dante::daemon::media`), and its control socket
+//! (`--control`, default `/run/iem-dante/control.sock`, the unit's
+//! `RuntimeDirectory`; `iem_dante::ctl`). Its stop ends every RX flow at
+//! its transmitter before the goodbyes. `iem-dante-dev ctl [--socket
+//! <path>] <request>` sends one request to that socket and prints the
+//! answer line: exit 0 for `ok` or the status, 1 for an error answer or a
+//! socket it cannot reach, 2 for the command line.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -31,27 +48,38 @@ fn main() -> std::process::ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::fmt::Display;
+    use std::io::{BufRead, BufReader, Write};
     use std::net::IpAddr;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
     use std::process::ExitCode;
+    use std::sync::atomic::AtomicI32;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use iem_dante::announce::Announcer;
+    use iem_dante::clock::{
+        ClockStats, DANTESYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dantesync, realtime_ns,
+    };
+    use iem_dante::daemon::media::{Clock, Media};
     use iem_dante::daemon::{
-        self, BUILD, Command, IfAddr, Options, Sockets, USAGE, VERSION, net_info, parse_args,
-        pick_interface, version_line,
+        self, BUILD, ClockLines, Command, IfAddr, Options, Sockets, USAGE, VERSION, ctl_succeeded,
+        net_info, parse_args, pick_interface, version_line,
     };
     use iem_dante::device::{Device, DeviceConfig, DeviceState};
     use iem_dante::info::{self, Multicast, NetInfo};
-    use iem_dante::{arc, cmc};
+    use iem_dante::{arc, cmc, ctl, flows};
     use mdns_sd::{DaemonStatus, IfKind, ServiceDaemon};
     use tokio::net::UdpSocket;
     use tokio::signal::unix::{SignalKind, signal};
+    use tokio::time::MissedTickBehavior;
     use tracing::{error, info};
     use tracing_subscriber::EnvFilter;
 
     /// How long the mDNS daemon gets to send the goodbyes and stop.
     const GOODBYE_WAIT: Duration = Duration::from_secs(3);
+    /// How long `ctl` waits for the device's answer.
+    const CTL_WAIT: Duration = Duration::from_secs(5);
 
     /// Why the daemon ended badly, and its exit code.
     enum Failure {
@@ -80,6 +108,8 @@ mod linux {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
+            Ok(Command::Clock { seconds }) => return clock(seconds),
+            Ok(Command::Ctl { socket, request }) => return ctl_request(&socket, &request),
             Ok(Command::Run(opts)) => opts,
             Err(msg) => {
                 eprintln!("iem-dante-dev: {msg}\n\n{USAGE}");
@@ -103,6 +133,79 @@ mod linux {
                 error!("{e}");
                 ExitCode::from(1)
             }
+        }
+    }
+
+    /// `clock --seconds <n>`: n polls of dantesync's time server, a second
+    /// apart (the first at once), each one line on stdout; no log.
+    fn clock(seconds: u32) -> ExitCode {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("iem-dante-dev clock: no runtime: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        rt.block_on(async {
+            let mut poller = match Poller::connect(DANTESYNC).await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("iem-dante-dev clock: no socket to dantesync's time server: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let clock = MonoClock::new();
+            let freq = AtomicI32::new(0);
+            let mut lines = ClockLines::new();
+            let mut tick = tokio::time::interval(POLL);
+            tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            for t_s in 0..seconds {
+                tick.tick().await;
+                let polled = poller.once(&clock, &freq).await;
+                let line = lines.line(t_s, &polled);
+                if let Err(e) = writeln!(std::io::stdout(), "{line}") {
+                    eprintln!("iem-dante-dev clock: stdout: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+            ExitCode::SUCCESS
+        })
+    }
+
+    /// `ctl`: one request line to the control socket at `path`, its answer
+    /// line on stdout (exit 0 for `ok` or the status, 1 otherwise).
+    fn ctl_request(path: &Path, request: &str) -> ExitCode {
+        let exchange = || -> std::io::Result<String> {
+            let mut stream = UnixStream::connect(path)?;
+            stream.set_read_timeout(Some(CTL_WAIT))?;
+            stream.set_write_timeout(Some(CTL_WAIT))?;
+            stream.write_all(format!("{request}\n").as_bytes())?;
+            let mut answer = String::new();
+            BufReader::new(stream).read_line(&mut answer)?;
+            Ok(answer)
+        };
+        let answer = match exchange() {
+            Ok(answer) => answer,
+            Err(e) => {
+                eprintln!(
+                    "iem-dante-dev ctl: the control socket {}: {e}",
+                    path.display()
+                );
+                return ExitCode::from(1);
+            }
+        };
+        let line = answer.trim_end();
+        if let Err(e) = writeln!(std::io::stdout(), "{line}") {
+            eprintln!("iem-dante-dev ctl: stdout: {e}");
+            return ExitCode::from(1);
+        }
+        if ctl_succeeded(line) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
         }
     }
 
@@ -159,9 +262,10 @@ mod linux {
             tx = device.cfg.tx.len(),
             rate = device.cfg.sample_rate,
             encoding = device.cfg.encoding,
+            latency_ns = device.cfg.latency_ns,
             link_mbit_s = net.link_speed,
             gateway = !net.gateway.is_unspecified(),
-            "iem-dante-dev starting (no PTP, no audio)"
+            "iem-dante-dev starting (flows on PTP time from dantesync; no PTP sent)"
         );
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -169,7 +273,7 @@ mod linux {
             .map_err(run_failed)?;
         let mdns = ServiceDaemon::new().map_err(|e| run_failed(format!("the mDNS daemon: {e}")))?;
         let mut announcer = Announcer::new(mdns);
-        let served = rt.block_on(serve(device, &mut announcer, net));
+        let served = rt.block_on(serve(device, &mut announcer, net, &opts.control));
         // The goodbyes whatever ended serving: no record outlives the daemon.
         let goodbye = goodbye(announcer.registry());
         served?;
@@ -180,6 +284,7 @@ mod linux {
         device: Device,
         announcer: &mut Announcer<ServiceDaemon>,
         net: NetInfo,
+        control: &Path,
     ) -> Result<(), Failure> {
         let ip = net.ip;
         let mut term = signal(SignalKind::terminate()).map_err(run_failed)?;
@@ -195,7 +300,33 @@ mod linux {
             // Bound to the address, as inferno's: the info multicasts leave
             // by its interface.
             info: bind(info::REQUEST_PORT, "the info server").await?,
+            flows: bind(flows::control::PORT, "flow control").await?,
         };
+        // The media clock: PTP time from dantesync on the box, polled once
+        // a second for the device's life (the task ends with the runtime).
+        let mono = Arc::new(MonoClock::new());
+        let clock = Clock {
+            ptp: mono.clone(),
+            freq: Arc::new(AtomicI32::new(0)),
+            stats: Arc::new(ClockStats::default()),
+        };
+        tokio::spawn(poll_dantesync(
+            mono,
+            Arc::clone(&clock.freq),
+            Arc::clone(&clock.stats),
+        ));
+        // The TX flows' cookies: any start differing between runs.
+        let seed = (realtime_ns() as u64) ^ ((monotonic_ns() as u64) << 21);
+        let media = Arc::new(
+            Media::new(&device, ip, clock, seed)
+                .map_err(|e| run_failed(format!("the flow sockets: {e}")))?,
+        );
+        let listener = ctl::bind_control(control).map_err(|e| {
+            run_failed(format!(
+                "the control socket {}: {e} (the unit's RuntimeDirectory=iem-dante makes its folder)",
+                control.display()
+            ))
+        })?;
         // Only the served address's interface, IPv4: no other network sees
         // the records (mdns-sd applies the selections in order).
         let mdns = announcer.registry();
@@ -206,6 +337,7 @@ mod linux {
             arc = arc::PORT,
             cmc = cmc::PORT,
             info = info::REQUEST_PORT,
+            flows = flows::control::PORT,
             info_group_port = info::INFO_PORT,
             heartbeat_port = info::HEARTBEAT_PORT,
             "listening on the interface's address"
@@ -216,12 +348,15 @@ mod linux {
                 _ = int.recv() => info!("SIGINT: stopping"),
             }
         };
+        let control = ctl::serve_control(listener, Arc::clone(&media));
         daemon::serve(
             sockets,
             Arc::new(Mutex::new(device)),
             announcer,
             net,
             Multicast::DANTE,
+            media,
+            control,
             stop,
         )
         .await

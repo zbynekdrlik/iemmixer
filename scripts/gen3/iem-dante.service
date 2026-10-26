@@ -1,19 +1,20 @@
-# iemmixer's own Dante device on the Gen 3 box (#72 phase A, plan Task 5):
-# iem-dante-dev, installed by scripts/gen3/deploy.sh; rules in
-# .claude/rules/gen3.md. Public repository (P6): the box's user and its
-# interface come from two files deploy.sh writes on the box, never from
-# here: the drop-in /etc/systemd/system/iem-dante.service.d/10-user.conf
-# (User=) and /etc/iemmixer/iem-dante.env (IEM_DANTE_IFACE=). The device's
-# test name and channel names are the ops repository's device config.
+# iemmixer's own Dante device on the Gen 3 box (#72): iem-dante-dev,
+# installed by scripts/gen3/deploy.sh; rules in .claude/rules/gen3.md.
+# Public repository (P6): the box's user and its interface come from two
+# files deploy.sh writes on the box, never from here: the drop-in
+# /etc/systemd/system/iem-dante.service.d/10-user.conf (User=) and
+# /etc/iemmixer/iem-dante.env (IEM_DANTE_IFACE=). The device's test name and
+# channel names are the ops repository's device config.
 #
+# Phase B (plan Task 7): the device sends and receives audio flows, so it is
+# never enabled at boot (deploy.sh disables it and restarts it): a reboot of
+# the box, during an event or not, never brings its flows back unattended.
 # "ide event" stops it (iempc event: ssh <GEN3_HOST> sudo -n systemctl stop
-# iem-dante). Nothing starts it again when the event ends: deploy.sh or
-# `sudo systemctl start iem-dante` in dev time does. A reboot of the box
-# during an event starts it (the unit is enabled; the flag lives on the
-# dev box).
+# iem-dante); nothing starts it again when the event ends: deploy.sh or
+# `sudo systemctl start iem-dante` in dev time does.
 
 [Unit]
-Description=iemmixer Gen 3 Dante device (phase A: names and channels, no PTP, no audio)
+Description=iemmixer Gen 3 Dante device (phase B: flows on PTP time from dantesync, no PTP sent)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 Wants=network-online.target
 After=network-online.target
@@ -21,21 +22,30 @@ After=network-online.target
 [Service]
 Type=exec
 EnvironmentFile=/etc/iemmixer/iem-dante.env
-ExecStart=/opt/iemmixer/bin/iem-dante-dev --config /etc/iemmixer/dante-device.toml --iface ${IEM_DANTE_IFACE}
+ExecStart=/opt/iemmixer/bin/iem-dante-dev --config /etc/iemmixer/dante-device.toml --iface ${IEM_DANTE_IFACE} --control /run/iem-dante/control.sock
 # Exit 1 (the address not there yet, serving failed, goodbyes unconfirmed)
 # is restarted; exit 2 (the command line, the config, the state file) is not.
 Restart=on-failure
 RestartSec=5
 RestartPreventExitStatus=2
-# A stop is SIGTERM and a bounded wait (I8): the daemon withdraws its mDNS
-# records (goodbyes, at most 3 s) and exits 0. One that does not end within
-# the bound is left running and the stop fails, never force-ended.
+# A stop is SIGTERM and a bounded wait (I8): the daemon stops every RX flow
+# at its transmitter (within 1 s), ends its media threads, withdraws its
+# mDNS records (goodbyes, at most 3 s) and exits 0. One that does not end
+# within the bound is left running and the stop fails, never force-ended.
 TimeoutStopSec=10
 SendSIGKILL=no
 # /var/lib/iem-dante, owned by the service's user: the config's state_file
-# (the renamed names) lives there.
+# (the renamed names and the RX subscriptions) lives there.
 StateDirectory=iem-dante
-# No capability: every port is above 1024 (ARC 4440, CMC 8800, mDNS 5353).
+# /run/iem-dante, the service's user's only: the control socket
+# (iem-dante-dev ctl status|source|check), gone when the service stops.
+RuntimeDirectory=iem-dante
+RuntimeDirectoryMode=0700
+# The TX and RX threads ask for SCHED_FIFO 45 (below dantesync's 50); without
+# this limit they run at normal priority and say so once.
+LimitRTPRIO=80
+# No capability: every port is above 1024 (ARC 4440, flow control 4455, CMC
+# 8800, mDNS 5353, the info requests 8700, the flows' ephemeral ports).
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes

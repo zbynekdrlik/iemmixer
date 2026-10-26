@@ -101,7 +101,9 @@ exclude_globs = [
   # interface list and its MAC, speed and route files, the sockets, the mDNS
   # daemon on one interface, SIGTERM and SIGINT, the goodbyes) around the
   # mutated iem_dante::daemon, which holds every decision (parse_args,
-  # pick_interface, net_info, announce_device, serve).
+  # pick_interface, net_info, announce_device, serve; phase B's `clock`
+  # subcommand: parse_args and ClockLines, its polls iem_dante::clock's
+  # Poller).
   # The unit tests never start mdns-sd's multicast daemon; the plan's live
   # check (Task 6) runs the binary on the box.
   "crates/iem-dante/src/bin/**",
@@ -210,6 +212,31 @@ exclude_re = [
   # are tested through a fake registry; the plan's live check (Task 6) sees
   # the records in Dante Controller.
   "iem-dante/src/announce\\.rs.*<impl Registry for ServiceDaemon>",
+  # The media clock's poller (#72 phase B): `poll_dantesync` only aims the
+  # tested `poll` at dantesync's real port (127.0.0.1:31900, which a test
+  # cannot hold on a box running dantesync), and `log_event` writes log
+  # lines only. `poll`, `Poller::connect`, `Poller::once` and `ask` stay
+  # mutated: the loopback tests run them against a stand-in time server
+  # (`a_poll_reports_its_reply_sample_event_and_k` pins each poll's
+  # report); every decision is `sample`'s and the `Tracker`'s.
+  "iem-dante/src/clock\\.rs.*\\b(poll_dantesync|log_event)\\b",
+  # The TX thread's SCHED_FIFO request (#72 phase B, plan Task 4): its
+  # answer only picks the thread's start line (FIFO or normal priority), and
+  # CI's kernel refuses FIFO to an unprivileged runner, so no test can see
+  # it; the twin for other systems is compiled out on Linux. The thread's
+  # loop (`run`), `spawn` and every decision (`Transmitter`, `Schedule`,
+  # `TxTable`) stay mutated: the loopback and thread tests in media/tx run
+  # them.
+  "iem-dante/src/media/tx\\.rs.*\\bask_realtime\\b",
+  # The daemon's wait for its TX and RX threads at the stop (#72 phase B,
+  # plan Task 7): it sets both stop flags (tested: `stopping()` after it)
+  # and then only waits, a 1 ms nap a pass, for threads that end within one
+  # of their own waits (33 ms; their loops' ends are tested in media/tx and
+  # media/rx). A changed wait condition (`!`, `&&`) still returns after the
+  # joins, so nothing but timing tells it apart; a thread left running is a
+  # warning, never killed. `spawn_threads`, the driver, the checks and the
+  # control socket's accept loop stay mutated.
+  "iem-dante/src/daemon/media\\.rs.*\\bThreads::stop\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).

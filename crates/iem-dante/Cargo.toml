@@ -18,7 +18,14 @@ if-addrs = "0.15"
 # blocking API is all the announcer needs, so no `async` feature; `logging`
 # keeps its warnings (through `log`) in the daemon's log.
 mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
+# The RX thread's wait on every RX flow socket at once (epoll on Linux;
+# MIT). Already in the lockfile through tokio and mdns-sd, with these
+# features.
+mio = { version = "1", features = ["net", "os-poll"] }
 serde = { version = "1.0", features = ["derive"] }
+# The RX flow sockets' receive buffer (SO_RCVBUF; MIT OR Apache-2.0).
+# Already in the lockfile through tokio.
+socket2 = "0.6"
 thiserror = "2.0"
 # The ARC server's UDP socket and the change signal to the mDNS announcer;
 # the daemon's select loop (`macros`), the info server's heartbeat
@@ -31,7 +38,16 @@ tracing = "0.1"
 # iem-dante-dev's log on stderr (the journal), RUST_LOG as the engine reads it.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The media clock (phase B): clock_gettime(CLOCK_MONOTONIC / CLOCK_REALTIME)
+# and clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME). MIT OR Apache-2.0,
+# already in the lockfile (through tokio and others).
+libc = "0.2"
+
 [dev-dependencies]
+# tests/hot_path.rs (phase B): the packet codec, the rings, the sources and
+# the checkers allocate nothing, as iem-engine's tests/rt.rs proves it.
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
 # The state file's tests (a temporary directory), as the other crates use it.
 tempfile = "3"
 # The socket tests: a runtime, #[tokio::test] and bounded waits.

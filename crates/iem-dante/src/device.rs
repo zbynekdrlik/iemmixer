@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors. The 31-character device name
 // limit is inferno's note (teodly/inferno at 9767558,
-// inferno_aoip/src/device_info.rs, GPL-3.0-or-later OR AGPL-3.0-or-later);
-// the rest is iemmixer's own code.
+// inferno_aoip/src/device_info.rs, GPL-3.0-or-later OR AGPL-3.0-or-later),
+// and so is the subscriptions' saved form (an RX channel's number with the
+// TX channel's and device's names, inferno_aoip/src/device_server/
+// channels_subscriber.rs `SavedChannelState`); the rest is iemmixer's own
+// code.
 
 //! The device's identity (#72 phase A): its config, a private TOML on the
 //! box (this repository holds only the synthetic
@@ -15,6 +18,12 @@
 //!   exist only as the state's (ARC 0x3000).
 //! - The state's `name` is the device name it lists. Phase A has no device
 //!   rename, so it is the config's name unless a state file says otherwise.
+//! - The state's RX subscriptions (phase B): which TX channel of which
+//!   device each RX channel receives, set on our own device only (ARC
+//!   0x3010), kept so a restart subscribes again. The file lists the
+//!   subscribed channels by number (`[[subscriptions]]`, `rx` from 1); a
+//!   state without any is written as phase A wrote it, so a phase A file
+//!   loads unchanged.
 //! - Problems name a field and a channel number, never a name: the channel
 //!   names may be the band's labels (P6), and no log may hold one.
 
@@ -215,24 +224,69 @@ impl Device {
     }
 }
 
+/// An RX channel's subscription: the TX channel and the device it comes
+/// from, by their Dante names (as Dante Controller sets them, ARC 0x3010).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subscription {
+    pub tx_channel: String,
+    pub tx_device: String,
+}
+
+impl Subscription {
+    /// Whether both names follow Dante's rules.
+    pub fn is_valid(&self) -> bool {
+        valid_channel_name(&self.tx_channel) && valid_device_name(&self.tx_device)
+    }
+}
+
 /// The names the device lists now: the config's until Dante Controller
-/// renames a channel, then the state file's.
+/// renames a channel, then the state file's; and its RX subscriptions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceState {
     pub name: String,
     pub rx: Vec<String>,
     pub tx: Vec<String>,
+    /// RX channel `n`'s subscription at index `n − 1`: empty while none was
+    /// ever made, else one entry per RX channel (anything else is refused).
+    /// The file lists only the subscribed channels, by number.
+    #[serde(default, with = "saved", skip_serializing_if = "saved::none")]
+    pub subscriptions: Vec<Option<Subscription>>,
 }
 
 impl DeviceState {
-    /// The config's names.
+    /// The config's names, no subscription.
     pub fn from_config(cfg: &DeviceConfig) -> Self {
         Self {
             name: cfg.name.clone(),
             rx: cfg.rx.clone(),
             tx: cfg.tx.clone(),
+            subscriptions: Vec::new(),
         }
+    }
+
+    /// RX channel `rx`'s subscription (from 0).
+    pub fn subscription(&self, rx: usize) -> Option<&Subscription> {
+        self.subscriptions.get(rx)?.as_ref()
+    }
+
+    /// Sets (or with `None` removes) RX channel `rx`'s subscription (from
+    /// 0); `false`, nothing changed, for a channel `cfg` does not have or
+    /// a name Dante's rules refuse. The list grows to one entry per RX
+    /// channel at the first change.
+    pub fn set_subscription(
+        &mut self,
+        cfg: &DeviceConfig,
+        rx: usize,
+        sub: Option<Subscription>,
+    ) -> bool {
+        if rx >= cfg.rx.len() || sub.as_ref().is_some_and(|s| !s.is_valid()) {
+            return false;
+        }
+        self.subscriptions.resize(cfg.rx.len(), None);
+        self.subscriptions[rx] = sub;
+        true
     }
 
     /// The state file's names, or the config's when there is no file. A file
@@ -251,7 +305,14 @@ impl DeviceState {
                 format!("{}: {why}", path.display()),
             )
         };
-        let state: Self = toml::from_str(&text).map_err(|e| invalid(parse_problem(&text, &e)))?;
+        let mut state: Self =
+            toml::from_str(&text).map_err(|e| invalid(parse_problem(&text, &e)))?;
+        // The file lists the subscribed channels up to the highest; the
+        // state holds one entry per RX channel.
+        if !state.subscriptions.is_empty() {
+            let len = state.subscriptions.len().max(cfg.rx.len());
+            state.subscriptions.resize(len, None);
+        }
         let problems = state.problems(cfg);
         if problems.is_empty() {
             Ok(state)
@@ -261,7 +322,9 @@ impl DeviceState {
     }
 
     /// Whether these names fit `cfg`: its channel counts, Dante's name
-    /// rules, and no TX name that is another channel's (default) name.
+    /// rules, and no TX name that is another channel's (default) name; the
+    /// subscriptions: none or one entry per RX channel, each with names
+    /// Dante's rules allow.
     pub fn problems(&self, cfg: &DeviceConfig) -> Vec<String> {
         let mut out = Vec::new();
         if !valid_device_name(&self.name) {
@@ -275,9 +338,34 @@ impl DeviceState {
                 out.push(format!("{} {dir} channels, the config {want}", names.len()));
             }
         }
+        let (subs, want) = (self.subscriptions.len(), cfg.rx.len());
+        if subs > want {
+            out.push(format!(
+                "a subscription of RX channel {subs}, the config has {want} RX channels"
+            ));
+        } else if subs != 0 && subs != want {
+            out.push(format!(
+                "{subs} subscription entries, the config has {want} RX channels"
+            ));
+        }
         if out.is_empty() {
             out.extend(channel_problems("RX", &self.rx, None));
             out.extend(channel_problems("TX", &self.tx, Some(&cfg.tx)));
+            for (i, sub) in self.subscriptions.iter().enumerate() {
+                let Some(sub) = sub else { continue };
+                if !valid_channel_name(&sub.tx_channel) {
+                    out.push(format!(
+                        "RX channel {}: a subscription to an invalid channel name",
+                        i + 1
+                    ));
+                }
+                if !valid_device_name(&sub.tx_device) {
+                    out.push(format!(
+                        "RX channel {}: a subscription to an invalid device name",
+                        i + 1
+                    ));
+                }
+            }
         }
         out
     }
@@ -311,6 +399,76 @@ impl DeviceState {
             let _ = fs::remove_file(&tmp);
         }
         written.map_err(named)
+    }
+}
+
+/// The subscriptions as the state file holds them: one `[[subscriptions]]`
+/// table per subscribed RX channel, `rx` its number from 1 (inferno's
+/// `SavedChannelState`), read back as one entry per channel up to the
+/// highest listed. A number of 0, past [`MAX_CHANNELS`] or listed twice is
+/// refused by its number (never a name).
+mod saved {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+
+    use super::{MAX_CHANNELS, Subscription};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        rx: u32,
+        tx_channel: String,
+        tx_device: String,
+    }
+
+    /// No subscription at all: the field is left out.
+    pub(super) fn none(subs: &[Option<Subscription>]) -> bool {
+        subs.iter().all(Option::is_none)
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        subs: &[Option<Subscription>],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let entries: Vec<Entry> = subs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, sub)| {
+                let sub = sub.as_ref()?;
+                Some(Entry {
+                    rx: u32::try_from(i + 1).ok()?,
+                    tx_channel: sub.tx_channel.clone(),
+                    tx_device: sub.tx_device.clone(),
+                })
+            })
+            .collect();
+        entries.serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<Option<Subscription>>, D::Error> {
+        let entries = Vec::<Entry>::deserialize(d)?;
+        let mut subs: Vec<Option<Subscription>> = Vec::new();
+        for e in entries {
+            let rx = usize::try_from(e.rx).unwrap_or(usize::MAX);
+            if rx == 0 || rx > MAX_CHANNELS {
+                return Err(D::Error::custom(format!(
+                    "RX channel {}: no device has it (1 to {MAX_CHANNELS})",
+                    e.rx
+                )));
+            }
+            subs.resize(subs.len().max(rx), None);
+            if subs[rx - 1].is_some() {
+                return Err(D::Error::custom(format!(
+                    "RX channel {rx} is subscribed twice"
+                )));
+            }
+            subs[rx - 1] = Some(Subscription {
+                tx_channel: e.tx_channel,
+                tx_device: e.tx_device,
+            });
+        }
+        Ok(subs)
     }
 }
 
