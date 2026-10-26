@@ -7,17 +7,24 @@
 # channel names are the ops repository's device config.
 #
 # Phase B (plan Task 7): the device sends and receives audio flows, so it is
-# never enabled at boot (deploy.sh disables it and restarts it): a reboot of
+# never enabled at boot (deploy.sh disables it): a reboot of
 # the box, during an event or not, never brings its flows back unattended.
 # "ide event" stops it (iempc event: ssh <GEN3_HOST> sudo -n systemctl stop
-# iem-dante); nothing starts it again when the event ends: deploy.sh or
-# `sudo systemctl start iem-dante` in dev time does.
+# iem-dante, from plan Task 7 with the engine and the server); nothing starts
+# it again when the event ends: deploy.sh --start device or `sudo systemctl
+# start iem-dante` in dev time does.
+#
+# Phase C (plan Task 6): iem-engine.service hosts the same device inside the
+# engine; this unit stays the standalone device (deploy.sh --start device)
+# and never runs beside it.
 
 [Unit]
 Description=iemmixer Gen 3 Dante device (phase B: flows on PTP time from dantesync, no PTP sent)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 Wants=network-online.target
 After=network-online.target
+# The engine (iem-engine.service) hosts the same device: never both.
+Conflicts=iem-engine.service
 
 [Service]
 Type=exec
