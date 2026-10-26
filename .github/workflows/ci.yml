@@ -34,6 +34,7 @@ jobs:
           python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/pc-tuning -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
+          python3 -m unittest discover -s scripts/gen3 -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
         run: |
@@ -218,6 +219,44 @@ jobs:
         with:
           name: iem-migrate-linux-${{ github.sha }}
           path: target/release/iem-migrate
+          retention-days: 14
+          if-no-files-found: error
+
+  dante-bin:
+    name: dante-bin
+    # The Gen 3 device daemon (#72 phase A) for scripts/gen3/deploy.sh: built
+    # for x86_64 Linux on every push and pull request, uploaded only from a
+    # push to dev or main, as the bundle is.
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build iem-dante-dev (release, x86_64 Linux)
+        run: cargo build --locked --release -p iem-dante --bin iem-dante-dev
+      - name: The binary is x86-64 and names this build
+        run: |
+          set -euo pipefail
+          bin=target/release/iem-dante-dev
+          file -b "$bin" | grep -Eq '^ELF 64-bit LSB (pie )?executable, x86-64' \
+            || { echo "::error::$bin is not an x86-64 ELF executable: $(file -b "$bin")"; exit 1; }
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "iem-dante") | .version')"
+          said="$("$bin" --version)"
+          echo "$said"
+          [ "$said" = "iem-dante-dev ${version} ${GITHUB_SHA}" ] \
+            || { echo "::error::--version says '$said', not 'iem-dante-dev ${version} ${GITHUB_SHA}'"; exit 1; }
+          sha256sum "$bin"
+      - name: Upload (dev/main pushes only)
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: iem-dante-dev-${{ github.sha }}
+          path: target/release/iem-dante-dev
           retention-days: 14
           if-no-files-found: error
 
