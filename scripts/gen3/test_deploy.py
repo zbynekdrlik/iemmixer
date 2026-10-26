@@ -81,10 +81,17 @@ elif cmd == STOP:
             code = 5
         elif os.environ.get("FAKE_STILL_RUNS") == unit:
             st["units"][unit] = "deactivating"
-        else:
+        elif st["units"].get(unit) != "failed":   # a stop leaves a failed unit failed
             st["units"][unit] = "inactive"
     save()
     sys.exit(code)
+elif cmd == "systemctl list-units --all --plain --no-legend --full iem-dante.service iem-engine.service iem-server.service":
+    # systemd keeps in memory only a unit that runs, ends or failed lately;
+    # one installed and never started (or long inactive) is not listed.
+    for unit in ("iem-dante", "iem-engine", "iem-server"):
+        state = st["units"].get(unit, "inactive")
+        if unit not in st["not_loaded"] and state != "inactive":
+            print(f"{unit}.service loaded {state} {state} {unit}")
 elif cmd.startswith("systemctl is-active "):
     names = cmd.split()[2:]
     for unit in names:
@@ -152,6 +159,12 @@ elif cmd.startswith("set -e\n"):
             sys.exit(97)
         if words[3] == "daemon-reload":
             st["not_loaded"] = []
+        elif words[3] == "reset-failed":
+            for unit in words[4:]:
+                if st["units"].get(unit, "inactive") == "inactive":
+                    sys.stderr.write(f"Failed to reset failed state of unit {unit}.service: Unit {unit}.service not loaded.\n")
+                    sys.exit(1)
+            open(os.path.join(box, "reset.log"), "a").write(json.dumps(words[4:]) + "\n")
         elif words[3] == "start":
             wanted = dict(item.split("=", 1) for item in os.environ.get("FAKE_ACTIVE", "").split(",") if item)
             for unit in words[4:]:
@@ -425,6 +438,24 @@ class DeployTests(unittest.TestCase):
         self.assertIn("the stop exited 5", r.stderr)
         self.assertNotIn("WARNING", r.stderr)
         self.assertEqual(self.states(), {"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
+
+    def test_a_first_deploy_resets_only_the_units_systemd_holds(self) -> None:
+        # Live 1 (#72, 2026-10-26): units installed and never started are not
+        # in systemd's memory, and `reset-failed` of one fails ("not
+        # loaded"), which stopped the deploy before the start. Only a unit
+        # systemd lists is reset; its start counter is the one that matters.
+        self.set_states({"iem-dante": "inactive", "iem-engine": "inactive", "iem-server": "inactive"})
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not loaded", r.stderr)
+        self.assertEqual(self.states()["iem-engine"], "active")
+        self.assertFalse((self.box / "reset.log").exists())
+
+    def test_a_unit_that_failed_is_reset_before_the_start(self) -> None:
+        self.set_states({"iem-dante": "inactive", "iem-engine": "failed", "iem-server": "inactive"})
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.box / "reset.log").read_text(encoding="utf-8").splitlines(), ['["iem-engine"]'])
 
     def test_a_unit_still_running_after_the_stop_refuses_the_copy(self) -> None:
         self.set_states({"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
