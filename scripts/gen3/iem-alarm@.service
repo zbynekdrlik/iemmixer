@@ -1,0 +1,43 @@
+# The Gen 3 box's alarm (#72 phase D, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 5, choice 3);
+# rules in .claude/rules/gen3.md. Each unit of the stack (iem-engine,
+# iem-server, iem-dante) has OnFailure=iem-alarm@%n.service with
+# RestartMode=direct, so this runs, with the unit's name as its instance, only
+# when that unit stays down: a crash loop's start-limit-hit, an exit its unit
+# does not restart (2, 3), a stop past its bound. Never per restart.
+#
+# It writes one journal line (`journalctl -t iem-alarm`) and sends the notice
+# down the guard's own path to the engineer's devices, `iem-server notify --to
+# alarm` on the box's site (exit 3 when no device took it: until the box
+# serves HTTPS no device can subscribe, and the unit then reads failed, which
+# raises nothing more). systemd gives it the failed unit's result and exit
+# (MONITOR_SERVICE_RESULT, MONITOR_EXIT_CODE, MONITOR_EXIT_STATUS); the line
+# and the notice name the unit and those words and numbers only (P6).
+#
+# An alarm never raises an alarm (no OnFailure=), never restarts and is never
+# enabled (no [Install]); no shell: each command is a program and its
+# arguments. Its stop is bounded and never a kill (I8).
+
+[Unit]
+Description=iemmixer Gen 3 alarm: %i stays down
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+
+[Service]
+Type=oneshot
+User=iemmixer
+Group=iemmixer
+SyslogIdentifier=iem-alarm
+Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml
+ExecStart=/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} ${MONITOR_EXIT_STATUS})"
+ExecStart=/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"
+TimeoutStartSec=30
+TimeoutStopSec=10
+SendSIGKILL=no
+# It reads the site, the engineer's subscriptions and the VAPID key, and
+# sends the pushes: nothing to write, no capability.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

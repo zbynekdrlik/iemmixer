@@ -6,9 +6,14 @@
 # public synthetic test band (config/test-site.toml as iemmixer.toml and
 # config/test-roster.toml as roster.toml), which deploy.sh copies into
 # /var/lib/iemmixer/site; the server writes its secrets and the band's data
-# beside them. Public repository (P6): the box's user comes from the drop-in
-# /etc/systemd/system/iem-server.service.d/10-user.conf (User=), the same user
-# as the engine's, who owns the site folder and the engine's pipes.
+# beside them.
+# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
+# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# user without login or home, not site data), the engine's user, who owns the
+# site folder and the engine's pipes; its PIN pepper is the box's systemd
+# credential (made on the box by provision, root-only, never in clear on
+# disk), which systemd decrypts into the server's private credentials folder
+# at each start; a unit that stays down raises one alarm (iem-alarm@.service).
 #
 # No ordering with iem-engine.service: the server reconnects to the engine's
 # socket by itself (as on the PC), so the two start and stop in parallel.
@@ -16,23 +21,40 @@
 # engine and the device (plan Task 7).
 
 [Unit]
-Description=iemmixer Gen 3 server and UI (phase C: the public test band, plain HTTP on 8080)
+Description=iemmixer Gen 3 server and UI (phase D: the public test band, plain HTTP on 8080)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 Wants=network-online.target
 After=network-online.target
+# A crash loop stays down: a fourth start within ten minutes is refused
+# (manual starts count too; deploy.sh resets the count before its start).
+StartLimitIntervalSec=600
+StartLimitBurst=3
+# Down for good (start-limit-hit, a stop past its bound): one alarm.
+# RestartMode=direct keeps a restart out of `failed`, so a restart raises none.
+OnFailure=iem-alarm@%n.service
 
 [Service]
 Type=exec
+User=iemmixer
+Group=iemmixer
 ExecStart=/opt/iemmixer/bin/iem-server
 Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml IEMMIXER_ENGINE_PIPE=/run/iemmixer/engine.sock PORT=8080 RUST_LOG=info
+# The PIN pepper: $CREDENTIALS_DIRECTORY/pepper, exactly 32 bytes; a plain
+# test pepper in the site folder beside it is an error, never a fall back
+# (.claude/rules/security-baseline.md).
+LoadCredentialEncrypted=pepper:/etc/credstore.encrypted/iemmixer-pepper
+# Restarted after 1 s growing to 10 s in four steps.
 Restart=on-failure
-RestartSec=2
+RestartSec=1
+RestartSteps=4
+RestartMaxDelaySec=10
+RestartMode=direct
 # A stop is SIGTERM and a bounded wait (I8): the listener closes, open
 # requests get 5 s, exit 0. One that does not end within the bound is left
 # running and the stop fails, never force-ended.
 TimeoutStopSec=10
 SendSIGKILL=no
-# /var/lib/iemmixer, owned by the service's user: the site folder (secrets,
+# /var/lib/iemmixer, owned by the service user: the site folder (secrets,
 # lineups, backups beside the site file).
 StateDirectory=iemmixer
 # No capability: port 8080.

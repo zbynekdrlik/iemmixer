@@ -1,7 +1,8 @@
 """Tests for scripts/gen3/deploy.sh (#72 phase C, plan Task 6): the Gen 3
 stack's deploy, run against a stand-in `ssh` and `scp` first on PATH that play
 the box in a temporary folder (its home, its root and its units' states), and
-the three units' contents. The stand-in ssh records each call's command line
+the units' contents (phase C's three; phase D's service user and alarm unit,
+plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 5). The stand-in ssh records each call's command line
 and its stdin apart, so a PIN is seen to travel only on stdin. Every value is
 synthetic (P6)."""
 from __future__ import annotations
@@ -22,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 DEPLOY = HERE / "deploy.sh"
 UNITS = {name: HERE / f"{name}.service" for name in ("iem-dante", "iem-engine", "iem-server")}
+ALARM = HERE / "iem-alarm@.service"
 TEST_SITE = REPO / "config" / "test-site.toml"
 TEST_ROSTER = REPO / "config" / "test-roster.toml"
 HOST = "tester@gen3.test"
@@ -819,10 +821,23 @@ class DeployTests(unittest.TestCase):
 
 
 class UnitTests(unittest.TestCase):
-    """The three units (plan Task 6 Interfaces, choice 5)."""
+    """The units (phase C plan Task 6 Interfaces, choice 5; phase D plan Task 5,
+    choices 3 and 5: the service user, the alarm unit)."""
+
+    SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "busybox", "env"}
+    HARDENING = (("NoNewPrivileges", "yes"), ("ProtectSystem", "strict"), ("ProtectHome", "yes"),
+                 ("PrivateTmp", "yes"))
+    CREDENTIALS = ("LoadCredential", "LoadCredentialEncrypted", "SetCredential", "SetCredentialEncrypted",
+                   "ImportCredential")
 
     def setUp(self) -> None:
         self.units = {name: parse_unit(path) for name, path in UNITS.items()}
+
+    def alarm(self) -> dict[str, dict[str, list[str]]]:
+        return parse_unit(ALARM)
+
+    def all_four(self) -> dict[str, dict[str, dict[str, list[str]]]]:
+        return {**self.units, "iem-alarm@": self.alarm()}
 
     def test_the_engine_and_the_standalone_device_conflict_both_ways(self) -> None:
         self.assertEqual(self.units["iem-engine"]["Unit"].get("Conflicts"), ["iem-dante.service"])
@@ -845,25 +860,87 @@ class UnitTests(unittest.TestCase):
                 self.assertEqual(one(unit, "Service", "TimeoutStopSec"), "10")
                 self.assertEqual(one(unit, "Service", "SendSIGKILL"), "no")
                 self.assertEqual(one(unit, "Service", "Restart"), "on-failure")
-                self.assertEqual(one(unit, "Service", "NoNewPrivileges"), "yes")
-                self.assertEqual(one(unit, "Service", "CapabilityBoundingSet"), "")
-                self.assertEqual(one(unit, "Service", "AmbientCapabilities"), "")
-                # The user comes from deploy.sh's drop-in (P6), never the unit.
-                self.assertNotIn("User", unit["Service"])
+                for key, value in self.HARDENING:
+                    self.assertEqual(one(unit, "Service", key), value, key)
                 # [Install] stays so `disable` removes an earlier enable.
                 self.assertEqual(one(unit, "Install", "WantedBy"), "multi-user.target")
 
-    def test_the_engine_unit_restarts_except_on_a_usage_or_card_refusal_and_stays_down_in_a_crash_loop(self) -> None:
+    def test_every_unit_and_the_alarm_run_as_the_service_user(self) -> None:
+        # Phase D choice 5: the system user and group `iemmixer` (not site
+        # data) in the units themselves, no drop-in naming the admin user.
+        for name, unit in self.all_four().items():
+            with self.subTest(unit=name):
+                self.assertEqual(one(unit, "Service", "User"), "iemmixer")
+                self.assertEqual(one(unit, "Service", "Group"), "iemmixer")
+                for section in unit.values():
+                    self.assertNotIn("DynamicUser", section)
+        for path in [*UNITS.values(), ALARM]:
+            self.assertNotIn("10-user.conf", path.read_text(encoding="utf-8"), path.name)
+
+    def test_every_unit_raises_the_alarm_only_when_it_stays_down(self) -> None:
+        # OnFailure= runs the alarm once the unit fails for good (a crash
+        # loop's start-limit-hit, exit 2 or 3, a stop past its bound);
+        # RestartMode=direct keeps a restart from passing through `failed`,
+        # so an ordinary restart raises none.
+        for name, unit in self.units.items():
+            with self.subTest(unit=name):
+                self.assertEqual(one(unit, "Unit", "OnFailure"), "iem-alarm@%n.service")
+                self.assertNotIn("OnFailure", unit["Service"])
+                self.assertNotIn("OnSuccess", unit["Unit"])
+                self.assertEqual(one(unit, "Service", "RestartMode"), "direct")
+
+    def test_every_unit_restarts_with_a_backoff_and_stays_down_in_a_crash_loop(self) -> None:
+        # Choice 3: 1 s growing to 10 s in four steps; a fourth start within
+        # ten minutes is refused (start-limit-hit). The start limit lives in
+        # [Unit] (systemd ignores it in [Service]).
+        for name, unit in self.units.items():
+            with self.subTest(unit=name):
+                self.assertEqual(one(unit, "Service", "RestartSec"), "1")
+                self.assertEqual(one(unit, "Service", "RestartSteps"), "4")
+                self.assertEqual(one(unit, "Service", "RestartMaxDelaySec"), "10")
+                self.assertEqual(one(unit, "Unit", "StartLimitIntervalSec"), "600")
+                self.assertEqual(one(unit, "Unit", "StartLimitBurst"), "3")
+                for key in ("StartLimitIntervalSec", "StartLimitBurst", "StartLimitInterval"):
+                    self.assertNotIn(key, unit["Service"])
+
+    def test_no_unit_holds_a_capability(self) -> None:
+        # dantesync is the box's one PTP owner (owner, 2026-10-26): our
+        # device never opens UDP 319/320 and every port of the stack is above
+        # 1024, so no unit needs a capability.
+        for name, unit in self.all_four().items():
+            with self.subTest(unit=name):
+                self.assertEqual(one(unit, "Service", "CapabilityBoundingSet"), "")
+                self.assertEqual(one(unit, "Service", "AmbientCapabilities"), "")
+
+    def test_the_pepper_credential_only_on_the_server(self) -> None:
+        # Choice 5: systemd decrypts the box's credential into the server's
+        # private credentials folder at each start; no other unit gets it.
+        server = self.units["iem-server"]
+        self.assertEqual(one(server, "Service", "LoadCredentialEncrypted"),
+                         "pepper:/etc/credstore.encrypted/iemmixer-pepper")
+        for name, unit in self.all_four().items():
+            for key in self.CREDENTIALS:
+                if name == "iem-server" and key == "LoadCredentialEncrypted":
+                    continue
+                self.assertNotIn(key, unit["Service"], (name, key))
+
+    def test_the_runtime_folders_open_to_the_service_group_only(self) -> None:
+        # 0750: the admin user, in the group `iemmixer`, reaches the device's
+        # 0660 control socket; nobody else reaches anything in them.
+        engine, device, server = (self.units[n] for n in ("iem-engine", "iem-dante", "iem-server"))
+        self.assertEqual(one(engine, "Service", "RuntimeDirectory"), "iemmixer iem-dante")
+        self.assertEqual(one(engine, "Service", "RuntimeDirectoryMode"), "0750")
+        self.assertEqual(one(device, "Service", "RuntimeDirectory"), "iem-dante")
+        self.assertEqual(one(device, "Service", "RuntimeDirectoryMode"), "0750")
+        for unit in (server, self.alarm()):
+            self.assertNotIn("RuntimeDirectory", unit["Service"])
+            self.assertNotIn("RuntimeDirectoryMode", unit["Service"])
+
+    def test_the_engine_unit_restarts_except_on_a_usage_or_card_refusal(self) -> None:
         engine = self.units["iem-engine"]
-        self.assertEqual(one(engine, "Service", "RestartSec"), "2")
         self.assertEqual(one(engine, "Service", "RestartPreventExitStatus"), "2 3")
-        # The start limit lives in [Unit] (systemd ignores it in [Service]).
-        self.assertEqual(one(engine, "Unit", "StartLimitIntervalSec"), "600")
-        self.assertEqual(one(engine, "Unit", "StartLimitBurst"), "3")
         self.assertEqual(one(engine, "Service", "LimitRTPRIO"), "80")
         self.assertEqual(one(engine, "Service", "StateDirectory"), "iemmixer iem-dante")
-        self.assertEqual(one(engine, "Service", "RuntimeDirectory"), "iemmixer iem-dante")
-        self.assertEqual(one(engine, "Service", "RuntimeDirectoryMode"), "0700")
         self.assertEqual(one(engine, "Service", "EnvironmentFile"), "/etc/iemmixer/iem-dante.env")
 
     def test_the_engine_runs_the_dante_backend_on_the_servers_site_and_pipe(self) -> None:
@@ -889,7 +966,6 @@ class UnitTests(unittest.TestCase):
         self.assertTrue(opts["--state-dir"].startswith("/var/lib/iemmixer/"))
         self.assertTrue(opts["--pipe"].startswith("/run/iemmixer/"))
         self.assertEqual(one(server, "Service", "StateDirectory"), "iemmixer")
-        self.assertNotIn("RuntimeDirectory", server["Service"])
         # The engine's device reads the standalone device's config, and the
         # device's control socket stays at its phase B path in /run/iem-dante.
         device = shlex.split(one(self.units["iem-dante"], "Service", "ExecStart"))
@@ -897,13 +973,57 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(device[device.index("--control") + 1], "/run/iem-dante/control.sock")
         self.assertNotIn("--dante-control", opts)
 
-    def test_the_standalone_device_keeps_fifo_its_private_runtime_folder_and_its_stop(self) -> None:
+    def test_the_standalone_device_keeps_fifo_its_state_and_its_exit_codes(self) -> None:
         device = self.units["iem-dante"]
-        for key, value in (("LimitRTPRIO", "80"), ("RuntimeDirectory", "iem-dante"), ("RuntimeDirectoryMode", "0700"),
-                           ("StateDirectory", "iem-dante"), ("RestartPreventExitStatus", "2")):
+        for key, value in (("LimitRTPRIO", "80"), ("StateDirectory", "iem-dante"),
+                           ("RestartPreventExitStatus", "2")):
             self.assertEqual(one(device, "Service", key), value)
         exec_start = one(device, "Service", "ExecStart")
         self.assertIn("--control /run/iem-dante/control.sock", exec_start)
+
+    def test_the_alarm_unit_says_which_unit_stays_down_and_notifies_the_engineer(self) -> None:
+        alarm = self.alarm()
+        service = alarm["Service"]
+        self.assertEqual(one(alarm, "Service", "Type"), "oneshot")
+        self.assertEqual(one(alarm, "Service", "SyslogIdentifier"), "iem-alarm")
+        self.assertEqual(one(alarm, "Service", "TimeoutStartSec"), "30")
+        # The site the server reads, so the notice reaches its engineer's devices.
+        server_env = dict(item.split("=", 1)
+                          for item in shlex.split(one(self.units["iem-server"], "Service", "Environment")))
+        self.assertEqual(service.get("Environment"), [f"IEMMIXER_CONFIG={server_env['IEMMIXER_CONFIG']}"])
+        self.assertEqual(service.get("ExecStart"), [
+            '/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} '
+            '${MONITOR_EXIT_STATUS})"',
+            '/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"',
+        ])
+        # The notice is the server unit's own binary: the guard's alarm path.
+        notify = shlex.split(service["ExecStart"][1])
+        self.assertEqual(notify[0], one(self.units["iem-server"], "Service", "ExecStart"))
+        self.assertEqual(notify[1:], ["notify", "--to", "alarm", "Gen 3 box",
+                                      "%i stays down: ${MONITOR_SERVICE_RESULT}"])
+
+    def test_the_alarm_unit_never_loops_never_starts_by_itself_and_runs_no_shell(self) -> None:
+        alarm = self.alarm()
+        # An alarm never raises an alarm, never restarts and is never enabled.
+        for section in alarm.values():
+            for key in ("OnFailure", "OnSuccess", "Restart"):
+                self.assertNotIn(key, section)
+        self.assertNotIn("Install", alarm)
+        # No shell: every command is a program called with its arguments.
+        service = alarm["Service"]
+        lines = [line for key in ("ExecStartPre", "ExecStart", "ExecStartPost", "ExecCondition", "ExecReload",
+                                  "ExecStop", "ExecStopPost") for line in service.get(key, [])]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            argv = shlex.split(line)
+            self.assertTrue(argv[0].startswith("/"), line)
+            self.assertNotIn(Path(argv[0]).name, self.SHELLS, line)
+            self.assertNotIn("-c", argv[1:], line)
+        # Its stop is bounded and never a kill (I8); the stack's hardening.
+        self.assertEqual(one(alarm, "Service", "TimeoutStopSec"), "10")
+        self.assertEqual(one(alarm, "Service", "SendSIGKILL"), "no")
+        for key, value in self.HARDENING:
+            self.assertEqual(one(alarm, "Service", key), value, key)
 
 
 if __name__ == "__main__":
