@@ -14,7 +14,10 @@
 //! A kind is the reply ([`Kind`]), not the request's whole opcode: a
 //! request's byte 1 (and for 0x13 and 0x77 its last byte) may be anything,
 //! so a sender that varies them still meets one bound. A request that gets
-//! no reply (clock stats, an unknown opcode) is never bounded here.
+//! no reply (clock stats, an unknown opcode) is never bounded here. The
+//! channel-change notification is a kind of its own: the server sends one
+//! only when [`Limit::room`] says so and keeps the changes until then, so
+//! it is never dropped.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -30,12 +33,13 @@ pub const REPORT_EVERY: Duration = Duration::from_secs(60);
 /// How often the server looks whether a report is due.
 pub const CHECK: Duration = Duration::from_secs(1);
 
-/// The kinds the server answers, in their report order.
-pub const BOUNDED: [Kind; 4] = [
+/// The kinds the server sends, in their report order.
+pub const BOUNDED: [Kind; 5] = [
     Kind::BoardInfo,
     Kind::ProductInfo,
     Kind::NetworkInfo,
     Kind::Op0077,
+    Kind::ChannelChange,
 ];
 
 /// The replies dropped over the bound in one report's time.
@@ -59,6 +63,7 @@ fn label(kind: Kind) -> &'static str {
         Kind::ProductInfo => "0xc1 product info",
         Kind::NetworkInfo => "0x13 network info",
         Kind::Op0077 => "0x77",
+        Kind::ChannelChange => "channel change",
         // Never bounded, so never in a report.
         Kind::ClockStats | Kind::Unknown => "no reply",
     }
@@ -105,22 +110,28 @@ impl Limit {
         }
     }
 
-    /// Whether a reply of `kind` may go out at `now`. One that may is
-    /// counted toward its kind's window; one that may not is a drop,
-    /// counted for the report. A kind without a reply always may.
+    /// Whether a reply of `kind` may go out at `now`, nothing counted: the
+    /// oldest of its kind's last [`PER_SPAN`] went out [`SPAN`] or more
+    /// ago. A kind without a reply always may.
+    pub fn room(&self, now: Instant, kind: Kind) -> bool {
+        slot(kind).is_none_or(|k| {
+            self.sent[k][self.next[k]].is_none_or(|t| now.saturating_duration_since(t) >= SPAN)
+        })
+    }
+
+    /// Whether a reply of `kind` may go out at `now` ([`Limit::room`]). One
+    /// that may is counted toward its kind's window; one that may not is a
+    /// drop, counted for the report. A kind without a reply always may.
     pub fn allow(&mut self, now: Instant, kind: Kind) -> bool {
         let Some(k) = slot(kind) else {
             return true;
         };
-        let oldest = &mut self.sent[k][self.next[k]];
-        // The oldest of the last PER_SPAN replies within SPAN: the bound is
-        // reached.
-        if oldest.is_some_and(|t| now.saturating_duration_since(t) < SPAN) {
+        if !self.room(now, kind) {
             self.dropped[k] += 1;
             self.started.get_or_insert(now);
             return false;
         }
-        *oldest = Some(now);
+        self.sent[k][self.next[k]] = Some(now);
         self.next[k] = (self.next[k] + 1) % PER_SPAN;
         true
     }

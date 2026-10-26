@@ -236,3 +236,21 @@ fn a_body_writer_hands_out_packet_offsets() {
     );
     assert_eq!(string_at(&bytes, at), Some("ab"));
 }
+
+#[test]
+fn a_body_aligns_on_packet_offsets_the_header_counted() {
+    let mut body = Body::new();
+    // Packet offset 10: two zeros up to 12.
+    body.align(4);
+    assert_eq!(body.offset(), 12);
+    // Aligned already: nothing added.
+    body.align(4);
+    assert_eq!(body.offset(), 12);
+    body.bytes(&[1, 2, 3]);
+    body.align(4);
+    assert_eq!(body.offset(), 16);
+    body.u8(4);
+    body.align(8);
+    assert_eq!(body.offset(), 24);
+    assert_eq!(body.into_vec(), [0, 0, 1, 2, 3, 0, 4, 0, 0, 0, 0, 0, 0, 0]);
+}

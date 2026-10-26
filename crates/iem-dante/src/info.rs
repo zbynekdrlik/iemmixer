@@ -48,23 +48,56 @@
 //! [`limit::PER_SPAN`] replies of a kind go out in any second; the rest are
 //! dropped and counted in one warning a minute.
 //!
-//! The heartbeat's opcode is `00 08 00 01 10 00 00 00` and, with no clock,
-//! its body is empty: inferno adds its records (the frequency offset
-//! 0x8001, the peaks 0x8002, the RX latency 0x8003) only once its clock
-//! has an offset, and phase A has no PTP.
+//! **The channel-change notification** (`07 2a 01 02 00 00 00 00`, to the
+//! info group, unasked): a 16-bit length, then a bitmask of RX channels
+//! (bit `n mod 8` of byte `n / 8` for channel `n` from 0, at least one
+//! byte; inferno's `make_channel_change_notification`). Dante Controller
+//! reads ARC 0x3000 again for them. It goes out when an RX channel is
+//! renamed, or its subscription or its status changes ([`Changes`]);
+//! changes are coalesced, so one notification names every channel that
+//! changed since the last, and it is bounded as a kind of its own (at most
+//! [`limit::PER_SPAN`] a second; a change held back goes with the next).
+//! inferno also sends an empty one after an RX rename that renamed
+//! nothing; we send none without a channel.
+//!
+//! **The heartbeat**'s opcode is `00 08 00 01 10 00 00 00`. While the
+//! media clock is not ready its body is empty, as inferno's before its
+//! clock has an offset. Once it is ready ([`Beat::records`]), the body
+//! holds inferno's records ([`heartbeat_body`]), each `length, type, 4,
+//! content length, the packet's sequence, 0`, then:
+//!
+//! - 0x8001: dantesync's frequency adjustment, ppb (`i32`): what our clock
+//!   follows, never a lock of our own;
+//! - 0x8002: the peaks, one byte a channel (`−40·log10` of the peak's part
+//!   of full scale, 0 to 255: [`peak_byte`]), TX channels then RX channels,
+//!   padded to 4 bytes;
+//! - 0x8003: our rate and each RX flow slot's largest lateness since the
+//!   last beat, samples (0 for a slot without a granted flow).
+//!
+//! Clock stats (`07 xx 00 21`) stay unanswered: inferno sends them only
+//! with a grandmaster identity read from its PTP daemon's files, and our
+//! device has none of its own (the box's dantesync is the PTP follower).
 //!
 //! Logs name opcodes, sequences and ports, never an address or a MAC.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
+use tokio::sync::Notify;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
+use crate::clock::PtpClock;
 use crate::cmc::{PROCESS_ID, device_id};
 use crate::device::DeviceConfig;
+use crate::media::rx::{MAX_FLOWS, RxShared};
+use crate::media::tx::TxShared;
+use crate::subscribe::Manager;
 use limit::Limit;
 
 pub mod limit;
@@ -96,7 +129,16 @@ pub mod op {
     pub const NETWORK_INFO: [u8; 8] = [0x07, 0x2a, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00];
     /// The answer to 0x77, whose meaning inferno does not name.
     pub const ANSWER_0077: [u8; 8] = [0x07, 0x2a, 0x00, 0x78, 0x00, 0x00, 0x00, 0x00];
+    /// RX channels changed (sent unasked).
+    pub const CHANNEL_CHANGE: [u8; 8] = [0x07, 0x2a, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00];
     pub const HEARTBEAT: [u8; 8] = [0x00, 0x08, 0x00, 0x01, 0x10, 0x00, 0x00, 0x00];
+}
+
+/// The heartbeat records' types.
+pub mod record {
+    pub const FREQUENCY: u16 = 0x8001;
+    pub const PEAKS: u16 = 0x8002;
+    pub const RX_LATENESS: u16 = 0x8003;
 }
 
 pub const BOARD_INFO_LEN: usize = 200;
@@ -181,10 +223,14 @@ pub enum Kind {
     NetworkInfo,
     /// 0x77: answered with [`op::ANSWER_0077`].
     Op0077,
-    /// 0x21: clock stats, which a device without a clock does not send.
+    /// 0x21: clock stats, which a device without a PTP daemon of its own
+    /// does not send.
     ClockStats,
     /// Anything else: no reply.
     Unknown,
+    /// No request: the channel-change notification, sent unasked and
+    /// bounded as a kind of its own.
+    ChannelChange,
 }
 
 /// A request received on [`REQUEST_PORT`].
@@ -266,6 +312,198 @@ pub fn network_info_body(net: &NetInfo) -> [u8; NETWORK_INFO_LEN] {
     c
 }
 
+/// The channel-change notification's body for the RX channels `rx` (from
+/// 0): the bitmask's length in bytes (at least 1), then the bitmask.
+pub fn channel_change_body(rx: &[usize]) -> Vec<u8> {
+    let mut c = vec![0u8; 3];
+    for &ch in rx {
+        let byte = 2 + ch / 8;
+        if byte >= c.len() {
+            c.resize(byte + 1, 0);
+        }
+        c[byte] |= 1 << (ch % 8);
+    }
+    let mask = u16::try_from(c.len() - 2).unwrap_or(u16::MAX);
+    c[..2].copy_from_slice(&mask.to_be_bytes());
+    c
+}
+
+/// A channel's peak as the heartbeat carries it (inferno's
+/// `peaks_of_buffers`): `−40·log10(peak / i32::MAX)`, rounded, 0 to 255
+/// (silence 255, full scale 0), in `f32` as inferno computes it.
+pub fn peak_byte(peak: u32) -> u8 {
+    let peak = peak.min(i32::MAX as u32) as i32;
+    let lin = peak as f32 / i32::MAX as f32;
+    let log = lin.log10() * 40.0;
+    (-log).round().clamp(0.0, 255.0) as u8
+}
+
+/// What the heartbeat reports once the media clock is ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Records {
+    /// dantesync's frequency adjustment, ppb.
+    pub freq_ppb: i32,
+    /// Each TX channel's peak byte ([`peak_byte`]).
+    pub tx_peaks: Vec<u8>,
+    /// Each RX channel's peak byte.
+    pub rx_peaks: Vec<u8>,
+    /// Our sample rate.
+    pub rate: u32,
+    /// Each RX flow slot's largest lateness since the last beat, samples.
+    pub lateness: [u32; MAX_FLOWS],
+}
+
+/// A record's head: its length, its type, 4, its content's length, the
+/// packet's sequence `seq`, 0.
+fn record_head(out: &mut Vec<u8>, len: usize, kind: u16, seq: u16) {
+    for field in [
+        u16::try_from(len).unwrap_or(u16::MAX),
+        kind,
+        4,
+        u16::try_from(len - 12).unwrap_or(u16::MAX),
+        seq,
+        0,
+    ] {
+        out.extend_from_slice(&field.to_be_bytes());
+    }
+}
+
+/// The heartbeat's body with `records` for the packet of sequence `seq`
+/// (inferno's `send_heartbeat`): 0x8001, then 0x8002 when there are peaks,
+/// then 0x8003.
+pub fn heartbeat_body(seq: u16, r: &Records) -> Vec<u8> {
+    let mut out = Vec::new();
+    record_head(&mut out, 16, record::FREQUENCY, seq);
+    out.extend_from_slice(&r.freq_ppb.to_be_bytes());
+    let peaks = r.tx_peaks.len() + r.rx_peaks.len();
+    if peaks > 0 {
+        let end = out.len() + (24 + peaks).next_multiple_of(4);
+        record_head(&mut out, 24 + peaks, record::PEAKS, seq);
+        for count in [r.tx_peaks.len(), r.rx_peaks.len(), 24] {
+            out.extend_from_slice(&u16::try_from(count).unwrap_or(u16::MAX).to_be_bytes());
+            out.extend_from_slice(&[0, 0]);
+        }
+        out.extend_from_slice(&r.tx_peaks);
+        out.extend_from_slice(&r.rx_peaks);
+        out.resize(end, 0);
+    }
+    record_head(&mut out, 24 + 4 * MAX_FLOWS, record::RX_LATENESS, seq);
+    for field in [MAX_FLOWS as u16, 0, 24, 0] {
+        out.extend_from_slice(&field.to_be_bytes());
+    }
+    out.extend_from_slice(&r.rate.to_be_bytes());
+    for lateness in r.lateness {
+        out.extend_from_slice(&lateness.to_be_bytes());
+    }
+    out
+}
+
+/// Where the heartbeat's records come from.
+pub trait Beat: Send + Sync {
+    /// The records now; `None` while the media clock is not ready (the
+    /// heartbeat is the header alone then, as inferno's without a clock).
+    fn records(&self) -> Option<Records>;
+}
+
+/// A device without a media clock: the heartbeat is the header alone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoClock;
+
+impl Beat for NoClock {
+    fn records(&self) -> Option<Records> {
+        None
+    }
+}
+
+/// The running device's records (plan Task 7 builds it): the media clock,
+/// dantesync's frequency adjustment as the clock's poller keeps it, the TX
+/// side (its channels' peaks), the RX side (its rings' peaks, its slots'
+/// lateness) and the manager (which slots hold a granted flow). Each beat
+/// takes the peaks and the lateness, so the next one reports its own
+/// second.
+#[derive(Clone)]
+pub struct Sources {
+    pub clock: Arc<dyn PtpClock>,
+    pub freq: Arc<AtomicI32>,
+    pub tx: Arc<TxShared>,
+    pub rx: Arc<RxShared>,
+    pub manager: Arc<Mutex<Manager>>,
+}
+
+impl Beat for Sources {
+    fn records(&self) -> Option<Records> {
+        self.clock.now_ns()?;
+        let granted: [bool; MAX_FLOWS] = {
+            let m = self.manager.lock().unwrap_or_else(PoisonError::into_inner);
+            std::array::from_fn(|slot| m.flow(slot).is_some_and(|f| f.handle.is_some()))
+        };
+        Some(Records {
+            freq_ppb: self.freq.load(Ordering::Relaxed),
+            tx_peaks: (0..self.tx.cfg.tx.len())
+                .map(|tx| peak_byte(self.tx.take_peak(tx)))
+                .collect(),
+            rx_peaks: self
+                .rx
+                .rings()
+                .iter()
+                .map(|ring| peak_byte(ring.take_peak()))
+                .collect(),
+            rate: self.tx.cfg.sample_rate,
+            lateness: std::array::from_fn(|slot| {
+                if granted[slot] {
+                    u32::try_from(self.rx.take_max_lateness(slot).min(i32::MAX as u64)).unwrap_or(0)
+                } else {
+                    0
+                }
+            }),
+        })
+    }
+}
+
+/// RX channels whose name, subscription or status changed, waiting for
+/// the next channel-change notification: coalesced, so one notification
+/// names every channel that changed since the last, and none is lost while
+/// the bound holds it back. The ARC server and the manager's loop add to
+/// it; the info server takes from it.
+#[derive(Debug, Default)]
+pub struct Changes {
+    pending: Mutex<BTreeSet<usize>>,
+    added: Notify,
+}
+
+impl Changes {
+    /// RX channels `rx` (from 0) changed.
+    pub fn add(&self, rx: impl IntoIterator<Item = usize>) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = pending.len();
+        pending.extend(rx);
+        if pending.len() > before {
+            self.added.notify_one();
+        }
+    }
+
+    /// Whether a change waits.
+    pub fn is_empty(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    }
+
+    /// Every change waiting, in channel order; none waits after.
+    pub fn take(&self) -> Vec<usize> {
+        std::mem::take(&mut *self.pending.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_iter()
+            .collect()
+    }
+
+    /// Until a change is added (at once when one was added since the last
+    /// wait).
+    pub async fn added(&self) {
+        self.added.notified().await;
+    }
+}
+
 /// The device's sender of info packets: its identity and the sequence its
 /// next packet carries (inferno's `Multicaster`).
 #[derive(Debug, Clone)]
@@ -306,9 +544,35 @@ impl Multicaster {
         self.packet(START_INFO, op::PRODUCT_INFO, &body)
     }
 
-    /// The heartbeat of a device with no clock: the header alone.
-    pub fn heartbeat(&mut self) -> Vec<u8> {
-        self.packet(START_HEARTBEAT, op::HEARTBEAT, &[])
+    /// The heartbeat: the header alone without `records` (the clock is not
+    /// ready), else with them ([`heartbeat_body`], each record carrying
+    /// this packet's sequence).
+    pub fn heartbeat(&mut self, records: Option<&Records>) -> Vec<u8> {
+        let body = records.map_or_else(Vec::new, |r| heartbeat_body(self.seq, r));
+        self.packet(START_HEARTBEAT, op::HEARTBEAT, &body)
+    }
+
+    /// The channel-change notification for the RX channels `rx` (from 0).
+    pub fn channel_change(&mut self, rx: &[usize]) -> Vec<u8> {
+        self.packet(START_INFO, op::CHANNEL_CHANGE, &channel_change_body(rx))
+    }
+
+    /// The channel-change notification for every change waiting in
+    /// `changes`, when one waits and `limit` has room for one now; `None`
+    /// (the changes kept for later, no sequence used) otherwise.
+    pub fn notify_within(
+        &mut self,
+        limit: &mut Limit,
+        now: Instant,
+        changes: &Changes,
+    ) -> Option<Vec<u8>> {
+        if changes.is_empty() || !limit.room(now, Kind::ChannelChange) {
+            return None;
+        }
+        limit.allow(now, Kind::ChannelChange);
+        let rx = changes.take();
+        debug!(channels = rx.len(), "RX channels changed: notified");
+        Some(self.channel_change(&rx))
     }
 
     /// The reply to a datagram received on [`REQUEST_PORT`], for the info
@@ -331,10 +595,10 @@ impl Multicaster {
             }
             Kind::Op0077 => Some(self.packet(START_INFO, op::ANSWER_0077, &ANSWER_0077_BODY)),
             Kind::ClockStats => {
-                debug!(op = %opcode, seq = req.seq, "clock stats asked: no clock, no reply");
+                debug!(op = %opcode, seq = req.seq, "clock stats asked: no PTP daemon of ours, no reply");
                 None
             }
-            Kind::Unknown => {
+            Kind::Unknown | Kind::ChannelChange => {
                 info!(op = %opcode, seq = req.seq, "info request not answered");
                 None
             }
@@ -383,17 +647,26 @@ impl Multicast {
 /// [`REQUEST_PORT`]): sends the board and the product info, then answers
 /// every request to `to.info` within the bound ([`limit`]: at most
 /// [`limit::PER_SPAN`] replies of a kind a second, the drops logged as one
-/// warning a minute, looked at every [`limit::CHECK`]) and beats to
-/// `to.heartbeat` every `to.every`, the first beat at once. The socket's
-/// address picks the interface the multicasts leave by (Linux routes a
-/// multicast from a bound source address out of that address's
-/// interface). Ends only with an error receiving; a packet that cannot be
-/// sent is logged and the server goes on.
-pub async fn serve_info(sock: UdpSocket, mut mc: Multicaster, to: Multicast) -> io::Result<()> {
+/// warning a minute, looked at every [`limit::CHECK`]), sends the
+/// channel-change notification to `to.info` when `changes` holds one
+/// (within the bound; one held back goes at the next [`limit::CHECK`]) and
+/// beats to `to.heartbeat` every `to.every` with `beat`'s records, the
+/// first beat at once. The socket's address picks the interface the
+/// multicasts leave by (Linux routes a multicast from a bound source
+/// address out of that address's interface). Ends only with an error
+/// receiving; a packet that cannot be sent is logged and the server goes
+/// on.
+pub async fn serve_info(
+    sock: UdpSocket,
+    mut mc: Multicaster,
+    to: Multicast,
+    beat: Arc<dyn Beat>,
+    changes: Arc<Changes>,
+) -> io::Result<()> {
     send(&sock, &mc.board_info(), to.info).await;
     send(&sock, &mc.product_info(), to.info).await;
-    let mut beat = tokio::time::interval(to.every);
-    beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut every = tokio::time::interval(to.every);
+    every.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut check = tokio::time::interval(limit::CHECK);
     check.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut bound = Limit::default();
@@ -406,8 +679,19 @@ pub async fn serve_info(sock: UdpSocket, mut mc: Multicaster, to: Multicast) -> 
                     send(&sock, &packet, to.info).await;
                 }
             }
-            _ = beat.tick() => send(&sock, &mc.heartbeat(), to.heartbeat).await,
+            _ = every.tick() => {
+                let records = beat.records();
+                send(&sock, &mc.heartbeat(records.as_ref()), to.heartbeat).await;
+            }
+            () = changes.added() => {
+                if let Some(packet) = mc.notify_within(&mut bound, Instant::now(), &changes) {
+                    send(&sock, &packet, to.info).await;
+                }
+            }
             _ = check.tick() => {
+                if let Some(packet) = mc.notify_within(&mut bound, Instant::now(), &changes) {
+                    send(&sock, &packet, to.info).await;
+                }
                 if let Some(report) = bound.flush(Instant::now()) {
                     warn!(
                         dropped = report.total(),

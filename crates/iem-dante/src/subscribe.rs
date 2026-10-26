@@ -298,6 +298,11 @@ impl Manager {
         }
     }
 
+    /// Our address: where every flow slot receives (ARC 0x3200).
+    pub fn ip(&self) -> Ipv4Addr {
+        self.ip
+    }
+
     /// RX channel `rx`'s subscription.
     pub fn subscription(&self, rx: usize) -> Option<&Subscription> {
         self.subs.get(rx)?.as_ref()

@@ -29,13 +29,16 @@
 //!   names and RX subscriptions, with Dante's name rules.
 //! - [`wire`]: the request/response datagram ARC and CMC share.
 //! - [`arc`]: the control server on UDP 4440: names, channel lists,
-//!   renames, the empty flow lists; every opcode inferno answers is
+//!   renames, the TX and RX flow lists, our RX subscriptions (set on our
+//!   own device, kept in the state file); every opcode inferno answers is
 //!   answered as inferno answers it, the rest get no reply and are counted
 //!   in one warning a minute.
 //! - [`cmc`]: the advertisement on UDP 8800.
 //! - [`info`]: the info requests on UDP 8700 (replies to the info group
-//!   224.0.0.231:8702) and the heartbeat every second to 224.0.0.233:8708;
-//!   Dante Controller goes on to ARC only once its board info request is
+//!   224.0.0.231:8702), the channel-change notification there, and the
+//!   heartbeat every second to 224.0.0.233:8708 (with the frequency, peak
+//!   and RX lateness records once the media clock is ready); Dante
+//!   Controller goes on to ARC only once its board info request is
 //!   answered.
 //! - [`announce`]: the mDNS records Dante Controller browses for, and their
 //!   announcer.

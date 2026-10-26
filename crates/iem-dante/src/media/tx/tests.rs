@@ -694,6 +694,41 @@ fn a_flow_carries_its_sources_samples_stamped_t_to_its_receiver_only() {
 }
 
 #[test]
+fn a_sent_channel_s_peak_is_kept_until_taken() {
+    let mut rig = Rig::new(Vec::new());
+    assert!(rig.shared.set_source(0, Source::Counter));
+    assert!(rig.shared.set_source(
+        2,
+        Source::Sine {
+            hz: 1_000.0,
+            dbfs: -20.0
+        }
+    ));
+    rig.flow(vec![Some(1), Some(2), Some(3)]);
+    // Nothing sent yet: no peak.
+    assert_eq!(rig.shared.take_peak(0), 0);
+    let packets = run(&mut rig, 0, 20_000);
+    // The counter's largest sample sent, read back from the packets.
+    let loudest = packets
+        .iter()
+        .flat_map(|p| slot_samples(p, 3, 0))
+        .map(i32::unsigned_abs)
+        .max()
+        .unwrap();
+    assert!(loudest > 0);
+    assert_eq!(rig.shared.take_peak(0), loudest);
+    assert_eq!(rig.shared.take_peak(0), 0, "taken");
+    // TX 2 is silent; TX 3's sine is at most -20 dBFS and near it.
+    assert_eq!(rig.shared.take_peak(1), 0);
+    let sine = rig.shared.take_peak(2);
+    let cap = (f64::from(i32::MAX) * 0.1) as u32;
+    assert!((cap - cap / 100..=cap).contains(&sine), "{sine}");
+    // A channel no flow sends, and one the device does not have.
+    assert_eq!(rig.shared.take_peak(3), 0);
+    assert_eq!(rig.shared.take_peak(99), 0);
+}
+
+#[test]
 fn nothing_is_sent_before_the_clock_is_ready_but_keepalives_are_read() {
     let mut rig = Rig::new(Vec::new());
     let (slot, _) = rig.flow(vec![Some(1)]);

@@ -167,6 +167,18 @@ impl Body {
         self.bytes.resize(self.bytes.len() + n, 0);
     }
 
+    pub fn bytes(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    /// Zeros up to the next packet offset that is a multiple of `n`
+    /// (inferno's `align_wpos`, whose buffer holds the header too).
+    pub fn align(&mut self, n: usize) {
+        while usize::from(self.offset()) % n != 0 {
+            self.bytes.push(0);
+        }
+    }
+
     /// Writes `s` and its NUL; returns the packet offset of its first byte.
     pub fn cstr(&mut self, s: &str) -> u16 {
         let at = self.offset();

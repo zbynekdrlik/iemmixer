@@ -387,7 +387,7 @@ fn clock_stats_and_unknown_requests_get_no_reply_and_use_no_sequence() {
         None
     );
     assert_eq!(mc.answer(&captured()[..31]), None);
-    assert_eq!(mc.heartbeat(), packet(0xfffe, 1, HEARTBEAT, &[]));
+    assert_eq!(mc.heartbeat(None), packet(0xfffe, 1, HEARTBEAT, &[]));
 }
 
 #[test]
@@ -395,7 +395,7 @@ fn the_heartbeat_is_a_bare_header_with_no_clock() {
     // inferno before its clock has a frequency offset: no 0x8001 record,
     // no peaks, no latency; the header alone.
     let mut mc = Multicaster::new(identity());
-    let beat = mc.heartbeat();
+    let beat = mc.heartbeat(None);
     #[rustfmt::skip]
     let want = [
         0xff, 0xfe, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00,
@@ -412,13 +412,13 @@ fn every_packet_takes_the_next_sequence_number_from_1_and_it_wraps() {
     let seq = |p: &[u8]| u16::from_be_bytes([p[4], p[5]]);
     assert_eq!(seq(&mc.board_info()), 1);
     assert_eq!(seq(&mc.product_info()), 2);
-    assert_eq!(seq(&mc.heartbeat()), 3);
+    assert_eq!(seq(&mc.heartbeat(None)), 3);
     assert_eq!(seq(&mc.answer(&captured()).unwrap()), 4);
-    assert_eq!(seq(&mc.heartbeat()), 5);
+    assert_eq!(seq(&mc.heartbeat(None)), 5);
     mc.seq = 0xffff;
-    assert_eq!(seq(&mc.heartbeat()), 0xffff);
-    assert_eq!(seq(&mc.heartbeat()), 0);
-    assert_eq!(seq(&mc.heartbeat()), 1);
+    assert_eq!(seq(&mc.heartbeat(None)), 0xffff);
+    assert_eq!(seq(&mc.heartbeat(None)), 0);
+    assert_eq!(seq(&mc.heartbeat(None)), 1);
 }
 
 #[test]
@@ -491,7 +491,13 @@ async fn loopback(every: Duration) -> (SocketAddr, UdpSocket, UdpSocket, Multica
 #[tokio::test]
 async fn the_server_says_who_it_is_answers_to_the_info_group_and_beats() {
     let (at, info_rx, beat_rx, to, sock) = loopback(NEVER).await;
-    let task = tokio::spawn(serve_info(sock, Multicaster::new(identity()), to));
+    let task = tokio::spawn(serve_info(
+        sock,
+        Multicaster::new(identity()),
+        to,
+        Arc::new(NoClock),
+        Arc::new(Changes::default()),
+    ));
     // At start, as inferno: the board info, the product info, then the
     // first heartbeat at once.
     let board = recv(&info_rx).await;
@@ -535,7 +541,13 @@ async fn drain(sock: &UdpSocket) -> Vec<Vec<u8>> {
 #[tokio::test]
 async fn the_server_bounds_its_replies_to_the_info_group() {
     let (at, info_rx, _beat_rx, to, sock) = loopback(NEVER).await;
-    let task = tokio::spawn(serve_info(sock, Multicaster::new(identity()), to));
+    let task = tokio::spawn(serve_info(
+        sock,
+        Multicaster::new(identity()),
+        to,
+        Arc::new(NoClock),
+        Arc::new(Changes::default()),
+    ));
     recv(&info_rx).await;
     recv(&info_rx).await;
     // A burst of board and network info requests from one sender.
@@ -572,10 +584,404 @@ async fn the_server_bounds_its_replies_to_the_info_group() {
     task.abort();
 }
 
+/// Records for 2 TX and 3 RX channels: dantesync's -1234 ppb, peaks, RX
+/// flow slot 1 seven samples late and slot 32 past `i32::MAX`.
+fn records() -> Records {
+    let mut lateness = [0u32; crate::media::rx::MAX_FLOWS];
+    lateness[0] = 7;
+    lateness[31] = 0x7fff_ffff;
+    Records {
+        freq_ppb: -1234,
+        tx_peaks: vec![0, 255],
+        rx_peaks: vec![40, 84, 255],
+        rate: 96_000,
+        lateness,
+    }
+}
+
+#[test]
+fn the_heartbeat_with_a_clock_holds_inferno_s_three_records() {
+    let mut mc = Multicaster::new(identity());
+    let beat = mc.heartbeat(Some(&records()));
+    #[rustfmt::skip]
+    let mut body = vec![
+        // 0x8001: 16 bytes, 4, 4, this packet's sequence (1), 0, -1234 ppb.
+        0x00, 0x10, 0x80, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00,
+        0xff, 0xff, 0xfb, 0x2e,
+        // 0x8002: 24 + 5 bytes, 4, 12 + 5, the sequence, 0; 2 TX, 3 RX, 24.
+        0x00, 0x1d, 0x80, 0x02, 0x00, 0x04, 0x00, 0x11, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
+        // TX peaks, then RX peaks, padded to a multiple of 4.
+        0x00, 0xff, 0x28, 0x54, 0xff, 0x00, 0x00, 0x00,
+        // 0x8003: 24 + 128 bytes, 4, 12 + 128, the sequence, 0; 32 flow
+        // slots, 0, 24, 0, 96 kHz.
+        0x00, 0x98, 0x80, 0x03, 0x00, 0x04, 0x00, 0x8c, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x20, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x01, 0x77, 0x00,
+        0x00, 0x00, 0x00, 0x07,
+    ];
+    body.extend([0; 30 * 4]);
+    body.extend([0x7f, 0xff, 0xff, 0xff]);
+    assert_eq!(body.len(), 200);
+    assert_eq!(beat, packet(0xfffe, 1, HEARTBEAT, &body));
+    // Each record carries its own packet's sequence; without a clock the
+    // heartbeat is the header alone.
+    mc.seq = 0x1234;
+    let beat = mc.heartbeat(Some(&records()));
+    for at in [32 + 8, 32 + 16 + 8, 32 + 48 + 8] {
+        assert_eq!(beat[at..at + 2], [0x12, 0x34], "{at}");
+    }
+    assert_eq!(mc.heartbeat(None), packet(0xfffe, 0x1235, HEARTBEAT, &[]));
+    // No channels: no peaks record (inferno sends it only with peaks).
+    let quiet = Records {
+        tx_peaks: Vec::new(),
+        rx_peaks: Vec::new(),
+        ..records()
+    };
+    let body = heartbeat_body(1, &quiet);
+    assert_eq!(body.len(), 16 + 152);
+    assert_eq!(body[16..20], [0x00, 0x98, 0x80, 0x03]);
+    // One peak pads by three.
+    let one = Records {
+        tx_peaks: vec![9],
+        rx_peaks: Vec::new(),
+        ..records()
+    };
+    let body = heartbeat_body(1, &one);
+    assert_eq!(body[16..18], [0x00, 25]);
+    assert_eq!(body[16 + 24..16 + 28], [9, 0, 0, 0]);
+    assert_eq!(body[16 + 28..16 + 32], [0x00, 0x98, 0x80, 0x03]);
+    // Four peaks need no padding.
+    let four = Records {
+        tx_peaks: vec![1, 2],
+        rx_peaks: vec![3, 4],
+        ..records()
+    };
+    let body = heartbeat_body(1, &four);
+    assert_eq!(body[16 + 24..16 + 32], [1, 2, 3, 4, 0x00, 0x98, 0x80, 0x03]);
+}
+
+#[test]
+fn a_peak_is_minus_40_log10_of_full_scale_as_inferno_computes_it() {
+    let full = i32::MAX as u32;
+    assert_eq!(peak_byte(0), 255, "silence");
+    assert_eq!(peak_byte(1), 255, "far below the scale");
+    assert_eq!(peak_byte(full), 0);
+    assert_eq!(peak_byte(1 << 31), 0, "i32::MIN's magnitude");
+    assert_eq!(peak_byte(u32::MAX), 0);
+    assert_eq!(peak_byte(full / 10), 40, "-20 dBFS");
+    assert_eq!(peak_byte(full / 100), 80, "-40 dBFS");
+    assert_eq!(peak_byte(65_535 << 8), 84, "the counter's top");
+    assert_eq!(peak_byte(full / 2), 12);
+}
+
+#[test]
+fn the_channel_change_bitmask_is_inferno_s() {
+    assert_eq!(channel_change_body(&[]), [0, 1, 0]);
+    assert_eq!(channel_change_body(&[0]), [0, 1, 0x01]);
+    assert_eq!(channel_change_body(&[7]), [0, 1, 0x80]);
+    assert_eq!(channel_change_body(&[8]), [0, 2, 0, 0x01]);
+    assert_eq!(channel_change_body(&[3, 3]), [0, 1, 0x08]);
+    assert_eq!(
+        channel_change_body(&[31, 9, 0]),
+        [0, 4, 0x01, 0x02, 0x00, 0x80]
+    );
+    let last = channel_change_body(&[511]);
+    assert_eq!(last.len(), 66);
+    assert_eq!(last[..2], [0, 64]);
+    assert_eq!(last[65], 0x80);
+    let mut mc = Multicaster::new(identity());
+    assert_eq!(
+        mc.channel_change(&[4, 12]),
+        packet(
+            0xffff,
+            1,
+            [0x07, 0x2a, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00],
+            &[0, 2, 0x10, 0x10]
+        )
+    );
+}
+
+#[test]
+fn changes_are_coalesced_and_the_notification_is_bounded() {
+    let t0 = Instant::now();
+    let mut mc = Multicaster::new(identity());
+    let mut limit = Limit::new();
+    let changes = Changes::default();
+    // Nothing waits: nothing sent, no sequence used.
+    assert_eq!(mc.notify_within(&mut limit, t0, &changes), None);
+    assert_eq!(mc.seq, 1);
+    // A channel changes every millisecond for a second: at most ten
+    // notifications, and every channel is named, none lost.
+    let mut sent = Vec::new();
+    let mut named = BTreeSet::new();
+    for k in 0..1_000u64 {
+        changes.add([(k % 40) as usize]);
+        let now = t0 + Duration::from_millis(k);
+        if let Some(p) = mc.notify_within(&mut limit, now, &changes) {
+            assert_eq!(p[24..32], [0x07, 0x2a, 0x01, 0x02, 0, 0, 0, 0]);
+            for (byte, bits) in p[34..].iter().enumerate() {
+                for bit in 0..8 {
+                    if bits & (1 << bit) != 0 {
+                        named.insert(byte * 8 + bit);
+                    }
+                }
+            }
+            sent.push(u16::from_be_bytes([p[4], p[5]]));
+        }
+    }
+    assert_eq!(sent, (1..=10).collect::<Vec<u16>>());
+    assert!(!changes.is_empty(), "the rest waits");
+    // The next second: one notification names everything that waited.
+    let p = mc
+        .notify_within(&mut limit, t0 + Duration::from_secs(1), &changes)
+        .unwrap();
+    for (byte, bits) in p[34..].iter().enumerate() {
+        for bit in 0..8 {
+            if bits & (1 << bit) != 0 {
+                named.insert(byte * 8 + bit);
+            }
+        }
+    }
+    assert_eq!(named, (0..40).collect());
+    assert!(changes.is_empty());
+    // Nothing of it counts as a dropped reply.
+    assert_eq!(limit.flush(t0 + Duration::from_secs(120)), None);
+}
+
+#[test]
+fn changes_take_every_channel_once_in_order() {
+    let changes = Changes::default();
+    assert!(changes.is_empty());
+    changes.add([5, 1]);
+    changes.add([1]);
+    changes.add(std::iter::empty());
+    assert!(!changes.is_empty());
+    assert_eq!(changes.take(), [1, 5]);
+    assert!(changes.is_empty());
+    assert_eq!(changes.take(), Vec::<usize>::new());
+}
+
+#[tokio::test]
+async fn adding_a_change_wakes_a_waiter_once() {
+    let changes = Changes::default();
+    // A change added before the wait wakes it at once.
+    changes.add([3]);
+    tokio::time::timeout(BOUND, changes.added())
+        .await
+        .expect("woken");
+    // A channel already waiting wakes nobody again.
+    changes.add([3]);
+    let again = tokio::time::timeout(Duration::from_millis(50), changes.added()).await;
+    assert!(again.is_err());
+    // A new one does.
+    changes.add([4]);
+    tokio::time::timeout(BOUND, changes.added())
+        .await
+        .expect("woken");
+}
+
+/// A beat with fixed records.
+struct Fixed(Option<Records>);
+
+impl Beat for Fixed {
+    fn records(&self) -> Option<Records> {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn the_server_beats_with_its_records_and_notifies_changes() {
+    let (_, info_rx, beat_rx, to, sock) = loopback(NEVER).await;
+    let changes = Arc::new(Changes::default());
+    let task = tokio::spawn(serve_info(
+        sock,
+        Multicaster::new(identity()),
+        to,
+        Arc::new(Fixed(Some(records()))),
+        Arc::clone(&changes),
+    ));
+    recv(&info_rx).await;
+    recv(&info_rx).await;
+    let beat = recv(&beat_rx).await;
+    assert_eq!(beat.len(), 232);
+    assert_eq!(beat[32..34], [0x00, 0x10]);
+    // RX 2 and RX 10 changed: one notification on the info group.
+    changes.add([1, 9]);
+    let note = recv(&info_rx).await;
+    assert_eq!(
+        note,
+        packet(
+            0xffff,
+            4,
+            [0x07, 0x2a, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00],
+            &[0, 2, 0x02, 0x02]
+        )
+    );
+    assert!(changes.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn the_server_sends_a_held_back_notification_within_a_second_or_two() {
+    let (_, info_rx, _beat_rx, to, sock) = loopback(NEVER).await;
+    let changes = Arc::new(Changes::default());
+    let task = tokio::spawn(serve_info(
+        sock,
+        Multicaster::new(identity()),
+        to,
+        Arc::new(NoClock),
+        Arc::clone(&changes),
+    ));
+    recv(&info_rx).await;
+    recv(&info_rx).await;
+    // Twelve changes as fast as they come: ten notifications at once, the
+    // rest held back by the bound, then sent at a check.
+    let mut seen = BTreeSet::new();
+    for rx in 0..12 {
+        changes.add([rx]);
+        tokio::task::yield_now().await;
+    }
+    let started = Instant::now();
+    while seen.len() < 12 {
+        let note = recv(&info_rx).await;
+        assert_eq!(note[24..28], [0x07, 0x2a, 0x01, 0x02]);
+        for (byte, bits) in note[34..].iter().enumerate() {
+            for bit in 0..8 {
+                if bits & (1 << bit) != 0 {
+                    seen.insert(byte * 8 + bit);
+                }
+            }
+        }
+    }
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(seen, (0..12).collect());
+    task.abort();
+}
+
+#[test]
+fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second() {
+    use crate::clock::{ManualClock, stamp};
+    use crate::media::packet;
+    use crate::media::ring::Ring;
+    use crate::media::rx::{Receiver, RxPlan, RxRoute};
+    use crate::subscribe::resolve::{Advertised, Resolver};
+    use crate::subscribe::{Action, Answer};
+
+    struct One(Advertised);
+    impl Resolver for One {
+        fn lookup(&self, _: &str, _: &str) -> Option<Advertised> {
+            Some(self.0)
+        }
+    }
+
+    let cfg = cfg();
+    let lo = Ipv4Addr::LOCALHOST;
+    let rings: Arc<[Ring]> = (0..cfg.rx.len())
+        .map(|_| Ring::new())
+        .collect::<Vec<_>>()
+        .into();
+    let tx = Arc::new(TxShared::new(cfg.clone(), lo, Arc::clone(&rings), 1).unwrap());
+    let rx = Arc::new(RxShared::new(cfg.sample_rate, lo, Arc::clone(&rings)).unwrap());
+    let ports = rx.ports().unwrap();
+    // The manager holds a granted flow in slot 1 only.
+    let mut m = Manager::new(&cfg, "test-device", lo, ports);
+    m.set(
+        0,
+        Some(crate::device::Subscription {
+            tx_channel: "TX 1".into(),
+            tx_device: "peer-device".into(),
+        }),
+    );
+    let peer = Advertised {
+        control: SocketAddrV4::new(lo, 4455),
+        tx_channel_id: 1,
+        nchan: 1,
+        bits: 24,
+        rate: 96_000,
+        dbcp1: 0x1102,
+        fpp_min: 1,
+        fpp_max: 16,
+        latency_ns: 2_000_000,
+    };
+    let Some(Action::Request { flow, .. }) = m.tick(0, &[0; 32], &One(peer)).pop() else {
+        panic!("a request");
+    };
+    assert_eq!(flow.slot, 0);
+    m.answered(flow, Answer::Granted([0, 0, 0, 0, 0, 1]), 0);
+    let clock = Arc::new(ManualClock::new(0));
+    clock.set_ready(false);
+    let freq = Arc::new(AtomicI32::new(-1234));
+    let sources = Sources {
+        clock: clock.clone(),
+        freq: Arc::clone(&freq),
+        tx,
+        rx: Arc::clone(&rx),
+        manager: Arc::new(Mutex::new(m)),
+    };
+    // Not ready: no records, nothing taken.
+    rings[2].write_at(5, &[i32::MAX / 10]);
+    assert_eq!(sources.records(), None);
+    clock.set_ready(true);
+    // Slots 1 and 2 each receive a packet 300 samples late.
+    let mut receiver = Receiver::new(Arc::clone(&rx)).unwrap();
+    let plan = RxPlan {
+        src: Some(lo),
+        bps: 3,
+        nslots: 1,
+        latency: 192,
+        live: true,
+        generation: 1,
+    };
+    rx.publish(
+        |slot| if slot < 2 { plan } else { RxPlan::default() },
+        |ch| (ch < 2).then_some(RxRoute { flow: ch, slot: 0 }),
+    );
+    let now_samples = 1_000_000u64;
+    let now_ns = crate::media::tx::ns_of(now_samples, 96_000);
+    let sender = std::net::UdpSocket::bind((lo, 0)).unwrap();
+    let mut buf = [0u8; 64];
+    let (secs, sub) = stamp(now_samples - 300, 96_000);
+    let n = packet::write(&mut buf, secs, sub, 1, 3, 1, |_, _| 0);
+    for slot in 0..2 {
+        sender
+            .send_to(&buf[..n], rx.local_addr(slot).unwrap())
+            .unwrap();
+    }
+    let deadline = Instant::now() + BOUND;
+    while rx.lane(0).packets + rx.lane(1).packets < 2 {
+        receiver.wait(Duration::from_millis(20)).unwrap();
+        receiver.pass(Some(now_ns), 0);
+        assert!(Instant::now() < deadline, "the packets never came");
+    }
+    let r = sources.records().unwrap();
+    assert_eq!(r.freq_ppb, -1234);
+    assert_eq!(r.rate, 96_000);
+    assert_eq!(r.tx_peaks, vec![255; 16], "nothing sent");
+    let mut want = vec![255; 32];
+    want[2] = 40;
+    assert_eq!(r.rx_peaks, want);
+    // Only the slot with a granted flow reports its lateness.
+    let mut late = [0u32; 32];
+    late[0] = 300;
+    assert_eq!(r.lateness, late);
+    // The next beat has its own second: the peaks and lateness were taken.
+    freq.store(77, Ordering::Relaxed);
+    let r = sources.records().unwrap();
+    assert_eq!(r.freq_ppb, 77);
+    assert_eq!(r.rx_peaks, vec![255; 32]);
+    assert_eq!(r.lateness, [0; 32]);
+}
+
 #[tokio::test]
 async fn the_heartbeat_repeats_at_its_period() {
     let (_, info_rx, beat_rx, to, sock) = loopback(Duration::from_millis(20)).await;
-    let task = tokio::spawn(serve_info(sock, Multicaster::new(identity()), to));
+    let task = tokio::spawn(serve_info(
+        sock,
+        Multicaster::new(identity()),
+        to,
+        Arc::new(NoClock),
+        Arc::new(Changes::default()),
+    ));
     recv(&info_rx).await;
     recv(&info_rx).await;
     for seq in 3..6 {
