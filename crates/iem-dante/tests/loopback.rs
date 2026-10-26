@@ -64,6 +64,7 @@ async fn our_tx_counter_reaches_our_rx_clean_for_a_second_then_the_stop_releases
                 stats: Arc::default(),
             },
             7,
+            &[],
         )
         .unwrap(),
     );

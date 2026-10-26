@@ -26,7 +26,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Live E2E on the PC, live verdict, dispatch-live → `.claude/rules/live.md`
 - Roster onto the PC (`iempc roster-install`) → `.claude/rules/roster-install.md`
 - Dante labels of the IEM card (`iempc dante-labels`, the sheet and `--apply`, `dante_card.py`) → `.claude/rules/dante-labels.md`
-- Gen 3's own Dante device (the `iem-dante` crate, the `iem-dante-dev` daemon and its service, `scripts/gen3/deploy.sh`, the event stop; its real device and channel names only in the ops repo's device config) → `.claude/rules/gen3.md`
+- Gen 3: our own Dante device and the engine on Linux (the `iem-dante` crate, the engine's Dante backend, the units and `scripts/gen3/deploy.sh --bundle`, `iempc gen3-loop`/`gen3-mix`, the event stop; real device and channel names only in the ops repo's device config) → `.claude/rules/gen3.md`
 
 ## Always-apply rules
 

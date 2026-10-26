@@ -1,10 +1,12 @@
 //! Engine start-up and the offline renderer (design note §1, §3.7): load the
-//! site and the state, start the backend (NullRt, or on Windows the ASIO
-//! card of the site's `[card]` table, S6), open the pipes, run the control
-//! loop; or render a WAV file through the processor with `Offline`; or, S6,
-//! check a site (`check-site`). Nothing listens to the stage before a switch
-//! (#38: only the owner's signal decides).
+//! site and the state, start the backend (NullRt, on Windows the ASIO card
+//! of the site's `[card]` table, S6, or on Linux our own Dante device, Gen 3
+//! phase C), open the pipes, run the control loop; or render a WAV file
+//! through the processor with `Offline`; or, S6, check a site
+//! (`check-site`). Nothing listens to the stage before a switch (#38: only
+//! the owner's signal decides).
 
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -65,7 +67,35 @@ pub enum Backend {
     NullRt,
     /// The ASIO card of the site's `[card]` table (Windows).
     Asio,
+    /// Our own Dante device in the engine's process, the engine on its
+    /// media clock (Linux, Gen 3 phase C: `crate::dante`).
+    Dante,
 }
+
+/// Where the Dante device serves: an interface's one IPv4 address, or an
+/// address one of the box's interfaces holds (`iem_dante::daemon::Place`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DantePlace {
+    Iface(String),
+    Ip(Ipv4Addr),
+}
+
+/// `run --backend dante`'s device (portable; on Linux it becomes
+/// `iem_dante::daemon::Options`, the same three fields).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DanteArgs {
+    /// `--dante-config`: the device's config (the ops repository's).
+    pub config: PathBuf,
+    /// `--dante-iface` or `--dante-ip`, exactly one.
+    pub place: DantePlace,
+    /// `--dante-control`: the device's control socket ([`DANTE_CONTROL`]
+    /// unless given).
+    pub control: PathBuf,
+}
+
+/// The device's control socket unless `--dante-control` names another:
+/// `iem_dante::ctl::SOCKET`, where `iem-dante-dev ctl` looks.
+pub const DANTE_CONTROL: &str = "/run/iem-dante/control.sock";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunConfig {
@@ -80,6 +110,8 @@ pub struct RunConfig {
     pub backend: Backend,
     /// `--hold`: silent until the supervisor's `Arm` (S6).
     pub hold: bool,
+    /// The Dante device of `--backend dante` (its `--dante-*` flags).
+    pub dante: Option<DanteArgs>,
 }
 
 impl RunConfig {
@@ -94,6 +126,7 @@ impl RunConfig {
             solo_grace: Duration::from_secs(10),
             backend: Backend::NullRt,
             hold: false,
+            dante: None,
         }
     }
 }
@@ -113,28 +146,44 @@ pub enum Command {
     Render(RenderArgs),
     CheckSite(PathBuf),
     Help,
+    /// `--version`: [`version`]'s line.
+    Version,
 }
 
 pub const USAGE: &str = "\
 usage:
   iem-engine run --site <site.toml> --state-dir <dir> --pipe <name>
-                 [--backend nullrt|asio] [--hold] [--block <frames>] [--sine <hz>]
+                 [--backend nullrt|asio|dante] [--hold] [--block <frames>] [--sine <hz>]
                  [--test-signal] [--fault-injection]
+                 [--dante-config <device.toml> (--dante-iface <name> | --dante-ip <IPv4>)
+                  [--dante-control <socket>]]
   iem-engine render --site <site.toml> [--state <state.json>] --in <in.wav> --out <out.wav>
                  [--block <frames>]
   iem-engine check-site --site <site.toml>
+  iem-engine --version
 
 run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
 with --backend asio (Windows) on the card of the site's [card] table at its
-32 samples; --hold keeps every output silent until the supervisor's Arm.
---pipe is a socket path on Unix and a pipe name on Windows (the media pipe
-is <name>.media).
+32 samples, or with --backend dante (Linux) on our own Dante device, hosted
+in this process, at 32 samples on its media clock (the site's RX and TX
+channel numbers are the device's; --dante-control defaults to
+/run/iem-dante/control.sock); --hold keeps every output silent until the
+supervisor's Arm. SIGTERM or SIGINT under --backend dante saves, fades and
+stops the device. --pipe is a socket path on Unix and a pipe name on
+Windows (the media pipe is <name>.media).
 render: the input WAV must be 96 kHz with one channel per RX channel of the
 site; the output has one channel per TX channel.
 check-site: validates the site (I4; [card] and [guard] hil_tx too) and
 prints its topology hash and counts.
-exit codes: 0 shut down, 1 i/o error, 2 usage or site error, 3 card
-refused, 70 RT fault, 75 state directory busy";
+exit codes: 0 shut down, 1 i/o error or the Dante device ended, 2 usage or
+site error, 3 card refused (or a channel the Dante device lacks), 70 RT
+fault, 75 state directory busy";
+
+/// What `iem-engine --version` prints: `iem-engine <version>+<GITHUB_SHA or
+/// local>`, the build `Hello.engine_build` names.
+pub fn version() -> String {
+    format!("iem-engine {}", crate::control::engine_build())
+}
 
 fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<&'a String, String> {
     it.next().ok_or_else(|| format!("{flag} needs a value"))
@@ -151,7 +200,41 @@ fn backend(v: &str) -> Result<Backend, String> {
     match v {
         "nullrt" => Ok(Backend::NullRt),
         "asio" => Ok(Backend::Asio),
-        _ => Err(format!("--backend is nullrt or asio, not {v:?}")),
+        "dante" => Ok(Backend::Dante),
+        _ => Err(format!("--backend is nullrt, asio or dante, not {v:?}")),
+    }
+}
+
+/// The `--dante-*` flags as given (each the last value seen; the places
+/// in order).
+#[derive(Debug, Default)]
+struct DanteFlags {
+    config: Option<PathBuf>,
+    places: Vec<DantePlace>,
+    control: Option<PathBuf>,
+}
+
+impl DanteFlags {
+    fn any(&self) -> bool {
+        self.config.is_some() || !self.places.is_empty() || self.control.is_some()
+    }
+
+    /// `--backend dante`'s device: its config and exactly one place.
+    fn args(self) -> Result<DanteArgs, String> {
+        let config = self
+            .config
+            .ok_or_else(|| "--backend dante needs --dante-config".to_owned())?;
+        let mut places = self.places.into_iter();
+        let (Some(place), None) = (places.next(), places.next()) else {
+            return Err(
+                "--backend dante needs exactly one of --dante-iface and --dante-ip".to_owned(),
+            );
+        };
+        Ok(DanteArgs {
+            config,
+            place,
+            control: self.control.unwrap_or_else(|| PathBuf::from(DANTE_CONTROL)),
+        })
     }
 }
 
@@ -160,6 +243,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut it = args.iter();
     let sub = match it.next().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => return Ok(Command::Help),
+        Some("--version") => return Ok(Command::Version),
         Some(s @ ("run" | "render" | "check-site")) => s,
         Some(other) => return Err(format!("unknown command {other:?}")),
     };
@@ -170,6 +254,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut signal = None;
     let mut chosen = Backend::NullRt;
     let mut hold = false;
+    let mut dante = DanteFlags::default();
     while let Some(flag) = it.next() {
         let slot = match flag.as_str() {
             "--site" => Some(0),
@@ -202,6 +287,18 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--fault-injection" => flags.fault_injection = true,
             "--backend" => chosen = backend(value(&mut it, flag)?)?,
             "--hold" => hold = true,
+            "--dante-config" => dante.config = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--dante-iface" => dante
+                .places
+                .push(DantePlace::Iface(value(&mut it, flag)?.clone())),
+            "--dante-ip" => {
+                let v = value(&mut it, flag)?;
+                let ip = v
+                    .parse()
+                    .map_err(|_| format!("--dante-ip needs an IPv4 address, not {v:?}"))?;
+                dante.places.push(DantePlace::Ip(ip));
+            }
+            "--dante-control" => dante.control = Some(PathBuf::from(value(&mut it, flag)?)),
             other => return Err(format!("unknown option {other:?}")),
         }
     }
@@ -209,12 +306,24 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let need = |p: Option<PathBuf>, flag: &str| p.ok_or_else(|| format!("{sub} needs {flag}"));
     match sub {
         "run" => {
-            if chosen == Backend::Asio && (size.is_some() || signal.is_some()) {
+            if chosen != Backend::NullRt && (size.is_some() || signal.is_some()) {
                 return Err(
-                    "--block and --sine are for the nullrt backend: the card runs at its [card] frames"
+                    "--block and --sine are for the nullrt backend: the card runs at its [card] \
+                     frames, the Dante device at 32"
                         .to_owned(),
                 );
             }
+            let device = match chosen {
+                Backend::Dante => Some(dante.args()?),
+                _ if dante.any() => {
+                    return Err(
+                        "--dante-config, --dante-iface, --dante-ip and --dante-control are for \
+                         --backend dante"
+                            .to_owned(),
+                    );
+                }
+                _ => None,
+            };
             let mut cfg = RunConfig::new(
                 need(site, "--site")?,
                 need(state_dir, "--state-dir")?,
@@ -225,6 +334,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             cfg.signal = signal.unwrap_or(InputSignal::Silence);
             cfg.backend = chosen;
             cfg.hold = hold;
+            cfg.dante = device;
             Ok(Command::Run(cfg))
         }
         "render" => Ok(Command::Render(RenderArgs {
@@ -424,10 +534,11 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     if !(1..=MAX_BLOCK).contains(&cfg.block) {
         return Err(EngineError::Usage(format!("block must be 1…{MAX_BLOCK}")));
     }
+    let dante = dante_args(&cfg)?;
     let text = site::read(&cfg.site)?;
     let topo = Arc::new(compile(&parse(&text)?)?);
     let card = match cfg.backend {
-        Backend::NullRt => None,
+        Backend::NullRt | Backend::Dante => None,
         Backend::Asio => Some(parse_card(&text)?.ok_or(SiteError::NoCardTable)?),
     };
     #[cfg(not(windows))]
@@ -547,8 +658,12 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     } = handles;
     let control_listener = listen(control_name(&cfg.pipe)?)?;
     let media_listener = listen(media_name(&cfg.pipe)?)?;
-    let (driver, block): (Box<dyn Driver>, usize) = match card {
-        None => {
+    let (driver, block): (Box<dyn Driver>, usize) = match (card, dante) {
+        #[cfg(target_os = "linux")]
+        (None, Some(device)) => crate::dante::start(&device, &topo, &hil, processor)?,
+        #[cfg(not(target_os = "linux"))]
+        (None, Some(_)) => return Err(EngineError::Usage(DANTE_ON_LINUX.to_owned())),
+        (None, None) => {
             let nullrt = NullRt::start(
                 NullRtConfig {
                     sample_rate: SAMPLE_RATE,
@@ -567,9 +682,9 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             (driver, cfg.block)
         }
         #[cfg(windows)]
-        Some(card) => crate::asio::start(&card, &topo, &hil, processor)?,
+        (Some(card), _) => crate::asio::start(&card, &topo, &hil, processor)?,
         #[cfg(not(windows))]
-        Some(_) => return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned())),
+        (Some(_), _) => return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned())),
     };
     if cfg.hold {
         info!("held: every output is silent until the supervisor's Arm");
@@ -639,6 +754,25 @@ fn lock_state(store: &Store) -> Result<StateLock, EngineError> {
 
 #[cfg(not(windows))]
 const ASIO_ON_WINDOWS: &str = "the asio backend runs on Windows only";
+
+const DANTE_ON_LINUX: &str = "the dante backend runs on Linux only";
+
+/// `run --backend dante`'s device (`None` for the other backends): refused
+/// off Linux, before any state, and without its config and place (the
+/// parser asks for them; a `RunConfig` built in code may lack them).
+fn dante_args(cfg: &RunConfig) -> Result<Option<DanteArgs>, EngineError> {
+    if cfg.backend != Backend::Dante {
+        return Ok(None);
+    }
+    if !cfg!(target_os = "linux") {
+        return Err(EngineError::Usage(DANTE_ON_LINUX.to_owned()));
+    }
+    cfg.dante.clone().map(Some).ok_or_else(|| {
+        EngineError::Usage(
+            "--backend dante needs --dante-config and --dante-iface or --dante-ip".to_owned(),
+        )
+    })
+}
 
 /// What `check-site` prints (I4, F30).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

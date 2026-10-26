@@ -6,6 +6,8 @@ azo
 azo-sys
 bitflags
 block-buffer
+# Gen 3 phase C (#72), Linux only: tokio's byte buffers (MIT), through iem-dante.
+bytes
 cfg-if
 cpufeatures
 crossbeam-utils
@@ -13,21 +15,37 @@ crypto-common
 digest
 doctest-file
 equivalent
+# Gen 3 phase C (#72), Linux only: signal-hook-registry's errno (MIT OR Apache-2.0), tokio's SIGTERM/SIGINT.
+errno
+# Gen 3 phase C (#72), Linux only: mdns-sd's query jitter (Apache-2.0 OR MIT).
+fastrand
+# Gen 3 phase C (#72), Linux only: mdns-sd's channels to its daemon thread (Apache-2.0 OR MIT).
+flume
 generic-array
 hashbrown
 iem-audio-io
+# Gen 3 phase C (#72), Linux only: our own Dante device as the engine's backend (GPL-3.0-or-later, as the engine).
+iem-dante
 iem-dsp
 iem-engine-proto
 iem-limiter-mga
 iem-win
+# Gen 3 phase C (#72), Linux only: the box's interface addresses for --dante-iface (MIT OR BSD-3-Clause), iem-dante and mdns-sd.
+if-addrs
 indexmap
 interprocess
 itoa
 lazy_static
 libc
+# Gen 3 phase C (#72), Linux only: spin's lock traits (MIT OR Apache-2.0), through flume.
+lock_api
 log
 matchers
+# Gen 3 phase C (#72), Linux only: the device's mDNS records and browses (Apache-2.0 OR MIT), iem-dante's announcer.
+mdns-sd
 memchr
+# Gen 3 phase C (#72), Linux only: the RX thread's wait on its flow sockets, tokio's and mdns-sd's event loop (MIT).
+mio
 nu-ansi-term
 once_cell
 pin-project-lite
@@ -37,6 +55,8 @@ recvmsg
 regex-automata
 regex-syntax
 rtrb
+# Gen 3 phase C (#72), Linux only: lock_api's guards (MIT OR Apache-2.0), through flume and spin.
+scopeguard
 serde
 serde_core
 serde_derive
@@ -44,12 +64,24 @@ serde_json
 serde_spanned
 sha2
 sharded-slab
+# Gen 3 phase C (#72), Linux only: tokio's signal handlers, the device's SIGTERM/SIGINT report (MIT OR Apache-2.0).
+signal-hook-registry
 smallvec
+# Gen 3 phase C (#72), Linux only: mdns-sd's receive interface per packet (MIT).
+socket-pktinfo
+# Gen 3 phase C (#72), Linux only: SO_RCVBUF of the RX flow sockets, tokio's and mdns-sd's sockets (MIT OR Apache-2.0).
+socket2
+# Gen 3 phase C (#72), Linux only: flume's spin lock (MIT), through mdns-sd.
+spin
 subtle
 syn
 thiserror
 thiserror-impl
 thread_local
+# Gen 3 phase C (#72), Linux only: the device's own current-thread runtime on its dante-device thread (MIT), never the engine's RT path.
+tokio
+# Gen 3 phase C (#72), Linux only: tokio's select! and main macros (MIT).
+tokio-macros
 toml
 toml_datetime
 toml_parser

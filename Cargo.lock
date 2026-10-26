@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
  "azo",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2769,9 +2769,10 @@ dependencies = [
 
 [[package]]
 name = "iem-dante"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
+ "iem-audio-io",
  "if-addrs",
  "libc",
  "mdns-sd",
@@ -2788,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2797,10 +2798,11 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
  "iem-audio-io",
+ "iem-dante",
  "iem-dsp",
  "iem-engine-proto",
  "iem-limiter-mga",
@@ -2812,6 +2814,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -2821,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -2830,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "iem-guard"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "iem-win",
  "interprocess",
@@ -2851,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2859,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "iem-migrate"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2874,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "iem-rpp"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2889,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2931,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -2946,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "dirs 6.0.0",
  "iem-core",
@@ -2965,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -2987,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "iem-win"
-version = "2.0.0-dev.43"
+version = "2.0.0-dev.44"
 dependencies = [
  "tokio",
  "windows-registry 0.100.0",

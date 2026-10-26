@@ -7,9 +7,9 @@ import { join, resolve } from "node:path";
 import { chromium, type APIRequestContext } from "@playwright/test";
 import { test, expect } from "./support/fixtures";
 import { BurstWatch } from "./live/support/burst";
-import { Desk, LiveMixer, RESTORE_MS, type Cmd } from "./live/support/desk";
+import { Desk, LiveMixer, RESTORE_MS, mixerSocketURL, type Cmd } from "./live/support/desk";
 import { SILENT_PEAK, continuity, dbOf, median, spread, talkbackLevel } from "./live/support/series";
-import { apiAt, runMarker, storeLogin } from "./live/support/env";
+import { apiAt, originOf, runMarker, storeLogin, type Schemes } from "./live/support/env";
 import { guardConsole, redacted } from "./live/support/console";
 import { Relay } from "./live/support/relay";
 import { closeFacts } from "./live/support/socket";
@@ -724,6 +724,62 @@ test("the run's marker is built from the run id and attempt, and a refusal names
   expect(() => runMarker({ GITHUB_RUN_ID: "zyxqwvn", GITHUB_RUN_ATTEMPT: "1" })).toThrow(
     "GITHUB_RUN_ID is not a run number (digits)",
   );
+});
+
+test("the mixer reads IEM VOL as the newest state shows it and the updates after it", async () => {
+  const { mixer, socket } = mixerOn();
+  expect(mixer.volume()).toBeUndefined();
+  socket.event("State", { channels: [], mix: "member2", global_level_db: -6, global_muted: true });
+  expect(mixer.volume()).toEqual({ level_db: -6, muted: true });
+  socket.event("GlobalVolumeUpdate", { level_db: 0, muted: true });
+  socket.event("GlobalVolumeUpdate", { level_db: 0, muted: false });
+  socket.event("ChannelUpdate", { id: "mic2", level_db: 9, muted: false, pan: 0.5 });
+  expect(mixer.volume()).toEqual({ level_db: 0, muted: false });
+  // An update of another shape changes nothing; a new state replaces what came before it.
+  socket.event("GlobalVolumeUpdate", { level_db: "loud" });
+  expect(mixer.volume()).toEqual({ level_db: 0, muted: false });
+  socket.event("State", { channels: [], mix: "member2", global_level_db: -12, global_muted: false });
+  expect(mixer.volume()).toEqual({ level_db: -12, muted: false });
+  socket.event("State", { channels: [], mix: "member2" });
+  expect(mixer.volume()).toBeUndefined();
+});
+
+test("a runner's mixer socket is wss: on the public host's https: and ws: on the Gen 3 box's http:", () => {
+  const synthetic = ["zyx", "zyx", "zyx"].join(".");
+  expect(mixerSocketURL("https://mixer.example.org", "member2", synthetic)).toBe(
+    `wss://mixer.example.org/ws/member2?token=${synthetic}&proto=3`,
+  );
+  expect(mixerSocketURL("http://10.0.0.10:8080", "member2", synthetic)).toBe(
+    `ws://10.0.0.10:8080/ws/member2?token=${synthetic}&proto=3`,
+  );
+  expect(mixerSocketURL("http://10.0.0.10:8080", "a b", synthetic)).toBe(`ws://10.0.0.10:8080/ws/a%20b?token=${synthetic}&proto=3`);
+});
+
+test("LIVE_BASE_URL is a bare https:// origin for the live run, and http:// too for the Gen 3 box; a refusal never shows it", () => {
+  const publicHost = ["https:"] as const;
+  const lanBox = ["http:", "https:"] as const;
+  const at = (url: string, schemes: Schemes) => originOf("LIVE_BASE_URL", schemes, { LIVE_BASE_URL: url });
+  const refusal = (url: string | undefined, schemes: Schemes): string => {
+    try {
+      originOf("LIVE_BASE_URL", schemes, { LIVE_BASE_URL: url });
+    } catch (e) {
+      return (e as Error).message;
+    }
+    return "accepted";
+  };
+  expect(at("https://mixer.example.org", publicHost)).toBe("https://mixer.example.org");
+  expect(at("https://mixer.example.org/", publicHost)).toBe("https://mixer.example.org");
+  expect(at("http://10.0.0.10:8080/", lanBox)).toBe("http://10.0.0.10:8080");
+  expect(at("https://mixer.example.org", lanBox)).toBe("https://mixer.example.org");
+  expect(refusal("http://10.0.0.10:8080/", publicHost)).toBe("LIVE_BASE_URL is not an https:// URL");
+  for (const url of ["ws://10.0.0.10:8080/", "HTTP://10.0.0.10:8080/", "10.0.0.10:8080", "http:/10.0.0.10"]) {
+    expect(refusal(url, lanBox), url).toBe("LIVE_BASE_URL is not an http:// or https:// URL");
+  }
+  for (const url of ["http://10.0.0.10:8080/zyxqwvn", "http://10.0.0.10:8080/?a=1", "http://u:p@10.0.0.10:8080/"]) {
+    expect(refusal(url, lanBox), url).toBe("LIVE_BASE_URL must be a bare origin (no path, query, fragment or credentials)");
+  }
+  expect(refusal(undefined, lanBox)).toBe("LIVE_BASE_URL is not set");
+  expect(refusal("", publicHost)).toBe("LIVE_BASE_URL is not set");
 });
 
 test("a push body's endpoint: any non-empty string the server stores, and an https:// URL for the browser's", () => {

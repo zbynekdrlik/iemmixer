@@ -362,7 +362,7 @@ class Breaks(io.StringIO):
 
 class Gen3StopTests(Base):
     """"ide event" also takes the Gen 3 device off the network (#72, design
-    §5.5): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-dante`, started
+    §5.5): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-server iem-engine iem-dante`, started
     right after the flag beside the PC's switch, waited for at most
     GEN3_STOP_S at the end. It never delays the PC and never changes the
     event's exit code; a stand-in `ssh` first on PATH plays the box."""
@@ -583,7 +583,8 @@ class Gen3StopTests(Base):
         args = self.ssh_args()
         self.assertEqual(len(args), 1, args)
         self.assertIn("BatchMode=yes", args[0])
-        self.assertEqual(args[0][-6:], [self.HOST, "sudo", "-n", "systemctl", "stop", "iem-dante"])
+        self.assertEqual(args[0][-8:], [self.HOST, "sudo", "-n", "systemctl", "stop", "iem-server", "iem-engine",
+                                        "iem-dante"])
 
     def test_a_stop_that_answers_is_reported_and_warns_nothing(self) -> None:
         self.gen3_host()
@@ -646,7 +647,7 @@ class Gen3StopTests(Base):
         code, docs, err = self.run_main("event", "--dry-run")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.ssh_args(), [])
-        self.assertIn({"gen3_stop": {"plan": "systemctl stop iem-dante"}}, docs)
+        self.assertIn({"gen3_stop": {"plan": "systemctl stop iem-server iem-engine iem-dante"}}, docs)
 
 
 if __name__ == "__main__":

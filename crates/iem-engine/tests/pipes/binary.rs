@@ -44,6 +44,50 @@ fn the_binary_runs_and_shuts_down() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("iem-engine render"));
 }
 
+/// `--version` names the build as `Hello.engine_build` does (Gen 3 phase
+/// C: the box's deploy reads it against the bundle's SHA).
+#[test]
+fn the_binary_names_its_build() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!(
+            "iem-engine {}+{}\n",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("GITHUB_SHA").unwrap_or("local")
+        )
+    );
+}
+
+/// Off Linux the Dante backend is a usage error (exit 2); on Linux a
+/// device config that cannot be read is one too (the device's setup, which
+/// its unit never restarts), before the device binds anything.
+#[test]
+fn the_binary_refuses_a_dante_device_it_cannot_set_up_as_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+        .args(["run", "--backend", "dante", "--site"])
+        .arg(common::site_path())
+        .arg("--state-dir")
+        .arg(dir.path().join("state"))
+        .args(["--pipe", &pipe_name(&dir), "--dante-config"])
+        .arg(dir.path().join("missing-device.toml"))
+        .args(["--dante-iface", "eth9", "--dante-control"])
+        .arg(dir.path().join("c.sock"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The owner-approved SEH test (design §10 test #4) off Windows: with
 /// `--fault-injection`, `InjectSeh` reaches the RT thread, whose
 /// `inject_seh` aborts the process (no SEH filter exists here; like the

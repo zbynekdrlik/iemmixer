@@ -8,12 +8,15 @@
 //! `iem-dante-dev ctl <request>` is the client.
 //!
 //! - `status`: one JSON line, numbers only: keys and a few fixed words
-//!   (`counter`, `sine`, `echo`), never a name or an address ([`status`]).
-//! - `source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>`:
+//!   (`counter`, `sine`, `echo`, `engine`), never a name or an address
+//!   ([`status`]); with the engine's pump once one is attached.
+//! - `source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine`:
 //!   what TX channel `tx` (from 1) sends ([`crate::media::source::Source`]);
 //!   runtime only, every TX channel is silent at start. A sine is at most
 //!   −20 dBFS (the HIL rule) and below half the sample rate; an echo reads
-//!   RX channel `rx` (from 1) `samples` earlier, fewer than a ring holds.
+//!   RX channel `rx` (from 1) `samples` earlier, fewer than a ring holds;
+//!   `engine` (phase C) sends the engine's ring of that channel, only on a
+//!   channel the engine feeds (`error: no engine on that channel`).
 //! - `check <rx> off|counter|sine <hz>`: which checker reads RX channel
 //!   `rx`'s ring at its playout point ([`Checks`]); runtime only.
 //!
@@ -98,7 +101,9 @@ pub enum Request {
 }
 
 const UNKNOWN: &str = "unknown request: status, source or check";
-const SOURCE_USAGE: &str = "source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>";
+const SOURCE_USAGE: &str =
+    "source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine";
+const NO_ENGINE: &str = "no engine on that channel";
 const CHECK_USAGE: &str = "check <rx> off|counter|sine <hz>";
 const HZ: &str = "the sine's frequency must be above 0 and below half the sample rate";
 
@@ -126,6 +131,7 @@ pub fn parse(line: &str, lim: Limits) -> Result<Request, &'static str> {
                         .filter(|&o| u64::from(o) < SLOTS as u64)
                         .ok_or("the echo's offset must be a whole number of samples below 65536")?,
                 },
+                ["engine"] => Source::Engine,
                 _ => return Err(SOURCE_USAGE),
             };
             Ok(Request::Source { tx, source })
@@ -173,7 +179,14 @@ pub fn answer(line: &str, media: &Media) -> String {
         Ok(Request::Status) => status(media),
         Ok(Request::Source { tx, source }) => {
             if !media.tx.set_source(tx, source) {
-                return "error: source: no such TX channel".to_string();
+                // The channel is the device's (parsed): only the engine's
+                // source is refused on a channel without its ring.
+                let reason = if source == Source::Engine {
+                    NO_ENGINE
+                } else {
+                    "source: no such TX channel"
+                };
+                return format!("error: {reason}");
             }
             info!(tx = tx + 1, source = source_word(source), "TX source set");
             "ok".to_string()
@@ -198,6 +211,7 @@ fn source_word(s: Source) -> &'static str {
         Source::Counter => "counter",
         Source::Sine { .. } => "sine",
         Source::Echo { .. } => "echo",
+        Source::Engine => "engine",
     }
 }
 
@@ -589,6 +603,12 @@ impl Json {
 ///   `slips`, `last_slip`, `lag` (null before a lock), `no_return`; the
 ///   sine's `checked`, `blind`, `discontinuities`, `discontinuity_frames`;
 ///   else `waiting` 1.
+/// - `engine` (phase C), only once an engine is attached
+///   ([`Media::attach_engine`]): its pump's `media` (1 on the media clock, 0
+///   pacing itself), `offset` (D) and `playout` (P) in samples, `blocks`,
+///   `late`, `missed` (blocks skipped by re-bootstraps), `overruns` (blocks
+///   longer than one period), `rebootstraps`, `max_process_us`
+///   ([`crate::stream::PumpView`]).
 pub fn status(media: &Media) -> String {
     let mut j = Json::new();
     j.open(None, '{');
@@ -598,6 +618,7 @@ pub fn status(media: &Media) -> String {
     rx_part(&mut j, media);
     sources_part(&mut j, media);
     checks_part(&mut j, media);
+    engine_part(&mut j, media);
     j.close('}');
     j.out
 }
@@ -760,7 +781,7 @@ fn sources_part(j: &mut Json, media: &Media) {
                 j.num("rx", rx + 1);
                 j.num("offset", offset);
             }
-            Source::Silence | Source::Counter => {}
+            Source::Silence | Source::Counter | Source::Engine => {}
         }
         j.close('}');
     }
@@ -802,6 +823,21 @@ fn checks_part(j: &mut Json, media: &Media) {
         j.close('}');
     }
     j.close(']');
+}
+
+fn engine_part(j: &mut Json, media: &Media) {
+    let Some(v) = media.engine() else { return };
+    j.open(Some("engine"), '{');
+    j.flag("media", v.media);
+    j.num("offset", v.offset);
+    j.num("playout", v.playout);
+    j.num("blocks", v.blocks);
+    j.num("late", v.late);
+    j.num("missed", v.missed);
+    j.num("overruns", v.overruns);
+    j.num("rebootstraps", v.rebootstraps);
+    j.num("max_process_us", v.max_process_us);
+    j.close('}');
 }
 
 #[cfg(unix)]

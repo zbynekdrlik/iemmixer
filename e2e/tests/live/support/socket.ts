@@ -2,7 +2,7 @@
 import type { EventEmitter } from "node:events";
 import NodeWebSocket from "ws";
 import { devices } from "@playwright/test";
-import { live } from "./env";
+import { box } from "./env";
 
 // The one handshake of every runner-side socket of the live specs (the
 // relay's real sockets, the burst watch): to the public host, with the
@@ -24,7 +24,7 @@ export const USER_AGENT = devices["Desktop Chrome"].userAgent;
  * continuation of `opened` runs); a later `error` is already handled here.
  */
 export function liveSocket(url: string, label: string): { ws: NodeWebSocket; opened: Promise<void> } {
-  const ws = new NodeWebSocket(url, { origin: live().baseURL, headers: { "User-Agent": USER_AGENT } });
+  const ws = new NodeWebSocket(url, { origin: box().baseURL, headers: { "User-Agent": USER_AGENT } });
   const opened = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`${label} did not open within ${OPEN_MS / 1000} s`));

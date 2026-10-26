@@ -307,6 +307,28 @@ fn a_route_change_alone_is_read() {
     assert_eq!(rx.lanes[0].targets, [(0, 0), (1, 2)]);
 }
 
+/// Phase C: the engine's pump reads only a routed channel's ring.
+#[test]
+fn routed_follows_the_published_routes() {
+    let s = shared(3);
+    assert!((0..4).all(|rx| !s.routed(rx)), "nothing routed at start");
+    let p = plan(LOOPBACK, 2, true, 1);
+    publish(
+        &s,
+        &[(0, p)],
+        &[
+            (0, RxRoute { flow: 0, slot: 0 }),
+            (2, RxRoute { flow: 0, slot: 1 }),
+        ],
+    );
+    let routed: Vec<bool> = (0..4).map(|rx| s.routed(rx)).collect();
+    assert_eq!(routed, [true, false, true, false], "RX 4 does not exist");
+    // A route that leaves.
+    publish(&s, &[(0, p)], &[(2, RxRoute { flow: 0, slot: 0 })]);
+    let routed: Vec<bool> = (0..3).map(|rx| s.routed(rx)).collect();
+    assert_eq!(routed, [false, false, true]);
+}
+
 #[test]
 fn a_channel_slot_the_flow_does_not_have_is_never_read() {
     let s = shared(2);

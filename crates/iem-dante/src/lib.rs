@@ -61,9 +61,23 @@
 //!   and RX threads, our RX's manager driven every 250 ms, the stop).
 //! - [`ctl`]: the local control socket: the status (numbers only), the TX
 //!   test sources and the RX checks, set at runtime; the request counts.
+//! - [`stream`] (phase C, plan
+//!   `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`):
+//!   the engine's pump on the media clock: it reads the RX rings at the
+//!   playout point, calls the engine's `Process` every 32 frames and writes
+//!   the engine's TX rings, which the TX thread sends as
+//!   [`media::source::Source::Engine`]. It knows nothing about mixing.
+//! - `host` (phase C, Linux): the device as a library: its setup
+//!   (`host::prepare`), its serving on a thread of its own
+//!   (`host::Prepared::start`) and its bounded stop (`host::Host::stop`);
+//!   `iem-dante-dev` and the engine host it the same way.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
+
+// The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `stream::Pump::block`
+// as a real-time context (I7), as iem-engine marks `Processor::process`.
+#![cfg_attr(iem_rtsan, feature(sanitize))]
 
 pub mod announce;
 pub mod arc;
@@ -73,7 +87,10 @@ pub mod ctl;
 pub mod daemon;
 pub mod device;
 pub mod flows;
+#[cfg(target_os = "linux")]
+pub mod host;
 pub mod info;
 pub mod media;
+pub mod stream;
 pub mod subscribe;
 pub mod wire;

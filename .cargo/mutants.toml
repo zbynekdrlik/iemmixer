@@ -97,13 +97,14 @@ exclude_globs = [
   # #[cfg(windows)] CPU Set call is not compiled on the Linux runners, so no
   # test there could catch its mutant.
   "crates/iem-soakclient/src/main.rs",
-  # iem-dante-dev (#72 phase A): Linux glue (the config and state files, the
-  # interface list and its MAC, speed and route files, the sockets, the mDNS
-  # daemon on one interface, SIGTERM and SIGINT, the goodbyes) around the
-  # mutated iem_dante::daemon, which holds every decision (parse_args,
-  # pick_interface, net_info, announce_device, serve; phase B's `clock`
-  # subcommand: parse_args and ClockLines, its polls iem_dante::clock's
-  # Poller).
+  # iem-dante-dev (#72 phase A): Linux glue around the mutated
+  # iem_dante::daemon and, from phase C (plan Task 2), iem_dante::host (the
+  # config and state files, the interface and its files, the sockets, the
+  # mDNS daemon on one interface, SIGTERM and SIGINT, the goodbyes), which
+  # hold every decision (parse_args, pick_interface, net_info,
+  # announce_device, serve, host::prepare's refusals, Host::wait,
+  # exit_code; phase B's `clock` subcommand: parse_args and ClockLines, its
+  # polls iem_dante::clock's Poller).
   # The unit tests never start mdns-sd's multicast daemon; the plan's live
   # check (Task 6) runs the binary on the box.
   "crates/iem-dante/src/bin/**",
@@ -237,10 +238,43 @@ exclude_re = [
   # warning, never killed. `spawn_threads`, the driver, the checks and the
   # control socket's accept loop stay mutated.
   "iem-dante/src/daemon/media\\.rs.*\\bThreads::stop\\b",
+  # The device as a library (#72 phase C, plan Task 2): the glue moved out
+  # of iem-dante-dev's main, excluded there by its glob before. `seed` only
+  # makes the TX flows' cookies differ between runs (any value works, so
+  # no test can tell its mutants apart); `Watch::stop` and `report` are
+  # tokio's SIGTERM and SIGINT (a test cannot signal its own test process);
+  # `device_thread`, `serve_device` and `goodbye` run the mDNS daemon, which
+  # the unit tests never start (it would announce the test records on the
+  # build machine's network), and the runtime around `daemon::serve`. Every
+  # decision stays mutated: `exit_code`, `read_config`, `load_device`,
+  # `interfaces`, `interface_info`, `prepare`'s refusals, `settle` (serving's
+  # end as `Host::ended`), `Host::{ended, stop, wait}` (host/tests.rs runs
+  # them over a stand-in device thread), and daemon.rs's `serve`.
+  "iem-dante/src/host\\.rs.*\\b(seed|Watch::stop|report|device_thread|serve_device|goodbye)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
   "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop -> StopOutcome with ",
+  # The engine's Dante backend (#72 phase C, plan Task 3; Linux), its glue
+  # as asio.rs is on Windows. `start` sets up, starts and wires the real
+  # device (`iem_dante::host::prepare` and `Prepared::start`), which needs
+  # an interface with a usable MAC and binds the Dante ports and the mDNS
+  # daemon on it: the unit tests never have one (loopback's all-zero MAC is
+  # a Setup refusal) and must not announce on the build machine's network;
+  # the box's live runs (plan Tasks 9 to 11) run it. `<impl Device for
+  # Host>` only forwards to `Host::ended` and `Host::stop`, mutated and
+  # tested in iem-dante's host/tests.rs. Every decision stays mutated:
+  # `check`, `timing`, `options`, `host_error`, `join_within` and the
+  # `DanteDriver` (dante/tests.rs), the parser and `dante_args`
+  # (engine/tests.rs), the endings (control/tests.rs).
+  "iem-engine/src/dante\\.rs.*( start -> | in start$)",
+  "iem-engine/src/dante\\.rs.*<impl Device for Host>",
+  # Unobservable (#72 phase C): in the driver's stop, `if !join_within(..)`
+  # only decides whether "the engine pump did not end within the wait" is
+  # logged; the stop goes on to the device either way (the order is
+  # tested: stop_ends_the_pump_before_the_device; join_within itself stays
+  # mutated).
+  "iem-engine/src/dante\\.rs.*delete ! in <impl Driver for DanteDriver>::stop$",
   # Equivalent `>` → `>=` (S2): at equality both branches give the same
   # result, so no input can tell them apart.
   # |x| equal to the running peak: assigning the same value changes nothing.
@@ -328,8 +362,8 @@ exclude_re = [
   # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
   # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
   # run_hil` is killed too — both must stay mutated.
-  # anchor 453: if !hil.is_empty() {
-  "iem-engine/src/engine\\.rs:453:.*delete ! in run$",
+  # anchor 564: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:564:.*delete ! in run$",
   # Equivalent (S6): the DER length fold `(n << 8) | usize::from(b)` shifts the
   # accumulator left by 8, so its low 8 bits are always zero; OR-ing in a byte
   # (0..=255) there equals XOR-ing it, so `| b` and `^ b` are identical (like

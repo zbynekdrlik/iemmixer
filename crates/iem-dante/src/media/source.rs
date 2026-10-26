@@ -20,6 +20,10 @@
 //! - [`Source::Echo`]: RX channel `rx`'s ring at `position − offset`: the
 //!   TX sample stamped T is the RX sample stamped T − offset; a hole is
 //!   silence, counted.
+//! - [`Source::Engine`] (phase C): the TX channel's own engine ring at the
+//!   position, which the engine's pump ([`crate::stream`]) writes stamped
+//!   RX time plus its offset; a hole (a block not written in time, or no
+//!   ring) is silence, counted.
 
 use super::ring::Ring;
 
@@ -40,6 +44,8 @@ pub enum Source {
         rx: usize,
         offset: u32,
     },
+    /// The engine's output for this TX channel (phase C).
+    Engine,
 }
 
 /// What one fill found.
@@ -51,8 +57,16 @@ pub struct Fill {
 
 impl Source {
     /// Writes the samples of positions `stamp`, `stamp + 1`, … into `out`,
-    /// at `rate` (the sine's only use of it); `rings` are the RX channels'.
-    pub fn fill(&mut self, stamp: u64, rate: u32, out: &mut [i32], rings: &[Ring]) -> Fill {
+    /// at `rate` (the sine's only use of it); `rings` are the RX channels',
+    /// `own` this TX channel's engine ring (`None`: it has none).
+    pub fn fill(
+        &mut self,
+        stamp: u64,
+        rate: u32,
+        out: &mut [i32],
+        rings: &[Ring],
+        own: Option<&Ring>,
+    ) -> Fill {
         match *self {
             Source::Silence => out.fill(0),
             Source::Counter => {
@@ -79,6 +93,19 @@ impl Source {
                     },
                     // No such RX channel, or a position before time began.
                     _ => {
+                        out.fill(0);
+                        Fill { holes: out.len() }
+                    }
+                };
+            }
+            Source::Engine => {
+                return match own {
+                    Some(ring) => Fill {
+                        holes: ring.read_at(stamp, out).holes,
+                    },
+                    // A channel without an engine ring (refused by
+                    // `TxShared::set_source`): all silence, all holes.
+                    None => {
                         out.fill(0);
                         Fill { holes: out.len() }
                     }

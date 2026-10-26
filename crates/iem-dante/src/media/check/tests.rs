@@ -37,7 +37,7 @@ const CLEAN: (u64, u64, u64, u64, u64, u64) = (0, 0, 0, 0, 0, 0);
 fn a_clean_counter_has_no_event() {
     let mut c = CounterCheck::new(96_000);
     let mut out = vec![0; 96_000];
-    Source::Counter.fill(T, RATE, &mut out, &[]);
+    Source::Counter.fill(T, RATE, &mut out, &[], None);
     feed(&mut c, T, &out);
     let s = c.stats();
     assert_eq!(counted(s), CLEAN);
@@ -203,7 +203,7 @@ fn a_counter_that_never_locks_reads_no_return_only_at_its_bound() {
 /// The sine as a flow of `bits` carries it.
 fn sine(hz: f64, dbfs: f64, start: u64, n: usize, rate: u32, bits: u32) -> Vec<i32> {
     let mut out = vec![0; n];
-    Source::Sine { hz, dbfs }.fill(start, rate, &mut out, &[]);
+    Source::Sine { hz, dbfs }.fill(start, rate, &mut out, &[], None);
     let mask = (!0u32 << (32 - bits)) as i32;
     out.iter().map(|v| v & mask).collect()
 }

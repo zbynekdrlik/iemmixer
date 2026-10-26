@@ -54,7 +54,7 @@ if cmd == "/opt/iemmixer/bin/iem-dante-dev ctl status":
         sys.stderr.write("iem-dante-dev ctl: the control socket: Connection refused\n")
         sys.exit(1)
     print(json.dumps(doc))
-elif cmd == "sudo -n systemctl stop iem-dante":
+elif cmd == "sudo -n systemctl stop iem-server iem-engine iem-dante":
     code = int(os.environ.get("FAKE_STOP_EXIT", "0"))
     if code:
         sys.stderr.write("sudo: a password is required\n")
@@ -331,7 +331,7 @@ class GuardTests(unittest.TestCase):
         return out
 
     STATUS = f"{HOST} /opt/iemmixer/bin/iem-dante-dev ctl status"
-    STOP = f"{HOST} sudo -n systemctl stop iem-dante"
+    STOP = f"{HOST} sudo -n systemctl stop iem-server iem-engine iem-dante"
 
     def test_a_loop_trips_the_stop_within_3_s(self) -> None:
         self.plan([loop(t) for t in range(30)])
@@ -342,7 +342,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual((end["end"], end["t_s"], end["stop_exit"]), ("requests", 3.0, 0))
         self.assertEqual(end["trip"], {"port": ARC, "peer": 1, "op": 0x2204, "rate": 2250.0, "seconds": 3.0})
         self.assertIn("TRIPPED: requests", err)
-        self.assertIn("iem-dante stopped", err)
+        self.assertIn("the Gen 3 stack stopped", err)
         # Every call goes out batch-mode with bounded connects, never asking for a password.
         for args in self.calls():
             self.assertEqual(args[:9], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o",
@@ -365,6 +365,27 @@ class GuardTests(unittest.TestCase):
         for doc in docs:
             for key, value in doc.items():
                 self.assertTrue(type(value) in (int, float) or (key == "end" and value in ("seconds",)), (key, value))
+
+    def test_the_engine_s_pump_counts_are_reported_and_never_trip(self) -> None:
+        def with_engine(t: int) -> dict:
+            doc = ordinary(t)
+            doc["engine"] = {"media": 1, "offset": 320, "playout": 192, "blocks": 3000 * t,
+                             "late": 1000 * t, "missed": 500 * t, "overruns": 7 * t,
+                             "rebootstraps": 40 * t, "max_process_us": 150}
+            return doc
+        self.plan([with_engine(t) for t in range(15)])
+        code, docs, err = self.guard("--seconds", "12")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(self.STOP, self.commands())
+        line = docs[0]
+        self.assertEqual((line["pump_late"], line["pump_missed"], line["pump_rebootstraps"]),
+                         (10000, 5000, 400))
+
+    def test_without_an_engine_the_line_has_no_pump_counts(self) -> None:
+        self.plan([ordinary(t) for t in range(15)])
+        code, docs, err = self.guard("--seconds", "12")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(any(k.startswith("pump_") for d in docs for k in d), docs)
 
     def test_the_flag_exits_0_and_stops_nothing(self) -> None:
         self.plan([ordinary(t) for t in range(30)])
@@ -402,7 +423,7 @@ class GuardTests(unittest.TestCase):
             code, docs, err = self.guard()
         self.assertEqual((code, docs[-1]["stop_exit"]), (1, 1))
         self.assertIn("WARNING: the stop failed (exit 1): sudo: a password is required; stop it by hand: ssh "
-                      "<GEN3_HOST> sudo -n systemctl stop iem-dante", err)
+                      "<GEN3_HOST> sudo -n systemctl stop iem-server iem-engine iem-dante", err)
         self.assertNotIn(HOST, err)
 
     def test_failed_reads_are_counted_and_compared_across(self) -> None:

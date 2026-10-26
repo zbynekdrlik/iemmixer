@@ -6,7 +6,7 @@ const RATE: u32 = 96_000;
 
 fn fill(src: &mut Source, stamp: u64, n: usize, rings: &[Ring]) -> (Vec<i32>, Fill) {
     let mut out = vec![0x5555_5500; n];
-    let f = src.fill(stamp, RATE, &mut out, rings);
+    let f = src.fill(stamp, RATE, &mut out, rings, None);
     (out, f)
 }
 
@@ -168,4 +168,31 @@ fn echo_of_a_hole_is_silence_and_counted() {
         fill(&mut early, 5, 4, &rings),
         (vec![0; 4], Fill { holes: 4 })
     );
+}
+
+#[test]
+fn the_engine_source_is_its_own_ring_at_the_stamp_a_hole_silence() {
+    let own = Ring::new();
+    let block: Vec<i32> = (0..32).map(|i| (i + 1) << 8).collect();
+    own.put_at(T, &block);
+    // RX rings are not read: RX 1 holds other samples at the same stamps.
+    let rings = [Ring::new()];
+    rings[0].write_at(T, &[7 << 8; 64]);
+    let mut src = Source::Engine;
+    let mut out = vec![0x5555_5500; 64];
+    let f = src.fill(T, RATE, &mut out, &rings, Some(&own));
+    assert_eq!(&out[..32], &block[..]);
+    assert_eq!(&out[32..], &[0; 32], "not written: silence");
+    assert_eq!(f, Fill { holes: 32 });
+    // Another stamp, the same rule.
+    let f = src.fill(T + 30, RATE, &mut out[..4], &rings, Some(&own));
+    assert_eq!(&out[..4], &[31 << 8, 32 << 8, 0, 0]);
+    assert_eq!(f, Fill { holes: 2 });
+    // No ring of its own: all silence, all holes.
+    let (out, f) = fill(&mut Source::Engine, T, 16, &rings);
+    assert_eq!((out, f), (vec![0; 16], Fill { holes: 16 }));
+    // The other sources never read it.
+    let mut out = vec![0x5555_5500; 4];
+    Source::Silence.fill(T, RATE, &mut out, &rings, Some(&own));
+    assert_eq!(out, [0; 4]);
 }

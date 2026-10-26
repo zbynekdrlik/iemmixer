@@ -4,21 +4,29 @@ import { expect, type APIRequestContext, type APIResponse, type Page } from "@pl
 // The live run's site values (S7, #10; P6): every one comes from a LIVE_*
 // variable of the ops live run, read on first use, so `--list` works without
 // any of them. A refusal names the variable, never its value, and no error
-// here carries a URL (a socket URL holds a token in its query).
+// here carries a URL (a socket URL holds a token in its query). The Gen 3
+// box's browser step (`tests/gen3/`, #72 phase C) reads the same variables
+// for the box's own server: `box()`, with a plain-HTTP origin its spec
+// allows (`allowPlainHttp`).
 
 export type Who = "engineer" | "member";
 
-export type Live = {
-  /** The band's public host, `https://…` (the members' real path, through the tunnel). */
+/** What every spec against a server of ours reads: the live run's and the Gen 3 box's. */
+export type Box = {
+  /** The server's origin: the band's public host, `https://…` (the members' real path, through the tunnel), or the Gen 3 box's UI. */
   baseURL: string;
-  /** The run's build: the 40-hex SHA the PC runs. */
+  /** The run's build: the 40-hex SHA the server runs. */
   sha: string;
-  /** Short-lived tokens the PC minted for this run (`iem-soakclient token`). */
+  /** Short-lived tokens the server's host minted for this run (`iem-soakclient token`). */
   tokens: { engineer: string; member: string };
   /** The member whose page a member-side spec opens. */
   member: string;
-  /** The input the bursts drive, and the talkback's input. */
+  /** The input the bursts drive (live) or the member opens (Gen 3). */
   testInput: string;
+};
+
+/** The live run's values: the box's and the talkback's input and the bursts' level. */
+export type Live = Box & {
   talkbackInput: string;
   /** The bursts' level (dBFS, at most the HIL ceiling of −20). */
   burstDbfs: number;
@@ -32,7 +40,7 @@ const DECIMAL = /^-?[0-9]+(?:\.[0-9]+)?$/;
 export const BURST_CEILING_DBFS = -20;
 
 /** The failing hop when /api/version does not name the run's build. */
-export const NOT_THE_BUILD = "the public host does not answer with the run's build (tunnel or server)";
+export const NOT_THE_BUILD = "the run's host does not answer with the run's build (tunnel or server)";
 
 /** The variables a value is read from: the process's, or a test's own. */
 type Env = Record<string, string | undefined>;
@@ -49,21 +57,33 @@ function matching(name: string, re: RegExp, what: string, env: Env = process.env
   return v;
 }
 
-function baseURLOf(name: string): string {
-  const v = matching(name, /^https:\/\//, "an https:// URL");
+/** The schemes an origin may have: the live run's public host is `https:` only. */
+export type Schemes = readonly ("http:" | "https:")[];
+const PUBLIC_HOST: Schemes = ["https:"];
+/** The Gen 3 box serves its UI over plain HTTP on its LAN (#72 phase C, plan choice 4). */
+const LAN_BOX: Schemes = ["http:", "https:"];
+
+/**
+ * The variable `name`'s value as a bare origin with one of `schemes`; a
+ * refusal names the variable, never its value.
+ */
+export function originOf(name: string, schemes: Schemes, env: Env = process.env): string {
+  const what = `an ${schemes.map((s) => `${s}//`).join(" or ")} URL`;
+  const v = value(name, env);
   let url: URL;
   try {
     url = new URL(v);
   } catch {
-    throw new Error(`${name} is not an https:// URL`);
+    throw new Error(`${name} is not ${what}`);
   }
+  if (!schemes.some((s) => s === url.protocol && v.startsWith(`${s}//`))) throw new Error(`${name} is not ${what}`);
   if (url.pathname !== "/" || url.search !== "" || url.hash !== "" || url.username !== "" || url.password !== "") {
     throw new Error(`${name} must be a bare origin (no path, query, fragment or credentials)`);
   }
   return url.origin;
 }
 
-function tokensOf(name: string): Live["tokens"] {
+function tokensOf(name: string): Box["tokens"] {
   const path = value(name);
   let parsed: unknown;
   try {
@@ -101,16 +121,37 @@ export function runMarker(env: Env = process.env): string {
   return `iemmixer-live-marker-${id}-${attempt}`;
 }
 
+/** The schemes LIVE_BASE_URL may have in this process: the public host's, until `allowPlainHttp`. */
+let schemes: Schemes = PUBLIC_HOST;
+let boxCached: Box | null = null;
 let cached: Live | null = null;
 
-/** The live run's values, read and checked on the first call. */
-export function live(): Live {
-  cached ??= {
-    baseURL: baseURLOf("LIVE_BASE_URL"),
+/**
+ * The Gen 3 box's spec, at its top: LIVE_BASE_URL may be the box's plain
+ * `http://` origin too (GEN3_UI_URL). Only before any value is read, so a
+ * live spec, which never calls it, keeps the public host's `https://`.
+ */
+export function allowPlainHttp(): void {
+  if (boxCached) throw new Error("allowPlainHttp comes before the first LIVE_* value is read");
+  schemes = LAN_BOX;
+}
+
+/** The values every spec against a server of ours reads, read and checked on the first call. */
+export function box(): Box {
+  boxCached ??= {
+    baseURL: originOf("LIVE_BASE_URL", schemes),
     sha: matching("LIVE_SHA", SHA, "a 40-hex SHA"),
     tokens: tokensOf("LIVE_TOKENS"),
     member: matching("LIVE_MEMBER", ID, "an id"),
     testInput: matching("LIVE_TEST_INPUT", ID, "an id"),
+  };
+  return boxCached;
+}
+
+/** The live run's values, read and checked on the first call. */
+export function live(): Live {
+  cached ??= {
+    ...box(),
     talkbackInput: matching("LIVE_TALKBACK_INPUT", ID, "an id"),
     burstDbfs: burstOf("LIVE_BURST_DBFS"),
   };
@@ -132,7 +173,7 @@ export function namesBuild(gitHash: unknown, sha: string): boolean {
  * real socket opens only after this check.
  */
 export async function expectBuild(request: APIRequestContext): Promise<void> {
-  const { baseURL, sha } = live();
+  const { baseURL, sha } = box();
   let answer = "no answer";
   let gitHash: unknown;
   try {
@@ -154,7 +195,7 @@ export type Auth = { token: string; member: string; engineer: boolean };
 
 /** The stored login of `who`. */
 function authOf(who: Who): Auth {
-  const l = live();
+  const l = box();
   return who === "engineer"
     ? { token: l.tokens.engineer, member: "engineer", engineer: true }
     : { token: l.tokens.member, member: l.member, engineer: false };
@@ -183,7 +224,7 @@ export async function storeLogin(page: Page, origin: string, auth: Auth): Promis
  */
 export async function openLive(page: Page, who: Who, path?: string): Promise<void> {
   const auth = authOf(who);
-  const { baseURL } = live();
+  const { baseURL } = box();
   await storeLogin(page, baseURL, auth);
   const what = who === "engineer" ? "a mixer page" : "the member's mixer page";
   await navigate(page, new URL(`/${path ?? auth.member}`, baseURL).toString(), what);
@@ -192,7 +233,7 @@ export async function openLive(page: Page, who: Who, path?: string): Promise<voi
 
 /** Opens the public host's start page (the band's landing page). */
 export async function openStart(page: Page): Promise<void> {
-  await navigate(page, new URL("/", live().baseURL).toString(), "the app's start page");
+  await navigate(page, new URL("/", box().baseURL).toString(), "the app's start page");
 }
 
 /**
@@ -241,7 +282,7 @@ async function api(
   data?: unknown,
 ): Promise<{ status: number; body: unknown }> {
   if (!/^\/[^?#]*$/.test(path)) throw new Error(`${method} takes a path without a query`);
-  return apiAt(request, { origin: live().baseURL, token: authOf(who).token }, method, path, data);
+  return apiAt(request, { origin: box().baseURL, token: authOf(who).token }, method, path, data);
 }
 
 /**

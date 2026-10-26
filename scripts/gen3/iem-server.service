@@ -1,0 +1,47 @@
+# iemmixer's server and UI on the Gen 3 box (#72 phase C, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md Task 6,
+# choice 4), installed by scripts/gen3/deploy.sh; rules in .claude/rules/gen3.md.
+# The build CI's e2e job runs (features standalone,audio): plain HTTP on the
+# LAN at port 8080, the UI embedded, no TLS and no tunnel. Its data is the
+# public synthetic test band (config/test-site.toml as iemmixer.toml and
+# config/test-roster.toml as roster.toml), which deploy.sh copies into
+# /var/lib/iemmixer/site; the server writes its secrets and the band's data
+# beside them. Public repository (P6): the box's user comes from the drop-in
+# /etc/systemd/system/iem-server.service.d/10-user.conf (User=), the same user
+# as the engine's, who owns the site folder and the engine's pipes.
+#
+# No ordering with iem-engine.service: the server reconnects to the engine's
+# socket by itself (as on the PC), so the two start and stop in parallel.
+# Never enabled at boot (deploy.sh disables it); "ide event" stops it with the
+# engine and the device (plan Task 7).
+
+[Unit]
+Description=iemmixer Gen 3 server and UI (phase C: the public test band, plain HTTP on 8080)
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/opt/iemmixer/bin/iem-server
+Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml IEMMIXER_ENGINE_PIPE=/run/iemmixer/engine.sock PORT=8080 RUST_LOG=info
+Restart=on-failure
+RestartSec=2
+# A stop is SIGTERM and a bounded wait (I8): the listener closes, open
+# requests get 5 s, exit 0. One that does not end within the bound is left
+# running and the stop fails, never force-ended.
+TimeoutStopSec=10
+SendSIGKILL=no
+# /var/lib/iemmixer, owned by the service's user: the site folder (secrets,
+# lineups, backups beside the site file).
+StateDirectory=iemmixer
+# No capability: port 8080.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
