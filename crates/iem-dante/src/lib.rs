@@ -42,6 +42,8 @@
 //! - [`clock`]: the media clock: PTP time as `CLOCK_MONOTONIC` + k, k from
 //!   dantesync's time server on the box (the box's one PTP owner), and the
 //!   packets' stamps.
+//! - [`media`]: the audio packet codec, the jitter ring of an RX channel,
+//!   the TX test sources and the checkers of what comes back.
 //! - [`daemon`]: the `iem-dante-dev` binary's command line, its interface
 //!   and address, and the loop that serves the device and announces it
 //!   again after renames.
@@ -56,4 +58,5 @@ pub mod cmc;
 pub mod daemon;
 pub mod device;
 pub mod info;
+pub mod media;
 pub mod wire;

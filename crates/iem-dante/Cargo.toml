@@ -38,6 +38,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 
 [dev-dependencies]
+# tests/hot_path.rs (phase B): the packet codec, the rings, the sources and
+# the checkers allocate nothing, as iem-engine's tests/rt.rs proves it.
+assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }
 # The state file's tests (a temporary directory), as the other crates use it.
 tempfile = "3"
 # The socket tests: a runtime, #[tokio::test] and bounded waits.
