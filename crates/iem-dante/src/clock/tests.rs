@@ -492,6 +492,114 @@ mod linux {
         assert_eq!(clock.epoch(), 0);
     }
 
+    /// The stand-in answers the next request with `make(its id)`, or not at
+    /// all; returns the reply sent.
+    async fn answer(
+        server: &tokio::net::UdpSocket,
+        make: Option<fn(u32) -> Vec<u8>>,
+    ) -> Option<(u32, Vec<u8>)> {
+        let mut buf = [0u8; 128];
+        let (n, from) = server.recv_from(&mut buf).await.unwrap();
+        assert_eq!((n, &buf[0..4]), (dsyx::REQUEST_LEN, &b"DSYX"[..]));
+        let id = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let reply = make?(id);
+        server.send_to(&reply, from).await.unwrap();
+        Some((id, reply))
+    }
+
+    const D: i64 = 1_790_000_000_000_000_000;
+
+    /// A locked reply now, the last step an hour ago.
+    fn locked_now(id: u32) -> Vec<u8> {
+        let wall = realtime_ns();
+        locked_reply(id, wall, D, wall - D - HOUR, -750)
+    }
+
+    /// The same, not locked.
+    fn unlocked_now(id: u32) -> Vec<u8> {
+        let mut b = locked_now(id);
+        b[41] = 0;
+        b[36..40].copy_from_slice(&12_000i32.to_be_bytes());
+        b
+    }
+
+    /// One poll, the stand-in answering it with `make` (or not), bounded at
+    /// 5 s.
+    async fn step(
+        poller: &mut Poller,
+        clock: &MonoClock,
+        freq: &AtomicI32,
+        server: &tokio::net::UdpSocket,
+        make: Option<fn(u32) -> Vec<u8>>,
+    ) -> (Polled, Option<(u32, Vec<u8>)>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(poller.once(clock, freq), answer(server, make))
+        })
+        .await
+        .expect("a poll within 5 s")
+    }
+
+    /// One poll at a time (the `clock` subcommand's step): each reports the
+    /// reply, its sample, the event and the anchored k, and sets the clock
+    /// and the frequency as the service's poller does.
+    #[tokio::test]
+    async fn a_poll_reports_its_reply_sample_event_and_k() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let clock = MonoClock::new();
+        let freq = AtomicI32::new(0);
+        let mut poller = Poller::connect(addr).await.unwrap();
+
+        // Not locked: no k.
+        let (p, sent) = step(&mut poller, &clock, &freq, &server, Some(unlocked_now)).await;
+        let (id, reply) = sent.unwrap();
+        let r = dsyx::parse(&reply, id).unwrap();
+        assert!(!r.locked);
+        assert_eq!(
+            p,
+            Polled {
+                reading: Some(r),
+                sample: Sample::NotLocked,
+                event: Event::NotReady,
+                k_ns: None,
+            }
+        );
+        assert_eq!((clock.k_ns(), freq.load(Ordering::Relaxed)), (None, 12_000));
+
+        // Locked: the first k, the clock ready with it.
+        let (p, sent) = step(&mut poller, &clock, &freq, &server, Some(locked_now)).await;
+        let (id, reply) = sent.unwrap();
+        assert_eq!(p.reading, Some(dsyx::parse(&reply, id).unwrap()));
+        let Sample::Usable { k_ns } = p.sample else {
+            panic!("{p:?}");
+        };
+        assert_eq!(
+            (p.event, p.k_ns, clock.k_ns()),
+            (Event::Ready { k_ns }, Some(k_ns), Some(k_ns))
+        );
+        assert_eq!(freq.load(Ordering::Relaxed), -750);
+        // k = PTP now less the box's monotonic clock, within the loop's ms.
+        let expect = realtime_ns() - D - monotonic_ns();
+        assert!((k_ns - expect).abs() < 50_000_000, "{k_ns} {expect}");
+
+        // Silence: holdover, k and the frequency kept.
+        let (p, sent) = step(&mut poller, &clock, &freq, &server, None).await;
+        assert_eq!(sent, None);
+        assert_eq!(
+            p,
+            Polled {
+                reading: None,
+                sample: Sample::NoReply,
+                event: Event::Holdover,
+                k_ns: Some(k_ns),
+            }
+        );
+        assert_eq!(
+            (clock.k_ns(), clock.epoch(), freq.load(Ordering::Relaxed)),
+            (Some(k_ns), 0, -750)
+        );
+    }
+
     /// No answer: the clock stays not ready and the poller keeps polling.
     #[tokio::test]
     async fn the_poller_waits_for_a_silent_dantesync() {

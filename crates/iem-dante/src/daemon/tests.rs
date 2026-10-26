@@ -139,6 +139,235 @@ fn an_address_the_dante_network_cannot_reach_is_refused() {
     }
 }
 
+#[test]
+fn clock_takes_its_seconds() {
+    for (a, want) in [
+        (
+            &["clock", "--seconds", "1800"][..],
+            Command::Clock { seconds: 1800 },
+        ),
+        (&["clock", "--seconds", "1"], Command::Clock { seconds: 1 }),
+        (
+            &["clock", "--seconds", "4294967295"],
+            Command::Clock { seconds: u32::MAX },
+        ),
+        (&["clock", "--seconds", "5", "--version"], Command::Version),
+        (&["clock", "-V"], Command::Version),
+        (&["clock", "--help", "--bogus"], Command::Help),
+        (&["clock", "-h"], Command::Help),
+    ] {
+        assert_eq!(parse_args(&args(a)), Ok(want), "{a:?}");
+    }
+}
+
+#[test]
+fn a_bad_clock_command_line_is_a_usage_error() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["clock"], "clock: --seconds is missing"),
+        (&["clock", "--seconds"], "--seconds needs a value"),
+        (
+            &["clock", "--seconds", "0"],
+            "\"0\" is not a whole number from 1",
+        ),
+        (&["clock", "--seconds", "-1"], "not a whole number"),
+        (&["clock", "--seconds", "1.5"], "not a whole number"),
+        (&["clock", "--seconds", "4294967296"], "not a whole number"),
+        (
+            &["clock", "--seconds", "5", "--seconds", "6"],
+            "given twice",
+        ),
+        (
+            &["clock", "--config", "c"],
+            "clock: unknown argument \"--config\"",
+        ),
+        (&["clock", "5"], "clock: unknown argument \"5\""),
+        // Only the first word selects the clock.
+        (
+            &["--config", "c", "--iface", "e", "clock"],
+            "unknown argument \"clock\"",
+        ),
+    ];
+    for (a, want) in cases {
+        let got = parse_args(&args(a)).expect_err(&format!("{a:?} is refused"));
+        assert!(got.contains(want), "{a:?}: {got}");
+    }
+}
+
+fn reading(locked: bool, mode: u8, freq_ppb: i32) -> crate::clock::Reading {
+    crate::clock::Reading {
+        wall_ns: 1_790_000_100_000_000_000,
+        locked,
+        settled: true,
+        mode,
+        freq_ppb,
+        date: None,
+    }
+}
+
+fn polled(
+    reading: Option<crate::clock::Reading>,
+    sample: Sample,
+    event: Event,
+    k_ns: Option<i64>,
+) -> Polled {
+    Polled {
+        reading,
+        sample,
+        event,
+        k_ns,
+    }
+}
+
+/// A run from a silent dantesync to a re-anchor and a holdover, line by
+/// line: every field pinned.
+#[test]
+fn the_clock_lines_follow_the_clock_from_waiting_to_a_re_anchor() {
+    let mut lines = ClockLines::new();
+    let usable = |k_ns| Sample::Usable { k_ns };
+    let steps = [
+        (
+            polled(None, Sample::NoReply, Event::NotReady, None),
+            r#"{"t_s":0,"ready":0,"k_ns":null,"dk_ns":null,"off_ns":null,"re_anchors":0,"re_anchor_ns":null,"holdover":0,"sample":5,"locked":null,"mode":null,"freq_ppb":null}"#,
+        ),
+        (
+            polled(
+                Some(reading(false, 1, 12_000)),
+                Sample::NotLocked,
+                Event::NotReady,
+                None,
+            ),
+            r#"{"t_s":1,"ready":0,"k_ns":null,"dk_ns":null,"off_ns":null,"re_anchors":0,"re_anchor_ns":null,"holdover":0,"sample":1,"locked":0,"mode":1,"freq_ppb":12000}"#,
+        ),
+        (
+            polled(
+                Some(reading(true, 3, -750)),
+                usable(5_000_000),
+                Event::Ready { k_ns: 5_000_000 },
+                Some(5_000_000),
+            ),
+            r#"{"t_s":2,"ready":1,"k_ns":5000000,"dk_ns":null,"off_ns":0,"re_anchors":0,"re_anchor_ns":null,"holdover":0,"sample":0,"locked":1,"mode":3,"freq_ppb":-750}"#,
+        ),
+        (
+            polled(
+                Some(reading(true, 4, -751)),
+                usable(5_003_000),
+                Event::Held,
+                Some(5_000_000),
+            ),
+            r#"{"t_s":3,"ready":1,"k_ns":5003000,"dk_ns":3000,"off_ns":3000,"re_anchors":0,"re_anchor_ns":null,"holdover":0,"sample":0,"locked":1,"mode":4,"freq_ppb":-751}"#,
+        ),
+        (
+            polled(
+                Some(reading(true, 4, -751)),
+                usable(9_000_000),
+                Event::Held,
+                Some(5_000_000),
+            ),
+            r#"{"t_s":4,"ready":1,"k_ns":9000000,"dk_ns":3997000,"off_ns":4000000,"re_anchors":0,"re_anchor_ns":null,"holdover":0,"sample":0,"locked":1,"mode":4,"freq_ppb":-751}"#,
+        ),
+        (
+            polled(
+                Some(reading(true, 4, -751)),
+                usable(9_000_050),
+                Event::ReAnchored {
+                    delta_ns: 4_000_050,
+                },
+                Some(9_000_050),
+            ),
+            r#"{"t_s":5,"ready":1,"k_ns":9000050,"dk_ns":50,"off_ns":0,"re_anchors":1,"re_anchor_ns":4000050,"holdover":0,"sample":0,"locked":1,"mode":4,"freq_ppb":-751}"#,
+        ),
+        (
+            polled(
+                Some(reading(true, 4, -752)),
+                usable(9_000_010),
+                Event::Held,
+                Some(9_000_050),
+            ),
+            r#"{"t_s":6,"ready":1,"k_ns":9000010,"dk_ns":-40,"off_ns":-40,"re_anchors":1,"re_anchor_ns":null,"holdover":0,"sample":0,"locked":1,"mode":4,"freq_ppb":-752}"#,
+        ),
+        (
+            polled(
+                Some(reading(false, 1, -700)),
+                Sample::NotLocked,
+                Event::Holdover,
+                Some(9_000_050),
+            ),
+            r#"{"t_s":7,"ready":1,"k_ns":null,"dk_ns":null,"off_ns":null,"re_anchors":1,"re_anchor_ns":null,"holdover":1,"sample":1,"locked":0,"mode":1,"freq_ppb":-700}"#,
+        ),
+        // The line before had no k: no change to name.
+        (
+            polled(
+                Some(reading(true, 3, -760)),
+                usable(9_000_060),
+                Event::Held,
+                Some(9_000_050),
+            ),
+            r#"{"t_s":8,"ready":1,"k_ns":9000060,"dk_ns":null,"off_ns":10,"re_anchors":1,"re_anchor_ns":null,"holdover":0,"sample":0,"locked":1,"mode":3,"freq_ppb":-760}"#,
+        ),
+        // A second re-anchor, backwards.
+        (
+            polled(
+                Some(reading(true, 3, -760)),
+                usable(1_000),
+                Event::ReAnchored {
+                    delta_ns: -8_999_050,
+                },
+                Some(1_000),
+            ),
+            r#"{"t_s":9,"ready":1,"k_ns":1000,"dk_ns":-8999060,"off_ns":0,"re_anchors":2,"re_anchor_ns":-8999050,"holdover":0,"sample":0,"locked":1,"mode":3,"freq_ppb":-760}"#,
+        ),
+    ];
+    for (t_s, (p, want)) in steps.iter().enumerate() {
+        assert_eq!(lines.line(t_s as u32, p), *want, "line {t_s}");
+    }
+}
+
+#[test]
+fn every_sample_has_its_number() {
+    for (sample, code) in [
+        (Sample::Usable { k_ns: 1 }, 0),
+        (Sample::NotLocked, 1),
+        (Sample::NoDateState, 2),
+        (Sample::StepNear, 3),
+        (Sample::Slewing, 4),
+        (Sample::NoReply, 5),
+    ] {
+        assert_eq!(sample_code(sample), code, "{sample:?}");
+        let line = ClockLines::new().line(0, &polled(None, sample, Event::NotReady, None));
+        assert!(line.contains(&format!("\"sample\":{code},")), "{line}");
+    }
+}
+
+/// The clock's lines name numbers only (P6: they may be pasted).
+#[test]
+fn a_clock_line_holds_numbers_only() {
+    let line = ClockLines::new().line(
+        7,
+        &polled(
+            Some(reading(true, 3, -750)),
+            Sample::Usable { k_ns: -42 },
+            Event::Ready { k_ns: -42 },
+            Some(-42),
+        ),
+    );
+    let body = line
+        .strip_prefix('{')
+        .and_then(|l| l.strip_suffix('}'))
+        .unwrap();
+    for field in body.split(',') {
+        let (key, value) = field.split_once(':').unwrap();
+        assert!(
+            key.starts_with('"')
+                && key.ends_with('"')
+                && key[1..key.len() - 1]
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_'),
+            "{field}"
+        );
+        assert!(value == "null" || value.parse::<i64>().is_ok(), "{field}");
+    }
+}
+
 fn if_addr(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) -> IfAddr {
     IfAddr {
         name: name.into(),

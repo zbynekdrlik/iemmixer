@@ -167,6 +167,20 @@ fn agree(a: i64, b: i64) -> bool {
     a.abs_diff(b) <= TOLERANCE_NS.unsigned_abs()
 }
 
+/// One poll of dantesync and what it did (the poller's step; the
+/// `iem-dante-dev clock` lines are made of these).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Polled {
+    /// dantesync's reply; `None` when it did not answer in time.
+    pub reading: Option<Reading>,
+    /// What the reply gave the tracker.
+    pub sample: Sample,
+    /// What it did to k.
+    pub event: Event,
+    /// The anchored k after the poll; `None` before the clock is ready.
+    pub k_ns: Option<i64>,
+}
+
 /// PTP time for the media threads.
 pub trait PtpClock: Send + Sync {
     /// PTP ns now; `None` before the clock is ready.
@@ -261,11 +275,11 @@ pub fn from_stamp(secs: u32, sub: u32, rate: u32, near: u64) -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{MonoClock, monotonic_ns, poll_dantesync, realtime_ns};
+pub use linux::{DANTESYNC, MonoClock, POLL, Poller, monotonic_ns, poll_dantesync, realtime_ns};
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::time::Duration;
 
     use tokio::net::UdpSocket;
@@ -276,6 +290,9 @@ mod linux {
 
     /// How often dantesync is asked.
     pub const POLL: Duration = Duration::from_secs(1);
+    /// dantesync's time server on the box.
+    pub const DANTESYNC: SocketAddr =
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, dsyx::PORT));
     /// How long one poll waits for its reply.
     pub const REPLY_TIMEOUT: Duration = Duration::from_millis(200);
     /// k before the clock is ready.
@@ -378,21 +395,16 @@ mod linux {
     /// and keeps `clock`'s k and `freq` (dantesync's frequency adjustment,
     /// ppb) up to date; runs until the task ends.
     pub async fn poll_dantesync(clock: Arc<MonoClock>, freq: Arc<AtomicI32>) {
-        poll(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, dsyx::PORT)),
-            clock,
-            freq,
-        )
-        .await
+        poll(DANTESYNC, clock, freq).await
     }
 
     /// The poller, aimed at `target` (a stand-in server in the tests).
     /// Glue: every decision is [`sample`]'s and [`Tracker`]'s. Logs name
     /// the clock's state, k and deltas in ns, never an address.
     pub(crate) async fn poll(target: SocketAddr, clock: Arc<MonoClock>, freq: Arc<AtomicI32>) {
-        let socket = loop {
-            match socket_to(target).await {
-                Ok(s) => break s,
+        let mut poller = loop {
+            match Poller::connect(target).await {
+                Ok(p) => break p,
                 Err(e) => {
                     warn!(error = %e, "media clock: no socket to dantesync, trying again");
                     tokio::time::sleep(POLL).await;
@@ -403,38 +415,70 @@ mod linux {
             port = target.port(),
             "media clock: polling dantesync's time server once a second"
         );
-        let mut tracker = Tracker::new();
-        // Any start; replies are matched by it, and only the polled address
-        // reaches a connected socket.
-        let mut id = monotonic_ns() as u32;
-        let mut buf = [0u8; dsyx::REPLY_MAX];
         let mut tick = tokio::time::interval(POLL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last = Event::Held;
         let mut waiting: Option<Sample> = None;
         loop {
             tick.tick().await;
-            id = id.wrapping_add(1);
-            let s = match ask(&socket, id, &mut buf).await {
+            let p = poller.once(&clock, &freq).await;
+            log_event(p.event, last, p.sample, &mut waiting, clock.epoch());
+            last = p.event;
+        }
+    }
+
+    /// One poll at a time of dantesync's time server at a target: the
+    /// socket, the request ids and the [`Tracker`]. The service's poller
+    /// ([`poll_dantesync`]) and `iem-dante-dev clock` both step it once a
+    /// second.
+    #[derive(Debug)]
+    pub struct Poller {
+        socket: UdpSocket,
+        tracker: Tracker,
+        id: u32,
+        buf: [u8; dsyx::REPLY_MAX],
+    }
+
+    impl Poller {
+        /// A socket on loopback, connected to `target` ([`DANTESYNC`] on
+        /// the box): only the target's datagrams reach it.
+        pub async fn connect(target: SocketAddr) -> std::io::Result<Self> {
+            let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            socket.connect(target).await?;
+            Ok(Poller {
+                socket,
+                tracker: Tracker::new(),
+                // Any start; replies are matched by it.
+                id: monotonic_ns() as u32,
+                buf: [0u8; dsyx::REPLY_MAX],
+            })
+        }
+
+        /// One request and its reply (at most [`REPLY_TIMEOUT`]): the
+        /// reply's frequency adjustment goes to `freq`, its sample to the
+        /// tracker, and a first or a replaced k to `clock`.
+        pub async fn once(&mut self, clock: &MonoClock, freq: &AtomicI32) -> Polled {
+            self.id = self.id.wrapping_add(1);
+            let reply = ask(&self.socket, self.id, &mut self.buf).await;
+            let s = match reply {
                 Some((r, wall, mono)) => {
                     freq.store(r.freq_ppb, Ordering::Relaxed);
                     sample(&r, wall, mono)
                 }
                 None => Sample::NoReply,
             };
-            let ev = tracker.feed(s);
-            if let (Event::Ready { .. } | Event::ReAnchored { .. }, Some(k)) = (ev, tracker.k()) {
+            let event = self.tracker.feed(s);
+            let k_ns = self.tracker.k();
+            if let (Event::Ready { .. } | Event::ReAnchored { .. }, Some(k)) = (event, k_ns) {
                 clock.set_k(k);
             }
-            log_event(ev, last, s, &mut waiting, clock.epoch());
-            last = ev;
+            Polled {
+                reading: reply.map(|(r, _, _)| r),
+                sample: s,
+                event,
+                k_ns,
+            }
         }
-    }
-
-    async fn socket_to(target: SocketAddr) -> std::io::Result<UdpSocket> {
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        socket.connect(target).await?;
-        Ok(socket)
     }
 
     /// One request and its reply within [`REPLY_TIMEOUT`], with the box's

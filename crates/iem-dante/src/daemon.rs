@@ -6,7 +6,9 @@
 //!
 //! - [`parse_args`]: `--config <path>` and one of `--iface <name>` or `--ip
 //!   <IPv4>`; `--version` ([`version_line`]: the workspace version and the
-//!   build's commit, CI's `GITHUB_SHA`, "local" otherwise).
+//!   build's commit, CI's `GITHUB_SHA`, "local" otherwise); `clock
+//!   --seconds <n>` (phase B, plan Task 2): the media clock's polls of
+//!   dantesync, one JSON line each ([`ClockLines`]), serving nothing.
 //! - [`pick_interface`]: the interface and its one IPv4 address the device
 //!   serves on, from the box's interface list: ARC, CMC and the info
 //!   server bind the address, the mDNS records point at it and are sent on
@@ -35,6 +37,7 @@ use tokio::sync::Notify;
 use tracing::info;
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
+use crate::clock::{Event, Polled, Sample};
 use crate::device::Device;
 use crate::info::{Identity, Multicast, Multicaster, NetInfo};
 use crate::{arc, cmc, info};
@@ -52,6 +55,7 @@ pub const BUILD: &str = match option_env!("GITHUB_SHA") {
 
 pub const USAGE: &str = "\
 usage: iem-dante-dev --config <path> (--iface <name> | --ip <IPv4 address>)
+       iem-dante-dev clock --seconds <n>
        iem-dante-dev --version
 
 Our own Dante device (Gen 3 phase A, #72): ARC on UDP 4440, CMC on UDP 8800
@@ -59,7 +63,19 @@ and the info requests on UDP 8700 at the interface's IPv4 address (replies
 to 224.0.0.231:8702, a heartbeat every second to 224.0.0.233:8708), its
 mDNS records on that interface only, renames saved to the config's state
 file. SIGTERM or SIGINT withdraws the records (mDNS goodbyes), then it
-exits 0. It never sends PTP or audio.";
+exits 0. It never sends PTP or audio.
+
+clock: polls dantesync's time server on the box (127.0.0.1:31900) n times,
+a second apart, as the device's media clock does, and prints one JSON line
+a poll, numbers only: t_s (seconds from the first poll), ready (1 once the
+clock has a k), k_ns (this poll's k, null when the poll gave none), dk_ns
+(its change since the line before), off_ns (this poll's k less the
+anchored one), re_anchors (so far), re_anchor_ns (this poll's re-anchor,
+else null), holdover (1 when this poll kept k without a usable reading),
+sample (0 usable, 1 dantesync not locked, 2 no date offset, 3 a date step
+within 2 s, 4 a date slew, 5 no reply), locked, mode and freq_ppb
+(dantesync's, null without a reply). It serves nothing and never opens
+UDP 319 or 320.";
 
 /// What `--version` prints: the name, the version and the build.
 pub fn version_line() -> String {
@@ -86,13 +102,23 @@ pub struct Options {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run(Options),
+    /// `clock --seconds <n>`: n polls of dantesync, a line each.
+    Clock {
+        seconds: u32,
+    },
     Version,
     Help,
 }
 
 /// The command line (without the program's name). `--version` and
 /// `--help` win wherever they stand; anything else is a usage error.
+/// `clock` first selects the clock's polls ([`Command::Clock`]).
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
+    if let Some((first, rest)) = args.split_first()
+        && first == "clock"
+    {
+        return parse_clock(rest);
+    }
     let mut config = None;
     let mut iface = None;
     let mut ip = None;
@@ -125,6 +151,99 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         config: PathBuf::from(config),
         place,
     }))
+}
+
+/// `clock`'s own arguments: `--seconds <n>`, n from 1.
+fn parse_clock(args: &[String]) -> Result<Command, String> {
+    let mut seconds = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--version" | "-V" => return Ok(Command::Version),
+            "--help" | "-h" => return Ok(Command::Help),
+            "--seconds" => {
+                let Some(value) = it.next() else {
+                    return Err("--seconds needs a value".into());
+                };
+                if seconds.replace(value).is_some() {
+                    return Err("--seconds given twice".into());
+                }
+            }
+            other => return Err(format!("clock: unknown argument {other:?}")),
+        }
+    }
+    let text = seconds.ok_or("clock: --seconds is missing")?;
+    match text.parse::<u32>() {
+        Ok(seconds) if seconds > 0 => Ok(Command::Clock { seconds }),
+        _ => Err(format!("--seconds {text:?} is not a whole number from 1")),
+    }
+}
+
+/// The lines of `iem-dante-dev clock`: one JSON object a poll, numbers
+/// only ([`USAGE`] names the fields). Keeps the line before's k and the
+/// re-anchors so far.
+#[derive(Debug, Default, Clone)]
+pub struct ClockLines {
+    last_k: Option<i64>,
+    re_anchors: u32,
+}
+
+impl ClockLines {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The line of poll `p`, `t_s` seconds after the first.
+    pub fn line(&mut self, t_s: u32, p: &Polled) -> String {
+        let k = match p.sample {
+            Sample::Usable { k_ns } => Some(k_ns),
+            _ => None,
+        };
+        let dk = k.zip(self.last_k).map(|(k, last)| k.wrapping_sub(last));
+        let off = k.zip(p.k_ns).map(|(k, anchored)| k.wrapping_sub(anchored));
+        self.last_k = k;
+        let re_anchor = match p.event {
+            Event::ReAnchored { delta_ns } => {
+                self.re_anchors += 1;
+                Some(delta_ns)
+            }
+            _ => None,
+        };
+        let r = p.reading;
+        format!(
+            "{{\"t_s\":{t_s},\"ready\":{},\"k_ns\":{},\"dk_ns\":{},\"off_ns\":{},\
+             \"re_anchors\":{},\"re_anchor_ns\":{},\"holdover\":{},\"sample\":{},\
+             \"locked\":{},\"mode\":{},\"freq_ppb\":{}}}",
+            u8::from(p.k_ns.is_some()),
+            json_number(k),
+            json_number(dk),
+            json_number(off),
+            self.re_anchors,
+            json_number(re_anchor),
+            u8::from(p.event == Event::Holdover),
+            sample_code(p.sample),
+            json_number(r.map(|r| u8::from(r.locked))),
+            json_number(r.map(|r| r.mode)),
+            json_number(r.map(|r| r.freq_ppb)),
+        )
+    }
+}
+
+/// A sample's number in the clock's lines.
+fn sample_code(s: Sample) -> u8 {
+    match s {
+        Sample::Usable { .. } => 0,
+        Sample::NotLocked => 1,
+        Sample::NoDateState => 2,
+        Sample::StepNear => 3,
+        Sample::Slewing => 4,
+        Sample::NoReply => 5,
+    }
+}
+
+/// A number, or `null`.
+fn json_number<T: std::fmt::Display>(v: Option<T>) -> String {
+    v.map_or_else(|| "null".to_string(), |v| v.to_string())
 }
 
 /// `text` as a unicast IPv4 address the Dante network can reach.
