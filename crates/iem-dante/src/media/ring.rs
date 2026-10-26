@@ -7,7 +7,9 @@
 //! one reads as a hole.
 //!
 //! [`SLOTS`] slots (0.68 s at 96 kHz), one writer (the RX thread) and one
-//! reader (the TX thread's echo, phase C's engine), atomics only. Each slot
+//! reader (the TX thread's echo, phase C's engine), atomics only; an engine
+//! output ring ([`Ring::put_at`]) has the engine's pump as its writer and
+//! the TX thread as its reader. Each slot
 //! is one `AtomicU64`: the sample in its low 32 bits and the position's
 //! lap (`position >> 16`, mod 2³²) in its high 32, written and read in one
 //! access, so a reader never sees a sample of another position: a slot of
@@ -129,6 +131,20 @@ impl Ring {
             .fetch_add(w.duplicate as u64, Ordering::Relaxed);
         self.early.fetch_add(w.early as u64, Ordering::Relaxed);
         w
+    }
+
+    /// Stores `samples` at positions `pos`, `pos + 1`, … whatever the
+    /// reader did: no late or early check, and the reader's end never
+    /// moves; counts them `written` only. The engine's output rings (phase
+    /// C, [`crate::stream`]): a block written after the TX thread read its
+    /// stamps shows as TX holes, never here.
+    pub fn put_at(&self, pos: u64, samples: &[i32]) {
+        for (i, &sample) in samples.iter().enumerate() {
+            let p = pos.wrapping_add(i as u64);
+            self.slot(p).store(word(p, sample), Ordering::Relaxed);
+        }
+        self.written
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
     }
 
     /// Reads positions `pos`, `pos + 1`, … into `out`, a hole as 0.

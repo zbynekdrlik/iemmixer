@@ -60,7 +60,7 @@ fn packets_across_the_seconds_wrap_land_at_their_stamps_and_echo_exactly() {
     let first = wrap - 32 * FPP as u64;
     for p in 0..64u64 {
         let t = first + p * FPP as u64;
-        counter.fill(t, RATE, &mut samples, &rings);
+        counter.fill(t, RATE, &mut samples, &rings, None);
         let (secs, sub) = stamp(t, RATE);
         let n = packet::write(&mut buf, secs, sub, 1, 3, FPP, |f, _| samples[f]);
         // The receiver: header, the full position near its clock, the ring.
@@ -75,7 +75,7 @@ fn packets_across_the_seconds_wrap_land_at_their_stamps_and_echo_exactly() {
     // the wrap.
     let mut out = [0i32; FPP];
     for t in (first + u64::from(F)..first + 64 * FPP as u64).step_by(FPP) {
-        let f = echo.fill(t, RATE, &mut out, &rings);
+        let f = echo.fill(t, RATE, &mut out, &rings, None);
         assert_eq!(f.holes, 0, "{t}");
         for (i, v) in out.iter().enumerate() {
             let rx = t + i as u64 - u64::from(F);
@@ -84,7 +84,7 @@ fn packets_across_the_seconds_wrap_land_at_their_stamps_and_echo_exactly() {
     }
     // The echo's own packets carry those samples under their own stamps.
     let t = wrap + 7;
-    echo.fill(t, RATE, &mut out, &rings);
+    echo.fill(t, RATE, &mut out, &rings, None);
     let (secs, sub) = stamp(t, RATE);
     assert_eq!((secs, sub), (0, 7));
     let n = packet::write(&mut buf, secs, sub, 1, 3, FPP, |f, _| out[f]);
@@ -279,4 +279,38 @@ fn a_wrapped_slot_never_reads_stale() {
         read(&ring, T, 4),
         (vec![-256, i32::MIN, 0, i32::MAX], Read { holes: 0 })
     );
+}
+
+/// Phase C: the engine's output rings. `put_at` stores behind the reader
+/// and a whole ring ahead of it alike, never moves the reader's end, and
+/// counts only `written` (a late block shows as a TX hole, not here).
+#[test]
+fn put_at_stores_behind_and_far_ahead_of_the_reader() {
+    let ring = Ring::new();
+    assert_eq!(read(&ring, T, N).1, Read { holes: N });
+    // Behind the reader (write_at would call it late) and over the slots
+    // the reader is at: stored.
+    ring.put_at(T - 100, &packet(T - 100));
+    ring.put_at(T, &packet(T));
+    // A whole ring and more ahead (write_at would call it early): stored.
+    let far = T + SLOTS as u64 + 1_000;
+    ring.put_at(far, &packet(far));
+    // The same positions again: stored again, the last copy wins.
+    ring.put_at(T + 4, &[-(9 << 8); 2]);
+    // The reader's end did not move: T + 32 is neither late nor early.
+    assert_eq!(ring.write_at(T + N as u64, &packet(T + 32)), written(N));
+    let c = ring.counters();
+    assert_eq!(
+        (c.written, c.late, c.early, c.duplicate, c.holes),
+        (4 * N as u64 + 2, 0, 0, 0, N as u64),
+        "{c:?}"
+    );
+    assert_eq!(read(&ring, T - 100, N), (packet(T - 100), Read::default()));
+    let mut want = packet(T);
+    want[4..6].copy_from_slice(&[-(9 << 8); 2]);
+    assert_eq!(read(&ring, T, N), (want, Read::default()));
+    assert_eq!(read(&ring, far, N), (packet(far), Read::default()));
+    // An empty put stores and counts nothing.
+    ring.put_at(T + 999, &[]);
+    assert_eq!(ring.counters().written, 4 * N as u64 + 2);
 }

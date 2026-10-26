@@ -2091,7 +2091,7 @@ fn running_flows_read_the_tx_table_and_the_manager() {
         .map(|_| crate::media::ring::Ring::new())
         .collect::<Vec<_>>()
         .into();
-    let tx = Arc::new(TxShared::new(cfg.clone(), Ipv4Addr::LOCALHOST, rings, 3).unwrap());
+    let tx = Arc::new(TxShared::new(cfg.clone(), Ipv4Addr::LOCALHOST, rings, 3, &[]).unwrap());
     let rx_at = SocketAddrV4::new(PEER_IP, 50_000);
     tx.lock()
         .table

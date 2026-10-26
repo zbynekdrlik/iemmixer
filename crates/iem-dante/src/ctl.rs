@@ -198,6 +198,7 @@ fn source_word(s: Source) -> &'static str {
         Source::Counter => "counter",
         Source::Sine { .. } => "sine",
         Source::Echo { .. } => "echo",
+        Source::Engine => "engine",
     }
 }
 
@@ -760,7 +761,7 @@ fn sources_part(j: &mut Json, media: &Media) {
                 j.num("rx", rx + 1);
                 j.num("offset", offset);
             }
-            Source::Silence | Source::Counter => {}
+            Source::Silence | Source::Counter | Source::Engine => {}
         }
         j.close('}');
     }

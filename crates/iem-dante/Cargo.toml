@@ -5,12 +5,17 @@ edition.workspace = true
 authors.workspace = true
 # Gen 3 (#72, design §3): parts are adapted from teodly/inferno
 # (GPL-3.0-or-later OR AGPL-3.0-or-later, taken under GPL-3.0-or-later), so
-# the crate is GPL. Never a dependency of iem-engine in phase A.
+# the crate is GPL. Linked by iem-engine on Linux from phase C (design §3:
+# the engine binary is already GPL).
 license = "GPL-3.0-or-later"
 repository.workspace = true
-description = "iemmixer's own Dante device (Gen 3, #72): its config and persisted names, the ARC control codec and server, CMC and the mDNS records"
+description = "iemmixer's own Dante device (Gen 3, #72): its config and persisted names, the ARC control codec and server, CMC and the mDNS records, the media path and the engine's pump"
 
 [dependencies]
+# The engine's callback contract for the pump (phase C, `stream`): Process,
+# Block, StreamStats and the stream histograms. MIT OR Apache-2.0, no
+# dependency of its own on Linux; the engine already links it.
+iem-audio-io = { path = "../iem-audio-io" }
 # The box's interface addresses for iem-dante-dev's --iface (MIT OR
 # BSD-3-Clause); already in the lockfile through mdns-sd.
 if-addrs = "0.15"
@@ -52,3 +57,8 @@ assert_no_alloc = { version = "1.1.2", default-features = false, features = ["wa
 tempfile = "3"
 # The socket tests: a runtime, #[tokio::test] and bounded waits.
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+[lints.rust]
+# `iem_rtsan` is set by the rtsan CI job (nightly, -Zsanitizer=realtime):
+# stream::Pump::block.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iem_rtsan)"] }

@@ -40,8 +40,12 @@
 //! - [`Transmitter`] and [`spawn`]: the TX thread. Nothing leaves before the
 //!   clock is ready. Every [`EVENTS_EVERY_NS`] it reads the plans, the
 //!   sources and the keepalives; in between it sends what is due and
-//!   sleeps until the next packet. Phase B sends only the test sources of
-//!   [`super::source`] (every channel silent at start).
+//!   sleeps until the next packet. Phase B sends the test sources of
+//!   [`super::source`] (every channel silent at start); phase C adds
+//!   [`Source::Engine`]: a TX channel the engine feeds has an engine ring
+//!   ([`TxShared::engine_ring`]) that the engine's pump
+//!   ([`crate::stream`]) writes and the TX thread reads at each packet's
+//!   stamp, a hole counted in the slot's `holes` like the echo's.
 //!
 //! The hot path (a packet's samples, the packet, the send) allocates
 //! nothing, takes no lock and logs nothing; its one system call is the send
@@ -381,6 +385,7 @@ fn source_words(s: Source) -> [u64; 3] {
         Source::Counter => [1, 0, 0],
         Source::Sine { hz, dbfs } => [2, hz.to_bits(), dbfs.to_bits()],
         Source::Echo { rx, offset } => [3, rx as u64, u64::from(offset)],
+        Source::Engine => [4, 0, 0],
     }
 }
 
@@ -396,6 +401,7 @@ fn source_from(w: [u64; 3]) -> Source {
             rx: usize::try_from(w[1]).unwrap_or(usize::MAX),
             offset: w[2] as u32,
         },
+        4 => Source::Engine,
         _ => Source::Silence,
     }
 }
@@ -478,7 +484,8 @@ pub struct LaneCounts {
     /// Schedules started again: a lag past the latency, a jump, a
     /// re-anchor.
     pub rebootstraps: u64,
-    /// Echo samples the RX ring did not hold (sent as silence).
+    /// Echo samples the RX ring did not hold, and engine samples the
+    /// engine ring did not (sent as silence).
     pub holes: u64,
 }
 
@@ -499,6 +506,10 @@ pub struct TxShared {
     sources: Box<[Cell<3>]>,
     sockets: Box<[UdpSocket]>,
     rings: Arc<[Ring]>,
+    /// Each TX channel's engine ring (phase C): the engine's pump writes
+    /// it, [`Source::Engine`] sends it; `None` for a channel the engine
+    /// does not feed.
+    engine: Box<[Option<Ring>]>,
     lanes: [LaneStats; MAX_FLOWS],
     /// Each TX channel's largest magnitude sent since the last take (the
     /// heartbeat's peaks).
@@ -510,8 +521,26 @@ pub struct TxShared {
 impl TxShared {
     /// The shared state of the device `cfg` at `ip`: an empty table
     /// (cookies from `seed`), every TX channel silent, the RX channels'
-    /// `rings` for the echo, and one socket per slot bound to `ip`.
-    pub fn new(cfg: DeviceConfig, ip: Ipv4Addr, rings: Arc<[Ring]>, seed: u64) -> io::Result<Self> {
+    /// `rings` for the echo, an engine ring for each TX channel index in
+    /// `engine` (from 0; the standalone device passes none), and one socket
+    /// per slot bound to `ip`. An `engine` index the device does not have
+    /// is refused (`InvalidInput`).
+    pub fn new(
+        cfg: DeviceConfig,
+        ip: Ipv4Addr,
+        rings: Arc<[Ring]>,
+        seed: u64,
+        engine: &[usize],
+    ) -> io::Result<Self> {
+        if engine.iter().any(|&tx| tx >= cfg.tx.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "an engine channel past the device's {} TX channels",
+                    cfg.tx.len()
+                ),
+            ));
+        }
         let sockets = (0..MAX_FLOWS)
             .map(|_| {
                 let s = UdpSocket::bind(SocketAddrV4::new(ip, 0))?;
@@ -522,6 +551,9 @@ impl TxShared {
         Ok(TxShared {
             sources: (0..cfg.tx.len()).map(|_| Cell::new()).collect(),
             peaks: (0..cfg.tx.len()).map(|_| AtomicU32::new(0)).collect(),
+            engine: (0..cfg.tx.len())
+                .map(|tx| engine.contains(&tx).then(Ring::new))
+                .collect(),
             cfg,
             control: Mutex::new(Control {
                 table: TxTable::new(seed),
@@ -576,14 +608,25 @@ impl TxShared {
     }
 
     /// Sets TX channel `tx`'s source (from 0); `false` when there is no
-    /// such channel. Runtime only: every channel is silent at start.
+    /// such channel, or for [`Source::Engine`] on a channel without an
+    /// engine ring. Runtime only: every channel is silent at start.
     pub fn set_source(&self, tx: usize, source: Source) -> bool {
         let _writer = self.lock();
         let Some(cell) = self.sources.get(tx) else {
             return false;
         };
+        if source == Source::Engine && self.engine_ring(tx).is_none() {
+            return false;
+        }
         cell.write(source_words(source));
         true
+    }
+
+    /// TX channel `tx`'s engine ring (from 0; phase C): what the engine's
+    /// pump writes and [`Source::Engine`] sends. `None` for a channel the
+    /// engine does not feed.
+    pub fn engine_ring(&self, tx: usize) -> Option<&Ring> {
+        self.engine.get(tx)?.as_ref()
     }
 
     /// TX channel `tx`'s source (from 0).
@@ -885,12 +928,12 @@ impl Transmitter {
             while let Some(stamp) = schedule.due(now) {
                 for (frame, &id) in frames.iter_mut().zip(&plan.channels).take(nch) {
                     let out = &mut frame[..fpp];
-                    match usize::from(id)
-                        .checked_sub(1)
-                        .and_then(|i| Some((sources.get_mut(i)?, shared.peaks.get(i)?)))
-                    {
-                        Some((source, peak)) => {
-                            holes += source.fill(stamp, *rate, out, rings).holes;
+                    match usize::from(id).checked_sub(1).and_then(|i| {
+                        let own = shared.engine.get(i).and_then(Option::as_ref);
+                        Some((sources.get_mut(i)?, shared.peaks.get(i)?, own))
+                    }) {
+                        Some((source, peak, own)) => {
+                            holes += source.fill(stamp, *rate, out, rings, own).holes;
                             let loudest = out.iter().fold(0, |m: u32, s| m.max(s.unsigned_abs()));
                             peak.fetch_max(loudest, Ordering::Relaxed);
                         }
