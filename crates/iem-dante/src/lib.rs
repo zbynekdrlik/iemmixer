@@ -67,6 +67,10 @@
 //!   playout point, calls the engine's `Process` every 32 frames and writes
 //!   the engine's TX rings, which the TX thread sends as
 //!   [`media::source::Source::Engine`]. It knows nothing about mixing.
+//! - `host` (phase C, Linux): the device as a library: its setup
+//!   (`host::prepare`), its serving on a thread of its own
+//!   (`host::Prepared::start`) and its bounded stop (`host::Host::stop`);
+//!   `iem-dante-dev` and the engine host it the same way.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
@@ -83,6 +87,8 @@ pub mod ctl;
 pub mod daemon;
 pub mod device;
 pub mod flows;
+#[cfg(target_os = "linux")]
+pub mod host;
 pub mod info;
 pub mod media;
 pub mod stream;
