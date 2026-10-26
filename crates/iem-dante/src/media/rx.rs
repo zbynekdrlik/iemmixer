@@ -283,6 +283,16 @@ impl RxShared {
         }
     }
 
+    /// Whether RX channel `rx` (from 0) is routed to a flow slot (its route
+    /// atomic, `Relaxed`): the engine's pump ([`crate::stream`]) reads only
+    /// a routed channel's ring, so an unsubscribed input is silence and
+    /// counts no hole.
+    pub fn routed(&self, rx: usize) -> bool {
+        self.routes
+            .get(rx)
+            .is_some_and(|r| r.load(Ordering::Relaxed) != 0)
+    }
+
     /// Each flow slot's UDP port, where its transmitter sends the audio.
     pub fn ports(&self) -> io::Result<[u16; MAX_FLOWS]> {
         let mut ports = [0; MAX_FLOWS];

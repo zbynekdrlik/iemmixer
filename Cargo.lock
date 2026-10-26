@@ -2772,6 +2772,7 @@ name = "iem-dante"
 version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
+ "iem-audio-io",
  "if-addrs",
  "libc",
  "mdns-sd",

@@ -97,7 +97,15 @@ impl Media {
     pub fn new(device: &Device, ip: Ipv4Addr, clock: Clock, seed: u64) -> std::io::Result<Media> {
         let cfg = &device.cfg;
         let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
-        let tx = Arc::new(TxShared::new(cfg.clone(), ip, Arc::clone(&rings), seed)?);
+        // No engine ring on any TX channel: the standalone device (phase C
+        // Task 2 passes the engine's channels here).
+        let tx = Arc::new(TxShared::new(
+            cfg.clone(),
+            ip,
+            Arc::clone(&rings),
+            seed,
+            &[],
+        )?);
         let rx = Arc::new(RxShared::new(cfg.sample_rate, ip, rings)?);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
         manager.load(&device.state.subscriptions);

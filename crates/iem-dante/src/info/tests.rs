@@ -910,7 +910,7 @@ fn the_records_come_once_the_clock_is_ready_and_each_beat_takes_its_own_second()
         .map(|_| Ring::new())
         .collect::<Vec<_>>()
         .into();
-    let tx = Arc::new(TxShared::new(cfg.clone(), lo, Arc::clone(&rings), 1).unwrap());
+    let tx = Arc::new(TxShared::new(cfg.clone(), lo, Arc::clone(&rings), 1, &[]).unwrap());
     let rx = Arc::new(RxShared::new(cfg.sample_rate, lo, Arc::clone(&rings)).unwrap());
     let ports = rx.ports().unwrap();
     // The manager holds a granted flow in slot 1 only.

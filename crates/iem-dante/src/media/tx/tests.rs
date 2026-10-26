@@ -256,7 +256,7 @@ fn a_new_receiver_fpp_or_width_restarts_the_schedule_channels_do_not() {
 }
 
 #[test]
-fn a_source_round_trips_through_its_words() {
+fn every_source_survives_its_words() {
     for s in [
         Source::Silence,
         Source::Counter,
@@ -272,11 +272,14 @@ fn a_source_round_trips_through_its_words() {
             rx: 0,
             offset: u32::MAX,
         },
+        Source::Engine,
     ] {
         assert_eq!(source_from(source_words(s)), s);
     }
     assert_eq!(source_words(Source::Counter), [1, 0, 0]);
+    assert_eq!(source_words(Source::Engine), [4, 0, 0]);
     assert_eq!(source_from([9, 1, 2]), Source::Silence);
+    assert_eq!(source_from([5, 0, 0]), Source::Silence);
 }
 
 #[test]
@@ -462,7 +465,7 @@ fn packets_a_second_are_rate_over_fpp() {
 // ---- the shared state ----
 
 fn shared_with(rings: Vec<Ring>) -> Arc<TxShared> {
-    Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings.into(), 1).unwrap())
+    Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings.into(), 1, &[]).unwrap())
 }
 
 /// Adds a flow and hands it to the TX side; returns its slot and handle.
@@ -520,10 +523,62 @@ fn sources_are_silent_at_start_and_set_at_runtime() {
     assert!(!shared.set_source(16, Source::Counter));
 }
 
+/// The TX state with engine rings on `engine` (TX channel indices).
+fn shared_with_engine(rings: Vec<Ring>, engine: &[usize]) -> Arc<TxShared> {
+    Arc::new(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, rings.into(), 1, engine).unwrap())
+}
+
+#[test]
+fn engine_is_refused_for_a_channel_without_an_engine_ring() {
+    let shared = shared_with_engine(Vec::new(), &[1, 15]);
+    let has: Vec<bool> = (0..17).map(|tx| shared.engine_ring(tx).is_some()).collect();
+    let mut want = vec![false; 17];
+    want[1] = true;
+    want[15] = true;
+    assert_eq!(has, want, "TX 2 and TX 16 only; TX 17 does not exist");
+    assert!(!shared.set_source(0, Source::Engine));
+    assert_eq!(shared.source(0), Some(Source::Silence), "unchanged");
+    assert!(shared.set_source(1, Source::Engine));
+    assert_eq!(shared.source(1), Some(Source::Engine));
+    assert!(shared.set_source(15, Source::Engine));
+    assert!(!shared.set_source(16, Source::Engine));
+    // A channel with an engine ring takes any other source too, and back.
+    assert!(shared.set_source(1, Source::Counter));
+    assert_eq!(shared.source(1), Some(Source::Counter));
+    assert!(shared.set_source(1, Source::Engine));
+    assert_eq!(shared.source(1), Some(Source::Engine));
+    // Each ring is its own.
+    shared.engine_ring(1).unwrap().put_at(T, &[5 << 8]);
+    let mut got = [0; 1];
+    assert_eq!(
+        shared.engine_ring(15).unwrap().read_at(T, &mut got).holes,
+        1
+    );
+    // The standalone device has none.
+    let none = shared_with(Vec::new());
+    assert!((0..16).all(|tx| none.engine_ring(tx).is_none()));
+    assert!(!none.set_source(0, Source::Engine));
+}
+
+#[test]
+fn an_engine_channel_past_the_tx_count_is_refused() {
+    for engine in [&[16][..], &[0, 99]] {
+        let e = TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Vec::new().into(), 1, engine)
+            .expect_err("refused");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{engine:?}");
+        assert_eq!(
+            e.to_string(),
+            "an engine channel past the device's 16 TX channels"
+        );
+    }
+    // The last channel is the device's own.
+    assert!(TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[15]).is_ok());
+}
+
 #[test]
 fn each_slot_has_its_own_socket_counts_and_the_stop_flag() {
     let rings: Arc<[Ring]> = vec![Ring::new(), Ring::new()].into();
-    let shared = TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Arc::clone(&rings), 1).unwrap();
+    let shared = TxShared::new(cfg(), Ipv4Addr::LOCALHOST, Arc::clone(&rings), 1, &[]).unwrap();
     let mut ports: Vec<u16> = (0..MAX_FLOWS)
         .map(|s| shared.local_addr(s).unwrap().port())
         .collect();
@@ -574,7 +629,15 @@ fn v4(s: &UdpSocket) -> SocketAddrV4 {
 
 impl Rig {
     fn new(rings: Vec<Ring>) -> Self {
-        let shared = shared_with(rings);
+        Rig::with(shared_with(rings))
+    }
+
+    /// A rig whose TX channels at the indices `engine` have engine rings.
+    fn with_engine(engine: &[usize]) -> Self {
+        Rig::with(shared_with_engine(Vec::new(), engine))
+    }
+
+    fn with(shared: Arc<TxShared>) -> Self {
         Rig {
             tx: Transmitter::new(Arc::clone(&shared)),
             shared,
@@ -774,6 +837,75 @@ fn echo_sends_the_rx_sample_offset_earlier_and_counts_its_holes() {
         }
     }
     assert!(holes > 0);
+    assert_eq!(rig.shared.lane(slot).holes, holes);
+}
+
+/// The engine's samples a test puts in: the counter of each position, a
+/// sign apart from the counter source's.
+fn engine_value(p: u64) -> i32 {
+    -(((p % 65_536) << 8) as i32) - 256
+}
+
+#[test]
+fn an_engine_source_sends_its_engine_ring_at_the_stamp() {
+    let mut rig = Rig::with_engine(&[1]);
+    let n0 = send_clock(T, RATE);
+    let base = n0 - 1_000;
+    let values: Vec<i32> = (base..n0 + 3_000).map(engine_value).collect();
+    rig.shared.engine_ring(1).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Counter));
+    assert!(rig.shared.set_source(1, Source::Engine));
+    // TX 2 (the engine's), TX 1 (the counter) and TX 3 (silent, no ring).
+    let (slot, _) = rig.flow(vec![Some(2), Some(1), Some(3)]);
+    let packets = run(&mut rig, 0, 20_000);
+    assert!((58..=60).contains(&packets.len()), "{}", packets.len());
+    for p in &packets {
+        let t = stamp_of(p);
+        let want: Vec<i32> = (t..t + FPP).map(engine_value).collect();
+        assert_eq!(slot_samples(p, 3, 0), want, "TX 2 at T is its ring at T");
+        assert_eq!(slot_samples(p, 3, 1), counter(t, 32), "TX 1's counter");
+        assert_eq!(slot_samples(p, 3, 2), vec![0; 32], "TX 3 is silent");
+    }
+    let lane = rig.shared.lane(slot);
+    assert_eq!((lane.holes, lane.send_errors), (0, 0), "{lane:?}");
+    // TX 2's peak is what it sent.
+    let loudest = packets
+        .iter()
+        .flat_map(|p| slot_samples(p, 3, 0))
+        .map(i32::unsigned_abs)
+        .max()
+        .unwrap();
+    assert_eq!(rig.shared.take_peak(1), loudest);
+}
+
+#[test]
+fn an_engine_hole_is_silence_counted_in_the_lane() {
+    let mut rig = Rig::with_engine(&[0, 2]);
+    let n0 = send_clock(T, RATE);
+    // TX 1's ring holds positions up to n0 + 600; TX 3's nothing at all.
+    let base = n0 - 1_000;
+    let values: Vec<i32> = (base..n0 + 600).map(engine_value).collect();
+    rig.shared.engine_ring(0).unwrap().put_at(base, &values);
+    assert!(rig.shared.set_source(0, Source::Engine));
+    assert!(rig.shared.set_source(2, Source::Engine));
+    let (slot, _) = rig.flow(vec![Some(1), Some(3)]);
+    let packets = run(&mut rig, 0, 10_000);
+    let mut holes = 0;
+    for p in &packets {
+        let t = stamp_of(p);
+        for (f, &x) in slot_samples(p, 2, 0).iter().enumerate() {
+            let pos = t + f as u64;
+            if pos < n0 + 600 {
+                assert_eq!(x, engine_value(pos), "TX 1 at {pos}");
+            } else {
+                assert_eq!(x, 0, "a hole is silence");
+                holes += 1;
+            }
+        }
+        assert_eq!(slot_samples(p, 2, 1), vec![0; 32], "TX 3: all holes");
+        holes += 32;
+    }
+    assert!(holes > 32 * packets.len() as u64, "TX 1 ran out too");
     assert_eq!(rig.shared.lane(slot).holes, holes);
 }
 
