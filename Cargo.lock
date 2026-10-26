@@ -2802,6 +2802,7 @@ version = "2.0.0-dev.44"
 dependencies = [
  "assert_no_alloc",
  "iem-audio-io",
+ "iem-dante",
  "iem-dsp",
  "iem-engine-proto",
  "iem-limiter-mga",

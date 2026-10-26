@@ -37,6 +37,7 @@ mod status;
 mod stop;
 
 pub use self::connections::MAX_ALARMS;
+pub(crate) use self::connections::engine_build;
 use self::status::meters_msg;
 
 /// The control loop's tick.
@@ -76,7 +77,7 @@ pub trait Driver: Send {
     }
 }
 
-/// Why a backend ends the run (S6 design note §3, §4).
+/// Why a backend ends the run (S6 design note §3, §4; Gen 3 phase C).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
     /// The Windows session ends: save, fade out, release (the shutdown path).
@@ -84,6 +85,12 @@ pub enum Ending {
     /// The card must be refused (exit 3), e.g. a release could not write
     /// REAPER's preferred buffer back.
     Card(String),
+    /// A stop was asked (SIGTERM or SIGINT; the Dante backend reports them,
+    /// the unit's stop): the shutdown path, as the session's end.
+    Stop,
+    /// The backend ended by itself (the Dante device's serving failed):
+    /// save, release without a fade, [`Exit::Backend`] (exit 1, restarted).
+    Backend(String),
 }
 
 /// Messages from the acceptor and reader threads.
@@ -103,6 +110,9 @@ pub enum Exit {
     Fault(String),
     /// The backend refused the card while running (exit 3).
     Card(String),
+    /// The backend ended by itself while running (exit 1): the Dante
+    /// device stopped serving.
+    Backend(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,8 +252,13 @@ impl Control {
         }
         match self.driver.as_ref().and_then(|d| d.ending()) {
             Some(Ending::Card(why)) => return Some(self.card(why)),
+            Some(Ending::Backend(why)) => return Some(self.backend_ended(why)),
             Some(Ending::Session) => {
                 info!("the Windows session ends");
+                self.shutdown = true;
+            }
+            Some(Ending::Stop) => {
+                info!("a stop was asked (SIGTERM or SIGINT)");
                 self.shutdown = true;
             }
             None => {}

@@ -56,6 +56,34 @@ fn process_is_realtime_safe() {
     );
 }
 
+/// Gen 3 phase C (Linux): the Dante backend's pump block, whose
+/// `iem_dante::stream::Pump::block` carries the same attribute, around the
+/// real processor on the worst-case scenario: the RX rings read, the
+/// outputs quantized into the engine rings, the stats and histograms.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_dante_pump_block_is_realtime_safe() {
+    const BLOCKS: usize = 300;
+    let mut r = common::dante::pump_rig(BLOCKS);
+    common::dante::pump_drive(&mut r, BLOCKS);
+    let v = r.stats.view();
+    assert_eq!((v.blocks, v.late, v.rebootstraps), (BLOCKS as u64, 0, 0));
+    assert!(!r.stats.stream_stats().faulted, "the processor ran clean");
+    assert_eq!(
+        r.measured,
+        common::BLOCK as u64,
+        "the loopback probe measured"
+    );
+    assert!(
+        r.handles.probes.iter().all(|c| c.slots() > 0),
+        "the probe path ran"
+    );
+    assert!(
+        common::dante::loudest_output(&mut r, BLOCKS) > 0,
+        "the mixes reached the engine rings"
+    );
+}
+
 /// Run by `rtsan_detects_a_violation` in a child process; on its own it only
 /// checks the clean real-time function.
 #[test]

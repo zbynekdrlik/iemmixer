@@ -61,3 +61,36 @@ fn process_does_not_allocate() {
         "the overflow path ran"
     );
 }
+
+/// Gen 3 phase C (Linux): the Dante backend's pump block (the RX rings
+/// read, the real processor on the worst-case scenario, the outputs
+/// quantized into the engine rings, the stats and both histograms) does
+/// not allocate either.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_dante_pump_block_does_not_allocate() {
+    const BLOCKS: usize = 300;
+    let mut r = common::dante::pump_rig(BLOCKS);
+    reset_violation_count();
+    assert_no_alloc(|| common::dante::pump_drive(&mut r, BLOCKS));
+    assert_eq!(violation_count(), 0, "the pump's blocks allocated");
+    let v = r.stats.view();
+    assert_eq!((v.blocks, v.late, v.rebootstraps), (BLOCKS as u64, 0, 0));
+    assert!(!r.stats.stream_stats().faulted, "the processor ran clean");
+    assert_eq!(
+        r.measured,
+        common::BLOCK as u64,
+        "the loopback probe measured"
+    );
+    assert!(
+        r.handles.probes.iter().all(|c| c.slots() > 0),
+        "the probe path ran"
+    );
+    assert!(r.handles.meters.read().seq > 0);
+    assert!(
+        common::dante::loudest_output(&mut r, BLOCKS) > 0,
+        "the mixes reached the engine rings"
+    );
+    let h = r.stats.histograms();
+    assert_eq!(h.process.iter().map(|e| e.1).sum::<u64>(), BLOCKS as u64);
+}

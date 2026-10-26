@@ -437,6 +437,45 @@ fn a_card_refused_while_running_ends_with_exit_3_and_no_fade() {
     assert!(r.c.driver.is_none(), "released");
 }
 
+/// The fade-outs asked of the callback, sent or still waiting.
+fn fades_asked(r: &mut Rig) -> usize {
+    let fade = |op: &crate::cmd::RtOp| matches!(op, crate::cmd::RtOp::FadeOut);
+    let mut n = 0;
+    while let Ok(cmd) = r.ring.pop() {
+        n += usize::from(fade(&cmd.op));
+    }
+    n + r.c.pending.iter().flatten().filter(|op| fade(op)).count()
+}
+
+/// Gen 3 phase C: SIGTERM or SIGINT reported by the Dante backend takes
+/// the shutdown path (save, fade, release, exit 0).
+#[test]
+fn a_stop_ending_saves_fades_and_exits_shutdown() {
+    let mut r = rig();
+    r.status.faded_out.store(true, Ordering::Release);
+    r.c.driver = Some(scripted(Some(Ending::Stop), false).0);
+    assert_eq!(
+        r.c.tick(Instant::now()),
+        Some(Exit::Shutdown { faded: true })
+    );
+    assert!(r.dir.path().join("state/current.json").exists(), "saved");
+    assert!(r.c.driver.is_none(), "released");
+    assert_eq!(fades_asked(&mut r), 1, "the fade was asked once");
+}
+
+/// Gen 3 phase C: the Dante device that ended by itself ends the run with
+/// exit 1 (restarted): saved, released, no fade (its flows are gone).
+#[test]
+fn a_backend_ending_saves_and_exits_backend() {
+    let mut r = rig();
+    let why = "flow control on UDP 4455 ended";
+    r.c.driver = Some(scripted(Some(Ending::Backend(why.into())), false).0);
+    assert_eq!(r.c.tick(Instant::now()), Some(Exit::Backend(why.into())));
+    assert!(r.dir.path().join("state/current.json").exists(), "saved");
+    assert!(r.c.driver.is_none(), "released");
+    assert_eq!(fades_asked(&mut r), 0, "no fade");
+}
+
 #[test]
 fn only_new_sanitiser_trips_raise_an_alarm() {
     let mut r = rig();

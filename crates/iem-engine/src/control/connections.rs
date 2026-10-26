@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use super::Control;
 use crate::SAMPLE_RATE;
 
-pub(super) fn engine_build() -> String {
+pub(crate) fn engine_build() -> String {
     format!(
         "{}+{}",
         env!("CARGO_PKG_VERSION"),
