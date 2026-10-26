@@ -398,10 +398,12 @@ impl Manager {
         out
     }
 
-    /// RX channel `rx`'s status; `None` when it is not subscribed.
+    /// RX channel `rx`'s status; `None` when it is not subscribed. A route
+    /// made for another subscription (the channel's changed since the last
+    /// tick, which drops it) is none.
     pub fn status(&self, rx: usize) -> Option<SubStatus> {
-        self.subs.get(rx)?.as_ref()?;
-        let Some(route) = &self.routes[rx] else {
+        let sub = self.subs.get(rx)?.as_ref()?;
+        let Some(route) = self.routes[rx].as_ref().filter(|r| r.sub == *sub) else {
             return Some(self.failed[rx].unwrap_or(SubStatus::Unresolved));
         };
         let flow = self.flows[route.flow.slot].as_ref()?;
