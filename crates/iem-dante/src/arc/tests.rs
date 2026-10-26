@@ -682,6 +682,93 @@ fn an_invalid_rename_keeps_the_name() {
     }
 }
 
+/// A log sink for [`warnings_of`].
+#[derive(Clone, Default)]
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What `f` logs at WARN or above on this thread, as text.
+fn warnings_of(f: impl FnOnce()) -> String {
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn a_refused_rename_is_counted_never_a_warning_of_its_own() {
+    // Dante Controller asks again at once what it gets refused: a warning
+    // per request would be a flood. Every refusal is a gap the server's
+    // once-a-minute warning counts (peer, opcode, refused), and no more.
+    let tx: [Vec<u8>; 4] = [
+        tx_rename(0, b"Mix 0"),
+        tx_rename(3, b"Mix.3"),
+        tx_rename(3, b"TX 4"),
+        {
+            let mut high = tx_rename(3, b"Mix 3");
+            high[6..8].copy_from_slice(&200u16.to_be_bytes());
+            high
+        },
+    ];
+    let rx: [Vec<u8>; 3] = [
+        rx_rename(33, b"In 33"),
+        rx_rename(1, b"In@1"),
+        rx_rename(1, b"RX 2"),
+    ];
+    let mut dev = Dev::new(config());
+    let mut gaps = Vec::new();
+    let logged = warnings_of(|| {
+        for k in 0..1_000u16 {
+            for body in &tx {
+                gaps.push(
+                    dev.send(&request(CONTROLLER, k, op::TX_RENAME, 0, body))
+                        .gap(),
+                );
+            }
+            for body in &rx {
+                gaps.push(
+                    dev.send(&request(CONTROLLER, k, op::RX_RENAME, 0, body))
+                        .gap(),
+                );
+            }
+        }
+    });
+    assert_eq!(
+        logged.lines().count(),
+        0,
+        "refused renames logged warnings of their own, the first: {}",
+        logged.lines().next().unwrap_or_default()
+    );
+    assert_eq!(gaps.len(), 7_000);
+    for (i, gap) in gaps.iter().enumerate() {
+        let op1 = if i % 7 < 4 {
+            op::TX_RENAME
+        } else {
+            op::RX_RENAME
+        };
+        assert_eq!(*gap, Some((op1, Gap::Refused)), "{i}");
+    }
+    assert_eq!(dev.state, DeviceState::from_config(&dev.cfg));
+    // The capture works: a warning of the crate's own does show.
+    assert!(warnings_of(|| tracing::warn!("a test warning")).contains("a test warning"));
+}
+
 #[test]
 fn an_invalid_rename_leaves_the_state_file_as_it_was() {
     let dir = tempfile::tempdir().unwrap();
