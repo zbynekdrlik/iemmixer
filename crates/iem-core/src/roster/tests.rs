@@ -590,3 +590,163 @@ fn a_leaders_set_that_is_no_id_is_named_by_its_position() {
         "{against:?}"
     );
 }
+
+/// The test site's people's equipment (#58): member1 ... member9's sets and
+/// their inputs mic1 ... mic10 (mic5 is member4's guitar), as a roster's
+/// `[equipment]` table.
+const EQUIPMENT: &str = "\n[equipment]\n\
+    sets = [\"member1\", \"member2\", \"member3\", \"member4\", \"member5\", \"member6\", \"member7\", \"member8\", \"member9\"]\n\
+    inputs = [\"mic1\", \"mic2\", \"mic3\", \"mic4\", \"mic5\", \"mic6\", \"mic7\", \"mic8\", \"mic9\", \"mic10\"]\n";
+
+/// The test roster with [`EQUIPMENT`].
+fn equipped() -> Roster {
+    Roster::parse(&format!("{ROSTER}{EQUIPMENT}")).expect("the test roster with [equipment]")
+}
+
+fn ids(range: std::ops::RangeInclusive<u32>, prefix: &str) -> Vec<String> {
+    range.map(|n| format!("{prefix}{n}")).collect()
+}
+
+/// #58, the last step of point 2: the roster may declare the people's
+/// equipment; without the table there is none, as before.
+#[test]
+fn the_equipment_table_is_read_and_fits_the_test_site() {
+    assert_eq!(roster().equipment, None);
+    let r = equipped();
+    assert_eq!(
+        r.equipment,
+        Some(Equipment {
+            sets: ids(1..=9, "member"),
+            inputs: ids(1..=10, "mic"),
+        })
+    );
+    assert_eq!(r.problems(), Vec::<String>::new());
+    assert_eq!(r.problems_against(&facts()), Vec::<String>::new());
+    // Both lists are required, and nothing else is read.
+    for (from, to) in [
+        ("inputs = [", "parts = ["),
+        ("sets = [", "kit = ["),
+        ("[equipment]\n", "[equipment]\nmembers = []\n"),
+    ] {
+        let text = format!("{ROSTER}{EQUIPMENT}").replacen(from, to, 1);
+        assert!(
+            matches!(Roster::parse(&text), Err(RosterError::Parse(_))),
+            "{to}"
+        );
+    }
+}
+
+/// #58: with `[equipment]` every set a lineup places someone on must be one
+/// of its sets, and every input a lineup gives an owner one of its inputs;
+/// its own ids are valid and listed once (a value that is no id named by
+/// position, P6). An input a lineup lists without an owner need not be.
+#[test]
+fn equipment_problems_name_every_offender() {
+    type EquipmentEdit = fn(&mut Equipment);
+    let cases: [(&[&str], EquipmentEdit); 6] = [
+        (
+            &[
+                "lineup 'main': set 'member4' is not in [equipment] sets",
+                "lineup 'youth': set 'member4' is not in [equipment] sets",
+            ],
+            |e| e.sets.retain(|s| s != "member4"),
+        ),
+        (
+            &["lineup 'main': input 'mic5' has an owner and is not in [equipment] inputs"],
+            |e| e.inputs.retain(|i| i != "mic5"),
+        ),
+        (
+            &[
+                "lineup 'main': input 'mic1' has an owner and is not in [equipment] inputs",
+                "lineup 'youth': input 'mic1' has an owner and is not in [equipment] inputs",
+            ],
+            |e| e.inputs.retain(|i| i != "mic1"),
+        ),
+        (&["[equipment]: set #10 is no valid id"], |e| {
+            e.sets.push("Zyxq Wvn".into())
+        }),
+        (&["[equipment]: set 'member2' is listed twice"], |e| {
+            e.sets.push("member2".into())
+        }),
+        (
+            &[
+                "[equipment]: input #11 is no valid id",
+                "[equipment]: input 'mic3' is listed twice",
+            ],
+            |e| {
+                e.inputs.push("Qzyx Lw".into());
+                e.inputs.push("mic3".into());
+            },
+        ),
+    ];
+    for (want, edit) in cases {
+        let mut r = equipped();
+        edit(r.equipment.as_mut().unwrap());
+        let p = r.problems();
+        assert_eq!(p, want, "{want:?}");
+        for x in &p {
+            assert!(!x.to_lowercase().contains("zyxq"), "{x}");
+            assert!(!x.to_lowercase().contains("qzyx"), "{x}");
+        }
+    }
+    // A lineup's set and owned input that are no id (they sort first) are
+    // named by their position in the lineup.
+    let mut r = equipped();
+    let youth = &mut r.lineups[1];
+    youth.sets.insert("Zyxq Wvn".into(), "member2".into());
+    youth.inputs.insert(
+        "Qzyx Lw".into(),
+        LineupInput {
+            name: "X".into(),
+            owner: Some("member3".into()),
+        },
+    );
+    assert_eq!(
+        r.problems(),
+        [
+            "lineup 'youth': set #1 is not in [equipment] sets",
+            "lineup 'youth': input #1 has an owner and is not in [equipment] inputs",
+        ]
+    );
+    // A lineup input without an owner (youth's keys) is no person's.
+    let mut r = equipped();
+    r.lineups[1].inputs.insert(
+        "keys".into(),
+        LineupInput {
+            name: "KEYS".into(),
+            owner: None,
+        },
+    );
+    assert_eq!(r.problems(), Vec::<String>::new());
+    // Without [equipment] none of these is checked.
+    let mut r = roster();
+    r.lineups[1].sets.insert("member2".into(), "member2".into());
+    assert_eq!(r.problems(), Vec::<String>::new());
+}
+
+/// #58: each set of `[equipment]` is a stereo mix of the site other than
+/// the engineer's (the translator's mono mix is no person's set), each input
+/// one of the site's inputs; a value that is no id is named by position.
+#[test]
+fn the_equipment_must_be_the_sites() {
+    let mut r = equipped();
+    let e = r.equipment.as_mut().unwrap();
+    e.sets
+        .extend(["translator", "engineer", "ghost", "Zyxq Wvn"].map(String::from));
+    e.inputs.extend(["nowhere", "Qzyx Lw"].map(String::from));
+    let not_a_set = |s: &str| {
+        format!("[equipment]: set {s} is not a stereo mix of the site other than the engineer's")
+    };
+    let not_an_input = |s: &str| format!("[equipment]: input {s} is not an input of the site");
+    assert_eq!(
+        r.problems_against(&facts()),
+        [
+            not_a_set("'translator'"),
+            not_a_set("'engineer'"),
+            not_a_set("'ghost'"),
+            not_a_set("#13"),
+            not_an_input("'nowhere'"),
+            not_an_input("#12"),
+        ]
+    );
+}

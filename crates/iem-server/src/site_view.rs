@@ -59,12 +59,14 @@ pub struct SiteView {
     /// all playing; `roster_state::people`).
     pub people: Vec<PersonView>,
     /// People's sets nobody wears in the active lineup
-    /// (`roster_state::person_sets`: a departed person's too): no page, no
-    /// Mixes channel (legacy: none).
+    /// (`roster_state::person_sets`: the roster's `[equipment]` sets, else
+    /// the lineups' and the site's members' ones; a departed person's too):
+    /// no page, no Mixes channel (legacy: none).
     pub vacant: Vec<MixId>,
-    /// Inputs of people who do not play in the active lineup, which it does
-    /// not list (`roster_state::foreign_input`: another lineup's people's,
-    /// a departed person's): no page shows or moves them, the engineer's
+    /// People's inputs the active lineup does not list
+    /// (`roster_state::foreign_input`: with `[equipment]` its inputs, else
+    /// those of people who do not play in it, another lineup's people's, a
+    /// departed person's): no page shows or moves them, the engineer's
     /// included (`view::shows_input`, the owner on the live system,
     /// 2026-10-24: a switched band is the whole view; legacy: none).
     pub foreign_inputs: Vec<InputId>,
@@ -307,6 +309,31 @@ pub(crate) mod tests {
         toml::from_str(include_str!("../../../config/test-site.toml")).expect("test site")
     }
 
+    /// The test site after member9 left (#58, the last step of point 2):
+    /// no `[[members]]` entry of theirs, and their mic10 without an owner
+    /// (only the site's label).
+    pub(crate) fn departed_site() -> Config {
+        let cut = |text: &str, part: &str, with: &str| {
+            assert_eq!(text.matches(part).count(), 1, "{part}");
+            text.replacen(part, with, 1)
+        };
+        let text = include_str!("../../../config/test-site.toml");
+        let text = cut(
+            text,
+            "[[members]]\nid = \"member9\"\nname = \"Member9\"\nmix = \"member9\"\n\n",
+            "",
+        );
+        let text = cut(
+            &text,
+            "id = \"mic10\"\nname = \"MEMBER9 mic\"\nowner = \"member9\"\n",
+            "id = \"mic10\"\nname = \"MEMBER9 mic\"\n",
+        );
+        let config: Config = toml::from_str(&text).expect("the test site without member9");
+        assert_eq!(config.problems(), Vec::<String>::new());
+        assert!(config.member("member9").is_none());
+        config
+    }
+
     pub(crate) fn test_view() -> SiteView {
         let (view, problems) = SiteView::build(&test_config(), &test_topology());
         assert_eq!(problems, Vec::<String>::new());
@@ -506,6 +533,52 @@ pub(crate) mod tests {
             (p.mix.0.as_str(), p.member.as_deref()),
             ("member9", Some("member9"))
         );
+    }
+
+    /// #58, the last step of point 2: with the roster's `[equipment]` a
+    /// departed person's set stays vacant on a site that no longer names
+    /// them (no `[[members]]` entry, mic10 without an owner): no page,
+    /// whichever lineup plays, and their input, now with the site's label
+    /// and no owner, is foreign. The translator's member-less mix stays a
+    /// page. Without `[equipment]` (today's rule, kept) that site makes the
+    /// set a member-less page like the translator's and shows mic10.
+    #[test]
+    fn with_equipment_a_departed_persons_set_stays_vacant_on_a_site_without_them() {
+        let (site, topo) = (departed_site(), test_topology());
+        let vacant =
+            |v: &SiteView| -> Vec<String> { v.vacant.iter().map(|m| m.0.clone()).collect() };
+        for (active, want) in [
+            ("main", vec!["member9"]),
+            (
+                "youth",
+                vec![
+                    "member2", "member5", "member6", "member7", "member8", "member9",
+                ],
+            ),
+        ] {
+            let roster = crate::roster_state::tests::equipped_departed(active);
+            let (v, problems) = SiteView::build_with(&site, Some(&roster), &topo);
+            assert_eq!(problems, Vec::<String>::new(), "{active}");
+            assert_eq!(vacant(&v), want, "{active}");
+            assert!(v.page("member9").is_none(), "{active}");
+            let pages: Vec<String> = v.mix_pages().into_iter().map(|p| p.id).collect();
+            assert_eq!(pages, ["translator"], "{active}");
+            assert_eq!(v.page("engineer").unwrap().mix, MixId::new("engineer"));
+            let mic10 = v.input("mic10").unwrap();
+            assert_eq!(
+                (mic10.name.as_str(), mic10.owner.as_deref()),
+                ("MEMBER9 mic", None),
+                "{active}"
+            );
+            assert!(v.foreign_input("mic10"), "{active}");
+        }
+        // Without [equipment] the set the site no longer names is a page.
+        let legacy_rule = crate::roster_state::tests::departed_roster("main");
+        let (v, problems) = SiteView::build_with(&site, Some(&legacy_rule), &topo);
+        assert_eq!(problems, Vec::<String>::new());
+        assert!(v.vacant.is_empty());
+        assert_eq!(v.page("member9").unwrap().member, None);
+        assert!(!v.foreign_input("mic10"));
     }
 
     /// #58: an input the lineup lists takes its name and owner; any other
