@@ -43,6 +43,11 @@
 //! nor the length field of a request is checked, and the replies carry the
 //! device's own sequence, not the request's.
 //!
+//! Unlike inferno, the replies are bounded ([`limit`]): each goes to a group
+//! every Dante device on the network hears, so at most
+//! [`limit::PER_SPAN`] replies of a kind go out in any second; the rest are
+//! dropped and counted in one warning a minute.
+//!
 //! The heartbeat's opcode is `00 08 00 01 10 00 00 00` and, with no clock,
 //! its body is empty: inferno adds its records (the frequency offset
 //! 0x8001, the peaks 0x8002, the RX latency 0x8003) only once its clock
@@ -345,7 +350,11 @@ impl Multicaster {
         now: Instant,
         datagram: &[u8],
     ) -> Option<Vec<u8>> {
-        let _ = (limit, now);
+        if let Some(req) = parse_request(datagram)
+            && !limit.allow(now, req.kind)
+        {
+            return None;
+        }
         self.answer(datagram)
     }
 }
@@ -372,27 +381,41 @@ impl Multicast {
 
 /// The info server on `sock` (bound to the device's address and
 /// [`REQUEST_PORT`]): sends the board and the product info, then answers
-/// every request to `to.info` and beats to `to.heartbeat` every
-/// `to.every`, the first beat at once. The socket's address picks the
-/// interface the multicasts leave by (Linux routes a multicast from a
-/// bound source address out of that address's interface). Ends only with
-/// an error receiving; a packet that cannot be sent is logged and the
-/// server goes on.
+/// every request to `to.info` within the bound ([`limit`]: at most
+/// [`limit::PER_SPAN`] replies of a kind a second, the drops logged as one
+/// warning a minute, looked at every [`limit::CHECK`]) and beats to
+/// `to.heartbeat` every `to.every`, the first beat at once. The socket's
+/// address picks the interface the multicasts leave by (Linux routes a
+/// multicast from a bound source address out of that address's
+/// interface). Ends only with an error receiving; a packet that cannot be
+/// sent is logged and the server goes on.
 pub async fn serve_info(sock: UdpSocket, mut mc: Multicaster, to: Multicast) -> io::Result<()> {
     send(&sock, &mc.board_info(), to.info).await;
     send(&sock, &mc.product_info(), to.info).await;
     let mut beat = tokio::time::interval(to.every);
     beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut check = tokio::time::interval(limit::CHECK);
+    check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut bound = Limit::default();
     let mut buf = vec![0u8; RECV_BUFFER];
     loop {
         tokio::select! {
             got = sock.recv_from(&mut buf) => {
                 let (n, _) = got?;
-                if let Some(packet) = mc.answer(&buf[..n]) {
+                if let Some(packet) = mc.answer_within(&mut bound, Instant::now(), &buf[..n]) {
                     send(&sock, &packet, to.info).await;
                 }
             }
             _ = beat.tick() => send(&sock, &mc.heartbeat(), to.heartbeat).await,
+            _ = check.tick() => {
+                if let Some(report) = bound.flush(Instant::now()) {
+                    warn!(
+                        dropped = report.total(),
+                        counts = %report,
+                        "info replies over the bound dropped in a minute (at most 10 a second of each kind)"
+                    );
+                }
+            }
         }
     }
 }

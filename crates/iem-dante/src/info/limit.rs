@@ -48,41 +48,99 @@ pub struct Dropped {
 impl Dropped {
     /// Every reply dropped.
     pub fn total(&self) -> u64 {
-        let _ = &self.counts;
-        0
+        self.counts.iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// A kind's request opcode byte and name, as the report names it.
+fn label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::BoardInfo => "0x61 board info",
+        Kind::ProductInfo => "0xc1 product info",
+        Kind::NetworkInfo => "0x13 network info",
+        Kind::Op0077 => "0x77",
+        // Never bounded, so never in a report.
+        Kind::ClockStats | Kind::Unknown => "no reply",
     }
 }
 
 impl fmt::Display for Dropped {
     /// `0x61 board info 990, 0x13 network info 5, 0x77 1`: the request's
     /// opcode byte, the kind's name (0x77 has none), the count.
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts: Vec<String> = self
+            .counts
+            .iter()
+            .map(|&(kind, n)| format!("{} {n}", label(kind)))
+            .collect();
+        f.write_str(&parts.join(", "))
     }
 }
 
 /// The bound's state: the last replies of each kind and the drops counted.
 #[derive(Debug)]
-pub struct Limit {}
+pub struct Limit {
+    /// Per [`BOUNDED`] kind: the times of its last [`PER_SPAN`] replies, a
+    /// ring whose `next` slot holds the oldest (`None` while unused).
+    sent: [[Option<Instant>; PER_SPAN]; BOUNDED.len()],
+    next: [usize; BOUNDED.len()],
+    /// Per [`BOUNDED`] kind: the replies dropped since the last report.
+    dropped: [u64; BOUNDED.len()],
+    /// The first drop since the last report; `None` while none.
+    started: Option<Instant>,
+}
+
+/// `kind`'s place in [`BOUNDED`]; `None` for a kind without a reply.
+fn slot(kind: Kind) -> Option<usize> {
+    BOUNDED.iter().position(|&k| k == kind)
+}
 
 impl Limit {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            sent: [[None; PER_SPAN]; BOUNDED.len()],
+            next: [0; BOUNDED.len()],
+            dropped: [0; BOUNDED.len()],
+            started: None,
+        }
     }
 
     /// Whether a reply of `kind` may go out at `now`. One that may is
     /// counted toward its kind's window; one that may not is a drop,
     /// counted for the report. A kind without a reply always may.
     pub fn allow(&mut self, now: Instant, kind: Kind) -> bool {
-        let _ = (now, kind);
+        let Some(k) = slot(kind) else {
+            return true;
+        };
+        let oldest = &mut self.sent[k][self.next[k]];
+        // The oldest of the last PER_SPAN replies within SPAN: the bound is
+        // reached.
+        if oldest.is_some_and(|t| now.saturating_duration_since(t) < SPAN) {
+            self.dropped[k] += 1;
+            self.started.get_or_insert(now);
+            return false;
+        }
+        *oldest = Some(now);
+        self.next[k] = (self.next[k] + 1) % PER_SPAN;
         true
     }
 
     /// The drops counted, once [`REPORT_EVERY`] has run since the first
     /// of them; `None` before, or when nothing was dropped.
     pub fn flush(&mut self, now: Instant) -> Option<Dropped> {
-        let _ = now;
-        None
+        let started = self.started?;
+        if now.saturating_duration_since(started) < REPORT_EVERY {
+            return None;
+        }
+        self.started = None;
+        let dropped = std::mem::take(&mut self.dropped);
+        Some(Dropped {
+            counts: BOUNDED
+                .into_iter()
+                .zip(dropped)
+                .filter(|&(_, n)| n > 0)
+                .collect(),
+        })
     }
 }
 
