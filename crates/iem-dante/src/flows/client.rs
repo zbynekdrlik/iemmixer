@@ -141,14 +141,13 @@ impl Client {
         sock.connect(SocketAddr::V4(to)).await?;
         sock.send(datagram).await?;
         let mut buf = [0u8; RECV_BUFFER];
-        let mut skipped = 0u32;
         loop {
             let n = match tokio::time::timeout_at(deadline, sock.recv(&mut buf)).await {
                 Ok(got) => got?,
                 Err(_) => {
                     debug!(
                         op = format_args!("{op1:#06x}"),
-                        seq, skipped, "flow-control request: no reply"
+                        seq, "flow-control request: no reply"
                     );
                     return Err(ClientError::Timeout);
                 }
@@ -164,7 +163,8 @@ impl Client {
                     );
                     return Err(ClientError::Refused(status));
                 }
-                None => skipped += 1,
+                // Not its reply: the next datagram, until the deadline.
+                None => {}
             }
         }
     }

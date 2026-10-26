@@ -26,7 +26,7 @@
 //! sends PTP.
 //!
 //! - [`device`]: the config (a private TOML on the box) and the persisted
-//!   names, with Dante's name rules.
+//!   names and RX subscriptions, with Dante's name rules.
 //! - [`wire`]: the request/response datagram ARC and CMC share.
 //! - [`arc`]: the control server on UDP 4440: names, channel lists,
 //!   renames, the empty flow lists; every opcode inferno answers is
@@ -44,10 +44,14 @@
 //!   packets' stamps.
 //! - [`flows`]: flow control on UDP 4455: a receiver's request for a flow
 //!   of our TX channels, answered as inferno answers it, its stop and its
-//!   update.
+//!   update; and our own requests to a transmitter (the RX side).
+//! - [`subscribe`]: our RX subscriptions: which transmitter's channel each
+//!   RX channel receives, resolved from its mDNS record, and when to ask
+//!   for a flow or stop one (at most one request per transmitter per 9 s).
 //! - [`media`]: the audio packet codec, the jitter ring of an RX channel,
-//!   the TX test sources and the checkers of what comes back, and the TX
-//!   flows with the thread that sends them.
+//!   the TX test sources and the checkers of what comes back, the TX flows
+//!   with the thread that sends them, and the RX flows with the thread that
+//!   receives them.
 //! - [`daemon`]: the `iem-dante-dev` binary's command line, its interface
 //!   and address, and the loop that serves the device and announces it
 //!   again after renames.
@@ -64,4 +68,5 @@ pub mod device;
 pub mod flows;
 pub mod info;
 pub mod media;
+pub mod subscribe;
 pub mod wire;

@@ -250,7 +250,7 @@ pub struct DeviceState {
     pub tx: Vec<String>,
     /// RX channel `n`'s subscription at index `n − 1`: empty while none was
     /// ever made, else one entry per RX channel (anything else is refused).
-    /// The file lists only the subscribed channels ([`saved`]).
+    /// The file lists only the subscribed channels, by number.
     #[serde(default, with = "saved", skip_serializing_if = "saved::none")]
     pub subscriptions: Vec<Option<Subscription>>,
 }

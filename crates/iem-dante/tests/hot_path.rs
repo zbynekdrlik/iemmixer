@@ -1,23 +1,29 @@
-//! The media hot path allocates nothing (Gen 3 phase B, plan Tasks 3 and
-//! 4): a packet written and read, a ring written and read, every TX source
-//! and both checkers, and the TX thread's passes (the plans, the sources,
-//! the keepalives, the packets and their sends), under `assert_no_alloc`
-//! (warn mode: the violation count must stay zero). The first test proves
-//! the detector sees an allocation. Its own test binary, because it
-//! installs the global allocator; every buffer, ring, checker, socket and
-//! the transmitter are built before the detector runs.
+//! The media hot path allocates nothing (Gen 3 phase B, plan Tasks 3, 4
+//! and 5): a packet written and read, a ring written and read, every TX
+//! source and both checkers, the TX thread's passes (the plans, the
+//! sources, the keepalives, the packets and their sends) and the RX
+//! thread's (the wait on every flow socket, the plans and routes, the
+//! receive, the placing in the rings, the keepalives), under
+//! `assert_no_alloc` (warn mode: the violation count must stay zero). The
+//! first test proves the detector sees an allocation. Its own test binary,
+//! because it installs the global allocator; every buffer, ring, checker,
+//! socket, the transmitter and the receiver are built before the detector
+//! runs.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::Arc;
+use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+use iem_dante::clock;
 use iem_dante::device::DeviceConfig;
 use iem_dante::flows::control::FlowRequest;
 use iem_dante::media::check::{CounterCheck, SineCheck};
 use iem_dante::media::packet::{self, MEDIA_HEADER};
 use iem_dante::media::ring::Ring;
+use iem_dante::media::rx::{Receiver, RxPlan, RxRoute, RxShared};
 use iem_dante::media::source::Source;
-use iem_dante::media::tx::{Transmitter, TxShared};
+use iem_dante::media::tx::{Transmitter, TxShared, ns_of};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -179,4 +185,67 @@ fn the_tx_thread_s_passes_do_not_allocate() {
     let mut buf = [0u8; 2048];
     assert_eq!(a.recv(&mut buf).unwrap(), MEDIA_HEADER + 3 * 3 * 32);
     assert_eq!(b.recv(&mut buf).unwrap(), MEDIA_HEADER + 3 * 4 * 16);
+}
+
+#[test]
+fn the_rx_thread_s_passes_do_not_allocate() {
+    let rings: Arc<[Ring]> = (0..4).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let shared = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, rings).unwrap());
+    let plan = RxPlan {
+        src: Some(Ipv4Addr::LOCALHOST),
+        bps: 3,
+        nslots: 2,
+        latency: 192,
+        live: true,
+        generation: 1,
+    };
+    // RX 1 and 3 from slot 0, RX 2 from slot 1, RX 4 from nothing.
+    shared.publish(
+        |slot| if slot == 0 { plan } else { RxPlan::default() },
+        |rx| match rx {
+            0 | 2 => Some(RxRoute { flow: 0, slot: 0 }),
+            1 => Some(RxRoute { flow: 0, slot: 1 }),
+            _ => None,
+        },
+    );
+    let mut rx = Receiver::new(Arc::clone(&shared)).unwrap();
+    let (transmitter, _) = receiver();
+    let dest = shared.local_addr(0).unwrap();
+    // 300 packets of 32 frames, 24-bit, two slots: 100 ms of audio.
+    let packets: Vec<Vec<u8>> = (0..300u64)
+        .map(|k| {
+            let mut out = vec![0u8; 1500];
+            let (secs, sub) = clock::stamp(T + 32 * k, RATE);
+            let n = packet::write(&mut out, secs, sub, 2, 3, FPP, |f, s| {
+                ((f as i32 + 1) << 8) * if s == 0 { 1 } else { -1 }
+            });
+            out.truncate(n);
+            out
+        })
+        .collect();
+    let now = ns_of(T + 32 * 300 + 64, RATE);
+    reset_violation_count();
+    assert_no_alloc(|| {
+        // A pass a millisecond: 300 ms, one keepalive due at 250 ms.
+        for (k, p) in packets.iter().enumerate() {
+            transmitter.send_to(p, dest).unwrap();
+            rx.wait(Duration::ZERO).unwrap();
+            rx.pass(Some(now), k as u64 * 1_000_000);
+        }
+    });
+    assert_eq!(violation_count(), 0, "the RX passes allocated");
+    let c = shared.lane(0);
+    assert_eq!((c.packets, c.refused, c.stray), (300, 0, 0), "{c:?}");
+    assert_eq!(c.keepalives, 1);
+    let mut got = [0i32; FPP];
+    for (ring, sign) in [(0, 1), (1, -1), (2, 1)] {
+        assert_eq!(
+            shared.rings()[ring].read_at(T + 32 * 299, &mut got).holes,
+            0
+        );
+        assert_eq!(got[FPP - 1], ((FPP as i32) << 8) * sign);
+    }
+    assert_eq!(shared.rings()[3].read_at(T, &mut got).holes, FPP);
+    let mut buf = [0u8; 16];
+    assert_eq!(transmitter.recv(&mut buf).unwrap(), 2);
 }
