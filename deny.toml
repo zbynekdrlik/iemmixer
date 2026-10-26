@@ -39,6 +39,12 @@ allow = ["GPL-3.0-or-later"]
 crate = "iem-migrate"
 allow = ["GPL-3.0-or-later"]
 
+# Gen 3 (#72, design §3): our Dante device adapts parts of teodly/inferno
+# (GPL-3.0-or-later OR AGPL-3.0-or-later), so it is GPL; the engine does not link it
+[[licenses.exceptions]]
+crate = "iem-dante"
+allow = ["GPL-3.0-or-later"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"

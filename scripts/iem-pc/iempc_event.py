@@ -6,17 +6,28 @@ after a failed preempt (`close_failed_window`), a kernel trace a dead `iempc
 trace` left recorded stopped (iempc_trace.stop_recorded), then `iemmode
 event --signal` (the owner's "ide event", which in prod keeps the band's
 system; S8 lane 3), and `iemmode event --direct` when the guard is unreachable (exit 4):
-all within one budget (EVENT_BUDGET_S) on one clock (`event_clock`).
+all within one budget (EVENT_BUDGET_S) on one clock (`event_clock`). Right after
+the flag, beside all of that, the Gen 3 device's service is stopped (#72,
+`start_gen3_stop`/`end_gen3_stop`): one ssh to GEN3_HOST in a session of its
+own, its output in the state folder's gen3-stop.log, waited for at most
+GEN3_STOP_S at the end, a warning when it fails; neither function raises, so
+it never stops, delays or changes the event path or its exit code.
 iempc.py's docstring states the whole rule.
 
 iempc.py passes itself in (`ip`) for the siblings. The names a test patches
-here (SPIKE, EVENT_BUDGET_S, SPIKE_SHARE_S, SWITCH_MIN_S, `event_clock`,
-`ensure_flag`) live in this module only; the shared ones are read as
-`core.<name>` (iempc_core.py)."""
+here (SPIKE, EVENT_BUDGET_S, SPIKE_SHARE_S, SWITCH_MIN_S, GEN3_STOP_S,
+`event_clock`, `ensure_flag`) live in this module only; the shared ones are
+read as `core.<name>` (iempc_core.py)."""
 from __future__ import annotations
 
+import math
+import os
+import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO
 
 import iempc_core as core
 import iempc_trace
@@ -43,6 +54,151 @@ SWITCH_MIN_S = 120
 OWNER_ALARM = ("iempc: the event path did not complete: alarm the owner now with the prepared question (ops runbook "
                "docs/s6-pc-runbook.md); before the guard is installed, the interim switch (event runbook) applies; the "
                "last resort is the owner's reboot, which comes back in event mode. Never force-end anything.")
+# "ide event" also takes the Gen 3 device off the network (#72, design §5.5): its
+# service on the box (GEN3_HOST in the private env, an ssh destination) stopped by
+# one ssh started right after the flag, beside the PC's switch, and waited for at
+# most GEN3_STOP_S at the end of the path; past it the ssh is left to end by itself.
+GEN3_STOP_S = 5.0
+GEN3_STOP = ("sudo", "-n", "systemctl", "stop", "iem-dante")
+# The stop's output (stdout and stderr) goes into this log in iempc's state
+# folder, never into pipes that close when iempc ends while it runs on; each
+# stop appends under a header line, and a log past GEN3_LOG_MAX is emptied
+# when the next stop starts.
+GEN3_LOG = "gen3-stop.log"
+GEN3_LOG_MAX = 256 * 1024
+# What a failed stop's warning quotes of its own output, at most.
+GEN3_TAIL = 500
+
+
+@dataclass
+class Gen3Stop:
+    """The Gen 3 device's stop, running: its ssh, the moment its bound ends,
+    and its log with the offset its output starts at (None: no log)."""
+    proc: subprocess.Popen
+    deadline: float
+    log: Path | None
+    offset: int
+
+
+def gen3_say(text: str) -> None:
+    """One Gen 3 line on stderr; never raises (a closed stderr raises
+    BrokenPipeError, a closed stream ValueError): the line is lost, the
+    event path is not."""
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except Exception:   # airuleset:script-ok stderr itself failed, no channel is left for the line; the event path goes on
+        return
+
+
+def gen3_warning(text: str) -> None:
+    gen3_say(f"iempc: WARNING: the Gen 3 device: {text}; the event path goes on")
+
+
+def gen3_emit(doc: dict) -> None:
+    """The Gen 3 stop's JSON line; one that cannot be written is a warning."""
+    try:
+        emit({"gen3_stop": doc})
+    except Exception as e:   # nothing of the Gen 3 stop may reach the event path
+        gen3_warning(f"its report could not be written ({e})")
+
+
+def start_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
+    """Starts the Gen 3 device's stop, never waiting for it. No GEN3_HOST: one
+    info line, no ssh. Never raises (the event path's flag is written before
+    it and the PC's switch runs after it whatever it does): a stop that cannot
+    start, for whatever reason, is a warning."""
+    try:
+        return launch_gen3_stop(env)
+    except Exception as e:   # Popen's ValueError (a NUL byte), its OSError, anything
+        gen3_warning(f"its stop could not start ({e}): not stopped")
+        return None
+
+
+def launch_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
+    host = env.get("GEN3_HOST", "")
+    if not host:
+        gen3_say("iempc: no GEN3_HOST in the private env: no Gen 3 device to stop")
+        return None
+    if host.startswith("-"):
+        gen3_warning("GEN3_HOST must be an ssh destination, not an option: not stopped")
+        return None
+    bound = max(1, math.ceil(GEN3_STOP_S))
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={bound}", "-o", "ServerAliveInterval=1",
+           "-o", f"ServerAliveCountMax={bound}", host, *GEN3_STOP]
+    try:
+        log, out, offset = open_gen3_log()
+    except Exception as e:   # the log is no condition of the stop
+        gen3_warning(f"its log could not be opened ({e}): its output is not kept")
+        log, out, offset = None, None, 0
+    try:
+        # A session of its own: a hang-up of iempc's terminal never reaches a
+        # stop left running.
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out or subprocess.DEVNULL,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    finally:
+        if out is not None:
+            out.close()   # the ssh holds its own descriptor
+    return Gen3Stop(proc, time.monotonic() + GEN3_STOP_S, log, offset)
+
+
+def open_gen3_log() -> tuple[Path, BinaryIO, int]:
+    """The log opened for appending, its header line written: the path, the
+    file and the offset the stop's output starts at. Appending (O_APPEND), so
+    a stop still running from an earlier event never writes over this one."""
+    log = core.state_dir() / GEN3_LOG
+    if log.is_file() and log.stat().st_size > GEN3_LOG_MAX:
+        os.truncate(log, 0)
+    out = open(log, "ab")
+    try:
+        out.write(f"--- {core.now_iso()} gen3 stop started\n".encode())
+        out.flush()
+        return log, out, out.tell()
+    except BaseException:
+        out.close()
+        raise
+
+
+def gen3_tail(stop: Gen3Stop) -> str:
+    """This stop's output from its log, on one line, at most GEN3_TAIL characters."""
+    if stop.log is None:
+        return "(its output was not kept)"
+    try:
+        with open(stop.log, "rb") as f:
+            f.seek(stop.offset)
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError as e:
+        return f"(its log {stop.log} could not be read: {e})"
+    return " ".join(text.split())[-GEN3_TAIL:]
+
+
+def end_gen3_stop(stop: Gen3Stop | None) -> None:
+    """Waits for the stop until its bound (never longer) and reports it: one
+    JSON line, and one warning when it failed or did not answer in time. A stop
+    still running is left to end by itself. Never raises: the event's exit code
+    is the PC's alone."""
+    if stop is None:
+        return
+    try:
+        doc = gen3_outcome(stop)
+    except Exception as e:   # nothing of the Gen 3 stop may reach the event path
+        gen3_warning(f"its stop could not be read ({e})")
+        doc = {"ok": False, "error": str(e)[-500:]}
+    gen3_emit(doc)
+
+
+def gen3_outcome(stop: Gen3Stop) -> dict:
+    """The stop's report, warning when it failed or did not answer in time."""
+    try:
+        # A floor, so a stop that already ended past the bound is still read.
+        code = stop.proc.wait(timeout=max(stop.deadline - time.monotonic(), 0.1))
+    except subprocess.TimeoutExpired:
+        kept = f"its output goes to {stop.log}" if stop.log else "its output is not kept"
+        gen3_warning(f"its stop did not answer within {GEN3_STOP_S:g} s and is left to end by itself ({kept}); "
+                     "read 'systemctl is-active iem-dante' on the box")
+        return {"ok": False, "running": True}
+    if code != 0:
+        gen3_warning(f"its stop failed (exit {code}): {gen3_tail(stop)}")
+    return {"ok": code == 0, "exit": code}
 
 
 def ensure_flag() -> bool:
@@ -153,11 +309,30 @@ def cmd_event(ctx: Ctx, ip) -> int:
     `--signal` makes it the owner's "ide event": in prod (after the cutover)
     the guard keeps the band's system (S8 lane 3); an iemmode that does not
     know it (exit 2, UNKNOWN_SIGNAL) gets the plain `iemmode event`, the
-    event plan in every lifecycle."""
+    event plan in every lifecycle. Right after the flag the Gen 3 device's
+    stop starts beside all of it (`start_gen3_stop`); it is collected at the
+    end within GEN3_STOP_S of its start and never changes the exit code."""
     dry = bool(getattr(ctx.args, "dry_run", False))
     deadline = event_clock() + EVENT_BUDGET_S
-    if not dry:
-        write_flag()
+    if dry:
+        if ctx.env.get("GEN3_HOST"):
+            gen3_emit({"plan": "systemctl stop iem-dante"})
+        return pc_event(ctx, ip, deadline, dry)
+    write_flag()
+    # Started after the flag and never waited for here, so the PC's switch is
+    # not delayed; collected at the end, whatever the PC's path did. Neither
+    # raises, so the PC's switch always runs and its exit code (or its
+    # StepError) is what the event path ends with.
+    stop = start_gen3_stop(ctx.env)
+    try:
+        return pc_event(ctx, ip, deadline, dry)
+    finally:
+        end_gen3_stop(stop)
+
+
+def pc_event(ctx: Ctx, ip, deadline: float, dry: bool) -> int:
+    """The IEM PC's part of the event path, after the flag: the spike window,
+    a recorded trace, then iemmode event (`--direct` on exit 4)."""
     if spike_window_open() or spike_window_settling():
         if dry:
             emit({"spike_window": "open", "plan": "spike_window.py preempt"})

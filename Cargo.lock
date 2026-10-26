@@ -1635,9 +1635,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.3.0"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fdeflate"
@@ -1683,6 +1683,15 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "spin",
 ]
 
 [[package]]
@@ -2730,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "assert_no_alloc",
  "azo",
@@ -2742,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2759,8 +2768,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "iem-dante"
+version = "2.0.0-dev.42"
+dependencies = [
+ "if-addrs",
+ "mdns-sd",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2769,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "assert_no_alloc",
  "iem-audio-io",
@@ -2793,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -2802,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "iem-guard"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "iem-win",
  "interprocess",
@@ -2823,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2831,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "iem-migrate"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2846,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "iem-rpp"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2861,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2903,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -2918,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "dirs 6.0.0",
  "iem-core",
@@ -2937,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -2959,10 +2983,20 @@ dependencies = [
 
 [[package]]
 name = "iem-win"
-version = "2.0.0-dev.41"
+version = "2.0.0-dev.42"
 dependencies = [
  "tokio",
  "windows-registry 0.100.0",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
  "windows-sys 0.61.2",
 ]
 
@@ -3567,6 +3601,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "mdns-sd"
+version = "0.21.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "127d3355da0615643c88c885e29a1ccb29ca4b1ca1f2e44b3caed2e728a796aa"
+dependencies = [
+ "fastrand",
+ "flume",
+ "if-addrs",
+ "log",
+ "mio",
+ "socket-pktinfo",
+ "socket2",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3614,6 +3663,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
 dependencies = [
  "libc",
+ "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
@@ -5828,6 +5878,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "socket-pktinfo"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "612942246d0cc239cfd83af1dfd39be47f649208a3524e5e9da651910128e0ac"
+dependencies = [
+ "libc",
+ "socket2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5883,6 +5944,15 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

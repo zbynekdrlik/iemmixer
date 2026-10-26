@@ -97,6 +97,14 @@ exclude_globs = [
   # #[cfg(windows)] CPU Set call is not compiled on the Linux runners, so no
   # test there could catch its mutant.
   "crates/iem-soakclient/src/main.rs",
+  # iem-dante-dev (#72 phase A): Linux glue (the config and state files, the
+  # interface list and its MAC, speed and route files, the sockets, the mDNS
+  # daemon on one interface, SIGTERM and SIGINT, the goodbyes) around the
+  # mutated iem_dante::daemon, which holds every decision (parse_args,
+  # pick_interface, net_info, announce_device, serve).
+  # The unit tests never start mdns-sd's multicast daemon; the plan's live
+  # check (Task 6) runs the binary on the box.
+  "crates/iem-dante/src/bin/**",
 ]
 
 exclude_re = [
@@ -189,6 +197,19 @@ exclude_re = [
   # `pause` is the real 200 ms wait between read tries: only time shows it,
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
+  # The Dante device's state file (#72): the fsync of its directory after the
+  # rename, unobservable the same way; the rename itself is tested.
+  "iem-dante/src/device\\.rs.*\\bsync_dir\\b",
+  # Unobservable (#72): the direction's label only names it in log lines (a
+  # refused rename's problems are logged, never answered); the rename's
+  # decisions are tested by direction.
+  "iem-dante/src/arc\\.rs.*replace Dir::label -> ",
+  # The mDNS daemon's side of the announcer (#72): two calls into mdns-sd's
+  # multicast daemon, which the unit tests never start (it would announce the
+  # test records on the build machine's network). The announcer's decisions
+  # are tested through a fake registry; the plan's live check (Task 6) sees
+  # the records in Dante Controller.
+  "iem-dante/src/announce\\.rs.*<impl Registry for ServiceDaemon>",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
