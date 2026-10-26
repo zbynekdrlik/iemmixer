@@ -49,6 +49,9 @@ elif cmd.startswith("set -e\n"):
         words = line.split()
         if words[:4] == ["sudo", "-n", "install", "-D"]:
             mode, src, dst = words[5], words[6], words[7]
+            if os.environ.get("FAKE_SUDO_FAILS_AT") == dst:
+                sys.stderr.write("install: cannot create regular file: Read-only file system\n")
+                sys.exit(1)
             target = os.path.join(root, dst.lstrip("/"))
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copyfile(os.path.join(home, src), target)
@@ -159,8 +162,10 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"), self.config.read_bytes())
         self.assertEqual(self.installed("/etc/iemmixer/iem-dante.env"), b"IEM_DANTE_IFACE=eth9\n")
         modes = (self.box / "modes.log").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(modes, ["0755 /opt/iemmixer/bin/iem-dante-dev", "0644 /etc/systemd/system/iem-dante.service",
+        # The drop-in (User=) before the unit: no moment has a unit without it.
+        self.assertEqual(modes, ["0755 /opt/iemmixer/bin/iem-dante-dev",
                                  "0644 /etc/systemd/system/iem-dante.service.d/10-user.conf",
+                                 "0644 /etc/systemd/system/iem-dante.service",
                                  "0644 /etc/iemmixer/dante-device.toml", "0644 /etc/iemmixer/iem-dante.env"])
         remote = self.remote()
         self.assertEqual(remote[:3], ["id -un", "sudo -n -l systemctl stop iem-dante",
@@ -236,6 +241,17 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("a password is required", r.stderr)
         self.assertEqual(len(self.remote()), 4)
+
+    def test_an_install_that_fails_at_the_unit_never_leaves_a_unit_without_its_user(self) -> None:
+        # A fresh box: the install stops at the unit. The drop-in naming the
+        # user is in place already, so no later unit file runs as root.
+        r = self.deploy(FAKE_SUDO_FAILS_AT="/etc/systemd/system/iem-dante.service")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Read-only file system", r.stderr)
+        self.assertEqual(self.installed("/etc/systemd/system/iem-dante.service.d/10-user.conf"),
+                         b"[Service]\nUser=tester\n")
+        self.assertFalse((self.box / "root" / "etc/systemd/system/iem-dante.service").exists())
+        self.assertFalse(any(c.startswith("sha256sum ") for c in self.remote()))
 
     def test_a_box_whose_sudo_does_not_allow_the_event_stop_is_refused_before_any_copy(self) -> None:
         # "ide event" stops the device with `sudo -n systemctl stop iem-dante`
