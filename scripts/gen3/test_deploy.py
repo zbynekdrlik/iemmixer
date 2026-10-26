@@ -32,6 +32,11 @@ cmd = " ".join(args[1:])
 home, root = os.path.join(box, "home"), os.path.join(box, "root")
 if cmd == "id -un":
     print(os.environ.get("FAKE_USER", "tester"))
+elif cmd == "sudo -n -l systemctl stop iem-dante":
+    if os.environ.get("FAKE_NO_STOP_RULE"):
+        sys.stderr.write("Sorry, user tester is not allowed to execute this command.\n")
+        sys.exit(1)
+    print("/usr/bin/systemctl stop iem-dante")
 elif cmd.startswith("mkdir -p "):
     os.makedirs(os.path.join(home, cmd.split()[-1]), exist_ok=True)
     if os.environ.get("FAKE_FLAG_ON") == "mkdir":
@@ -97,8 +102,11 @@ class DeployTests(unittest.TestCase):
             p.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
             p.chmod(0o755)
         self.flag = self.tmp / "config" / "EVENT-NOW"
+        # iempc's private env, absent unless a test writes it: the dev box's
+        # own is never read.
+        self.pc_env = self.tmp / "config" / "iem-pc.env"
         self.env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BOX": str(self.box),
-                    "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SETTLE_S": "0"}
+                    "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SETTLE_S": "0", "PC_ENV": str(self.pc_env)}
         self.artifact = self.tmp / "artifact" / "iem-dante-dev"
         self.artifact.parent.mkdir()
         self.artifact.write_bytes(b"\x7fELF a synthetic iem-dante-dev")
@@ -147,14 +155,16 @@ class DeployTests(unittest.TestCase):
                                  "0644 /etc/systemd/system/iem-dante.service.d/10-user.conf",
                                  "0644 /etc/iemmixer/dante-device.toml", "0644 /etc/iemmixer/iem-dante.env"])
         remote = self.remote()
-        self.assertEqual(remote[:2], ["id -un", "mkdir -p .cache/iem-dante-deploy"])
-        install = remote[2].splitlines()
+        self.assertEqual(remote[:3], ["id -un", "sudo -n -l systemctl stop iem-dante",
+                                      "mkdir -p .cache/iem-dante-deploy"])
+        install = remote[3].splitlines()
         self.assertEqual(install[0], "set -e")
         self.assertTrue(all(line.startswith("sudo -n ") for line in install[1:]), install)
         self.assertEqual(install[-3:], ["sudo -n systemctl daemon-reload", "sudo -n systemctl enable iem-dante",
                                         "sudo -n systemctl restart iem-dante"])
-        self.assertEqual(remote[3:], ["sha256sum /opt/iemmixer/bin/iem-dante-dev",
+        self.assertEqual(remote[4:], ["sha256sum /opt/iemmixer/bin/iem-dante-dev",
                                       "/opt/iemmixer/bin/iem-dante-dev --version", "systemctl is-active iem-dante"])
+        self.assertNotIn("WARNING", r.stderr)
         self.assertTrue(all("BatchMode=yes" in c for c in self.calls()))
         last = r.stdout.strip().splitlines()[-1]
         self.assertIn(f"iem-dante-dev 2.0.0-dev.41 {'a' * 40}", last)
@@ -175,7 +185,7 @@ class DeployTests(unittest.TestCase):
         r = self.deploy(FAKE_FLAG_ON="mkdir")
         self.assertEqual(r.returncode, 1)
         self.assertIn("nothing installed", r.stderr)
-        self.assertEqual([c[0] for c in self.calls()], ["ssh", "ssh", "scp"])
+        self.assertEqual([c[0] for c in self.calls()], ["ssh", "ssh", "ssh", "scp"])
         self.assertFalse((self.box / "root" / "opt").exists())
 
     def test_an_artifact_with_another_sha256_is_refused_before_any_call(self) -> None:
@@ -195,7 +205,59 @@ class DeployTests(unittest.TestCase):
         r = self.deploy(FAKE_SUDO_FAILS="1")
         self.assertEqual(r.returncode, 1)
         self.assertIn("a password is required", r.stderr)
-        self.assertEqual(len(self.remote()), 3)
+        self.assertEqual(len(self.remote()), 4)
+
+    def test_a_box_whose_sudo_does_not_allow_the_event_stop_is_refused_before_any_copy(self) -> None:
+        # "ide event" stops the device with `sudo -n systemctl stop iem-dante`
+        # (iempc_event): a device it could not stop is never installed.
+        r = self.deploy(FAKE_NO_STOP_RULE="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("sudo -n systemctl stop iem-dante", r.stderr)
+        self.assertIn("sudoers", r.stderr)
+        self.assertIn("nothing was copied", r.stderr)
+        self.assertEqual(self.remote(), ["id -un", "sudo -n -l systemctl stop iem-dante"])
+        self.assertNotIn("scp", [c[0] for c in self.calls()])
+
+    def write_pc_env(self, text: str) -> None:
+        self.pc_env.parent.mkdir(exist_ok=True)
+        self.pc_env.write_text("PC_SSH=tester@pc.test\n" + text, encoding="utf-8")
+
+    def gen3_warnings(self, r: subprocess.CompletedProcess) -> list[str]:
+        return [line for line in r.stderr.splitlines() if "WARNING" in line]
+
+    def test_a_deploy_to_the_host_ide_event_stops_warns_nothing(self) -> None:
+        # Read as iempc reads the env: spaces around the key and the value,
+        # quotes around it, the last line of a key winning, comments skipped.
+        for text in (f"GEN3_HOST={HOST}\n", f"  GEN3_HOST = \"{HOST}\"  \n",
+                     f"GEN3_HOST=other@gen3.test\n# GEN3_HOST=x@y\nGEN3_HOST={HOST}\n"):
+            with self.subTest(text=text):
+                self.write_pc_env(text)
+                r = self.deploy()
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.gen3_warnings(r), [], r.stderr)
+
+    def test_a_deploy_to_another_host_than_gen3_host_warns(self) -> None:
+        self.write_pc_env("GEN3_HOST=other@gen3.test\n")
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        warnings = self.gen3_warnings(r)
+        self.assertEqual(len(warnings), 1, r.stderr)
+        self.assertIn("GEN3_HOST", warnings[0])
+        self.assertIn("ide event", warnings[0])
+        # The values stay out of the line (P6: it may be pasted).
+        self.assertNotIn("other@gen3.test", r.stderr)
+
+    def test_an_env_without_gen3_host_warns_and_no_env_is_no_warning(self) -> None:
+        self.write_pc_env("PC_ROOT=X:\\root\n")
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        warnings = self.gen3_warnings(r)
+        self.assertEqual(len(warnings), 1, r.stderr)
+        self.assertIn("no GEN3_HOST", warnings[0])
+        self.pc_env.unlink()
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.gen3_warnings(r), [], r.stderr)
 
     def test_an_installed_binary_with_another_sha256_fails(self) -> None:
         r = self.deploy(FAKE_SHA="f" * 64)
