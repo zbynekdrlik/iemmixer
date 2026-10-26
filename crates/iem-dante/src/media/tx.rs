@@ -408,7 +408,7 @@ pub(crate) struct Cell<const N: usize> {
 }
 
 impl<const N: usize> Cell<N> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Cell {
             seq: AtomicU32::new(0),
             words: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -449,7 +449,7 @@ impl<const N: usize> Cell<N> {
     }
 
     /// The words as last written (for the writer).
-    fn peek(&self) -> [u64; N] {
+    pub(crate) fn peek(&self) -> [u64; N] {
         std::array::from_fn(|i| self.words[i].load(Ordering::Relaxed))
     }
 }
@@ -932,9 +932,10 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
 }
 
 /// Asks for `SCHED_FIFO` at `priority` for the calling thread (reset in
-/// any child it forks); `false` when the kernel refuses it.
+/// any child it forks); `false` when the kernel refuses it. The RX thread
+/// asks too ([`super::rx`]).
 #[cfg(target_os = "linux")]
-fn ask_realtime(priority: i32) -> bool {
+pub(crate) fn ask_realtime(priority: i32) -> bool {
     let param = libc::sched_param {
         sched_priority: priority,
     };
@@ -946,7 +947,7 @@ fn ask_realtime(priority: i32) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn ask_realtime(_priority: i32) -> bool {
+pub(crate) fn ask_realtime(_priority: i32) -> bool {
     false
 }
 

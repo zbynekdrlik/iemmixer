@@ -460,3 +460,180 @@ fn redact_keeps_the_quote_marks_and_drops_what_they_hold() {
     assert_eq!(redact("open \"never closed"), "open \"\u{2026}\"");
     assert_eq!(redact("plain"), "plain");
 }
+
+// ---- RX subscriptions (phase B, plan Task 5) ----
+
+fn sub(channel: &str, device: &str) -> Subscription {
+    Subscription {
+        tx_channel: channel.to_string(),
+        tx_device: device.to_string(),
+    }
+}
+
+/// A phase A state file: the names only, RX 32 renamed.
+fn phase_a_state() -> String {
+    let quoted = |names: Vec<String>| {
+        names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut rx: Vec<String> = (1..=31).map(|i| format!("RX {i}")).collect();
+    rx.push("Return 32".to_string());
+    let tx: Vec<String> = (1..=16).map(|i| format!("TX {i}")).collect();
+    format!(
+        "name = \"test-device\"\nrx = [{}]\ntx = [{}]\n",
+        quoted(rx),
+        quoted(tx)
+    )
+}
+
+#[test]
+fn a_phase_a_state_file_loads_without_subscriptions() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    fs::write(&cfg.state_file, phase_a_state()).unwrap();
+    let state = DeviceState::load_or_default(&cfg).unwrap();
+    assert_eq!(state.rx[31], "Return 32");
+    assert!(state.subscriptions.is_empty());
+    assert_eq!(state.subscription(0), None);
+    assert_eq!(state.subscription(99), None);
+    // A state without subscriptions is written as phase A wrote it.
+    state.save(&cfg.state_file).unwrap();
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert!(!text.contains("subscriptions"), "{text}");
+    assert_eq!(DeviceState::load_or_default(&cfg).unwrap(), state);
+    // So is one whose subscriptions were all removed again.
+    let mut emptied = state.clone();
+    assert!(emptied.set_subscription(&cfg, 3, Some(sub("TX 1", "peer-device"))));
+    assert!(emptied.set_subscription(&cfg, 3, None));
+    assert_eq!(emptied.subscriptions.len(), 32);
+    emptied.save(&cfg.state_file).unwrap();
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert!(!text.contains("subscriptions"), "{text}");
+}
+
+#[test]
+fn a_subscription_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    let mut state = DeviceState::load_or_default(&cfg).unwrap();
+    assert!(state.set_subscription(&cfg, 1, Some(sub("TX 1", "peer-device"))));
+    assert!(state.set_subscription(&cfg, 31, Some(sub("TX 16", "test-device"))));
+    // No RX channel 33.
+    assert!(!state.set_subscription(&cfg, 32, Some(sub("TX 1", "peer-device"))));
+    assert!(!state.set_subscription(&cfg, 32, None));
+    assert_eq!(state.subscriptions.len(), 32);
+    state.save(&cfg.state_file).unwrap();
+    // The file lists the subscribed channels by number, nothing else.
+    let text = fs::read_to_string(&cfg.state_file).unwrap();
+    assert_eq!(text.matches("[[subscriptions]]").count(), 2, "{text}");
+    assert!(text.contains("rx = 2\n"), "{text}");
+    assert!(text.contains("rx = 32\n"), "{text}");
+    let back = DeviceState::load_or_default(&cfg).unwrap();
+    assert_eq!(back, state);
+    assert_eq!(back.subscription(1), Some(&sub("TX 1", "peer-device")));
+    assert_eq!(back.subscription(31), Some(&sub("TX 16", "test-device")));
+    assert_eq!(back.subscription(0), None);
+    // A file that lists only a low channel loads as one entry per channel.
+    let mut low = DeviceState::from_config(&cfg);
+    assert!(low.set_subscription(&cfg, 0, Some(sub("TX 2", "peer-device"))));
+    low.save(&cfg.state_file).unwrap();
+    let back = DeviceState::load_or_default(&cfg).unwrap();
+    assert_eq!(back.subscriptions.len(), 32);
+    assert_eq!(back.subscription(0), Some(&sub("TX 2", "peer-device")));
+}
+
+#[test]
+fn a_wrong_length_list_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    let path = cfg.state_file.display().to_string();
+    let entry = |rx: &str| {
+        format!(
+            "\n[[subscriptions]]\nrx = {rx}\ntx_channel = \"zyxqchan\"\n\
+             tx_device = \"zyxqdev\"\n"
+        )
+    };
+    let base = phase_a_state();
+    // Past the RX channels, past any device's, channel 0, a channel twice,
+    // not a number, an unknown field.
+    for (text, want) in [
+        (
+            format!("{base}{}", entry("33")),
+            "a subscription of RX channel 33, the config has 32 RX channels",
+        ),
+        // Any device's most channels are read, then refused by the config.
+        (
+            format!("{base}{}", entry("512")),
+            "a subscription of RX channel 512, the config has 32 RX channels",
+        ),
+        (
+            format!("{base}{}", entry("513")),
+            "RX channel 513: no device has it (1 to 512)",
+        ),
+        (format!("{base}{}", entry("100000")), "RX channel 100000"),
+        (format!("{base}{}", entry("0")), "RX channel 0"),
+        (
+            format!("{base}{}{}", entry("2"), entry("2")),
+            "RX channel 2 is subscribed twice",
+        ),
+        (format!("{base}{}", entry("\"zyxq\"")), "line "),
+        (format!("{base}{}zyxqfield = 1\n", entry("1")), "line "),
+    ] {
+        fs::write(&cfg.state_file, &text).unwrap();
+        let err = DeviceState::load_or_default(&cfg).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{text}");
+        let message = err.to_string();
+        assert!(message.contains(&path), "{message}");
+        assert!(message.contains(want), "{message} lacks {want:?}");
+        assert!(!message.contains("zyxq"), "{message} echoes the file");
+    }
+    // In memory: one entry per RX channel or none.
+    let mut state = DeviceState::from_config(&cfg);
+    state.subscriptions = vec![None; 5];
+    assert_eq!(
+        state.problems(&cfg),
+        ["5 subscription entries, the config has 32 RX channels"]
+    );
+    state.subscriptions = vec![None; 32];
+    assert!(state.problems(&cfg).is_empty());
+    state.subscriptions = Vec::new();
+    assert!(state.problems(&cfg).is_empty());
+}
+
+#[test]
+fn a_subscription_to_an_invalid_name_is_refused_by_number() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_in(dir.path());
+    for (s, want) in [
+        (
+            sub("zyxq.chan", "peer-device"),
+            "RX channel 4: a subscription to an invalid channel name",
+        ),
+        (
+            sub("", "peer-device"),
+            "RX channel 4: a subscription to an invalid channel name",
+        ),
+        (
+            sub("TX 1", "zyxq dev"),
+            "RX channel 4: a subscription to an invalid device name",
+        ),
+        (
+            sub("TX 1", "-zyxq"),
+            "RX channel 4: a subscription to an invalid device name",
+        ),
+    ] {
+        let mut state = DeviceState::from_config(&cfg);
+        // set_subscription refuses it; a hand-edited file may still hold it.
+        assert!(!state.set_subscription(&cfg, 3, Some(s.clone())));
+        assert!(state.subscriptions.is_empty());
+        state.subscriptions = vec![None; 32];
+        state.subscriptions[3] = Some(s);
+        state.save(&cfg.state_file).unwrap();
+        let message = DeviceState::load_or_default(&cfg).unwrap_err().to_string();
+        assert!(message.contains(want), "{message} lacks {want:?}");
+        assert!(!message.contains("zyxq"), "{message} echoes a name");
+    }
+}
