@@ -4,7 +4,9 @@
 //! The ARC server's count of the requests it refuses or leaves unanswered,
 //! and of the datagrams whose length field disagrees with their size
 //! (#72, 2026-10-26: Dante Controller asked 0x2200 and 0x2204 about 2 250
-//! times a second while the device refused both). Counted per peer and
+//! times a second while the device refused both); the flow-control server
+//! (UDP 4455, [`crate::flows::server`]) keeps one of its own, with the
+//! requests over its per-peer bound. Counted per peer and
 //! opcode and reported at most once a [`WINDOW`]: [`Gaps::record`] and
 //! [`Gaps::flush`] hand back a window's [`Report`] once it has run its
 //! length, and the server logs it as one warning. A peer is its address,
@@ -36,6 +38,9 @@ pub enum Gap {
     Unanswered,
     /// No request: its length field disagrees with its size.
     Misframed,
+    /// Dropped unread: over the server's bound on one peer's requests
+    /// (the flow-control server, [`crate::flows::server::PeerLimit`]).
+    Limited,
 }
 
 /// One (peer, opcode, gap) count of a window.
@@ -69,6 +74,7 @@ impl Gap {
             Gap::Refused => "refused",
             Gap::Unanswered => "unanswered",
             Gap::Misframed => "misframed",
+            Gap::Limited => "limited",
         }
     }
 }

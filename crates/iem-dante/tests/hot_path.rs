@@ -1,15 +1,23 @@
-//! The media hot path allocates nothing (Gen 3 phase B, plan Task 3): a
-//! packet written and read, a ring written and read, every TX source and
-//! both checkers, under `assert_no_alloc` (warn mode: the violation count
-//! must stay zero). The first test proves the detector sees an allocation.
-//! Its own test binary, because it installs the global allocator; every
-//! buffer, ring and checker is built before the detector runs.
+//! The media hot path allocates nothing (Gen 3 phase B, plan Tasks 3 and
+//! 4): a packet written and read, a ring written and read, every TX source
+//! and both checkers, and the TX thread's passes (the plans, the sources,
+//! the keepalives, the packets and their sends), under `assert_no_alloc`
+//! (warn mode: the violation count must stay zero). The first test proves
+//! the detector sees an allocation. Its own test binary, because it
+//! installs the global allocator; every buffer, ring, checker, socket and
+//! the transmitter are built before the detector runs.
+
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::Arc;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc, reset_violation_count, violation_count};
+use iem_dante::device::DeviceConfig;
+use iem_dante::flows::control::FlowRequest;
 use iem_dante::media::check::{CounterCheck, SineCheck};
 use iem_dante::media::packet::{self, MEDIA_HEADER};
 use iem_dante::media::ring::Ring;
 use iem_dante::media::source::Source;
+use iem_dante::media::tx::{Transmitter, TxShared};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -99,4 +107,76 @@ fn the_media_path_does_not_allocate() {
     let s = sine.stats();
     assert_eq!(s.discontinuities, 0, "{s:?}");
     assert!(s.checked > 60_000, "{s:?}");
+}
+
+/// A receiver's socket on loopback and its address.
+fn receiver() -> (UdpSocket, SocketAddrV4) {
+    let s = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    s.set_nonblocking(true).unwrap();
+    let SocketAddr::V4(at) = s.local_addr().unwrap() else {
+        panic!("an IPv4 socket");
+    };
+    (s, at)
+}
+
+#[test]
+fn the_tx_thread_s_passes_do_not_allocate() {
+    let cfg = DeviceConfig::from_toml(include_str!("../../../config/test-dante-device.toml"))
+        .expect("config/test-dante-device.toml");
+    let rings: Arc<[Ring]> = (0..2).map(|_| Ring::new()).collect::<Vec<_>>().into();
+    let shared = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1).unwrap());
+    assert!(shared.set_source(0, Source::Counter));
+    assert!(shared.set_source(1, Source::Echo { rx: 0, offset: 37 }));
+    assert!(shared.set_source(
+        2,
+        Source::Sine {
+            hz: 1_000.0,
+            dbfs: -20.0
+        }
+    ));
+    let (a, at_a) = receiver();
+    let (b, at_b) = receiver();
+    {
+        let mut c = shared.lock();
+        for (rx, channels, bits, fpp) in [
+            (at_a, vec![Some(1), Some(2), Some(3)], 24, 32),
+            (at_b, vec![Some(3), None, Some(1)], 32, 16),
+        ] {
+            let req = FlowRequest {
+                rx_host: "peer-device".to_string(),
+                rx_flow_name: "flow-1".to_string(),
+                sample_rate: RATE,
+                bits,
+                channels,
+                fpp,
+                rx,
+            };
+            c.table.add(&req, shared.now_ns()).unwrap();
+        }
+        shared.publish(&c);
+    }
+    // A keepalive waiting on the first flow's socket.
+    a.send_to(&[0x13, 0x37], shared.local_addr(0).unwrap())
+        .unwrap();
+    let mut tx = Transmitter::new(Arc::clone(&shared));
+    let start = T / u64::from(RATE) * 1_000_000_000;
+    reset_violation_count();
+    assert_no_alloc(|| {
+        // 100 ms in passes 250 µs apart: three reads of the plans, the
+        // sources and the keepalives, and every packet in between.
+        for i in 0..400 {
+            tx.step(Some(start + i * 250_000), 0);
+        }
+    });
+    assert_eq!(violation_count(), 0, "the TX passes allocated");
+    let (la, lb) = (shared.lane(0), shared.lane(1));
+    // 100 ms at 96 kHz: 300 packets of 32 frames, 600 of 16, less the first.
+    assert!((295..=300).contains(&la.packets), "{la:?}");
+    assert!((595..=600).contains(&lb.packets), "{lb:?}");
+    assert_eq!((la.send_errors, lb.send_errors), (0, 0));
+    assert_eq!(la.keepalives, 1);
+    assert!(la.holes > 0, "the echo of an empty ring");
+    let mut buf = [0u8; 2048];
+    assert_eq!(a.recv(&mut buf).unwrap(), MEDIA_HEADER + 3 * 3 * 32);
+    assert_eq!(b.recv(&mut buf).unwrap(), MEDIA_HEADER + 3 * 4 * 16);
 }

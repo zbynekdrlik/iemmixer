@@ -240,3 +240,21 @@ fn a_report_reads_as_ids_opcodes_and_counts() {
     };
     assert_eq!(report.to_string(), "peer 1 0x3014 unanswered 2");
 }
+
+#[test]
+fn every_gap_reads_as_its_word() {
+    let report = Report {
+        entries: vec![
+            entry(1, 0x0100, Gap::Refused, 4),
+            entry(1, 0x0100, Gap::Unanswered, 3),
+            entry(2, 0x0101, Gap::Misframed, 2),
+            entry(3, 0x0102, Gap::Limited, 1),
+        ],
+        uncounted: 0,
+    };
+    assert_eq!(
+        report.to_string(),
+        "peer 1 0x0100 refused 4, peer 1 0x0100 unanswered 3, \
+         peer 2 0x0101 misframed 2, peer 3 0x0102 limited 1"
+    );
+}

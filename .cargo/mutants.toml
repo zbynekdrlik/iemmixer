@@ -220,6 +220,14 @@ exclude_re = [
   # (`a_poll_reports_its_reply_sample_event_and_k` pins each poll's
   # report); every decision is `sample`'s and the `Tracker`'s.
   "iem-dante/src/clock\\.rs.*\\b(poll_dantesync|log_event)\\b",
+  # The TX thread's SCHED_FIFO request (#72 phase B, plan Task 4): its
+  # answer only picks the thread's start line (FIFO or normal priority), and
+  # CI's kernel refuses FIFO to an unprivileged runner, so no test can see
+  # it; the twin for other systems is compiled out on Linux. The thread's
+  # loop (`run`), `spawn` and every decision (`Transmitter`, `Schedule`,
+  # `TxTable`) stay mutated: the loopback and thread tests in media/tx run
+  # them.
+  "iem-dante/src/media/tx\\.rs.*\\bask_realtime\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).

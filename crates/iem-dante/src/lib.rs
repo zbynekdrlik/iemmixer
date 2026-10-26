@@ -42,8 +42,12 @@
 //! - [`clock`]: the media clock: PTP time as `CLOCK_MONOTONIC` + k, k from
 //!   dantesync's time server on the box (the box's one PTP owner), and the
 //!   packets' stamps.
+//! - [`flows`]: flow control on UDP 4455: a receiver's request for a flow
+//!   of our TX channels, answered as inferno answers it, its stop and its
+//!   update.
 //! - [`media`]: the audio packet codec, the jitter ring of an RX channel,
-//!   the TX test sources and the checkers of what comes back.
+//!   the TX test sources and the checkers of what comes back, and the TX
+//!   flows with the thread that sends them.
 //! - [`daemon`]: the `iem-dante-dev` binary's command line, its interface
 //!   and address, and the loop that serves the device and announces it
 //!   again after renames.
@@ -57,6 +61,7 @@ pub mod clock;
 pub mod cmc;
 pub mod daemon;
 pub mod device;
+pub mod flows;
 pub mod info;
 pub mod media;
 pub mod wire;
