@@ -25,8 +25,10 @@
 //!
 //! - [`device`]: the config (a private TOML on the box) and the persisted
 //!   names, with Dante's name rules.
+//! - [`wire`]: the request/response datagram ARC and CMC share.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
 
 pub mod device;
+pub mod wire;
