@@ -560,8 +560,7 @@ impl ArcDirectory {
     /// ended), at most `limit`.
     #[cfg(test)]
     fn join_within(&mut self, limit: Duration) {
-        self.shared.stop.store(true, Ordering::Relaxed);
-        self.shared.wake.notify_all();
+        ask_stop(&self.shared);
         let deadline = Instant::now() + limit;
         for thread in self.threads.drain(..) {
             while !thread.is_finished() {
@@ -578,9 +577,14 @@ impl Drop for ArcDirectory {
     /// request it waits on); the browse threads end with the mDNS daemon's
     /// events.
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
-        self.shared.wake.notify_all();
+        ask_stop(&self.shared);
     }
+}
+
+/// Asks the reader to stop and wakes it.
+fn ask_stop(shared: &Shared) {
+    shared.stop.store(true, Ordering::Relaxed);
+    shared.wake.notify_all();
 }
 
 impl Resolver for ArcDirectory {

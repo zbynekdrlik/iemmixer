@@ -907,3 +907,27 @@ fn dropping_the_directory_ends_its_reader_at_once() {
     // The reader was asked to stop and woken: nothing holds the directory.
     eventually("the reader's end", || shared.upgrade().is_none());
 }
+
+/// The stop is set under the book's lock, which the reader holds from its
+/// look at the stop to its wait, so a stop never lands in between and is
+/// lost (a lost one leaves the reader asleep for its whole wait: a full run
+/// of the crate's tests once waited one out, #72). While the test holds
+/// the lock, the stop is not set.
+#[test]
+fn the_stop_is_set_under_the_book_s_lock() {
+    let arc = ArcDirectory::new(Timing::default());
+    let shared = Arc::clone(&arc.shared);
+    let book = lock(&shared.book);
+    let asking = {
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || ask_stop(&shared))
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !shared.stop.load(Ordering::Relaxed),
+        "the stop was set while the book was locked"
+    );
+    drop(book);
+    asking.join().unwrap();
+    assert!(shared.stop.load(Ordering::Relaxed));
+}
