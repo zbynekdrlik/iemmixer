@@ -53,6 +53,14 @@ elif cmd.startswith("set -e\n"):
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copyfile(os.path.join(home, src), target)
             open(os.path.join(box, "modes.log"), "a").write(f"{mode} {dst}\n")
+        if line == "sudo -n systemctl restart iem-dante" and os.environ.get("FAKE_FLAG_ON") == "restart":
+            # "ide event" arrives while the service restarts: its own stop
+            # has already run, the restart starts the device again.
+            open(os.environ["IEMMIXER_EVENT_NOW"], "w").write("now\n")
+elif cmd == "sudo -n systemctl stop iem-dante":
+    if os.environ.get("FAKE_STOP_FAILS"):
+        sys.stderr.write("sudo: a password is required\n")
+        sys.exit(1)
 elif cmd.startswith("sha256sum "):
     path = cmd.split()[1]
     data = open(os.path.join(root, path.lstrip("/")), "rb").read()
@@ -187,6 +195,28 @@ class DeployTests(unittest.TestCase):
         self.assertIn("nothing installed", r.stderr)
         self.assertEqual([c[0] for c in self.calls()], ["ssh", "ssh", "ssh", "scp"])
         self.assertFalse((self.box / "root" / "opt").exists())
+
+    def test_a_flag_that_comes_during_the_install_stops_the_device_again(self) -> None:
+        # The race: the flag is checked, "ide event" arrives and stops the
+        # service, then the install's restart starts it again. The flag is
+        # read again after the restart: the device is stopped, exit 1.
+        self.flag.parent.mkdir()
+        r = self.deploy(FAKE_FLAG_ON="restart")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("an event is on", r.stderr)
+        self.assertIn("iem-dante stopped again", r.stderr)
+        remote = self.remote()
+        self.assertTrue(remote[-2].startswith("set -e\n"), remote)
+        self.assertEqual(remote[-1], "sudo -n systemctl stop iem-dante")
+        self.assertFalse(any(c.startswith("sha256sum ") for c in remote), remote)
+
+    def test_a_stop_after_a_flag_during_the_install_that_fails_says_so(self) -> None:
+        self.flag.parent.mkdir()
+        r = self.deploy(FAKE_FLAG_ON="restart", FAKE_STOP_FAILS="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("an event is on", r.stderr)
+        self.assertIn("may still run", r.stderr)
+        self.assertEqual(self.remote()[-1], "sudo -n systemctl stop iem-dante")
 
     def test_an_artifact_with_another_sha256_is_refused_before_any_call(self) -> None:
         r = self.deploy(args=["--host", HOST, "--artifact", str(self.artifact), "--sha256", "0" * 64,
