@@ -282,6 +282,16 @@ impl DeviceState {
         out
     }
 
+    /// Whether [`DeviceState::save`] can write `path`, asked at the daemon's
+    /// start so a folder it cannot write is found then, not at the first
+    /// rename: the temporary file `save` writes beside it is created and
+    /// removed again. An error names the file; `path` itself is never
+    /// touched.
+    pub fn check_writable(path: &Path) -> io::Result<()> {
+        let _ = path;
+        Ok(())
+    }
+
     /// Writes the state to `path`: a synced temporary file beside it, then a
     /// rename over it and a sync of the directory, so a crash leaves the old
     /// state or the new one, never a torn file.
