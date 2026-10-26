@@ -847,8 +847,7 @@ fn wait_for(stats: &PumpStats, done: impl Fn(&PumpView) -> bool) -> PumpView {
 }
 
 #[test]
-fn the_pump_thread_follows_the_media_clock_paces_itself_while_it_is_not_ready_and_ends_on_stop()
-{
+fn the_pump_thread_follows_the_media_clock_paces_itself_while_it_is_not_ready_and_ends_on_stop() {
     let r = rig(
         Map {
             rx: vec![0],
@@ -883,7 +882,11 @@ fn the_pump_thread_follows_the_media_clock_paces_itself_while_it_is_not_ready_an
     let mut out = vec![0; 31 * B as usize];
     let ring = tx.engine_ring(0).unwrap();
     assert_eq!(ring.read_at(first + D, &mut out).holes, 0);
-    assert!(out.iter().enumerate().all(|(i, &v)| v == counter(first + i as u64)));
+    assert!(
+        out.iter()
+            .enumerate()
+            .all(|(i, &v)| v == counter(first + i as u64))
+    );
     // The clock not ready: free blocks on the thread's own pace, nothing
     // written.
     clock.ready.store(false, Ordering::SeqCst);
