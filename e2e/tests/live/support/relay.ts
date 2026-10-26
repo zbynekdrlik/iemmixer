@@ -1,6 +1,6 @@
 import type NodeWebSocket from "ws";
 import type { Page, WebSocketRoute } from "@playwright/test";
-import { expectBuild, live } from "./env";
+import { box, expectBuild } from "./env";
 import { Wire, liveSocket } from "./socket";
 
 // Every page socket of a live spec goes through the runner (the #10 decision
@@ -171,7 +171,7 @@ export class Relay {
  */
 export async function relaySockets(page: Page, opts: { hil?: boolean } = {}): Promise<Relay> {
   const relay = new Relay();
-  const host = new URL(live().baseURL).host;
+  const host = new URL(box().baseURL).host;
   page.once("close", () => relay.end());
   await page.routeWebSocket(/\/ws\//, async (route) => {
     const side: PageSide = { gone: false };

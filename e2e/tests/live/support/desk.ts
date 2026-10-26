@@ -2,7 +2,7 @@ import type NodeWebSocket from "ws";
 import { expect, type APIRequestContext } from "@playwright/test";
 import type { Channel as PageChannel, ConsoleInput, EqBand } from "../../support/mixer-socket";
 import type { BurstWatch } from "./burst";
-import { expectBuild, live, type Who } from "./env";
+import { box, expectBuild, type Who } from "./env";
 import { Wire, liveSocket } from "./socket";
 
 // The live specs' runner-side mixer sockets, and the one way a live spec
@@ -76,6 +76,22 @@ type Received = { event: string; data: unknown; at: number };
 export const pause = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
+/** A page mix's IEM VOL (`State.global_*`, `ServerMsg::GlobalVolumeUpdate`). */
+export type Volume = { level_db: number; muted: boolean };
+
+/**
+ * The URL of `page`'s mixer socket (`/ws/<page>`, UI protocol 3) with
+ * `token`, on `origin`: `wss:` on the public host's `https:`, `ws:` on the
+ * Gen 3 box's plain `http:`. Never in an error: it holds the token.
+ */
+export function mixerSocketURL(origin: string, page: string, token: string): string {
+  const url = new URL(`/ws/${encodeURIComponent(page)}`, origin);
+  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
+  url.searchParams.set("token", token);
+  url.searchParams.set("proto", "3");
+  return url.toString();
+}
+
 /**
  * A mixer page's socket (`/ws/<page>`, UI protocol 3) held by the runner: it
  * opens after the build check, records every JSON event with its arrival time
@@ -105,14 +121,10 @@ export class LiveMixer {
 
   /** Opens `page`'s socket with `who`'s token of the run, after the build check; resolves with the page's state. */
   static async open(request: APIRequestContext, who: Who, page: string): Promise<LiveMixer> {
-    const { baseURL, tokens } = live();
+    const { baseURL, tokens } = box();
     const label = `the runner's ${who} socket on ${page === "engineer" ? "the engineer's" : "a member's"} page`;
     await expectBuild(request);
-    const url = new URL(`/ws/${encodeURIComponent(page)}`, baseURL);
-    url.protocol = "wss:";
-    url.searchParams.set("token", tokens[who]);
-    url.searchParams.set("proto", "3");
-    const { ws, opened } = liveSocket(url.toString(), label);
+    const { ws, opened } = liveSocket(mixerSocketURL(baseURL, page, tokens[who]), label);
     // Listening before the open: the hello and the state follow the upgrade at once.
     const mixer = new LiveMixer(ws, label);
     try {
@@ -246,6 +258,26 @@ export class LiveMixer {
     }
     const { level_db, muted, pan } = channel;
     return { id, level_db, muted, pan };
+  }
+
+  /**
+   * The page mix's IEM VOL as other sessions left it: the newest state's,
+   * then the `GlobalVolumeUpdate`s after it; undefined before a state that
+   * names it.
+   */
+  volume(): Volume | undefined {
+    const state = this.newest("State");
+    if (!state) return undefined;
+    const read = (level: unknown, muted: unknown): Volume | undefined =>
+      typeof level === "number" && typeof muted === "boolean" ? { level_db: level, muted } : undefined;
+    const s = state.data as { global_level_db?: unknown; global_muted?: unknown };
+    let volume = read(s.global_level_db, s.global_muted);
+    for (const e of this.events.slice(state.index + 1)) {
+      if (e.event !== "GlobalVolumeUpdate") continue;
+      const u = e.data as { level_db?: unknown; muted?: unknown };
+      volume = read(u.level_db, u.muted) ?? volume;
+    }
+    return volume;
   }
 
   /** The page mix's soloed channels (the newest `SoloUpdate`, sent on connect). */
