@@ -1,0 +1,77 @@
+# A synthetic Dante device for the iem-dante tests (Gen 3, #72 phase A).
+# Public repository (P6): no site value. The box's own config, with the
+# device's test name and its channel names, lives in the private ops
+# repository.
+
+# The name Dante Controller lists: 1 to 31 of A-Z a-z 0-9 and '-', no '-'
+# at either end.
+name = "test-device"
+# mDNS `mf` (the manufacturer).
+manufacturer = "iemmixer"
+# The board name: ARC 0x1003 and mDNS `router_info`.
+model = "iem-dante"
+# Hz: 44100, 48000, 88200, 96000, 176400 or 192000.
+sample_rate = 96000
+# Bits per sample: 16, 24 or 32.
+encoding = 24
+# The latency the channels advertise (mDNS `latency_ns`).
+latency_ns = 1000000
+# The names Dante Controller set, kept across restarts.
+state_file = "/var/lib/iem-dante/state.toml"
+
+# The channel names, in channel order. Each is 1 to 31 printable ASCII
+# characters, none of Dante's '=', '.' and '@', unique (case aside). A TX
+# name is also the channel's default name: its mDNS record stays when
+# Dante Controller renames the channel.
+rx = [
+  "RX 1",
+  "RX 2",
+  "RX 3",
+  "RX 4",
+  "RX 5",
+  "RX 6",
+  "RX 7",
+  "RX 8",
+  "RX 9",
+  "RX 10",
+  "RX 11",
+  "RX 12",
+  "RX 13",
+  "RX 14",
+  "RX 15",
+  "RX 16",
+  "RX 17",
+  "RX 18",
+  "RX 19",
+  "RX 20",
+  "RX 21",
+  "RX 22",
+  "RX 23",
+  "RX 24",
+  "RX 25",
+  "RX 26",
+  "RX 27",
+  "RX 28",
+  "RX 29",
+  "RX 30",
+  "RX 31",
+  "RX 32",
+]
+tx = [
+  "TX 1",
+  "TX 2",
+  "TX 3",
+  "TX 4",
+  "TX 5",
+  "TX 6",
+  "TX 7",
+  "TX 8",
+  "TX 9",
+  "TX 10",
+  "TX 11",
+  "TX 12",
+  "TX 13",
+  "TX 14",
+  "TX 15",
+  "TX 16",
+]
