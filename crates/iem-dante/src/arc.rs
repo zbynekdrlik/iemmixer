@@ -533,7 +533,10 @@ fn descriptor(fields: &[u16]) -> Vec<u8> {
 }
 
 /// 0x2013 and 0x3001: `[?, count]`, then `count` items (TX: `0, channel,
-/// name offset`; RX: `channel, name offset`), the names behind them.
+/// name offset`; RX: `channel, name offset`), the names behind them. A
+/// refusal's reason is a debug line only: the refusal is a gap the server's
+/// once-a-minute warning counts, and Dante Controller asks again at once,
+/// so a warning per request would be a flood.
 fn rename(
     h: &Header,
     req: &[u8],
@@ -560,11 +563,11 @@ fn rename(
             .checked_sub(1)
             .filter(|&i| i < proposed.len())
         else {
-            warn!(dir = label, channel = id, "rename refused: no such channel");
+            debug!(dir = label, channel = id, "rename refused: no such channel");
             return refuse(h, "no such channel");
         };
         let Some(name) = string_at(req, offset) else {
-            warn!(
+            debug!(
                 dir = label,
                 channel = id,
                 "rename refused: no name at its offset"
@@ -577,7 +580,7 @@ fn rename(
             name
         };
         if !valid_channel_name(name) {
-            warn!(
+            debug!(
                 dir = label,
                 channel = id,
                 "rename refused: not a valid Dante channel name"
@@ -593,7 +596,7 @@ fn rename(
         (dir == Dir::Tx).then_some(defaults.as_slice()),
     );
     if !problems.is_empty() {
-        warn!(dir = label, problems = %problems.join("; "), "rename refused");
+        debug!(dir = label, problems = %problems.join("; "), "rename refused");
         return refuse(h, "the names would clash");
     }
     let ok: &[u8] = match dir {
