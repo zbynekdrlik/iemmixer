@@ -11,6 +11,7 @@
 //! next, the same id for the server's life). A log, not a limiter: what the
 //! server answers never depends on it.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -55,13 +56,50 @@ pub struct Report {
 impl Report {
     /// Every request the window counted.
     pub fn requests(&self) -> u64 {
-        0
+        self.entries.iter().map(|e| e.count).sum::<u64>() + self.uncounted
+    }
+}
+
+impl Gap {
+    fn label(self) -> &'static str {
+        match self {
+            Gap::Refused => "refused",
+            Gap::Unanswered => "unanswered",
+        }
     }
 }
 
 impl fmt::Display for Report {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    /// `peer 1 0x2204 unanswered 134999, peer 1 0x2200 refused 3`: the
+    /// first [`LISTED`] entries, then one sum for the rest and one for the
+    /// requests past the table.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts: Vec<String> = self
+            .entries
+            .iter()
+            .take(LISTED)
+            .map(|e| {
+                format!(
+                    "peer {} {:#06x} {} {}",
+                    e.peer,
+                    e.op1,
+                    e.gap.label(),
+                    e.count
+                )
+            })
+            .collect();
+        let rest = self.entries.get(LISTED..).unwrap_or_default();
+        if !rest.is_empty() {
+            let requests: u64 = rest.iter().map(|e| e.count).sum();
+            parts.push(format!(
+                "{} more entries with {requests} requests",
+                rest.len()
+            ));
+        }
+        if self.uncounted > 0 {
+            parts.push(format!("{} requests past the table", self.uncounted));
+        }
+        f.write_str(&parts.join(", "))
     }
 }
 
@@ -69,25 +107,78 @@ impl fmt::Display for Report {
 #[derive(Debug)]
 pub struct Gaps {
     window: Duration,
+    /// The window's first request; `None` while nothing is counted.
+    started: Option<Instant>,
+    /// The peers seen, in order: peer `k + 1` is `peers[k]`.
+    peers: Vec<IpAddr>,
+    counts: BTreeMap<(usize, u16, Gap), u64>,
+    uncounted: u64,
 }
 
 impl Gaps {
     pub fn new(window: Duration) -> Self {
-        Self { window }
+        Self {
+            window,
+            started: None,
+            peers: Vec::new(),
+            counts: BTreeMap::new(),
+            uncounted: 0,
+        }
     }
 
     /// Counts one request of `peer`; returns the report of the window
     /// before it when that one has run its length (the request then opens
     /// the next window).
-    pub fn record(&mut self, _now: Instant, _peer: IpAddr, _op1: u16, _gap: Gap) -> Option<Report> {
-        let _ = self.window;
-        None
+    pub fn record(&mut self, now: Instant, peer: IpAddr, op1: u16, gap: Gap) -> Option<Report> {
+        let report = self.flush(now);
+        self.started.get_or_insert(now);
+        let key = (self.peer_id(peer), op1, gap);
+        if let Some(count) = self.counts.get_mut(&key) {
+            *count += 1;
+        } else if self.counts.len() < MAX_ENTRIES {
+            self.counts.insert(key, 1);
+        } else {
+            self.uncounted += 1;
+        }
+        report
     }
 
     /// The report of the window under way once it has run its length;
     /// `None` before, or when nothing was counted.
-    pub fn flush(&mut self, _now: Instant) -> Option<Report> {
-        None
+    pub fn flush(&mut self, now: Instant) -> Option<Report> {
+        let started = self.started?;
+        if now.saturating_duration_since(started) < self.window {
+            return None;
+        }
+        self.started = None;
+        let mut entries: Vec<Entry> = std::mem::take(&mut self.counts)
+            .into_iter()
+            .map(|((peer, op1, gap), count)| Entry {
+                peer,
+                op1,
+                gap,
+                count,
+            })
+            .collect();
+        // Stable: equal counts stay in the map's (peer, opcode, gap) order.
+        entries.sort_by_key(|e| std::cmp::Reverse(e.count));
+        Some(Report {
+            entries,
+            uncounted: std::mem::take(&mut self.uncounted),
+        })
+    }
+
+    /// `peer`'s id: its place among the peers seen, from 1; 0 once
+    /// [`MAX_PEERS`] have one.
+    fn peer_id(&mut self, peer: IpAddr) -> usize {
+        if let Some(k) = self.peers.iter().position(|&p| p == peer) {
+            return k + 1;
+        }
+        if self.peers.len() < MAX_PEERS {
+            self.peers.push(peer);
+            return self.peers.len();
+        }
+        0
     }
 }
 
