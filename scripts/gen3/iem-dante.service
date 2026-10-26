@@ -1,0 +1,47 @@
+# iemmixer's own Dante device on the Gen 3 box (#72 phase A, plan Task 5):
+# iem-dante-dev, installed by scripts/gen3/deploy.sh; rules in
+# .claude/rules/gen3.md. Public repository (P6): the box's user and its
+# interface come from two files deploy.sh writes on the box, never from
+# here: the drop-in /etc/systemd/system/iem-dante.service.d/10-user.conf
+# (User=) and /etc/iemmixer/iem-dante.env (IEM_DANTE_IFACE=). The device's
+# test name and channel names are the ops repository's device config.
+#
+# "ide event" stops it (iempc event: ssh <GEN3_HOST> sudo -n systemctl stop
+# iem-dante). Nothing starts it again when the event ends: deploy.sh or
+# `sudo systemctl start iem-dante` in dev time does. A reboot of the box
+# during an event starts it (the unit is enabled; the flag lives on the
+# dev box).
+
+[Unit]
+Description=iemmixer Gen 3 Dante device (phase A: names and channels, no PTP, no audio)
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/iemmixer/iem-dante.env
+ExecStart=/opt/iemmixer/bin/iem-dante-dev --config /etc/iemmixer/dante-device.toml --iface ${IEM_DANTE_IFACE}
+# Exit 1 (the address not there yet, serving failed, goodbyes unconfirmed)
+# is restarted; exit 2 (the command line, the config, the state file) is not.
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2
+# A stop is SIGTERM and a bounded wait (I8): the daemon withdraws its mDNS
+# records (goodbyes, at most 3 s) and exits 0. One that does not end within
+# the bound is left running and the stop fails, never force-ended.
+TimeoutStopSec=10
+SendSIGKILL=no
+# /var/lib/iem-dante, owned by the service's user: the config's state_file
+# (the renamed names) lives there.
+StateDirectory=iem-dante
+# No capability: every port is above 1024 (ARC 4440, CMC 8800, mDNS 5353).
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

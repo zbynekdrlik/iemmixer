@@ -26,7 +26,11 @@ preempt; after a failed one it closes the window under the window lock, so
 no queued window preempt starts a second bring-back), stops a kernel trace
 whose `iempc trace` died with this box (its record, iempc_trace.stop_recorded;
 `dev` does too), then runs `iemmode event`, and `iemmode event --direct` when
-the guard is unreachable (exit 4). The event path has one budget that fits one
+the guard is unreachable (exit 4). Right after the flag it also stops the
+Gen 3 device (#72): one `ssh <GEN3_HOST> sudo -n systemctl stop iem-dante`
+beside the PC's switch, waited for at most GEN3_STOP_S (5 s) at the end; a
+failure or a stop still running then is one warning, never the exit code;
+no GEN3_HOST is one info line. The event path has one budget that fits one
 Bash call (EVENT_BUDGET_S): the spike preempt gets SPIKE_SHARE_S of it, no
 `iemmode` call starts while the preempt still runs, and none starts with
 less than SWITCH_MIN_S left. `event` never waits for another iempc command;
@@ -79,7 +83,8 @@ values and shortcut names `name.lnk` in the desktop user's Startup folder;
 DANTE_IEM_NAME and NETAUDIO_PYTHON (optional: the IEM card's unicast IPv4
 address, its expected Dante device name and the netaudio venv's python, an
 executable file; `dante-labels --apply` refuses without all three, the
-sheet reads the card with them).
+sheet reads the card with them), and GEN3_HOST (optional: the Gen 3 box's
+ssh destination, whose `iem-dante` service `event` stops; #72).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside

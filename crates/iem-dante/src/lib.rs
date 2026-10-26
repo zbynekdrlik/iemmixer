@@ -31,6 +31,8 @@
 //! - [`cmc`]: the advertisement on UDP 8800.
 //! - [`announce`]: the mDNS records Dante Controller browses for, and their
 //!   announcer.
+//! - [`daemon`]: the `iem-dante-dev` binary's command line, its address and
+//!   the loop that serves the device and announces it again after renames.
 //!
 //! The device answers for itself only: it never sends a command that
 //! changes another Dante device.
@@ -38,5 +40,6 @@
 pub mod announce;
 pub mod arc;
 pub mod cmc;
+pub mod daemon;
 pub mod device;
 pub mod wire;
