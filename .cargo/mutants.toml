@@ -210,6 +210,13 @@ exclude_re = [
   # are tested through a fake registry; the plan's live check (Task 6) sees
   # the records in Dante Controller.
   "iem-dante/src/announce\\.rs.*<impl Registry for ServiceDaemon>",
+  # The media clock's poller (#72 phase B): `poll_dantesync` only aims the
+  # tested `poll` at dantesync's real port (127.0.0.1:31900, which a test
+  # cannot hold on a box running dantesync), and `log_event` writes log
+  # lines only. `poll` and `ask` stay mutated: the loopback tests run them
+  # against a stand-in time server; every decision is `sample`'s and the
+  # `Tracker`'s.
+  "iem-dante/src/clock\\.rs.*\\b(poll_dantesync|log_event)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
