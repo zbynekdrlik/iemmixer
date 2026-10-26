@@ -42,4 +42,5 @@ pub mod arc;
 pub mod cmc;
 pub mod daemon;
 pub mod device;
+pub mod info;
 pub mod wire;
