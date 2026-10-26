@@ -26,8 +26,12 @@
 //!   dropped (its flow, if granted, gets no keepalive and expires at its
 //!   transmitter).
 //!
+//! - The engine (phase C): [`Media::new`] builds an engine ring on each TX
+//!   channel the engine feeds; [`Media::attach_engine`] shows its pump on
+//!   the control socket's status ([`Media::engine`]).
+//!
 //! Locks are taken in the device's order (the device, then the TX control,
-//! then the manager); the checks' lock is taken alone.
+//! then the manager); the checks' lock and the engine's are taken alone.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::AtomicI32;
@@ -50,6 +54,7 @@ use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
 use crate::media::tx::TxShared;
 use crate::media::{rx, tx};
+use crate::stream::{PumpStats, PumpView};
 use crate::subscribe::resolve::Resolver;
 use crate::subscribe::{Action, Answer, FlowId, Manager};
 
@@ -82,6 +87,9 @@ pub struct Media {
     pub manager: Arc<Mutex<Manager>>,
     pub requests: Arc<Requests>,
     pub checks: Mutex<Checks>,
+    /// The engine's pump once one is attached (phase C): the control
+    /// socket's status shows it.
+    engine: Mutex<Option<Arc<PumpStats>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -91,20 +99,27 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Media {
     /// The audio side of `device` at `ip`: one ring per RX channel, the TX
     /// side (32 sockets on `ip`, cookies from `seed`, every TX channel
-    /// silent), the RX side (32 flow sockets on `ip`), and the manager with
-    /// the state file's subscriptions (their statuses the baseline of its
-    /// first `changed`). Fails when a socket cannot be bound.
-    pub fn new(device: &Device, ip: Ipv4Addr, clock: Clock, seed: u64) -> std::io::Result<Media> {
+    /// silent, an engine ring on each TX channel index in `engine_tx`, from
+    /// 0: the engine's; the standalone device passes none), the RX side (32
+    /// flow sockets on `ip`), and the manager with the state file's
+    /// subscriptions (their statuses the baseline of its first `changed`).
+    /// Fails when a socket cannot be bound, or for an `engine_tx` index the
+    /// device lacks (`InvalidInput`).
+    pub fn new(
+        device: &Device,
+        ip: Ipv4Addr,
+        clock: Clock,
+        seed: u64,
+        engine_tx: &[usize],
+    ) -> std::io::Result<Media> {
         let cfg = &device.cfg;
         let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
-        // No engine ring on any TX channel: the standalone device (phase C
-        // Task 2 passes the engine's channels here).
         let tx = Arc::new(TxShared::new(
             cfg.clone(),
             ip,
             Arc::clone(&rings),
             seed,
-            &[],
+            engine_tx,
         )?);
         let rx = Arc::new(RxShared::new(cfg.sample_rate, ip, rings)?);
         let mut manager = Manager::new(cfg, &device.state.name, ip, rx.ports()?);
@@ -120,7 +135,20 @@ impl Media {
             manager: Arc::new(Mutex::new(manager)),
             requests: Arc::default(),
             checks: Mutex::new(Checks::new(cfg.rx.len(), cfg.sample_rate)),
+            engine: Mutex::new(None),
         })
+    }
+
+    /// Shows the engine's pump counting into `stats` on the control
+    /// socket's status (phase C; the engine attaches it once its pump is
+    /// built, a later attach replaces it).
+    pub fn attach_engine(&self, stats: Arc<PumpStats>) {
+        *lock(&self.engine) = Some(stats);
+    }
+
+    /// The attached engine's numbers, `None` before one is attached.
+    pub fn engine(&self) -> Option<PumpView> {
+        lock(&self.engine).as_ref().map(|stats| stats.view())
     }
 
     /// The numbers a control request is checked against.

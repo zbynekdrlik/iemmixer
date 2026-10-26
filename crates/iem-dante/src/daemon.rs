@@ -14,18 +14,19 @@
 //!   server bind the address, the mDNS records point at it and are sent on
 //!   its interface only.
 //! - [`net_info`]: what the info server's network info says about that
-//!   interface, from the box's files the binary reads (its MAC and speed
+//!   interface, from the box's files the host reads (its MAC and speed
 //!   in `/sys/class/net/<iface>/`, the routes in `/proc/net/route`).
 //! - [`serve`]: announces the device's records, answers ARC (UDP 4440),
 //!   CMC (UDP 8800), the info requests (UDP 8700, [`crate::info`]) and
 //!   flow control (UDP 4455, [`crate::flows::server`]), beats every second,
 //!   runs the TX and RX threads and our RX's manager ([`media`]), serves
 //!   the control socket ([`crate::ctl`]), and announces again after every
-//!   saved rename, until its stop future ends (the binary's SIGTERM or
-//!   SIGINT). It then stops every RX flow at its transmitter, serving flow
-//!   control until the stops are done (a flow from our own TX is stopped at
-//!   our own server), and ends the threads; the binary shuts the mDNS
-//!   daemon down, which sends the goodbyes.
+//!   saved rename, until its stop future ends (the host's stop, or SIGTERM
+//!   or SIGINT for the standalone device: `crate::host`). It then stops
+//!   every RX flow at its transmitter, serving flow control until the stops
+//!   are done (a flow from our own TX is stopped at our own server), and
+//!   ends the threads; the host shuts the mDNS daemon down, which sends the
+//!   goodbyes.
 //!
 //! The device sends no PTP. Logs name counts, ports, flow slots and
 //! channel numbers, never a name or an address: the device and channel
@@ -87,8 +88,9 @@ goodbyes), then it exits 0.
 
 ctl: sends one request to the control socket and prints the answer line:
   status                    the device's numbers, one JSON line
-  source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>
-                            what TX channel tx (from 1) sends
+  source <tx> silence|counter|sine <hz> <dbfs>|echo <rx> <samples>|engine
+                            what TX channel tx (from 1) sends (engine: the
+                            engine's ring, on a channel the engine feeds)
   check <rx> off|counter|sine <hz>
                             which checker reads RX channel rx (from 1)
 Exit 0 for ok or the status, 1 for an error answer or no socket.
@@ -437,7 +439,7 @@ fn default_route(line: &str, name: &str) -> Option<Ipv4Addr> {
 }
 
 /// What the info server's network info says about `ifa`, from the text of
-/// its MAC file, its speed file and the route table (the binary reads
+/// its MAC file, its speed file and the route table (the host reads
 /// them; the speed and the routes may be missing). An interface without a
 /// usable MAC is refused.
 pub fn net_info(
@@ -528,7 +530,7 @@ pub struct Sockets {
 /// subscription; a device no channel record names is read through its ARC,
 /// [`Network`], whose browses and reader start once a lookup reached
 /// them), serves `control` (the control socket's server, the
-/// binary's [`crate::ctl::serve_control`]), and announces again after every
+/// host's [`crate::ctl::serve_control`]), and announces again after every
 /// rename the ARC server saved. A failed announcement or browse, a server
 /// that stops, or threads that do not start end it with an error (the
 /// service restarts the daemon; the state file holds every saved rename and

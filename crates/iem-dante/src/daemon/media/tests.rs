@@ -57,12 +57,21 @@ pub(crate) fn device_at(dir: &Path) -> Device {
 /// `device`'s audio side on loopback, on the clock `ptp` (dantesync's
 /// frequency adjustment −750 ppb).
 pub(crate) fn media_on(device: &Device, ptp: Arc<dyn PtpClock>) -> Arc<Media> {
+    media_with_engine(device, ptp, &[])
+}
+
+/// [`media_on`] with an engine ring on each TX channel index in `engine`.
+pub(crate) fn media_with_engine(
+    device: &Device,
+    ptp: Arc<dyn PtpClock>,
+    engine: &[usize],
+) -> Arc<Media> {
     let clock = Clock {
         ptp,
         freq: Arc::new(AtomicI32::new(-750)),
         stats: Arc::default(),
     };
-    Arc::new(Media::new(device, Ipv4Addr::LOCALHOST, clock, 7).unwrap())
+    Arc::new(Media::new(device, Ipv4Addr::LOCALHOST, clock, 7, engine).unwrap())
 }
 
 pub(crate) fn sub(channel: &str, device: &str) -> Subscription {
@@ -239,6 +248,73 @@ fn the_media_side_starts_from_the_state_file_s_subscriptions_and_silence() {
     let flow = media.manager.lock().unwrap().flow(0);
     assert_eq!(flow, None);
     assert!(lock(&media.checks).views().is_empty());
+    // The standalone device: no engine ring on any TX channel, no engine.
+    for tx in 0..16 {
+        assert!(media.tx.engine_ring(tx).is_none(), "TX {}", tx + 1);
+    }
+    assert_eq!(media.engine(), None);
+}
+
+#[test]
+fn engine_channels_get_one_engine_ring_each_and_the_rest_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0, 5, 15]);
+    for tx in 0..16 {
+        assert_eq!(
+            media.tx.engine_ring(tx).is_some(),
+            [0, 5, 15].contains(&tx),
+            "TX {}",
+            tx + 1
+        );
+        // Every channel still starts silent: the engine sets its sources.
+        assert_eq!(media.tx.source(tx), Some(Source::Silence), "TX {}", tx + 1);
+    }
+    assert!(media.tx.set_source(5, Source::Engine));
+    assert!(!media.tx.set_source(6, Source::Engine));
+    // A channel the device lacks: refused, nothing bound.
+    let clock = Clock {
+        ptp: Arc::new(Unready),
+        freq: Arc::default(),
+        stats: Arc::default(),
+    };
+    let e = Media::new(&device, Ipv4Addr::LOCALHOST, clock, 7, &[16])
+        .err()
+        .expect("TX 17 is past the device's 16");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn an_attached_engine_s_numbers_are_its_pump_s() {
+    use crate::stream::{PumpStats, PumpView, Timing};
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0]);
+    assert_eq!(media.engine(), None, "none before it is attached");
+    let timing = Timing {
+        block: 32,
+        playout: 96,
+        margin: 96,
+    };
+    media.attach_engine(Arc::new(PumpStats::new(timing, 96_000)));
+    assert_eq!(
+        media.engine(),
+        Some(PumpView {
+            offset: 224,
+            playout: 96,
+            ..PumpView::default()
+        })
+    );
+    // A later attach replaces it.
+    let at_2_ms = Timing {
+        playout: 192,
+        ..timing
+    };
+    media.attach_engine(Arc::new(PumpStats::new(at_2_ms, 96_000)));
+    assert_eq!(
+        media.engine().map(|v| (v.offset, v.playout)),
+        Some((320, 192))
+    );
 }
 
 #[test]

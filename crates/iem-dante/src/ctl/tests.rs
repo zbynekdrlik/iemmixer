@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use crate::clock::{Event, ManualClock};
-use crate::daemon::media::tests::{BOUND, T, Unready, device_at, media_on, sub};
+use crate::daemon::media::tests::{BOUND, T, Unready, device_at, media_on, media_with_engine, sub};
 use crate::media::check::CONFIRM;
 
 const LIMITS: Limits = Limits {
@@ -108,6 +108,9 @@ fn a_bad_request_is_a_fixed_reason_never_its_own_words() {
         ("source 1 counter 2", SOURCE_USAGE),
         ("source 1 sine 1000", SOURCE_USAGE),
         ("source 1 echo 1", SOURCE_USAGE),
+        ("source 1 engine 2", SOURCE_USAGE),
+        ("source 1 ENGINE", SOURCE_USAGE),
+        ("source 17 engine", "source: no such TX channel"),
         ("source 0 counter", "source: no such TX channel"),
         ("source 17 counter", "source: no such TX channel"),
         ("source -1 counter", "source: no such TX channel"),
@@ -161,6 +164,24 @@ fn a_bad_request_is_a_fixed_reason_never_its_own_words() {
         assert_eq!(got, want, "{line:?}");
         assert!(!got.contains("zyxqw"), "{line:?} echoed: {got}");
     }
+}
+
+#[test]
+fn source_engine_parses() {
+    assert_eq!(
+        parsed("source 1 engine"),
+        Ok(Request::Source {
+            tx: 0,
+            source: Source::Engine,
+        })
+    );
+    assert_eq!(
+        parsed(" source\t16 engine\r"),
+        Ok(Request::Source {
+            tx: 15,
+            source: Source::Engine,
+        })
+    );
 }
 
 #[test]
@@ -636,6 +657,13 @@ const WORDS: &[&str] = &[
     "no_return",
     "discontinuities",
     "discontinuity_frames",
+    "engine",
+    "media",
+    "playout",
+    "blocks",
+    "missed",
+    "overruns",
+    "max_process_us",
 ];
 
 #[test]
@@ -858,6 +886,133 @@ fn answers_set_sources_and_checks_and_refuse_with_a_reason() {
     // Nothing changed by a refusal.
     assert_eq!(media.tx.source(16), None);
     assert_eq!(media.tx.source(1), Some(Source::Silence));
+}
+
+#[test]
+fn source_engine_on_a_channel_without_an_engine_ring_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0, 3]);
+    assert_eq!(answer("source 4 engine", &media), "ok");
+    assert_eq!(media.tx.source(3), Some(Source::Engine));
+    assert_eq!(answer("source 1 engine", &media), "ok");
+    assert_eq!(
+        answer("source 2 engine", &media),
+        format!("error: {NO_ENGINE}")
+    );
+    assert_eq!(media.tx.source(1), Some(Source::Silence), "nothing changed");
+    // An engine channel switched to a test source and back.
+    assert_eq!(answer("source 4 counter", &media), "ok");
+    assert_eq!(media.tx.source(3), Some(Source::Counter));
+    assert_eq!(answer("source 4 engine", &media), "ok");
+    assert_eq!(media.tx.source(3), Some(Source::Engine));
+    // The status words it `engine`.
+    let s = status(&media);
+    assert!(
+        s.contains(
+            "\"sources\":[{\"tx\":1,\"source\":\"engine\"},\
+             {\"tx\":4,\"source\":\"engine\"}]"
+        ),
+        "{s}"
+    );
+    // The standalone device has no engine ring at all.
+    let standalone = media_on(&device, Arc::new(Unready));
+    assert_eq!(
+        answer("source 1 engine", &standalone),
+        format!("error: {NO_ENGINE}")
+    );
+    assert_eq!(standalone.tx.source(0), Some(Source::Silence));
+}
+
+/// A processor that leaves its outputs silent.
+struct Silent;
+
+impl iem_audio_io::Process for Silent {
+    fn process(&mut self, _block: &mut iem_audio_io::Block<'_>) {}
+}
+
+const ENGINE_TIMING: crate::stream::Timing = crate::stream::Timing {
+    block: 32,
+    playout: 96,
+    margin: 96,
+};
+
+#[test]
+fn the_status_has_no_engine_until_one_is_attached() {
+    use crate::stream::PumpStats;
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0]);
+    let before = status(&media);
+    assert!(!before.contains("engine"), "{before}");
+    assert!(before.ends_with("\"checks\":[]}"), "{before}");
+    media.attach_engine(Arc::new(PumpStats::new(ENGINE_TIMING, 96_000)));
+    let after = status(&media);
+    assert_eq!(
+        after,
+        format!(
+            "{},\"engine\":{{\"media\":0,\"offset\":224,\"playout\":96,\"blocks\":0,\
+             \"late\":0,\"missed\":0,\"overruns\":0,\"rebootstraps\":0,\"max_process_us\":0}}}}",
+            before.strip_suffix('}').unwrap()
+        )
+    );
+}
+
+#[test]
+fn the_engine_status_is_numbers_only() {
+    use crate::stream::{Map, Pump, PumpStats};
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    let media = media_with_engine(&device, Arc::new(Unready), &[0]);
+    let stats = Arc::new(PumpStats::new(ENGINE_TIMING, 96_000));
+    media.attach_engine(Arc::clone(&stats));
+    let mut pump = Pump::new(
+        Silent,
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        ENGINE_TIMING,
+        24,
+        Arc::clone(&media.rx),
+        Arc::clone(&media.tx),
+        Arc::clone(&stats),
+    );
+    // On the media clock: a bootstrap, two late blocks, then a step far past
+    // the margin (a re-bootstrap that skips blocks).
+    let wake = pump.media(T, 0);
+    pump.media(wake + 64, 0);
+    pump.media(wake + 64 + 10_000, 0);
+    let v = stats.view();
+    assert!(
+        v.media && v.blocks > 3 && v.late == 2 && v.missed > 0 && v.rebootstraps == 1,
+        "{v:?}"
+    );
+    let engine = |v: crate::stream::PumpView| {
+        format!(
+            "\"engine\":{{\"media\":{},\"offset\":224,\"playout\":96,\"blocks\":{},\
+             \"late\":{},\"missed\":{},\"overruns\":{},\"rebootstraps\":{},\
+             \"max_process_us\":{}}}}}",
+            u8::from(v.media),
+            v.blocks,
+            v.late,
+            v.missed,
+            v.overruns,
+            v.rebootstraps,
+            v.max_process_us
+        )
+    };
+    let s = status(&media);
+    for word in strings_of_json(&s) {
+        assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
+    }
+    assert!(s.ends_with(&engine(v)), "{s}");
+    // Pacing itself (the clock not ready): `media` 0, one more block.
+    pump.free();
+    let paced = stats.view();
+    assert!(!paced.media && paced.blocks == v.blocks + 1, "{paced:?}");
+    let s = status(&media);
+    assert!(s.ends_with(&engine(paced)), "{s}");
 }
 
 #[cfg(unix)]

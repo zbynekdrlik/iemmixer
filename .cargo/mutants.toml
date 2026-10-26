@@ -97,13 +97,14 @@ exclude_globs = [
   # #[cfg(windows)] CPU Set call is not compiled on the Linux runners, so no
   # test there could catch its mutant.
   "crates/iem-soakclient/src/main.rs",
-  # iem-dante-dev (#72 phase A): Linux glue (the config and state files, the
-  # interface list and its MAC, speed and route files, the sockets, the mDNS
-  # daemon on one interface, SIGTERM and SIGINT, the goodbyes) around the
-  # mutated iem_dante::daemon, which holds every decision (parse_args,
-  # pick_interface, net_info, announce_device, serve; phase B's `clock`
-  # subcommand: parse_args and ClockLines, its polls iem_dante::clock's
-  # Poller).
+  # iem-dante-dev (#72 phase A): Linux glue around the mutated
+  # iem_dante::daemon and, from phase C (plan Task 2), iem_dante::host (the
+  # config and state files, the interface and its files, the sockets, the
+  # mDNS daemon on one interface, SIGTERM and SIGINT, the goodbyes), which
+  # hold every decision (parse_args, pick_interface, net_info,
+  # announce_device, serve, host::prepare's refusals, Host::wait,
+  # exit_code; phase B's `clock` subcommand: parse_args and ClockLines, its
+  # polls iem_dante::clock's Poller).
   # The unit tests never start mdns-sd's multicast daemon; the plan's live
   # check (Task 6) runs the binary on the box.
   "crates/iem-dante/src/bin/**",
@@ -237,6 +238,19 @@ exclude_re = [
   # warning, never killed. `spawn_threads`, the driver, the checks and the
   # control socket's accept loop stay mutated.
   "iem-dante/src/daemon/media\\.rs.*\\bThreads::stop\\b",
+  # The device as a library (#72 phase C, plan Task 2): the glue moved out
+  # of iem-dante-dev's main, excluded there by its glob before. `seed` only
+  # makes the TX flows' cookies differ between runs (any value works, so
+  # no test can tell its mutants apart); `Watch::stop` and `report` are
+  # tokio's SIGTERM and SIGINT (a test cannot signal its own test process);
+  # `device_thread`, `serve_device` and `goodbye` run the mDNS daemon, which
+  # the unit tests never start (it would announce the test records on the
+  # build machine's network), and the runtime around `daemon::serve`. Every
+  # decision stays mutated: `exit_code`, `read_config`, `load_device`,
+  # `interfaces`, `interface_info`, `prepare`'s refusals, `settle` (serving's
+  # end as `Host::ended`), `Host::{ended, stop, wait}` (host/tests.rs runs
+  # them over a stand-in device thread), and daemon.rs's `serve`.
+  "iem-dante/src/host\\.rs.*\\b(seed|Watch::stop|report|device_thread|serve_device|goodbye)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
