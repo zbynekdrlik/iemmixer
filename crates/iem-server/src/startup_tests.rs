@@ -67,6 +67,63 @@ async fn start_refuses_a_corrupt_pepper() {
     );
 }
 
+/// #72 phase D: a credential systemd provides that is no 32-byte pepper
+/// stops the start before the server is ready (no port, nothing written).
+/// `CREDENTIALS_DIRECTORY` is the process's own environment, so the start
+/// runs in a child: this test binary again, running only this test.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn start_up_refuses_a_short_credential_before_any_port() {
+    const CHILD: &str = "IEMMIXER_TEST_CREDENTIAL_CHILD";
+    const RAN: &str = "the start with a short credential was refused";
+    if let Some(dir) = std::env::var_os(CHILD) {
+        let dir = std::path::PathBuf::from(dir);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let ended = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            start_server(server_config(&dir), Some(ready_tx)),
+        )
+        .await
+        .expect("the start ends within 5 s");
+        let msg = format!("{:#}", ended.unwrap_err());
+        assert!(
+            msg.contains("systemd credential 'pepper'") && msg.contains("holds 31 bytes"),
+            "{msg}"
+        );
+        assert!(ready_rx.await.is_err(), "never ready");
+        println!("{RAN}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let credentials = tempfile::tempdir().unwrap();
+    let short = [0x5au8; 31];
+    std::fs::write(credentials.path().join(pepper::CREDENTIAL), short).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "startup_tests::start_up_refuses_a_short_credential_before_any_port",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(CHILD, dir.path())
+        .env("CREDENTIALS_DIRECTORY", credentials.path())
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains(RAN), "the child ran the start: {stdout}");
+    let secrets_dir = dir.path().join(secrets::SECRETS_DIR);
+    assert!(!secrets_dir.join(pepper::PEPPER_FILE).exists(), "no pepper");
+    assert_eq!(
+        std::fs::read(credentials.path().join(pepper::CREDENTIAL)).unwrap(),
+        short
+    );
+}
+
 const TEST_ROSTER: &str = include_str!("../../../config/test-roster.toml");
 
 /// The status file the start wrote.
