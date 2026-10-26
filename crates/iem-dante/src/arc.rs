@@ -45,6 +45,9 @@ use crate::device::{Device, DeviceConfig, DeviceState, channel_problems, valid_c
 use crate::wire::{
     Body, HEADER_LEN, Header, STATUS_ERROR, STATUS_MORE, STATUS_OK, read_u16, reply, string_at,
 };
+use gaps::Gap;
+
+pub mod gaps;
 
 /// ARC's UDP port.
 pub const PORT: u16 = 4440;
@@ -61,10 +64,26 @@ pub mod op {
     pub const TX_CHANNELS: u16 = 0x2000;
     pub const TX_NAMES: u16 = 0x2010;
     pub const TX_RENAME: u16 = 0x2013;
+    pub const TX_FLOWS: u16 = 0x2200;
+    pub const TX_MULTICAST_CREATE: u16 = 0x2201;
+    pub const TX_MULTICAST_DELETE: u16 = 0x2202;
+    /// Asked by Dante Controller; inferno answers status
+    /// [`STATUS_2320`](super::STATUS_2320) and no body.
+    pub const OP_2320: u16 = 0x2320;
     pub const RX_CHANNELS: u16 = 0x3000;
     pub const RX_RENAME: u16 = 0x3001;
+    pub const RX_SUBSCRIBE: u16 = 0x3010;
+    /// netaudio's unsubscribe.
+    pub const RX_UNSUBSCRIBE: u16 = 0x3014;
+    pub const RX_FLOWS: u16 = 0x3200;
     pub const CLOCK: u16 = 0x3300;
 }
+
+/// The slots of a flow list's page (0x2200, 0x3200): inferno's 32 flows,
+/// at most 16 a page.
+pub const FLOW_PAGE: u8 = 16;
+/// inferno's status for 0x2320 ("???" in its source).
+pub const STATUS_2320: u16 = 0x0030;
 
 /// TX channels per page.
 pub const TX_PAGE: usize = 32;
@@ -97,8 +116,19 @@ pub enum ArcOutcome {
     /// Send this reply; the state changed, so the caller saves it and
     /// announces the new mDNS records.
     Changed(Vec<u8>),
+    /// A request inferno leaves unanswered: no reply.
+    Unanswered { op1: u16 },
     /// Not a request (too short, or a length field that disagrees): no reply.
     Ignored,
+}
+
+impl ArcOutcome {
+    /// What [`gaps::Gaps`] counts of this outcome: the opcode of a request
+    /// left unanswered or refused ([`STATUS_ERROR`]); `None` for any other
+    /// answer and for a datagram that is no request.
+    pub fn gap(&self) -> Option<(u16, Gap)> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +224,7 @@ pub async fn serve(
             respond(&mut device, &buf[..n])
         };
         let (bytes, is_change) = match outcome {
-            ArcOutcome::Ignored => continue,
+            ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => continue,
             ArcOutcome::Reply(bytes) => (bytes, false),
             ArcOutcome::Changed(bytes) => (bytes, true),
         };

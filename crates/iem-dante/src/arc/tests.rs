@@ -69,7 +69,9 @@ fn decode(outcome: ArcOutcome) -> Answer {
     let (bytes, changed) = match outcome {
         ArcOutcome::Reply(bytes) => (bytes, false),
         ArcOutcome::Changed(bytes) => (bytes, true),
-        ArcOutcome::Ignored => panic!("a well-formed request was dropped"),
+        ArcOutcome::Ignored | ArcOutcome::Unanswered { .. } => {
+            panic!("a well-formed request was not answered: {outcome:?}")
+        }
     };
     let (header, body) = Header::parse(&bytes).expect("a reply parses");
     Answer {
@@ -116,6 +118,71 @@ fn tx_renames(items: &[(u16, &str)]) -> Vec<u8> {
     }
     body.extend(names);
     body
+}
+
+/// The body of Dante Controller's 0x2200 and 0x2204, captured (#72,
+/// 2026-10-26): a page request from item 1.
+const DC_FIRST_PAGE: [u8; 4] = [0x00, 0x01, 0x00, 0x01];
+
+/// Dante Controller's 0x1100, the body inferno's source quotes.
+const DC_1100: [u8; 40] = [
+    0x00, 0x13, 0x02, 0x01, 0x82, 0x04, 0x82, 0x05, 0x02, 0x10, 0x02, 0x11, 0x82, 0x18, 0x82, 0x19,
+    0x83, 0x01, 0x83, 0x02, 0x83, 0x06, 0x03, 0x10, 0x03, 0x11, 0x03, 0x03, 0x80, 0x21, 0x00, 0xf0,
+    0x80, 0x60, 0x00, 0x22, 0x00, 0x63, 0x00, 0x64,
+];
+
+/// netaudio's add_subscription: `0201 00<rx> 0034 00<device offset>`, 34
+/// zero bytes, then the TX channel's and the TX device's names.
+fn subscribe(rx: u8, tx_channel: &str, tx_device: &str) -> Vec<u8> {
+    let device_at = 52 + tx_channel.len() as u8 + 1;
+    let mut body = vec![0x02, 0x01, 0, rx, 0, 52, 0, device_at];
+    body.extend([0; 34]);
+    for name in [tx_channel, tx_device] {
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+    }
+    body
+}
+
+/// netaudio's remove_subscription: `0001 0000 00<rx>`.
+fn unsubscribe(rx: u8) -> Vec<u8> {
+    vec![0, 1, 0, 0, 0, rx]
+}
+
+/// A multicast TX flow to create, as inferno parses it: `[?, 1, descriptor
+/// offset]`, the descriptor (flow id, type 2, 10 bytes, channel count), the
+/// channels, the offset of the mostly-zero block, the block.
+fn multicast_create(flow: u16, channels: &[u16]) -> Vec<u8> {
+    let mut body = vec![0x00, 0x01];
+    body.extend(((HEADER_LEN + 4) as u16).to_be_bytes());
+    body.extend(flow.to_be_bytes());
+    body.extend(2u16.to_be_bytes());
+    body.extend([0; 10]);
+    body.extend((channels.len() as u16).to_be_bytes());
+    for channel in channels {
+        body.extend(channel.to_be_bytes());
+    }
+    body.extend(((HEADER_LEN + body.len() + 2) as u16).to_be_bytes());
+    body.extend(0x0a00u16.to_be_bytes());
+    body.extend([0; 14]);
+    body.extend([0, 1, 0, 0]);
+    body
+}
+
+/// A multicast TX flow to delete, as inferno reads it: `[count, ?, flow
+/// ids]`.
+fn multicast_delete(flow: u16) -> Vec<u8> {
+    let mut body = vec![0, 1, 0, 0];
+    body.extend(flow.to_be_bytes());
+    body
+}
+
+/// The whole reply datagram to `packet`.
+fn reply_bytes(dev: &mut Dev, packet: &[u8]) -> Vec<u8> {
+    match dev.send(packet) {
+        ArcOutcome::Reply(bytes) => bytes,
+        other => panic!("not a plain reply: {other:?}"),
+    }
 }
 
 /// One decoded page of a channel list: its slots, its channels (number and
@@ -691,31 +758,45 @@ fn a_rename_that_cannot_be_saved_is_refused_and_undone() {
 }
 
 #[test]
-fn an_unknown_opcode_changes_nothing() {
+fn an_opcode_inferno_does_not_answer_gets_no_reply() {
+    // inferno's catch-all logs the opcode and answers nothing; Dante
+    // Controller then asks again after its timeout. Refusing it instead
+    // (0xffff) made Dante Controller ask 0x2200 and 0x2204 about 2 250
+    // times a second (#72, 2026-10-26).
     let mut dev = Dev::new(config());
     dev.state.tx[0] = "Mix 1".into();
     let before = dev.state.clone();
-    // A device rename, a subscription, the flow queries and others: not in
-    // phase A.
-    for op1 in [
-        0x1001, 0x2200, 0x2201, 0x2202, 0x2320, 0x3010, 0x3014, 0x3200, 0x0000, 0xffff,
+    let set_name = [&[0u8, 0][..], b"renamed\0"].concat();
+    for (op1, body) in [
+        // Dante Controller's 0x2204 with its captured body.
+        (0x2204, DC_FIRST_PAGE.to_vec()),
+        // netaudio's set_name and set_latency: not in inferno either.
+        (0x1001, set_name),
+        (0x1101, vec![0, 0, 0, 5]),
+        (0x2203, DC_FIRST_PAGE.to_vec()),
+        (0x3201, DC_FIRST_PAGE.to_vec()),
+        (0x0000, Vec::new()),
+        (0xffff, tx_rename(1, b"Mix X")),
     ] {
-        let answer = dev.ask(11, op1, &tx_rename(1, b"Mix X"));
-        assert!(!answer.changed, "{op1:#06x}");
-        assert_eq!(answer.header.op1, op1);
-        assert_eq!(answer.header.op2, STATUS_ERROR, "{op1:#06x}");
-        assert!(answer.body.is_empty());
-        assert_eq!(dev.state, before);
+        for start in [CONTROLLER, NETAUDIO] {
+            let outcome = dev.send(&request(start, 11, op1, 0, &body));
+            assert_eq!(outcome, ArcOutcome::Unanswered { op1 }, "{op1:#06x}");
+            assert_eq!(dev.state, before);
+        }
     }
-    // A request whose op2 is not 0 is refused too, even a known opcode.
-    let answer = decode(dev.send(&request(
-        NETAUDIO,
-        12,
-        op::TX_RENAME,
-        1,
-        &tx_rename(1, b"Mix Y"),
-    )));
-    assert_eq!(answer.header.op2, STATUS_ERROR);
+    // A request whose op2 is not 0 gets none either, even a known opcode
+    // (inferno: "unknown opcode2").
+    for (op1, body) in [
+        (op::COUNTS, Vec::new()),
+        (op::TX_RENAME, tx_rename(1, b"Mix Y")),
+        (op::TX_FLOWS, DC_FIRST_PAGE.to_vec()),
+        (op::RX_SUBSCRIBE, subscribe(5, "TX 1", "other-device")),
+    ] {
+        for op2 in [STATUS_OK, STATUS_MORE, STATUS_ERROR] {
+            let outcome = dev.send(&request(NETAUDIO, 12, op1, op2, &body));
+            assert_eq!(outcome, ArcOutcome::Unanswered { op1 }, "{op1:#06x}");
+        }
+    }
     assert_eq!(dev.state, before);
     // A datagram that is no request gets no answer at all.
     let mut cut = request(NETAUDIO, 13, op::COUNTS, 0, &[]);
@@ -739,7 +820,7 @@ fn two_interleaved_requests_get_their_own_sequence() {
         (NETAUDIO, 0xfff1, op::RX_CHANNELS),
         (CONTROLLER, 0x0102, op::CLOCK),
         (NETAUDIO, 0xfff2, op::TX_RENAME),
-        (CONTROLLER, 0x0103, 0x1001),
+        (CONTROLLER, 0x0103, op::OP_2320),
     ];
     for (start, seq, op1) in requests {
         let body = match op1 {
@@ -778,6 +859,315 @@ fn the_clock_reply_is_the_fixed_one() {
 }
 
 #[test]
+fn the_flow_lists_are_inferno_s_empty_page() {
+    // No flows: 16 slots (inferno's 32 flows, at most 16 a page), none used,
+    // status OK. Dante Controller's captured request first, byte for byte.
+    let mut dev = Dev::new(config());
+    let mut want = vec![
+        0x27, 0x29, 0x00, 0x2c, 0x12, 0x34, 0x22, 0x00, 0x00, 0x01, 0x10, 0x00,
+    ];
+    want.extend([0; 32]);
+    let packet = request(CONTROLLER, 0x1234, op::TX_FLOWS, 0, &DC_FIRST_PAGE);
+    assert_eq!(reply_bytes(&mut dev, &packet), want);
+    want[6] = 0x32;
+    let packet = request(CONTROLLER, 0x1234, op::RX_FLOWS, 0, &DC_FIRST_PAGE);
+    assert_eq!(reply_bytes(&mut dev, &packet), want);
+    // Any first flow, netaudio's page request too: the same empty page.
+    for op1 in [op::TX_FLOWS, op::RX_FLOWS] {
+        for body in [
+            page_request(1),
+            page_request(17),
+            page_request(0xffff),
+            vec![0xaa, 0xbb, 0, 3],
+        ] {
+            let answer = dev.ask(7, op1, &body);
+            assert_eq!(answer.header.op2, STATUS_OK, "{op1:#06x} {body:?}");
+            assert_eq!(answer.body, want[HEADER_LEN..], "{op1:#06x} {body:?}");
+            assert!(!answer.changed);
+        }
+        // Without its first flow it is refused, as inferno refuses a page
+        // request it cannot read.
+        for body in [&[][..], &[0, 1, 0], &[0, 1, 0, 0], &[0, 1, 0, 0, 0, 1]] {
+            let answer = dev.ask(8, op1, body);
+            assert_eq!(answer.header.op2, STATUS_ERROR, "{op1:#06x} {body:?}");
+            assert!(answer.body.is_empty());
+        }
+    }
+    assert_eq!(dev.state, DeviceState::from_config(&dev.cfg));
+}
+
+#[test]
+fn a_multicast_flow_is_neither_created_nor_deleted() {
+    // Phase A has no flows: inferno, with no transmitter, creates and
+    // deletes nothing and refuses, no body.
+    let mut dev = Dev::new(config());
+    let before = dev.state.clone();
+    for (op1, body, want) in [
+        (
+            op::TX_MULTICAST_CREATE,
+            multicast_create(1, &[1, 2]),
+            [0x27, 0x29, 0x00, 0x0a, 0x00, 0x05, 0x22, 0x01, 0xff, 0xff],
+        ),
+        (
+            op::TX_MULTICAST_DELETE,
+            multicast_delete(1),
+            [0x27, 0x29, 0x00, 0x0a, 0x00, 0x05, 0x22, 0x02, 0xff, 0xff],
+        ),
+    ] {
+        let packet = request(CONTROLLER, 5, op1, 0, &body);
+        assert_eq!(reply_bytes(&mut dev, &packet), want, "{op1:#06x}");
+        assert_eq!(dev.state, before);
+    }
+    // Whatever they name, as long as inferno can read it.
+    for (op1, body) in [
+        (op::TX_MULTICAST_CREATE, multicast_create(32, &[16])),
+        (op::TX_MULTICAST_CREATE, vec![0, 0]),
+        (op::TX_MULTICAST_DELETE, multicast_delete(0)),
+        (op::TX_MULTICAST_DELETE, vec![0, 0, 0, 0]),
+    ] {
+        let answer = dev.ask(6, op1, &body);
+        assert_eq!(answer.header.op2, STATUS_ERROR, "{op1:#06x} {body:?}");
+        assert!(answer.body.is_empty());
+    }
+}
+
+#[test]
+fn op_2320_is_answered_with_status_0x30() {
+    let mut dev = Dev::new(config());
+    for body in [&[][..], &DC_FIRST_PAGE, &[1, 2, 3]] {
+        let packet = request(CONTROLLER, 0x0102, op::OP_2320, 0, body);
+        assert_eq!(
+            reply_bytes(&mut dev, &packet),
+            [0x27, 0x29, 0x00, 0x0a, 0x01, 0x02, 0x23, 0x20, 0x00, 0x30]
+        );
+    }
+}
+
+#[test]
+fn a_subscription_request_is_answered_and_subscribes_nothing() {
+    // inferno answers OK, no body, to every subscription request it can
+    // read, also for a channel it passes over; phase A makes none, so the
+    // RX list goes on showing no subscription (decode_page checks it).
+    let mut dev = Dev::new(config());
+    let before = dev.state.clone();
+    let packet = request(
+        CONTROLLER,
+        9,
+        op::RX_SUBSCRIBE,
+        0,
+        &subscribe(5, "TX 1", "other-device"),
+    );
+    assert_eq!(
+        reply_bytes(&mut dev, &packet),
+        [0x27, 0x29, 0x00, 0x0a, 0x00, 0x09, 0x30, 0x10, 0x00, 0x01]
+    );
+    let packet = request(NETAUDIO, 10, op::RX_UNSUBSCRIBE, 0, &unsubscribe(5));
+    assert_eq!(
+        reply_bytes(&mut dev, &packet),
+        [0x27, 0xff, 0x00, 0x0a, 0x00, 0x0a, 0x30, 0x14, 0x00, 0x01]
+    );
+    for (op1, body) in [
+        // A channel the device does not have, and channel 0.
+        (op::RX_SUBSCRIBE, subscribe(33, "TX 1", "other-device")),
+        (op::RX_SUBSCRIBE, subscribe(0, "TX 1", "other-device")),
+        // Dante Controller's unsubscribe: no TX names.
+        (op::RX_SUBSCRIBE, vec![0x02, 0x01, 0, 5, 0, 0, 0, 0]),
+        (op::RX_SUBSCRIBE, vec![0x02, 0x00]),
+        (op::RX_UNSUBSCRIBE, unsubscribe(33)),
+        (op::RX_UNSUBSCRIBE, unsubscribe(0)),
+    ] {
+        let answer = dev.ask(11, op1, &body);
+        assert_eq!(answer.header.op2, STATUS_OK, "{op1:#06x} {body:?}");
+        assert!(answer.body.is_empty());
+        assert!(!answer.changed);
+    }
+    assert_eq!(dev.state, before);
+    assert_eq!(read_list(&mut dev, op::RX_CHANNELS), numbered(&dev.cfg.rx));
+}
+
+#[test]
+fn a_request_inferno_cannot_read_gets_no_reply() {
+    // inferno fails reading these bodies before it answers.
+    let mut dev = Dev::new(config());
+    let item = [0, 5, 0, 52, 0, 57];
+    for (op1, body) in [
+        (op::TX_MULTICAST_CREATE, vec![]),
+        (op::TX_MULTICAST_CREATE, vec![0]),
+        (op::TX_MULTICAST_DELETE, vec![]),
+        (op::TX_MULTICAST_DELETE, vec![0, 1, 0]),
+        (op::RX_SUBSCRIBE, vec![]),
+        (op::RX_SUBSCRIBE, vec![0x02]),
+        // One item announced: inferno reads 6 bytes after the first 2.
+        (op::RX_SUBSCRIBE, [&[0x02, 0x01][..], &item[..4]].concat()),
+        (op::RX_SUBSCRIBE, [&[0x02, 0x01][..], &item[..5]].concat()),
+        // Two in 13 bytes: two fit 13 / 6, but not after the first 2.
+        (
+            op::RX_SUBSCRIBE,
+            [&[0x02, 0x02][..], &item, &item[..5]].concat(),
+        ),
+        (op::RX_UNSUBSCRIBE, vec![]),
+        (op::RX_UNSUBSCRIBE, vec![0, 1, 0, 0, 0]),
+    ] {
+        let outcome = dev.send(&request(NETAUDIO, 3, op1, 0, &body));
+        assert_eq!(
+            outcome,
+            ArcOutcome::Unanswered { op1 },
+            "{op1:#06x} {body:?}"
+        );
+    }
+    // Just long enough: answered.
+    for (op1, body, status) in [
+        (op::TX_MULTICAST_CREATE, vec![0, 0], STATUS_ERROR),
+        (op::TX_MULTICAST_DELETE, vec![0, 1, 0, 0], STATUS_ERROR),
+        (op::RX_SUBSCRIBE, vec![0x02, 0x00], STATUS_OK),
+        (
+            op::RX_SUBSCRIBE,
+            [&[0x02, 0x01][..], &item].concat(),
+            STATUS_OK,
+        ),
+        // Five announced, one there: inferno reads the one.
+        (
+            op::RX_SUBSCRIBE,
+            [&[0x02, 0x05][..], &item].concat(),
+            STATUS_OK,
+        ),
+        (
+            op::RX_SUBSCRIBE,
+            [&[0x02, 0x02][..], &item, &item].concat(),
+            STATUS_OK,
+        ),
+        (op::RX_UNSUBSCRIBE, unsubscribe(1), STATUS_OK),
+    ] {
+        let answer = dev.ask(4, op1, &body);
+        assert_eq!(answer.header.op2, status, "{op1:#06x} {body:?}");
+        assert!(answer.body.is_empty());
+    }
+}
+
+/// Every opcode inferno's ARC server (`arc_server.rs` at 9767558) matches,
+/// with the request Dante Controller or netaudio sends, and inferno's status
+/// in phase A's state (no flows, no subscriptions).
+fn inferno_opcodes() -> Vec<(u16, Vec<u8>, u16)> {
+    vec![
+        (op::COUNTS, vec![], STATUS_OK),
+        (op::DEVICE_NAME, vec![], STATUS_OK),
+        (op::DEVICE_NAMES, vec![], STATUS_OK),
+        (op::ZEROS_1100, DC_1100.to_vec(), STATUS_OK),
+        (op::ZEROS_1102, vec![], STATUS_OK),
+        (op::TX_CHANNELS, page_request(1), STATUS_OK),
+        (op::TX_NAMES, page_request(1), STATUS_OK),
+        (op::TX_RENAME, tx_rename(3, b"Mix 3"), STATUS_OK),
+        (op::TX_FLOWS, DC_FIRST_PAGE.to_vec(), STATUS_OK),
+        // inferno refuses these two itself when it has no flows to create
+        // or delete; there is nothing else to answer.
+        (
+            op::TX_MULTICAST_CREATE,
+            multicast_create(1, &[1, 2]),
+            STATUS_ERROR,
+        ),
+        (op::TX_MULTICAST_DELETE, multicast_delete(1), STATUS_ERROR),
+        (op::OP_2320, vec![], STATUS_2320),
+        (op::RX_CHANNELS, page_request(1), STATUS_MORE),
+        (op::RX_RENAME, rx_rename(5, b"Input 5"), STATUS_OK),
+        (
+            op::RX_SUBSCRIBE,
+            subscribe(5, "TX 1", "other-device"),
+            STATUS_OK,
+        ),
+        (op::RX_UNSUBSCRIBE, unsubscribe(5), STATUS_OK),
+        (op::RX_FLOWS, DC_FIRST_PAGE.to_vec(), STATUS_OK),
+        (op::CLOCK, vec![], STATUS_OK),
+    ]
+}
+
+#[test]
+fn every_opcode_inferno_answers_is_answered_as_inferno_answers_it() {
+    let table = inferno_opcodes();
+    let mut ops: Vec<u16> = table.iter().map(|(op1, _, _)| *op1).collect();
+    ops.sort_unstable();
+    ops.dedup();
+    assert_eq!(ops.len(), 18, "each of inferno's 18 opcodes once");
+    let mut refused = Vec::new();
+    for start in [CONTROLLER, NETAUDIO] {
+        let mut dev = Dev::new(config());
+        for (k, (op1, body, status)) in table.iter().enumerate() {
+            let seq = 0x4000 + k as u16;
+            let outcome = dev.send(&request(start, seq, *op1, 0, body));
+            assert!(
+                matches!(outcome, ArcOutcome::Reply(_) | ArcOutcome::Changed(_)),
+                "{op1:#06x} not answered: {outcome:?}"
+            );
+            let answer = decode(outcome);
+            assert_eq!(
+                (answer.header.start, answer.header.seq, answer.header.op1),
+                (start, seq, *op1)
+            );
+            assert_eq!(answer.header.op2, *status, "{op1:#06x}");
+            if answer.header.op2 == STATUS_ERROR {
+                refused.push(*op1);
+            }
+        }
+    }
+    // 0xffff only where inferno answers it too.
+    assert_eq!(
+        refused,
+        [
+            op::TX_MULTICAST_CREATE,
+            op::TX_MULTICAST_DELETE,
+            op::TX_MULTICAST_CREATE,
+            op::TX_MULTICAST_DELETE
+        ]
+    );
+}
+
+#[test]
+fn an_outcome_is_a_gap_when_refused_or_unanswered() {
+    let mut dev = Dev::new(config());
+    assert_eq!(
+        ArcOutcome::Unanswered { op1: 0x2204 }.gap(),
+        Some((0x2204, Gap::Unanswered))
+    );
+    let refused = dev.send(&request(
+        CONTROLLER,
+        1,
+        op::TX_RENAME,
+        0,
+        &tx_rename(0, b"Mix 0"),
+    ));
+    assert_eq!(refused.gap(), Some((op::TX_RENAME, Gap::Refused)));
+    let refused = dev.send(&request(
+        CONTROLLER,
+        2,
+        op::TX_MULTICAST_DELETE,
+        0,
+        &multicast_delete(1),
+    ));
+    assert_eq!(refused.gap(), Some((op::TX_MULTICAST_DELETE, Gap::Refused)));
+    // An answer is none: OK, a page that says more, 0x2320's 0x30.
+    for (op1, body) in [
+        (op::COUNTS, Vec::new()),
+        (op::RX_CHANNELS, page_request(1)),
+        (op::OP_2320, Vec::new()),
+        (op::TX_FLOWS, DC_FIRST_PAGE.to_vec()),
+    ] {
+        let outcome = dev.send(&request(CONTROLLER, 3, op1, 0, &body));
+        assert!(matches!(outcome, ArcOutcome::Reply(_)), "{op1:#06x}");
+        assert_eq!(outcome.gap(), None, "{op1:#06x}");
+    }
+    // Nor a change, nor a datagram that is no request.
+    let changed = dev.send(&request(
+        CONTROLLER,
+        4,
+        op::TX_RENAME,
+        0,
+        &tx_rename(3, b"Mix 3"),
+    ));
+    assert!(matches!(changed, ArcOutcome::Changed(_)));
+    assert_eq!(changed.gap(), None);
+    assert_eq!(ArcOutcome::Ignored.gap(), None);
+}
+
+#[test]
 fn random_requests_never_panic_and_keep_the_names_valid() {
     let mut rng = Rng::new(0xa4c0_1440);
     let mut dev = Dev::new(config());
@@ -793,8 +1183,15 @@ fn random_requests_never_panic_and_keep_the_names_valid() {
         op::RX_CHANNELS,
         op::RX_RENAME,
         op::CLOCK,
+        op::TX_FLOWS,
+        op::TX_MULTICAST_CREATE,
+        op::TX_MULTICAST_DELETE,
+        op::OP_2320,
+        op::RX_SUBSCRIBE,
+        op::RX_UNSUBSCRIBE,
+        op::RX_FLOWS,
         0x1001,
-        0x3010,
+        0x2204,
     ];
     // Three names in four from letters a name may hold, the rest from any.
     let good: &[u8] = b"ab Z09-_~";
@@ -817,9 +1214,10 @@ fn random_requests_never_panic_and_keep_the_names_valid() {
                     rx_rename(channel, &name)
                 }
             }
-            (op::TX_CHANNELS | op::TX_NAMES | op::RX_CHANNELS, 0 | 1) => {
-                page_request(rng.below(80) as u16)
-            }
+            (
+                op::TX_CHANNELS | op::TX_NAMES | op::RX_CHANNELS | op::TX_FLOWS | op::RX_FLOWS,
+                0 | 1,
+            ) => page_request(rng.below(80) as u16),
             _ => {
                 let len = rng.below(80);
                 rng.bytes(len)
@@ -828,6 +1226,23 @@ fn random_requests_never_panic_and_keep_the_names_valid() {
         let op2 = if i % 50 == 0 { rng.next() as u16 } else { 0 };
         let before = dev.state.clone();
         let outcome = dev.send(&request(NETAUDIO, seq, op1, op2, &body));
+        // No reply only where inferno sends none: op2 not 0, an opcode it
+        // does not handle, a body it cannot read.
+        let silent = op2 != 0 || matches!(op1, 0x1001 | 0x2204);
+        let readable = !matches!(
+            op1,
+            op::TX_MULTICAST_CREATE
+                | op::TX_MULTICAST_DELETE
+                | op::RX_SUBSCRIBE
+                | op::RX_UNSUBSCRIBE
+        );
+        if let ArcOutcome::Unanswered { op1: unanswered } = outcome {
+            assert_eq!(unanswered, op1);
+            assert!(silent || !readable, "{op1:#06x} {body:02x?}");
+            assert_eq!(dev.state, before);
+            continue;
+        }
+        assert!(!silent, "{op1:#06x} op2 {op2:#06x} answered");
         let answer = decode(outcome);
         assert_eq!((answer.header.seq, answer.header.op1), (seq, op1));
         assert!(HEADER_LEN + answer.body.len() <= MAX_DATAGRAM);
@@ -959,5 +1374,38 @@ async fn the_server_saves_a_rename_and_signals_it() {
     recv(&peer).await;
     let signalled = tokio::time::timeout(Duration::from_millis(200), s.changed.notified()).await;
     assert!(signalled.is_err(), "a read signalled a change");
+    s.task.abort();
+}
+
+#[tokio::test]
+async fn the_server_sends_nothing_for_an_opcode_inferno_does_not_answer() {
+    let s = served().await;
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // Dante Controller's 0x2204 and 0x2200 as captured, a request with op2
+    // set, then the counts.
+    for (seq, op1, op2, body) in [
+        (1, 0x2204, 0, &DC_FIRST_PAGE[..]),
+        (2, op::TX_FLOWS, 0, &DC_FIRST_PAGE[..]),
+        (3, 0x2204, 0, &DC_FIRST_PAGE[..]),
+        (4, op::COUNTS, 1, &[][..]),
+        (5, op::COUNTS, 0, &[][..]),
+    ] {
+        peer.send_to(&request(CONTROLLER, seq, op1, op2, body), s.addr)
+            .await
+            .unwrap();
+    }
+    // The flow list and the counts are answered, in order, and nothing else.
+    let reply = recv(&peer).await;
+    let (h, body) = Header::parse(&reply).unwrap();
+    assert_eq!(
+        (h.seq, h.op1, h.op2, body.len()),
+        (2, op::TX_FLOWS, STATUS_OK, 34)
+    );
+    let reply = recv(&peer).await;
+    let (h, _) = Header::parse(&reply).unwrap();
+    assert_eq!((h.seq, h.op1, h.op2), (5, op::COUNTS, STATUS_OK));
+    let mut buf = [0u8; 64];
+    let more = tokio::time::timeout(Duration::from_millis(200), peer.recv_from(&mut buf)).await;
+    assert!(more.is_err(), "an unanswered request was answered");
     s.task.abort();
 }
