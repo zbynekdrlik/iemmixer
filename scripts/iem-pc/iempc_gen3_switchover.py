@@ -244,8 +244,11 @@ def helper_busy(ip) -> bool:
     """Whether any card helper (dante_card.py) runs on this box, recorded or
     not: a signal between its start and its pid record leaves it unrecorded."""
     for entry in Path("/proc").iterdir():
-        if entry.name.isdigit() and iempc_dante.running(int(entry.name)):
-            return True
+        try:
+            if entry.name.isdigit() and iempc_dante.running(int(entry.name)):
+                return True
+        except OSError:   # another user's process, or one gone meanwhile: not ours
+            continue
     return False
 
 
