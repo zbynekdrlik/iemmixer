@@ -129,7 +129,7 @@ def box(host: str, command: str, data: bytes, timeout: float) -> tuple[int, byte
 def stopped(ip, host: str) -> None:
     code, out, _ = box(host, "systemctl is-active " + " ".join(UNITS), b"", BOX_S)
     states = out.decode(errors="replace").split()
-    if len(states) != len(UNITS) or any(s != "inactive" for s in states):
+    if len(states) != len(UNITS) or any(s not in ("inactive", "failed") for s in states):   # failed: not running
         raise ip.Refused("gen3-data: the box's stack is not stopped (systemctl is-active): nothing was sent")
 
 

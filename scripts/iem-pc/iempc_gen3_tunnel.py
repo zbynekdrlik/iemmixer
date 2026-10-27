@@ -9,14 +9,17 @@ one connector of it runs: the PC's Windows service (2.x) or the box's
 - `token`: the PC's connector's token (its service command line) straight
   into the box's credential (`systemd-creds encrypt --name=tunnel`, then
   0600, read back 600 root), never printed, logged or stored in clear here.
-- `to-box`: the PC's service stopped and set Disabled (the PC's server's
-  tunnel watch then cannot start it again), read back; the box's unit
-  started (Type=notify: started means connected); the public URL must name
-  the box's build within PUBLIC_S. Any failure after the PC's stop puts the
-  PC's connector back (the box's stopped, the PC's Automatic and started).
-- `to-pc`: the reverse, the box's unit stopped first; it runs during an
-  event too (the owner's way back to 2.x); `token` and `to-box` refuse while
-  the "ide event" flag exists.
+- `to-box`: the box's unit started first (Type=notify: started means
+  connected), then the PC's service stopped and set Disabled (the PC's
+  server's tunnel watch then cannot start it again), read back; the public
+  URL must name the box's build within PUBLIC_S. Any failure puts the PC's
+  connector back. The same build on both sides is refused (the public read
+  could not tell them apart).
+- `to-pc`: the PC's service set Automatic and started first, the box's unit
+  stopped only once the PC's connector reports an edge connection (never
+  no connector; a few seconds with two); it runs during an event too (the
+  owner's way back to 2.x); `token` and `to-box` refuse while the "ide
+  event" flag exists.
 
 stdout: one JSON object of fixed words and the two short hashes."""
 from __future__ import annotations
@@ -48,6 +51,10 @@ TOKEN_SCRIPT = (f"$s = Get-CimInstance Win32_Service -Filter \"Name='{SERVICE}'\
 PC_STATE = f"$s = Get-CimInstance Win32_Service -Filter \"Name='{SERVICE}'\"; $s.State + ' ' + $s.StartMode"
 PC_STOP = (f"Stop-Service -Name {SERVICE}; Set-Service -Name {SERVICE} -StartupType Disabled; {PC_STATE}")
 PC_START = (f"Set-Service -Name {SERVICE} -StartupType Automatic; Start-Service -Name {SERVICE}; {PC_STATE}")
+# The PC's connector's edge connections (its metrics, pinned to 127.0.0.1:20241 as the watchdog reads them).
+PC_READY = ("try { ((Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:20241/ready).Content | "
+            "ConvertFrom-Json).readyConnections } catch { 0 }")
+PC_READY_S = 30
 PC_VERSION = ("try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:80/api/version).Content } "
               "catch { 'none' }")
 
@@ -152,11 +159,26 @@ def box_stopped(ip, host: str) -> None:
                            f"{err.decode(errors='replace').strip()[-300:]}")
 
 
+def wait_pc_ready(ip, env: dict[str, str]) -> bool:
+    """The PC's connector has an edge connection ("Running" is not connected)."""
+    deadline = time.monotonic() + PC_READY_S
+    while True:
+        lines = [line.strip() for line in ip.ssh_ps(env, PC_READY, PC_S, "ignore").splitlines() if line.strip()]
+        if lines and lines[-1].isdigit() and int(lines[-1]) > 0:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(POLL_S)
+
+
 def to_pc(ip, env: dict[str, str], host: str, url: str) -> dict:
     """The PC's connector enabled and started first (never no connector: a
     PC that cannot be reached leaves the box's running), then the box's
     stopped; the public URL must name the PC's build."""
     pc_state(ip, env, PC_START, "Running Auto", "start")
+    if not wait_pc_ready(ip, env):
+        raise ip.StepError(f"gen3-tunnel: the PC's connector is not ready within {PC_READY_S} s: the box's keeps "
+                           "serving the band's URL")
     want = pc_hash(ip, env)
     box_stopped(ip, host)
     if not wait_public(url, want, PUBLIC_S):

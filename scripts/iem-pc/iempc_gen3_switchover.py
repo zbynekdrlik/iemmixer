@@ -30,7 +30,9 @@ stdout: one JSON object of the steps done and fixed words; names and
 addresses only from the private env, never printed."""
 from __future__ import annotations
 
+import contextlib
 import json
+import signal
 import subprocess
 import tempfile
 import time
@@ -52,6 +54,9 @@ ENABLE = "sudo -n systemctl enable iem-engine iem-server iem-tunnel"
 DISABLE = "sudo -n systemctl disable iem-dante iem-engine iem-server"
 DISABLE_TUNNEL = "sudo -n systemctl disable iem-tunnel"
 STACK_STATE = "systemctl is-active iem-server iem-engine iem-dante"
+# A unit that stays down (an engine exit 2 or 3, a crash loop) reads `failed`
+# after the stop and refuses a start until this (deploy's line).
+RESET_FAILED = "sudo -n systemctl reset-failed iem-dante iem-engine iem-server"
 # A takeover state of an earlier switch would bring back its TX names (the
 # device prefers a state file's names over its config's): each switch starts
 # from none.
@@ -164,13 +169,54 @@ def live_tx_flows(s: dict[str, str]) -> int:
         return 0
 
 
+SIGNALS = ("SIGTERM", "SIGHUP")
+
+
+@contextlib.contextmanager
+def signals_as_exit():
+    """SIGTERM and SIGHUP end the switch through SystemExit, so its undo runs
+    (iempc_trace.ended_by_signals' rule); the handlers before come back."""
+    def leave(signum, _frame) -> None:
+        raise SystemExit(128 + signum)
+    saved = {}
+    for name in SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            saved[sig] = signal.getsignal(sig)
+            signal.signal(sig, leave)
+    try:
+        yield
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+
+
+@contextlib.contextmanager
+def signals_ignored():
+    """The undo runs to its end: a second Ctrl-C or SIGTERM meanwhile is ignored."""
+    saved = {}
+    for name in ("SIGINT", *SIGNALS):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            saved[sig] = signal.getsignal(sig)
+            signal.signal(sig, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+
+
 def stack_stopped(s: dict[str, str]) -> bool:
+    """None of the three units runs (`failed` is not running either)."""
     code, out = on_box(s["GEN3_HOST"], STACK_STATE)
-    return out.split() == ["inactive"] * 3
+    states = out.split()
+    return len(states) == 3 and all(state in ("inactive", "failed") for state in states)
 
 
 def stop_box(ip, s: dict[str, str]) -> None:
     on_box(s["GEN3_HOST"], STOP)
+    on_box(s["GEN3_HOST"], RESET_FAILED)
     if not stack_stopped(s):
         raise Failed("the box's stack does not read back stopped")
 
@@ -211,10 +257,13 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
     usual = Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8")
     done: list[str] = []
     undo: list = []
-    try:
+    out: dict = {}
+
+    def steps() -> None:
         stop_box(ip, s)
         report = data.send_band(ip, ctx.env, host, ctx.watch(abandon=False))
         data.pepper(ip, ctx.env, host, ctx.watch(abandon=False))
+        out.update(files=report["members"], manifest=report["manifest"])
         done.append("band")
         flag(ip)
         undo.append(lambda: install_config(ip, s, usual))
@@ -225,8 +274,9 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         rename_card(ip, s, name, spare)
         done.append("card")
         flag(ip)
-        record(ip, 3)   # from here "ide event" keeps the box (a failure below records 2 again once undone)
+        record(ip, 3)   # from here "ide event" keeps the box (undone: 2 again)
         undo.append(lambda: stop_box(ip, s))
+        must(ip, s, RESET_FAILED, "clearing a unit left failed")
         must(ip, s, START, "starting the engine and the server")
         if not wait(lambda: on_box(host, HEALTH)[0] == 0 and answers_as(ip, s["GEN3_DANTE_IP"], name), HEALTH_S):
             raise Failed(f"the box is not healthy under the card's name within {HEALTH_S} s")
@@ -238,33 +288,45 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
             raise Failed(f"the mirror: {why}")
         if not wait(lambda: live_tx_flows(s) > 0, TX_S):
             raise Failed(f"no receiver asked our device for a flow within {TX_S} s")
+        out["mirrored"] = sent
         done.append("mirror")
         flag(ip)
         undo.append(lambda: tunnel.to_pc(ip, ctx.env, host, s["GEN3_PUBLIC_URL"]))
         tunnel.to_box(ip, ctx.env, host, s["GEN3_PUBLIC_URL"])
         done.append("url")
+        flag(ip)
         undo.append(lambda: (must(ip, s, DISABLE, "disabling the stack at boot"),
                              must(ip, s, DISABLE_TUNNEL, "disabling the connector at boot")))
         must(ip, s, ENABLE, "enabling the box's units at boot")
         done.append("boot")
-    except BaseException as e:   # every way out of the try undoes it: a timeout, a Ctrl-C, a flag
+
+    try:
+        with signals_as_exit():
+            steps()
+    except BaseException as e:   # every way out undoes: a timeout, an interrupt, a signal, the flag
         left = []
-        for step in reversed(undo):
-            try:
-                step()
-            except Exception as u:   # each undo is tried; what failed is reported
-                left.append(str(u))
-        if not left:
-            record(ip, 2)
+        with signals_ignored():
+            for step in reversed(undo):
+                try:
+                    step()
+                except Exception as u:   # each undo is tried; what failed is reported
+                    left.append(str(u))
+            if not left:
+                record(ip, 2)
         if not isinstance(e, Exception):
             raise
         raise ip.StepError(f"gen3-switch to-3 stopped after {done or 'nothing'}: {e}; "
                            + (f"undo failed, 3.x may still hold the band ({'; '.join(left)}): run "
                               "`iempc gen3-switch to-2`" if left else "undone: 2.x serves again")) from None
-    # The PC's band files may have changed between the copy and the URL's move.
-    _, after = data.band_zip(ip, ctx.env, ctx.watch(abandon=False))
-    return {"serves": "3.x", "steps": done, "files": report["members"], "mirrored": sent,
-            "changed_during_switch": changed_files(report["manifest"], after)}
+    # The PC's band files may have changed between the copy and the URL's move;
+    # a read that fails here leaves the complete switch as it is.
+    try:
+        _, after = data.band_zip(ip, ctx.env, ctx.watch(abandon=False))
+        changed = changed_files(out["manifest"], after)
+    except Exception:   # reported as unknown, never failing a switch that is done
+        changed = None
+    return {"serves": "3.x", "steps": done, "files": out["files"], "mirrored": out["mirrored"],
+            "changed_during_switch": changed}
 
 
 def to_2(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
@@ -273,7 +335,7 @@ def to_2(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         return {"dry_run": True, "steps": ["url", "boot", "stop", "card", "config"]}
     done: list[str] = []
     try:
-        tunnel.to_pc(ip, ctx.env, host, s["GEN3_PUBLIC_URL"])
+        tunnel.to_pc(ip, ctx.env, host, s["GEN3_PUBLIC_URL"])   # the PC's ready before the box's goes
         done.append("url")
         must(ip, s, DISABLE, "disabling the stack at boot")
         must(ip, s, DISABLE_TUNNEL, "disabling the connector at boot")
