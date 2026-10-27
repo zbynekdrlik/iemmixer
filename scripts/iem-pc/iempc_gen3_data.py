@@ -126,11 +126,29 @@ def box(host: str, command: str, data: bytes, timeout: float) -> tuple[int, byte
     return proc.returncode, out, err
 
 
-def stopped(ip, host: str) -> None:
-    code, out, _ = box(host, "systemctl is-active " + " ".join(UNITS), b"", BOX_S)
+STATES = "systemctl is-active " + " ".join(UNITS)
+# A stop past its bound (SendSIGKILL=no, I8) can leave a unit `failed`, or
+# `inactive` after reset-failed, with its process alive: stopped is also an
+# empty process group.
+TASKS = "systemctl show -p TasksCurrent --value " + " ".join(UNITS)
+
+
+def quiet(host: str) -> bool:
+    """None of the stack's units runs: each `inactive` or `failed`, and no
+    process left in any of their groups."""
+    code, out, _ = box(host, STATES, b"", BOX_S)
     states = out.decode(errors="replace").split()
-    if len(states) != len(UNITS) or any(s not in ("inactive", "failed") for s in states):   # failed: not running
-        raise ip.Refused("gen3-data: the box's stack is not stopped (systemctl is-active): nothing was sent")
+    if len(states) != len(UNITS) or any(s not in ("inactive", "failed") for s in states):
+        return False
+    code, out, _ = box(host, TASKS, b"", BOX_S)
+    tasks = out.decode(errors="replace").split("\n")[:len(UNITS)]
+    return code == 0 and len(tasks) == len(UNITS) and all(t.strip() in ("0", "[not set]") for t in tasks)
+
+
+def stopped(ip, host: str) -> None:
+    if not quiet(host):
+        raise ip.Refused("gen3-data: the box's stack is not stopped (a unit runs, or a process is left in one): "
+                         "nothing was sent")
 
 
 def pepper(ip, env: dict[str, str], host: str, event: str) -> None:

@@ -67,6 +67,7 @@ KEYS = ("GEN3_HOST", "GEN3_DANTE_IP", "GEN3_DANTE_NAME", "GEN3_CARD_SPARE", "GEN
         "DANTE_IEM_HOST", "DANTE_IEM_NAME", "NETAUDIO_PYTHON")
 HEALTH_S = 60
 TX_S = 30
+HELPER_WAIT_S = 60   # dante_card.py's own bound is iempc_dante.CARD_S
 POLL_S = 2.0
 
 
@@ -208,17 +209,18 @@ def signals_ignored():
 
 
 def stack_stopped(s: dict[str, str]) -> bool:
-    """None of the three units runs (`failed` is not running either)."""
-    code, out = on_box(s["GEN3_HOST"], STACK_STATE)
-    states = out.split()
-    return len(states) == 3 and all(state in ("inactive", "failed") for state in states)
+    """None of the three units runs and no process is left in their groups
+    (iempc_gen3_data.quiet; `failed` is not running)."""
+    return data.quiet(s["GEN3_HOST"])
 
 
 def stop_box(ip, s: dict[str, str]) -> None:
+    """The stack stopped and read back so; reset-failed only then (it would
+    read a unit whose stop outlived its bound as inactive)."""
     on_box(s["GEN3_HOST"], STOP)
-    on_box(s["GEN3_HOST"], RESET_FAILED)
     if not stack_stopped(s):
-        raise Failed("the box's stack does not read back stopped")
+        raise Failed("the box's stack does not read back stopped (a unit runs, or a process is left in one)")
+    on_box(s["GEN3_HOST"], RESET_FAILED)   # best effort: it exits 1 for a unit not loaded
 
 
 def name_back(ip, s: dict[str, str]) -> None:
@@ -226,6 +228,9 @@ def name_back(ip, s: dict[str, str]) -> None:
     stack stopped and our device not answering with it (never two devices
     under one name)."""
     name, spare = s["DANTE_IEM_NAME"], s["GEN3_CARD_SPARE"]
+    # An earlier rename's helper (dante_card.py) left running by a signal may still land: wait for it.
+    if not wait(lambda: not helper_busy(ip), HELPER_WAIT_S):
+        raise Failed("the card's rename is still running (dante_card.py): the card's name is not touched")
     if not stack_stopped(s) or answers_as(ip, s["GEN3_DANTE_IP"], name):
         raise Failed("our device may still hold the card's name: the card stays on its spare name")
     if answers_as(ip, s["DANTE_IEM_HOST"], name):
@@ -233,6 +238,12 @@ def name_back(ip, s: dict[str, str]) -> None:
     if not answers_as(ip, s["DANTE_IEM_HOST"], spare):
         raise Failed("the card answers with neither of its names")
     rename_card(ip, s, spare, name)
+
+
+def helper_busy(ip) -> bool:
+    """Whether the card helper recorded last (iempc_dante's record) still runs."""
+    pid = ip.read_json(ip.state_dir() / iempc_dante.RECORD, {}).get("pid")
+    return type(pid) is int and iempc_dante.running(pid)
 
 
 def flag(ip) -> None:
