@@ -89,8 +89,11 @@ address, its expected Dante device name and the netaudio venv's python, an
 executable file; `dante-labels --apply` refuses without all three, the
 sheet reads the card with them), GEN3_HOST (optional: the Gen 3 box's ssh
 destination, whose stack `event` stops and whose device `gen3-loop` and
-`gen3-mix` drive; #72) and GEN3_UI_URL (optional: the box's UI,
-`http://<box>:8080/`, the browser's origin in `gen3-mix`).
+`gen3-mix` drive; #72), GEN3_UI_URL (optional: the box's UI,
+`http://<box>:8080/`, the browser's origin in `gen3-mix`), and GEN3_DANTE_IP
+and GEN3_DANTE_NAME (optional: our Gen 3 device's unicast IPv4 address on
+the Dante network and its device name; `gen3-mirror` refuses without them
+and the card's keys: iempc_gen3_switch.py, #72 phase E).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -115,6 +118,7 @@ import iempc_cutover
 import iempc_dante
 import iempc_event
 import iempc_gen3
+import iempc_gen3_switch
 import iempc_live
 import iempc_roster
 import iempc_shadow
@@ -268,6 +272,12 @@ def cmd_gen3_mix(ctx: Ctx) -> int:
     return iempc_gen3.run_mix(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_mirror(ctx: Ctx) -> int:
+    """Our Gen 3 device's RX table made equal to the IEM card's (or cleared); the code lives in iempc_gen3_switch.py
+    (#72 phase E)."""
+    return iempc_gen3_switch.run_mirror(ctx, sys.modules[__name__])
+
+
 def cmd_dispatch_hil(ctx: Ctx) -> int:
     """The ops hil.yml dispatch; the code lives in iempc_bundle.py (#36)."""
     return iempc_bundle.cmd_dispatch_hil(ctx, sys.modules[__name__])
@@ -325,6 +335,8 @@ COMMANDS: dict[str, Spec] = {
     "dante-labels": Spec(cmd_dante_labels, pc=False, dev_time=True, locked=True),
     "gen3-loop": Spec(cmd_gen3_loop, pc=True, dev_time=True, locked=True),
     "gen3-mix": Spec(cmd_gen3_mix, pc=True, dev_time=True, locked=True),
+    # No PC call: reads the card, writes only our own Gen 3 device (#72 phase E).
+    "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
 }
 
 
@@ -379,6 +391,9 @@ def build_parser() -> argparse.ArgumentParser:
     labels.add_argument("--apply", action="store_true",
                         help="write the labels that differ onto the IEM card (DANTE_IEM_* and NETAUDIO_PYTHON in the "
                              "private env), then read them back")
+    mirror = sub.add_parser("gen3-mirror")
+    mirror.add_argument("--dry-run", action="store_true", help="list the changes, send nothing")
+    mirror.add_argument("--clear", action="store_true", help="unsubscribe every RX of our device instead")
     loop = sub.add_parser("gen3-loop")
     loop.add_argument("--offsets", required=True,
                       help=f"F1,F2: the two echo offsets of TX 1 behind RX 1, 1..{iempc_gen3.OFFSET_MAX} samples")

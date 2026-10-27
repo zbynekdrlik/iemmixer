@@ -14,6 +14,10 @@ does, so the card is addressed by its IP on the ARC port, never discovered.
                                         channel, label}; stdout: one JSON
                                         object {sent, failed, error, read_back,
                                         mismatches, tx, rx}
+  subscriptions <ip> <expected-name>    stdout: one JSON object {name, rx_count,
+                                        rx: {"<n>": {tx_channel, tx_device,
+                                        status}}}, the subscribed RX channels
+                                        only (Gen 3 phase E's mirror, #72)
   rename <ip> <expected-name> <new-name>
                                         stdout: one JSON object {renamed, name,
                                         error} (Gen 3 phase E's switch, #72:
@@ -161,6 +165,21 @@ def parse_changes(text: str) -> list[dict]:
     return out
 
 
+async def subscriptions(ip: str, expected: str) -> dict:
+    """The device's subscribed RX channels by number. netaudio keeps a
+    subscription's RX channel by name only (the name it read with the
+    channel), so the number comes from the channel of that name."""
+    device = await connect(ip, expected)
+    numbers = {c.name: n for n, c in device.rx_channels.items()}
+    rx = {}
+    for s in device.subscriptions:
+        n = numbers.get(s.rx_channel_name)
+        if n is None:
+            raise Refused("incomplete read: a subscription names no rx channel of the card")
+        rx[str(n)] = {"tx_channel": s.tx_channel_name, "tx_device": s.tx_device_name, "status": s.status_code}
+    return {"name": device.name, "rx_count": device.rx_count, "rx": dict(sorted(rx.items(), key=lambda i: int(i[0])))}
+
+
 async def read(ip: str, expected: str) -> dict:
     device = await connect(ip, expected)
     return {"name": device.name, "rx_count": device.rx_count, "tx_count": device.tx_count, **labels(device)}
@@ -242,9 +261,9 @@ async def rename(ip: str, expected: str, new: str) -> dict:
 
 def main(argv: list[str], stdin) -> int:
     try:
-        if not argv or (argv[0], len(argv)) not in (("read", 3), ("write", 4), ("rename", 4)):
-            raise Usage("usage: dante_card.py read <ip> <expected-name> | write <ip> <expected-name> <flag> | "
-                        "rename <ip> <expected-name> <new-name>")
+        if not argv or (argv[0], len(argv)) not in (("read", 3), ("subscriptions", 3), ("write", 4), ("rename", 4)):
+            raise Usage("usage: dante_card.py read|subscriptions <ip> <expected-name> | write <ip> <expected-name> "
+                        "<flag> | rename <ip> <expected-name> <new-name>")
         verb, ip, expected = argv[:3]
         if not unicast_ipv4(ip):
             raise Usage("<ip> is not a unicast IPv4 address")
@@ -252,6 +271,8 @@ def main(argv: list[str], stdin) -> int:
             raise Usage("<expected-name> is empty or not printable")
         if verb == "read":
             out = asyncio.run(read(ip, expected))
+        elif verb == "subscriptions":
+            out = asyncio.run(subscriptions(ip, expected))
         elif verb == "rename":
             new = argv[3]
             if not DEVICE_NAME.fullmatch(new) or new == expected:
