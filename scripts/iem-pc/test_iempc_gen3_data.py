@@ -181,7 +181,7 @@ class Gen3DataTests(Base):
         self.assertEqual((code, docs), (1, []))
         self.assertIn("the box's stack is not stopped", err)
         self.assertEqual(self.scripts[-1:], [data.pc_script(ip.load_env(ip.env_path())["PC_ROOT"])])   # the dry run's
-        self.assertEqual(self.commands(), [data.STATES, data.TASKS])
+        self.assertEqual(self.commands(), [data.STATES])   # a unit runs: its processes need no read
 
     def test_a_failed_unit_with_no_process_left_is_stopped_and_one_with_a_process_is_not(self) -> None:
         # The reviews of PR #83: an engine exit 2/3 leaves its unit `failed` (not running); a stop past its
