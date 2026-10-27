@@ -33,8 +33,9 @@
 //!   socket would see it).
 //! - [`Schedule`]: a flow's packets in time. The packet stamped T carries
 //!   the source's samples T…T+fpp−1 and goes out once the clock has passed
-//!   T + fpp by [`TX_MARGIN_NS`]; the first stamp is a multiple of fpp, a
-//!   lag past the device's latency or a jump of [`DISCONTINUITY`] samples
+//!   T + fpp by the device's `tx_margin_ns` ([`TX_MARGIN_NS`] unless the
+//!   config sets it); the first stamp is a multiple of fpp, a lag past the
+//!   device's advertised latency or a jump of [`DISCONTINUITY`] samples
 //!   starts it again (counted), and so does a re-anchor of the clock. A
 //!   flow sends exactly rate / fpp packets a second and never more.
 //! - [`Transmitter`] and [`spawn`]: the TX thread. Nothing leaves before the
@@ -79,7 +80,8 @@ pub const FPP_MAX: u16 = 256;
 /// (inferno's 4 s).
 pub const KEEPALIVE_TIMEOUT_NS: u64 = 4_000_000_000;
 /// How long after a packet's last sample it is sent at the earliest: our
-/// clock may run up to a few tens of µs ahead of the grandmaster's.
+/// clock may run up to a few tens of µs ahead of the grandmaster's. The
+/// default of the device's `tx_margin_ns`.
 pub const TX_MARGIN_NS: u64 = 250_000;
 /// A schedule this many samples ahead of the clock starts again (inferno's
 /// "media clock jumped").
@@ -736,9 +738,10 @@ impl Schedule {
         std::mem::take(&mut self.rebootstraps)
     }
 
-    /// The PTP ns at which the next packet is due at `rate`.
-    pub fn wake_ns(&self, rate: u32) -> u64 {
-        ns_of(self.next.saturating_add(self.fpp), rate).saturating_add(TX_MARGIN_NS)
+    /// The PTP ns at which the next packet is due at `rate`, `margin_ns`
+    /// after its last sample.
+    pub fn wake_ns(&self, rate: u32, margin_ns: u64) -> u64 {
+        ns_of(self.next.saturating_add(self.fpp), rate).saturating_add(margin_ns)
     }
 }
 
@@ -756,9 +759,9 @@ pub fn ns_of(samples: u64, rate: u32) -> u64 {
 }
 
 /// The media clock a schedule runs on: the samples at `rate` up to
-/// [`TX_MARGIN_NS`] before `now_ns`.
-pub fn send_clock(now_ns: u64, rate: u32) -> u64 {
-    clock::to_samples(now_ns.saturating_sub(TX_MARGIN_NS), rate)
+/// `margin_ns` before `now_ns`.
+pub fn send_clock(now_ns: u64, rate: u32, margin_ns: u64) -> u64 {
+    clock::to_samples(now_ns.saturating_sub(margin_ns), rate)
 }
 
 /// One slot as the TX thread sees it.
@@ -787,6 +790,8 @@ pub struct Transmitter {
     next_events: Option<u64>,
     rate: u32,
     max_lag: u64,
+    /// The device's `tx_margin_ns`.
+    margin_ns: u64,
 }
 
 impl Transmitter {
@@ -803,7 +808,8 @@ impl Transmitter {
             epoch: None,
             next_events: None,
             rate,
-            max_lag: clock::to_samples(shared.cfg.latency_ns, rate),
+            max_lag: clock::to_samples(shared.cfg.advertised_latency_ns(), rate),
+            margin_ns: shared.cfg.tx_margin_ns,
             shared,
         }
     }
@@ -826,7 +832,7 @@ impl Transmitter {
         let Some(now_ns) = now_ns else {
             return;
         };
-        let now = send_clock(now_ns, self.rate);
+        let now = send_clock(now_ns, self.rate, self.margin_ns);
         if self.epoch.is_some_and(|e| e != epoch) {
             for schedule in self.lanes.iter_mut().filter_map(|l| l.schedule.as_mut()) {
                 schedule.realign(now);
@@ -846,7 +852,7 @@ impl Transmitter {
         // A lane has a schedule only while its plan sends.
         self.lanes
             .iter()
-            .filter_map(|l| l.schedule.map(|s| s.wake_ns(self.rate)))
+            .filter_map(|l| l.schedule.map(|s| s.wake_ns(self.rate, self.margin_ns)))
             .fold(self.next_events.unwrap_or(0), u64::min)
     }
 

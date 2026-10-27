@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::announce::{FPP_MAX, FPP_MIN};
+use crate::media::tx::TX_MARGIN_NS;
 use crate::stream::{BLOCK, MAX_WORK_MARGIN, WORK_MARGIN};
 
 /// The longest device or channel name, in bytes: Dante Controller ignores a
@@ -79,6 +81,24 @@ pub struct DeviceConfig {
     /// [`MAX_WORK_MARGIN`], [`WORK_MARGIN`] when the config leaves it out.
     #[serde(default = "default_work_margin")]
     pub work_margin: u64,
+    /// The latency our TX channels advertise (their mDNS `latency_ns`), in
+    /// ns: a receiver plays our audio at least this long after its stamp,
+    /// and our TX drops a flow's packets that lag more. 1 to `u32::MAX`;
+    /// `latency_ns` when the config leaves it out
+    /// ([`DeviceConfig::advertised_latency_ns`]). #72 phase F sets it apart
+    /// from the RX playout, as the IEM card's 0.25 ms.
+    #[serde(default)]
+    pub tx_latency_ns: Option<u64>,
+    /// How long after a packet's last sample our TX sends it at the
+    /// earliest, ns: our clock may run ahead of the grandmaster's. 0 to
+    /// [`MAX_TX_MARGIN_NS`]; [`TX_MARGIN_NS`] when left out.
+    #[serde(default = "default_tx_margin_ns")]
+    pub tx_margin_ns: u64,
+    /// The most frames per packet our TX channels offer (mDNS `fpp`, a
+    /// receiver asks for at most this): [`FPP_MIN`] to [`FPP_MAX`],
+    /// [`FPP_MAX`] when left out. The IEM card sends 16.
+    #[serde(default = "default_tx_fpp_max")]
+    pub tx_fpp_max: u16,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
 }
@@ -102,6 +122,12 @@ impl DeviceConfig {
         } else {
             Err(ConfigError { problems })
         }
+    }
+
+    /// The latency our TX channels advertise: `tx_latency_ns`, else
+    /// `latency_ns`.
+    pub fn advertised_latency_ns(&self) -> u64 {
+        self.tx_latency_ns.unwrap_or(self.latency_ns)
     }
 
     fn problems(&self) -> Vec<String> {
@@ -140,6 +166,18 @@ impl DeviceConfig {
         if self.latency_ns == 0 || self.latency_ns > u64::from(u32::MAX) {
             out.push(format!("latency_ns: 1 to {}", u32::MAX));
         }
+        if self
+            .tx_latency_ns
+            .is_some_and(|ns| ns == 0 || ns > u64::from(u32::MAX))
+        {
+            out.push(format!("tx_latency_ns: 1 to {}", u32::MAX));
+        }
+        if self.tx_margin_ns > MAX_TX_MARGIN_NS {
+            out.push(format!("tx_margin_ns: 0 to {MAX_TX_MARGIN_NS}"));
+        }
+        if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {
+            out.push(format!("tx_fpp_max: {FPP_MIN} to {FPP_MAX}"));
+        }
         if !(BLOCK..=MAX_WORK_MARGIN).contains(&self.work_margin) {
             out.push(format!("work_margin: {BLOCK} to {MAX_WORK_MARGIN} samples"));
         }
@@ -153,6 +191,17 @@ impl DeviceConfig {
 fn default_work_margin() -> u64 {
     WORK_MARGIN
 }
+
+fn default_tx_margin_ns() -> u64 {
+    TX_MARGIN_NS
+}
+
+fn default_tx_fpp_max() -> u16 {
+    FPP_MAX
+}
+
+/// The largest `tx_margin_ns` a config may set (1 ms).
+pub const MAX_TX_MARGIN_NS: u64 = 1_000_000;
 
 const DEVICE_NAME_RULE: &str = "name: not a valid Dante device name \
      (1 to 31 of A-Z a-z 0-9 and '-', no '-' at either end)";

@@ -30,6 +30,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use iem_audio_io::{Block, Offline, Planar, Process};
+use iem_dante::announce::FPP_MAX;
 use iem_dante::clock::{ManualClock, PtpClock, to_samples};
 use iem_dante::daemon::media::{Clock, Driver, Media};
 use iem_dante::device::{Device, DeviceConfig, Subscription};
@@ -39,7 +40,7 @@ use iem_dante::info::Changes;
 use iem_dante::media::ring::Ring;
 use iem_dante::media::rx::{Receiver, RxCounts};
 use iem_dante::media::source::Source;
-use iem_dante::media::tx::{LaneCounts, Transmitter, ns_of};
+use iem_dante::media::tx::{LaneCounts, TX_MARGIN_NS, Transmitter, ns_of};
 use iem_dante::stream::{Blocks, Map, Pump, PumpStats, PumpView, Timing, WORK_MARGIN};
 use iem_dante::subscribe::Answer;
 use iem_dante::subscribe::resolve::{Advertised, Own, Resolver};
@@ -126,6 +127,9 @@ fn device(dir: &Path) -> Device {
         encoding: BITS,
         latency_ns: 1_000_000,
         work_margin: WORK_MARGIN,
+        tx_latency_ns: None,
+        tx_margin_ns: TX_MARGIN_NS,
+        tx_fpp_max: FPP_MAX,
         state_file: dir.join("state.toml"),
     })
     .unwrap()

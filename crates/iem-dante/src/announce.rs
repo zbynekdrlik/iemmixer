@@ -136,8 +136,8 @@ pub fn records(
                 format!("pcm={} {PCM_TYPE:x}", cfg.encoding / 8),
                 format!("enc={}", cfg.encoding),
                 format!("en={}", cfg.encoding),
-                format!("latency_ns={}", cfg.latency_ns),
-                format!("fpp={FPP_MAX},{FPP_MIN}"),
+                format!("latency_ns={}", cfg.advertised_latency_ns()),
+                format!("fpp={},{FPP_MIN}", cfg.tx_fpp_max),
                 format!("nchan={nchan}"),
             ];
             if is_default {

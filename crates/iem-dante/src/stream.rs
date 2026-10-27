@@ -17,7 +17,8 @@
 //!   `work_margin` ([`WORK_MARGIN`], 1 ms, unless the config sets it): RX
 //!   media time plus a fixed processing offset.
 //!   The TX thread sends them as [`crate::media::source::Source::Engine`]:
-//!   the packet stamped kB + D leaves at kB + D + fpp + 250 µs, so a block
+//!   the packet stamped kB + D leaves at kB + D + fpp + the TX margin
+//!   (the device's `tx_margin_ns`, 250 µs by default), so a block
 //!   that ends within W of its due time is always in time, whatever either
 //!   side's fpp.
 //! - [`Blocks`] (pure) says what is due: a block, a wait, or a

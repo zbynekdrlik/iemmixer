@@ -69,6 +69,14 @@ fn a_config_reads_the_test_device() {
     assert_eq!(cfg.encoding, 24);
     assert_eq!(cfg.latency_ns, 1_000_000);
     assert_eq!(cfg.work_margin, 96, "W defaults to 1 ms");
+    assert_eq!(cfg.tx_latency_ns, None);
+    assert_eq!(
+        cfg.advertised_latency_ns(),
+        1_000_000,
+        "TX advertises the RX latency"
+    );
+    assert_eq!(cfg.tx_margin_ns, 250_000);
+    assert_eq!(cfg.tx_fpp_max, 32);
     assert_eq!(
         cfg.state_file,
         PathBuf::from("/var/lib/iem-dante/state.toml")
@@ -346,6 +354,18 @@ fn a_state_folder_that_cannot_be_written_fails_the_check_naming_the_file() {
 }
 
 #[test]
+fn the_tx_side_settings_are_read() {
+    let text = config_with(
+        "latency_ns =",
+        "latency_ns = 1000000\ntx_latency_ns = 250000\ntx_margin_ns = 30000\ntx_fpp_max = 16",
+    );
+    let cfg = DeviceConfig::from_toml(&text).unwrap();
+    assert_eq!(cfg.latency_ns, 1_000_000, "the RX playout stays");
+    assert_eq!(cfg.advertised_latency_ns(), 250_000);
+    assert_eq!((cfg.tx_margin_ns, cfg.tx_fpp_max), (30_000, 16));
+}
+
+#[test]
 fn the_config_is_checked_field_by_field() {
     let cases = [
         (
@@ -381,6 +401,25 @@ fn the_config_is_checked_field_by_field() {
             "state_file: empty",
         ),
         (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_latency_ns = 0"),
+            "tx_latency_ns: 1 to 4294967295",
+        ),
+        (
+            config_with(
+                "latency_ns =",
+                "latency_ns = 1000000\ntx_margin_ns = 1000001",
+            ),
+            "tx_margin_ns: 0 to 1000000",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 1"),
+            "tx_fpp_max: 2 to 32",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 33"),
+            "tx_fpp_max: 2 to 32",
+        ),
+        (
             config_with("latency_ns =", "latency_ns = 1000000\nwork_margin = 31"),
             "work_margin: 32 to 4096 samples",
         ),
@@ -399,6 +438,16 @@ fn the_config_is_checked_field_by_field() {
         ("latency_ns =", "latency_ns = 4294967295"),
         ("latency_ns =", "latency_ns = 1"),
         ("latency_ns =", "latency_ns = 1000000\nwork_margin = 32"),
+        (
+            "latency_ns =",
+            "latency_ns = 1000000\ntx_latency_ns = 250000",
+        ),
+        ("latency_ns =", "latency_ns = 1000000\ntx_margin_ns = 0"),
+        (
+            "latency_ns =",
+            "latency_ns = 1000000\ntx_margin_ns = 1000000",
+        ),
+        ("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 2"),
         ("latency_ns =", "latency_ns = 1000000\nwork_margin = 4096"),
         ("sample_rate =", "sample_rate = 48000"),
         ("encoding =", "encoding = 32"),

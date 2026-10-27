@@ -175,6 +175,17 @@ fn the_txt_records_carry_the_rate_encoding_and_latency() {
         assert!(has(c, entry), "{entry} not in {:?}", c.txt);
     }
     assert!(has(&recs[0], "router_info=zyxboard") && has(&recs[0], "mf=zyxmaker"));
+    // The TX settings: the advertised latency and the most fpp.
+    let tight = DeviceConfig {
+        tx_latency_ns: Some(250_000),
+        tx_fpp_max: 16,
+        ..other.clone()
+    };
+    let recs = records(&state, &tight, HOST, Ipv4Addr::new(192, 0, 2, 1));
+    for entry in ["latency_ns=250000", "fpp=16,2"] {
+        assert!(has(&recs[4], entry), "{entry} not in {:?}", recs[4].txt);
+    }
+    assert!(!has(&recs[4], "latency_ns=5000000"), "not the RX latency");
     // The device id holds the address (192.0.2.1) after two zero bytes.
     assert!(has(&recs[1], "id=0000c00002010000"), "{:?}", recs[1].txt);
 }
