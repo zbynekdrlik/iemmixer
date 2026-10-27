@@ -93,7 +93,9 @@ destination, whose stack `event` stops and whose device `gen3-loop` and
 `http://<box>:8080/`, the browser's origin in `gen3-mix`), and GEN3_DANTE_IP
 and GEN3_DANTE_NAME (optional: our Gen 3 device's unicast IPv4 address on
 the Dante network and its device name; `gen3-mirror` refuses without them
-and the card's keys: iempc_gen3_switch.py, #72 phase E).
+and the card's keys: iempc_gen3_switch.py, #72 phase E); `gen3-data` reads
+the PC's band files (PC_ROOT) and writes them onto GEN3_HOST
+(iempc_gen3_data.py).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -118,6 +120,7 @@ import iempc_cutover
 import iempc_dante
 import iempc_event
 import iempc_gen3
+import iempc_gen3_data
 import iempc_gen3_switch
 import iempc_live
 import iempc_roster
@@ -278,6 +281,12 @@ def cmd_gen3_mirror(ctx: Ctx) -> int:
     return iempc_gen3_switch.run_mirror(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_data(ctx: Ctx) -> int:
+    """The band's data from the PC onto the Gen 3 box (the switch to 3.x); the code lives in iempc_gen3_data.py
+    (#72 phase E)."""
+    return iempc_gen3_data.run(ctx, sys.modules[__name__])
+
+
 def cmd_dispatch_hil(ctx: Ctx) -> int:
     """The ops hil.yml dispatch; the code lives in iempc_bundle.py (#36)."""
     return iempc_bundle.cmd_dispatch_hil(ctx, sys.modules[__name__])
@@ -337,6 +346,8 @@ COMMANDS: dict[str, Spec] = {
     "gen3-mix": Spec(cmd_gen3_mix, pc=True, dev_time=True, locked=True),
     # No PC call: reads the card, writes only our own Gen 3 device (#72 phase E).
     "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
+    # Reads the PC, writes only the Gen 3 box (#72 phase E).
+    "gen3-data": Spec(cmd_gen3_data, pc=True, dev_time=True, locked=True),
 }
 
 
@@ -394,6 +405,10 @@ def build_parser() -> argparse.ArgumentParser:
     mirror = sub.add_parser("gen3-mirror")
     mirror.add_argument("--dry-run", action="store_true", help="list the changes, send nothing")
     mirror.add_argument("--clear", action="store_true", help="unsubscribe every RX of our device instead")
+    data = sub.add_parser("gen3-data")
+    data.add_argument("--pepper", action="store_true",
+                      help="also the PC's PIN pepper into the box's credential (replaces the box's own)")
+    data.add_argument("--dry-run", action="store_true", help="read and check the PC's files, send nothing")
     loop = sub.add_parser("gen3-loop")
     loop.add_argument("--offsets", required=True,
                       help=f"F1,F2: the two echo offsets of TX 1 behind RX 1, 1..{iempc_gen3.OFFSET_MAX} samples")

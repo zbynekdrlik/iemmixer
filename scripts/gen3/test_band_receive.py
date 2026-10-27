@@ -94,6 +94,14 @@ class ReceiveTests(unittest.TestCase):
                                                        f"secrets/.jwt_secret.before-{STAMP}"]))
         self.assertEqual([p.name for p in self.root.rglob("*.incoming")], [])
 
+    def test_a_second_run_in_the_same_second_keeps_both_old_versions(self) -> None:
+        self.assertEqual(self.run_main(archive(BAND))[0], 0)
+        code, doc, err = self.run_main(archive({**BAND, "engine/current.json": b'{"rev": 6}'}))
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"engine.before-{STAMP}-1", doc["kept"])
+        self.assertEqual((self.root / f"engine.before-{STAMP}-1" / "current.json").read_bytes(), b'{"rev": 5}')
+        self.assertEqual((self.root / f"engine.before-{STAMP}" / "current.json").read_bytes(), b'{"rev": 900}')
+
     def test_anything_but_the_bands_files_refuses_the_whole_archive(self) -> None:
         before = self.tree()
         bad = [{"/server/roster.toml": b"x"}, {"server/../escape": b"x"}, {"server\\roster.toml": b"x"},

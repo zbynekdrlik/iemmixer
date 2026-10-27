@@ -115,6 +115,16 @@ def staging(target: Path) -> Path:
     return target.with_name(f".{target.name}.incoming")
 
 
+def aside(target: Path, stamp: str, hidden: bool) -> Path:
+    """A free name beside `target` for its old version: `<name>.before-<stamp>`,
+    `.<name>` when `hidden`, with `-<n>` when a run in the same second left one."""
+    base = f"{'.' if hidden else ''}{target.name}.before-{stamp}"
+    path, n = target.with_name(base), 1
+    while path.exists() or path.is_symlink():
+        path, n = target.with_name(f"{base}-{n}"), n + 1
+    return path
+
+
 def receive(raw: bytes, site: Path, engine: Path, stamp: str) -> dict:
     if len(raw) > MAX_ARCHIVE:
         raise Refused("the archive is larger than the cap")
@@ -149,7 +159,7 @@ def receive(raw: bytes, site: Path, engine: Path, stamp: str) -> dict:
     kept = []
     for t in targets:
         if t.exists() or t.is_symlink():
-            before = t.with_name(f"{t.name}.before-{stamp}" if t == engine else f".{t.name}.before-{stamp}")
+            before = aside(t, stamp, hidden=t != engine)
             os.rename(t, before)
             kept.append(before.name if t == engine else before.relative_to(site).as_posix())
         os.rename(staging(t), t)

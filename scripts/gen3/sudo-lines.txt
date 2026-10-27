@@ -100,3 +100,8 @@ root | cat /sys/module/drm_kms_helper/parameters/poll
 # reboot.
 root | systemctl restart iem-engine
 root | systemctl reboot
+
+# iempc gen3-data (phase E, #72): the band's files received as the service
+# user with the stack stopped, and the PC's pepper into the credential.
+iemmixer | python3 -I /opt/iemmixer/lib/band_receive.py /var/lib/iemmixer/site /var/lib/iemmixer/engine
+root | systemd-creds encrypt --name=pepper --with-key=auto - /etc/credstore.encrypted/iemmixer-pepper
