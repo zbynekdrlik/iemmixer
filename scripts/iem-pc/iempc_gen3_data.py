@@ -110,10 +110,20 @@ def band_zip(ip, env: dict[str, str], event: str) -> tuple[bytes, dict[str, str]
     return raw, manifest
 
 
+STILL_RUNNING = 124   # box()'s exit for a command past its bound, left running (never ended by force)
+
+
 def box(host: str, command: str, data: bytes, timeout: float) -> tuple[int, bytes, bytes]:
-    """One ssh command on the box, `data` on its stdin (tests replace it)."""
-    r = subprocess.run([*SSH, host, command], input=data, capture_output=True, timeout=timeout)
-    return r.returncode, r.stdout, r.stderr
+    """One ssh command on the box, `data` on its stdin (tests replace it).
+    Past `timeout` it is left to end by itself, never ended by force (I8):
+    exit STILL_RUNNING and that said on stderr."""
+    proc = subprocess.Popen([*SSH, host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    try:
+        out, err = proc.communicate(data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return STILL_RUNNING, b"", f"still running after {timeout:g} s, left to end by itself".encode()
+    return proc.returncode, out, err
 
 
 def stopped(ip, host: str) -> None:
@@ -165,7 +175,7 @@ def send_band(ip, env: dict[str, str], host: str, event: str) -> dict:
         raise ip.StepError("gen3-data: the box's receiver gave no answer to read back") from None
     if written != manifest:
         raise ip.StepError("gen3-data: what the box wrote does not read back as the PC's files")
-    return {"members": len(manifest), "bytes": len(raw), "written": len(written)}
+    return {"members": len(manifest), "bytes": len(raw), "written": len(written), "manifest": manifest}
 
 
 def host_of(ip, env: dict[str, str], cmd: str) -> str:

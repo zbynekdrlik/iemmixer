@@ -227,6 +227,13 @@ refuse_event() {
   [ ! -e "$flag" ] || die "$flag exists: an event is on; the Gen 3 stack is deployed only in dev time ($1)"
 }
 refuse_event "nothing was copied"
+# While 3.x serves the band (iempc gen3-switch to-3, phase E #72) a deploy
+# would stop the box that plays it and give back the usual device config: the
+# way back first. A record that does not say side 2 counts as 3.x.
+side_file="${IEMPC_STATE:-$HOME/.local/share/iemmixer/iem-pc}/gen3-side.json"
+if [ -e "$side_file" ] && ! grep -Eq '"side": *2([^0-9]|$)' -- "$side_file"; then
+  die "3.x serves the band ($side_file): run \`iempc gen3-switch to-2\` first: nothing was copied"
+fi
 
 # iempc's private env: the host "ide event" stops and, with --pins, the PINs
 # (values never printed: this output may be pasted).

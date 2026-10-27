@@ -14,8 +14,11 @@ archive before anything is written.
 
 - server: each top-level item named (a file, or a folder whole) replaces the
   site folder's item of that name: written beside it as `.<name>.incoming`,
-  the old one moved to `.<name>.before-<stamp>`, the new one renamed in. The
-  site's own files (iemmixer.toml, the roster's status) are never touched.
+  the old one moved to `.<name>.before-<stamp>`, the new one renamed in; a
+  band item the archive lacks (the PC no longer has it) is moved aside the
+  same way, so the box serves the PC's set. The site's own files
+  (iemmixer.toml, the roster's status) are never touched. A staging an
+  earlier run left is moved aside (`.incoming.before-<stamp>`).
 - engine: the whole state folder is replaced the same way (generations,
   revision markers and the baseline belong together), the old folder kept
   as `<engine>.before-<stamp>`.
@@ -138,9 +141,21 @@ def receive(raw: bytes, site: Path, engine: Path, stamp: str) -> dict:
         if d.is_symlink() or not d.is_dir():
             raise Refused("a target folder is missing or a link")
     # The targets: the engine folder whole, each server item by its name.
-    targets = [engine] + [site / item for item in sorted({item_of(n)[1] for n in data if n.startswith("server/")})]
-    if any(staging(t).exists() or staging(t).is_symlink() for t in targets):
-        raise Refused("an earlier run's staging is still there")
+    sent = {item_of(n)[1] for n in data if n.startswith("server/")}
+    targets = [engine] + [site / item for item in sorted(sent)]
+    # A staging an earlier run left (it failed part-way) is moved aside, never deleted.
+    kept = []
+    for t in targets:
+        if staging(t).exists() or staging(t).is_symlink():
+            old = aside(staging(t), stamp, hidden=False)
+            os.rename(staging(t), old)
+            kept.append(old.relative_to(site).as_posix() if t != engine else old.name)
+    # A band item the PC no longer has goes aside too: the box serves the PC's set, not an older one.
+    for item in (*SERVER_FILES, *SERVER_FOLDERS):
+        if item not in sent and ((site / item).exists() or (site / item).is_symlink()):
+            old = aside(site / item, stamp, hidden=True)
+            os.rename(site / item, old)
+            kept.append(old.relative_to(site).as_posix())
     # Stage everything first.
     for t in targets:
         if t == engine or t.name in SERVER_FOLDERS:
@@ -156,7 +171,6 @@ def receive(raw: bytes, site: Path, engine: Path, stamp: str) -> dict:
         else:
             write_file(staging(site / item), blob)
     # Then swap each in: the old one aside under a name of its own, never deleted.
-    kept = []
     for t in targets:
         if t.exists() or t.is_symlink():
             before = aside(t, stamp, hidden=t != engine)

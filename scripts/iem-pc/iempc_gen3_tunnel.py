@@ -22,9 +22,10 @@ stdout: one JSON object of fixed words and the two short hashes."""
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 import urllib.request
+
+import iempc_gen3_data
 
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-tunnel"
 ENCRYPT = f"sudo -n systemd-creds encrypt --name=tunnel --with-key=auto - {CREDENTIAL}"
@@ -52,9 +53,8 @@ PC_VERSION = ("try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://12
 
 
 def box(host: str, command: str, data: bytes, timeout: float) -> tuple[int, bytes, bytes]:
-    """One ssh command on the box, `data` on its stdin (tests replace it)."""
-    r = subprocess.run([*SSH, host, command], input=data, capture_output=True, timeout=timeout)
-    return r.returncode, r.stdout, r.stderr
+    """One ssh command on the box (iempc_gen3_data.box: never ended by force; tests replace it)."""
+    return iempc_gen3_data.box(host, command, data, timeout)
 
 
 def public_hash(url: str) -> str | None:
@@ -144,38 +144,51 @@ def pc_hash(ip, env: dict[str, str]) -> str:
     return value
 
 
-def to_pc(ip, env: dict[str, str], host: str, url: str) -> dict:
-    """The box's connector stopped, then the PC's enabled and started; the
-    public URL must name the PC's build."""
+def box_stopped(ip, host: str) -> None:
     code, _, err = box(host, BOX_STOP, b"", BOX_S)
-    code2, out, _ = box(host, BOX_STATE, b"", BOX_S)
+    _, out, _ = box(host, BOX_STATE, b"", BOX_S)
     if code != 0 or out.decode(errors="replace").strip() != "inactive":
-        raise ip.StepError(f"gen3-tunnel: the box's connector did not stop (exit {code}, {code2}): "
+        raise ip.StepError(f"gen3-tunnel: the box's connector did not stop (exit {code}): "
                            f"{err.decode(errors='replace').strip()[-300:]}")
+
+
+def to_pc(ip, env: dict[str, str], host: str, url: str) -> dict:
+    """The PC's connector enabled and started first (never no connector: a
+    PC that cannot be reached leaves the box's running), then the box's
+    stopped; the public URL must name the PC's build."""
     pc_state(ip, env, PC_START, "Running Auto", "start")
     want = pc_hash(ip, env)
+    box_stopped(ip, host)
     if not wait_public(url, want, PUBLIC_S):
         raise ip.StepError(f"gen3-tunnel: the public URL does not name the PC's build {want} within {PUBLIC_S} s")
     return {"serves": "pc", "build": want}
 
 
 def to_box(ip, env: dict[str, str], host: str, url: str) -> dict:
+    """The box's connector started first (Type=notify: started means
+    connected), then the PC's stopped and Disabled; the public URL must name
+    the box's build. Any failure puts the PC's connector back."""
     credential_ok(ip, host, make_owner_only=False)   # the token is there (`gen3-tunnel token` once)
-    want = box_hash(ip, host)
-    pc_state(ip, env, PC_STOP, "Stopped Disabled", "stop and stay disabled")
+    want, pc = box_hash(ip, host), pc_hash(ip, env)
+    if want == pc:
+        raise ip.StepError(f"gen3-tunnel: the PC and the box both run {want}: the public URL cannot tell them apart "
+                           "(deploy another build on the box)")
     try:
         code, _, err = box(host, BOX_START, b"", BOX_S)
         if code != 0:
             raise ip.StepError(f"gen3-tunnel: the box's connector did not start (exit {code}): "
                                f"{err.decode(errors='replace').strip()[-300:]}")
+        pc_state(ip, env, PC_STOP, "Stopped Disabled", "stop and stay disabled")
         if not wait_public(url, want, PUBLIC_S):
             raise ip.StepError(f"gen3-tunnel: the public URL does not name the box's build {want} within "
                                f"{PUBLIC_S} s")
-    except ip.StepError as e:
+    except BaseException as e:
         try:
             to_pc(ip, env, host, url)
-        except ip.StepError as back:
+        except BaseException as back:   # reported with the cause, never instead of it
             raise ip.StepError(f"{e}; putting the PC's connector back failed too: {back}") from None
+        if not isinstance(e, Exception):
+            raise
         raise ip.StepError(f"{e}; the PC's connector serves again") from None
     return {"serves": "box", "build": want}
 

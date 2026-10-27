@@ -127,3 +127,4 @@ root | systemctl stop iem-tunnel
 # engine, server and connector start at boot; the way back disables them.
 root | systemctl enable iem-engine iem-server iem-tunnel
 root | systemctl disable iem-tunnel
+iemmixer | rm -f /var/lib/iem-dante/takeover.toml

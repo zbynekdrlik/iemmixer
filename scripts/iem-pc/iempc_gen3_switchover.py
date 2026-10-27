@@ -51,6 +51,11 @@ START = "sudo -n systemctl start iem-engine iem-server"
 ENABLE = "sudo -n systemctl enable iem-engine iem-server iem-tunnel"
 DISABLE = "sudo -n systemctl disable iem-dante iem-engine iem-server"
 DISABLE_TUNNEL = "sudo -n systemctl disable iem-tunnel"
+STACK_STATE = "systemctl is-active iem-server iem-engine iem-dante"
+# A takeover state of an earlier switch would bring back its TX names (the
+# device prefers a state file's names over its config's): each switch starts
+# from none.
+RESET_STATE = f"sudo -n -u iemmixer rm -f {switch.TAKEOVER_STATE}"
 HEALTH = "/opt/iemmixer/bin/iem-dante-dev health"
 STATUS = "/opt/iemmixer/bin/iem-dante-dev ctl status"
 KEYS = ("GEN3_HOST", "GEN3_DANTE_IP", "GEN3_DANTE_NAME", "GEN3_CARD_SPARE", "GEN3_DEVICE_CONFIG", "GEN3_PUBLIC_URL",
@@ -65,9 +70,14 @@ class Failed(Exception):
 
 
 def copy(host: str, local: str, remote: str) -> int:
-    """scp of one file to the box (tests replace it)."""
-    return subprocess.run(["scp", "-q", "-o", "BatchMode=yes", local, f"{host}:{remote}"],
-                          capture_output=True, timeout=60).returncode
+    """scp of one file to the box (tests replace it); past its bound left to
+    end by itself, never ended by force (I8)."""
+    proc = subprocess.Popen(["scp", "-q", "-o", "BatchMode=yes", local, f"{host}:{remote}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        return proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        return data.STILL_RUNNING
 
 
 def on_box(host: str, command: str) -> tuple[int, str]:
@@ -79,11 +89,15 @@ def settings(ip, env: dict[str, str]) -> dict[str, str]:
     missing = [k for k in KEYS if not env.get(k)]
     if missing:
         raise ip.Refused(f"gen3-switch: {', '.join(missing)} missing in the private env")
+    if env["GEN3_HOST"].startswith("-"):
+        raise ip.Refused("gen3-switch: GEN3_HOST must be an ssh destination, not an option")
     for key in ("GEN3_DANTE_NAME", "GEN3_CARD_SPARE", "DANTE_IEM_NAME"):
         if not dante_card.DEVICE_NAME.fullmatch(env[key]):
             raise ip.Refused(f"gen3-switch: {key} is not a Dante device name")
-    if env["GEN3_CARD_SPARE"] == env["DANTE_IEM_NAME"]:
-        raise ip.Refused("gen3-switch: GEN3_CARD_SPARE must differ from DANTE_IEM_NAME")
+    names = [env[k].lower() for k in ("GEN3_CARD_SPARE", "DANTE_IEM_NAME", "GEN3_DANTE_NAME")]
+    if len(set(names)) != 3:
+        raise ip.Refused("gen3-switch: GEN3_CARD_SPARE, DANTE_IEM_NAME and GEN3_DANTE_NAME must differ (Dante names "
+                         "ignore case)")
     if not Path(env["GEN3_DEVICE_CONFIG"]).is_file():
         raise ip.Refused("gen3-switch: GEN3_DEVICE_CONFIG is not a file (the ops device config)")
     return {k: env[k] for k in KEYS}
@@ -150,6 +164,40 @@ def live_tx_flows(s: dict[str, str]) -> int:
         return 0
 
 
+def stack_stopped(s: dict[str, str]) -> bool:
+    code, out = on_box(s["GEN3_HOST"], STACK_STATE)
+    return out.split() == ["inactive"] * 3
+
+
+def stop_box(ip, s: dict[str, str]) -> None:
+    on_box(s["GEN3_HOST"], STOP)
+    if not stack_stopped(s):
+        raise Failed("the box's stack does not read back stopped")
+
+
+def name_back(ip, s: dict[str, str]) -> None:
+    """The card's name back, only once nothing of ours can announce it: our
+    stack stopped and our device not answering with it (never two devices
+    under one name)."""
+    name, spare = s["DANTE_IEM_NAME"], s["GEN3_CARD_SPARE"]
+    if not stack_stopped(s) or answers_as(ip, s["GEN3_DANTE_IP"], name):
+        raise Failed("our device may still hold the card's name: the card stays on its spare name")
+    if answers_as(ip, s["DANTE_IEM_HOST"], name):
+        return
+    if not answers_as(ip, s["DANTE_IEM_HOST"], spare):
+        raise Failed("the card answers with neither of its names")
+    rename_card(ip, s, spare, name)
+
+
+def flag(ip) -> None:
+    if ip.event_now():
+        raise Failed("the flag appeared: an event is on; the switch goes back to 2.x")
+
+
+def changed_files(before: dict[str, str], after: dict[str, str]) -> int:
+    return sum(1 for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+
 def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
     host, name, spare = s["GEN3_HOST"], s["DANTE_IEM_NAME"], s["GEN3_CARD_SPARE"]
     labels = {int(n): v for n, v in iempc_dante.ask_card(ip, card(ip, s, name), "read").get("tx", {}).items()}
@@ -160,25 +208,30 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
     tunnel.credential_ok(ip, host, make_owner_only=False)
     if dry_run:
         return {"dry_run": True, "steps": ["band", "config", "card", "start", "mirror", "url", "boot"]}
+    usual = Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8")
     done: list[str] = []
     undo: list = []
     try:
-        must(ip, s, STOP, "stopping the stack")
+        stop_box(ip, s)
         report = data.send_band(ip, ctx.env, host, ctx.watch(abandon=False))
         data.pepper(ip, ctx.env, host, ctx.watch(abandon=False))
         done.append("band")
-        usual = Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8")
-        install_config(ip, s, config)
+        flag(ip)
         undo.append(lambda: install_config(ip, s, usual))
+        install_config(ip, s, config)
+        must(ip, s, RESET_STATE, "clearing an earlier takeover state")
         done.append("config")
+        undo.append(lambda: name_back(ip, s))
         rename_card(ip, s, name, spare)
-        undo.append(lambda: rename_card(ip, s, spare, name))
         done.append("card")
+        flag(ip)
+        record(ip, 3)   # from here "ide event" keeps the box (a failure below records 2 again once undone)
+        undo.append(lambda: stop_box(ip, s))
         must(ip, s, START, "starting the engine and the server")
-        undo.append(lambda: must(ip, s, STOP, "stopping the stack"))
         if not wait(lambda: on_box(host, HEALTH)[0] == 0 and answers_as(ip, s["GEN3_DANTE_IP"], name), HEALTH_S):
             raise Failed(f"the box is not healthy under the card's name within {HEALTH_S} s")
         done.append("start")
+        flag(ip)
         sent, why = switch.mirror(ip, switch.Device(s["DANTE_IEM_HOST"], spare),
                                   switch.Device(s["GEN3_DANTE_IP"], name), also=(name,))
         if why:
@@ -186,26 +239,36 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         if not wait(lambda: live_tx_flows(s) > 0, TX_S):
             raise Failed(f"no receiver asked our device for a flow within {TX_S} s")
         done.append("mirror")
-        tunnel.to_box(ip, ctx.env, host, s["GEN3_PUBLIC_URL"])
+        flag(ip)
         undo.append(lambda: tunnel.to_pc(ip, ctx.env, host, s["GEN3_PUBLIC_URL"]))
+        tunnel.to_box(ip, ctx.env, host, s["GEN3_PUBLIC_URL"])
         done.append("url")
+        undo.append(lambda: (must(ip, s, DISABLE, "disabling the stack at boot"),
+                             must(ip, s, DISABLE_TUNNEL, "disabling the connector at boot")))
         must(ip, s, ENABLE, "enabling the box's units at boot")
         done.append("boot")
-    except (Failed, ip.StepError) as e:
+    except BaseException as e:   # every way out of the try undoes it: a timeout, a Ctrl-C, a flag
         left = []
         for step in reversed(undo):
             try:
                 step()
-            except (Failed, ip.StepError) as u:
+            except Exception as u:   # each undo is tried; what failed is reported
                 left.append(str(u))
+        if not left:
+            record(ip, 2)
+        if not isinstance(e, Exception):
+            raise
         raise ip.StepError(f"gen3-switch to-3 stopped after {done or 'nothing'}: {e}; "
-                           + (f"undo failed: {'; '.join(left)}" if left else "2.x serves again")) from None
-    record(ip, 3)
-    return {"serves": "3.x", "steps": done, "files": report["members"], "mirrored": sent}
+                           + (f"undo failed, 3.x may still hold the band ({'; '.join(left)}): run "
+                              "`iempc gen3-switch to-2`" if left else "undone: 2.x serves again")) from None
+    # The PC's band files may have changed between the copy and the URL's move.
+    _, after = data.band_zip(ip, ctx.env, ctx.watch(abandon=False))
+    return {"serves": "3.x", "steps": done, "files": report["members"], "mirrored": sent,
+            "changed_during_switch": changed_files(report["manifest"], after)}
 
 
 def to_2(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
-    host, name, spare = s["GEN3_HOST"], s["DANTE_IEM_NAME"], s["GEN3_CARD_SPARE"]
+    host = s["GEN3_HOST"]
     if dry_run:
         return {"dry_run": True, "steps": ["url", "boot", "stop", "card", "config"]}
     done: list[str] = []
@@ -215,14 +278,13 @@ def to_2(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         must(ip, s, DISABLE, "disabling the stack at boot")
         must(ip, s, DISABLE_TUNNEL, "disabling the connector at boot")
         done.append("boot")
-        must(ip, s, STOP, "stopping the stack")
+        stop_box(ip, s)
         done.append("stop")
-        if not answers_as(ip, s["DANTE_IEM_HOST"], name):   # a way back run again finds the card's name back
-            rename_card(ip, s, spare, name)
+        name_back(ip, s)
         done.append("card")
         install_config(ip, s, Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8"))
         done.append("config")
-    except (Failed, ip.StepError) as e:
+    except Exception as e:
         raise ip.StepError(f"gen3-switch to-2 stopped after {done or 'nothing'}: {e} (run it again once the "
                            "cause is fixed)") from None
     record(ip, 2)
