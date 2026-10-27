@@ -1515,6 +1515,17 @@ class UnitTests(unittest.TestCase):
             self.assertNotIn("RuntimeDirectory", unit["Service"])
             self.assertNotIn("RuntimeDirectoryMode", unit["Service"])
 
+    def test_the_state_folders_open_to_the_service_group_only(self) -> None:
+        # 0750, as provision makes them: systemd sets a state folder to its
+        # StateDirectoryMode (0755 when unset) at every start of a unit that
+        # names it, so all three units name the same mode.
+        engine, device, server = (self.units[n] for n in ("iem-engine", "iem-dante", "iem-server"))
+        for unit, folders in ((engine, "iemmixer iem-dante"), (device, "iem-dante"), (server, "iemmixer")):
+            self.assertEqual(one(unit, "Service", "StateDirectory"), folders)
+            self.assertEqual(one(unit, "Service", "StateDirectoryMode"), "0750")
+        self.assertNotIn("StateDirectory", self.alarm()["Service"])
+        self.assertNotIn("StateDirectoryMode", self.alarm()["Service"])
+
     def test_the_engine_unit_restarts_except_on_a_usage_or_card_refusal(self) -> None:
         engine = self.units["iem-engine"]
         self.assertEqual(one(engine, "Service", "RestartPreventExitStatus"), "2 3")
