@@ -18,7 +18,9 @@ mirrored: our RX stays unsubscribed there. Names reach only stdout, never a
 log or a refusal's words."""
 from __future__ import annotations
 
+import json
 import sys
+import tomllib
 from dataclasses import dataclass
 
 import dante_card
@@ -27,6 +29,50 @@ import gen3_arc
 KEYS = (("DANTE_IEM_HOST", "DANTE_IEM_NAME", "the IEM card"), ("GEN3_DANTE_IP", "GEN3_DANTE_NAME",
                                                                "our Gen 3 device"))
 SEQ_BASE = 0x4700   # our requests' sequence numbers (any 16-bit value; one per change)
+
+
+TAKEOVER_STATE = "/var/lib/iem-dante/takeover.toml"
+
+
+class TakeoverError(Exception):
+    """The card's labels cannot become our TX names, or the config is not one to edit."""
+
+
+def takeover_config(ops_text: str, labels: dict[int, str], card_name: str) -> str:
+    """Our device config under the card's name (phase E Task 3, the takeover
+    proven live on #72): `name` the card's, `state_file` one of its own
+    (a name saved in the usual state file would win over the config's), and
+    every TX name the card's label of that channel, so each channel a
+    receiver subscribes to by name exists on our device. Every other line is
+    kept as it is. The config's `name`, `state_file` and `tx = [` ... `]`
+    must each be one top-level entry (as the ops and test configs write
+    them)."""
+    if not dante_card.DEVICE_NAME.fullmatch(card_name):
+        raise TakeoverError("the card's name is not a Dante device name")
+    lines = ops_text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("tx = [")]
+    ends = [i for i, line in enumerate(lines) if line == "]" and starts and i > starts[0]]
+    names = [i for i, line in enumerate(lines) if line.startswith("name = ")]
+    states = [i for i, line in enumerate(lines) if line.startswith("state_file = ")]
+    if len(starts) != 1 or not ends or len(names) != 1 or len(states) != 1:
+        raise TakeoverError("the device config has no single name, state_file and tx = [ ... ] to replace")
+    first, last = starts[0], ends[0]
+    count = len(tomllib.loads(ops_text)["tx"])
+    want = [labels.get(n) for n in range(1, count + 1)]
+    if any(not isinstance(w, str) or not w or set(w) & dante_card.FORBIDDEN for w in want):
+        raise TakeoverError(f"the card has no label for each of our {count} TX channels")
+    if len(set(want)) != count:
+        raise TakeoverError("the card's labels of our TX channels are not unique")
+    out = list(lines)
+    out[names[0]] = f"name = {json.dumps(card_name)}"
+    out[states[0]] = f"state_file = {json.dumps(TAKEOVER_STATE)}"
+    out[first:last + 1] = ["tx = [", *(f"  {json.dumps(w)}," for w in want), "]"]
+    text = "\n".join(out) + "\n"
+    new, old = tomllib.loads(text), tomllib.loads(ops_text)
+    if {k: v for k, v in new.items() if k not in ("name", "state_file", "tx")} != \
+            {k: v for k, v in old.items() if k not in ("name", "state_file", "tx")} or new["tx"] != want:
+        raise TakeoverError("the edited config does not read back as the takeover")
+    return text
 
 
 class PlanError(Exception):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -59,6 +60,40 @@ class PlanTests(unittest.TestCase):
                 switch.mirror_plan(doc(4, {}), d, CARD)
             with self.subTest(card=d), self.assertRaises(switch.PlanError):
                 switch.mirror_plan(d, doc(4, {}), CARD)
+
+
+class TakeoverTests(unittest.TestCase):
+    """Phase E Task 3: our device config under the card's name (#72)."""
+    TEST = (HERE.parent.parent / "config" / "test-dante-device.toml").read_text(encoding="utf-8")
+
+    def labels(self, count: int) -> dict[int, str]:
+        return {n: f"ZYXQW inear L {n:02d}" for n in range(1, count + 1)}
+
+    def test_name_state_file_and_tx_names_change_and_nothing_else(self) -> None:
+        base = tomllib.loads(self.TEST)
+        got = switch.takeover_config(self.TEST, self.labels(200), CARD)
+        new = tomllib.loads(got)
+        self.assertEqual((new["name"], new["state_file"]), (CARD, switch.TAKEOVER_STATE))
+        self.assertEqual(new["tx"], [f"ZYXQW inear L {n:02d}" for n in range(1, len(base["tx"]) + 1)])
+        self.assertEqual({k: v for k, v in new.items() if k not in ("name", "state_file", "tx")},
+                         {k: v for k, v in base.items() if k not in ("name", "state_file", "tx")})
+        # The lines outside the three entries are the same lines.
+        kept = [line for line in self.TEST.splitlines() if not line.startswith(("name = ", "state_file = "))]
+        rx_and_rest = [line for line in kept if '"' not in line or not line.startswith("  ")]
+        for line in rx_and_rest:
+            self.assertIn(line, got.splitlines())
+
+    def test_labels_that_do_not_cover_our_tx_or_repeat_are_refused(self) -> None:
+        count = len(tomllib.loads(self.TEST)["tx"])
+        labels = self.labels(count)
+        for bad in ({**{n: v for n, v in labels.items() if n != count}},
+                    {**labels, 2: labels[1]}, {**labels, 3: "a.b"}, {**labels, 4: ""}):
+            with self.assertRaises(switch.TakeoverError):
+                switch.takeover_config(self.TEST, bad, CARD)
+        with self.assertRaises(switch.TakeoverError):
+            switch.takeover_config(self.TEST, labels, "not a name")
+        with self.assertRaises(switch.TakeoverError):
+            switch.takeover_config(self.TEST.replace("\ntx = [", "\ntx2 = ["), labels, CARD)
 
 
 class MirrorCommandTests(Base):
