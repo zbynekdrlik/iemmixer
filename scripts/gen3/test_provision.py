@@ -1,0 +1,1431 @@
+"""Tests for the Gen 3 box's provisioning (#72 phase D, plan
+docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9):
+provision-root.sh on a temporary root (IEM_PROVISION_ROOT) with stand-in
+commands first on PATH that play the box's users, units, packages, owners and
+the TPM (`systemd-creds`), every call logged; napi-priority on stand-in /sys
+and /proc trees with stand-in `chrt` and `taskset`; verify_box.py on what the
+root script made (IEM_VERIFY_ROOT, the same stand-ins and a stand-in `sudo`);
+provision.sh against a stand-in `ssh` and `scp`. The rendered sudoers rule
+goes through the runner's real `visudo -cf` and `cvtsudoers`. Every value is
+synthetic (P6)."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from test_deploy import expand, parse_unit, roster_people, sudo_lines, template_lines
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+ROOT_SCRIPT = HERE / "provision-root.sh"
+PROVISION = HERE / "provision.sh"
+VERIFY = HERE / "verify_box.py"
+NAPI = HERE / "napi-priority"
+NAPI_UNIT = HERE / "iem-napi.service"
+TEMPLATE = HERE / "sudo-lines.txt"
+STAGE_FILES = ("provision-root.sh", "sudo-lines.txt", "iem-napi.service", "napi-priority")
+ADMIN = "tester"
+NTP = "ntp-master.test"
+IFACE = "ethz9"
+# Another interface whose name starts with the Dante one's: never touched.
+OTHER = "ethz90"
+NAPI_THREADS = {"4101": f"napi/{IFACE}-8193", "4102": f"napi/{IFACE}-8194"}
+OTHER_THREADS = {"1": "systemd", "4201": f"napi/{OTHER}-8195"}
+IRQS = ("131", "132")
+OTHER_IRQS = ("1", "141")
+INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
+   1:          0          0          0          9  IR-IO-APIC    1-edge      i8042
+ 131:       1200          0          0          0  IR-PCI-MSIX-0000:01:00.0    1-edge      {IFACE}-TxRx-0
+ 132:          0       1300          0          0  IR-PCI-MSIX-0000:01:00.0    2-edge      {IFACE}-TxRx-1
+ 141:          5          0          0          0  IR-PCI-MSI-0000:02:00.0    0-edge      {OTHER}
+ NMI:          0          0          0          0   Non-maskable interrupts
+"""
+SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+STEPS = ("user", "folders", "pepper", "phase-c", "journal", "apt", "sleep", "swap", "clock", "napi", "stack",
+         "sudoers")
+CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "journal", "apt", "sleep", "swap",
+          "clock", "napi")
+STACK = ("iem-engine.service", "iem-server.service", "iem-dante.service")
+
+# One stand-in for every command the box's scripts call by name, dispatched
+# on its own name. The box's state is FAKE_WORLD/db.json; each call is one
+# JSON line of calls.log, marked a write unless it only reads.
+FAKE = r'''
+import fnmatch, hashlib, json, os, subprocess, sys
+
+WORLD = os.environ["FAKE_WORLD"]
+ROOT = os.environ["FAKE_ROOT"]
+name = os.path.basename(sys.argv[0])
+args = sys.argv[1:]
+DB = os.path.join(WORLD, "db.json")
+READS = {"id", "getent", "stat", "dpkg-query", "visudo", "sudo"}
+UNIT_DEFAULT = {"LoadState": "not-found", "UnitFileState": "", "ActiveState": "inactive", "User": "",
+                "DropInPaths": ""}
+REAL_VISUDO = next((p for p in ("/usr/sbin/visudo", "/usr/bin/visudo", "/sbin/visudo") if os.access(p, os.X_OK)), None)
+
+
+def load():
+    with open(DB, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save(db):
+    with open(DB, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=1, sort_keys=True)
+
+
+def is_write():
+    if name in READS:
+        return False
+    if name in ("systemctl", "timedatectl"):
+        return args[:1] != ["show"]
+    if name == "systemd-creds":
+        return args[:1] == ["encrypt"]
+    return True
+
+
+with open(os.path.join(WORLD, "calls.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": [name] + args, "write": is_write()}) + "\n")
+
+
+def fail(text, code=1):
+    sys.stderr.write(f"{name}: {text}\n")
+    sys.exit(code)
+
+
+def unit_of(db, unit):
+    return {**UNIT_DEFAULT, **db["units"].get(unit, {}), "Id": unit}
+
+
+def stat_text(fmt, path):
+    st = os.stat(path)
+    owner, group = load()["owners"].get(os.path.realpath(path), "root root").split()
+    out = fmt.replace("%a", format(st.st_mode & 0o7777, "o")).replace("%U", owner).replace("%G", group)
+    return out.replace("%s", str(st.st_size)).replace("%n", path)
+
+
+def reload(db):
+    unit_dir = os.path.join(ROOT, "etc/systemd/system")
+    for entry in sorted(os.listdir(unit_dir)):
+        path = os.path.join(unit_dir, entry)
+        if "@" in entry or not entry.endswith((".service", ".timer", ".target")) or not os.path.isfile(path):
+            continue
+        p = db["units"].setdefault(entry, dict(UNIT_DEFAULT))
+        if p["LoadState"] == "not-found":
+            p.update(LoadState="loaded", UnitFileState="disabled", ActiveState="inactive")
+        user, dropins = "", []
+        for line in open(path, encoding="utf-8"):
+            if line.startswith("User="):
+                user = line.split("=", 1)[1].strip()
+        if os.path.isdir(path + ".d"):
+            for conf in sorted(os.listdir(path + ".d")):
+                dropins.append(f"/etc/systemd/system/{entry}.d/{conf}")
+                for line in open(os.path.join(path + ".d", conf), encoding="utf-8"):
+                    if line.startswith("User="):
+                        user = line.split("=", 1)[1].strip()
+        p["User"] = user if entry.endswith(".service") else ""
+        p["DropInPaths"] = " ".join(dropins)
+
+
+def run_napi():
+    """systemd running iem-napi.service's ExecStart; its output is the journal's."""
+    with open(os.path.join(ROOT, "etc/iemmixer/iem-dante.env"), encoding="utf-8") as f:
+        iface = [line.split("=", 1)[1].strip() for line in f if line.startswith("IEM_DANTE_IFACE=")][-1]
+    env = {**os.environ, "IEM_NAPI_SYS": os.path.join(ROOT, "sys"), "IEM_NAPI_PROC": os.path.join(ROOT, "proc"),
+           "IEM_NAPI_IFACE_WAIT": "2", "IEM_NAPI_THREAD_WAIT": "2"}
+    with open(os.path.join(WORLD, "journal.log"), "a", encoding="utf-8") as journal:
+        return subprocess.run([os.path.join(ROOT, "usr/local/lib/iemmixer/napi-priority"), iface], env=env,
+                              stdout=journal, stderr=journal).returncode
+
+
+def proc_file(pid, leaf):
+    return os.path.join(os.environ["IEM_NAPI_PROC"], pid, leaf)
+
+
+if name == "id":
+    db = load()
+    if args == ["-u"]:
+        print(db["uid"])
+    elif args == ["-un"]:
+        print(db["user"])
+    else:
+        fail("unexpected id call", 97)
+elif name == "getent":
+    table, key = args
+    line = load()[table].get(key)
+    if line is None:
+        sys.exit(2)
+    print(line)
+elif name == "groupadd":
+    db = load()
+    assert args[0] == "--system", args
+    group = args[-1]
+    if group in db["group"]:
+        fail(f"group '{group}' already exists", 9)
+    db["group"][group] = f"{group}:x:{db['next_id']}:"
+    db["next_id"] += 1
+    save(db)
+elif name == "useradd":
+    db = load()
+    opts, user = args[:-1], args[-1]
+    want = ["--system", "--gid", "iemmixer", "--no-create-home", "--home-dir", "/nonexistent", "--shell",
+            "/usr/sbin/nologin"]
+    if opts != want:
+        fail(f"unexpected options {opts}", 97)
+    gid = db["group"]["iemmixer"].split(":")[2]
+    db["passwd"][user] = f"{user}:x:{db['next_id']}:{gid}::/nonexistent:/usr/sbin/nologin"
+    db["next_id"] += 1
+    save(db)
+elif name == "usermod":
+    db = load()
+    if args[:3] != ["--append", "--groups", "iemmixer"]:
+        fail("unexpected usermod", 97)
+    gname, pw, gid, members = db["group"]["iemmixer"].split(":")
+    members = [m for m in members.split(",") if m] + [args[3]]
+    db["group"]["iemmixer"] = ":".join([gname, pw, gid, ",".join(members)])
+    save(db)
+elif name == "install":
+    real, owner, group, positional, dirs, rest = [], None, None, [], False, list(args)
+    while rest:
+        a = rest.pop(0)
+        if a == "--":
+            positional += rest
+            break
+        if a in ("-o", "-g"):
+            value = rest.pop(0)
+            owner, group = (value, group) if a == "-o" else (owner, value)
+        elif a == "-m":
+            real += [a, rest.pop(0)]
+        elif a.startswith("-"):
+            real.append(a)
+            dirs = dirs or a == "-d"
+        else:
+            positional.append(a)
+    rc = subprocess.run(["/usr/bin/install", *real, "--", *positional]).returncode
+    if rc:
+        sys.exit(rc)
+    db = load()
+    for target in (positional if dirs else positional[-1:]):
+        db["owners"][os.path.realpath(target)] = f"{owner or 'root'} {group or 'root'}"
+    save(db)
+elif name == "stat":
+    rest = [a for a in args if a != "--"]
+    assert rest[0] == "-c", rest
+    if not os.path.exists(rest[2]):
+        fail(f"cannot statx '{rest[2]}': No such file or directory")
+    print(stat_text(rest[1], rest[2]))
+elif name == "systemctl":
+    db = load()
+    verb, rest = args[0], args[1:]
+    if verb == "show":
+        props, value_only, units = [], False, []
+        for a in rest:
+            if a.startswith("--property="):
+                props = a.split("=", 1)[1].split(",")
+            elif a == "--value":
+                value_only = True
+            else:
+                units.append(a)
+        blocks = []
+        for unit in units:
+            p = unit_of(db, unit)
+            blocks.append("\n".join(p[k] if value_only else f"{k}={p[k]}" for k in props))
+        print(("\n" if value_only else "\n\n").join(blocks))
+        sys.exit(0)
+    if verb == "daemon-reload":
+        reload(db)
+        save(db)
+        sys.exit(0)
+    now = "--now" in rest
+    for unit in (a for a in rest if not a.startswith("--")):
+        p = db["units"].setdefault(unit, dict(UNIT_DEFAULT))
+        if verb == "mask":
+            p.update(LoadState="masked", UnitFileState="masked")
+            if now:
+                p["ActiveState"] = "inactive"
+        elif verb in ("enable", "disable"):
+            if p["LoadState"] != "loaded":
+                fail(f"Unit file {unit} does not exist.")
+            p["UnitFileState"] = "enabled" if verb == "enable" else "disabled"
+            if now:
+                p["ActiveState"] = "active" if verb == "enable" else "inactive"
+        elif verb in ("start", "restart"):
+            if p["LoadState"] != "loaded":
+                fail(f"Unit {unit} not found.", 5)
+            if unit == "iem-napi.service":
+                rc = run_napi()
+                p["ActiveState"] = "active" if rc == 0 else "failed"
+                if rc:
+                    save(db)
+                    fail(f"Job for {unit} failed.")
+            else:
+                p["ActiveState"] = "active"
+        elif verb == "stop":
+            p["ActiveState"] = "inactive"
+        else:
+            fail(f"unexpected systemctl {verb}", 97)
+    save(db)
+elif name == "timedatectl":
+    db = load()
+    if args == ["show", "--property=NTP", "--value"]:
+        print(db["ntp"])
+    elif args == ["set-ntp", "false"]:
+        db["ntp"] = "no"
+        save(db)
+    else:
+        fail("unexpected timedatectl", 97)
+elif name == "dpkg-query":
+    fmt, patterns, rest = "${Package}\n", [], list(args)
+    while rest:
+        a = rest.pop(0)
+        if a == "-W":
+            continue
+        if a == "-f":
+            fmt = rest.pop(0)
+        else:
+            patterns.append(a)
+    fmt = fmt.replace("\\n", "\n")
+    db, found, out = load(), True, []
+    for pattern in patterns:
+        hits = sorted(p for p in db["packages"] if fnmatch.fnmatchcase(p, pattern))
+        if not hits:
+            found = False
+            sys.stderr.write(f"dpkg-query: no packages found matching {pattern}\n")
+        out += [fmt.replace("${Package}", p).replace("${Status}", db["packages"][p]) for p in hits]
+    sys.stdout.write("".join(out))
+    sys.exit(0 if found else 1)
+elif name == "apt-mark":
+    db = load()
+    assert args[0] == "hold", args
+    for package in args[1:]:
+        db["packages"][package] = "hold ok installed"
+        print(f"{package} set on hold.")
+    save(db)
+elif name == "apt-get":
+    db = load()
+    if args[:2] != ["purge", "-y"] or os.environ.get("DEBIAN_FRONTEND") != "noninteractive":
+        fail("unexpected apt-get", 97)
+    for package in args[2:]:
+        db["packages"].pop(package, None)
+    save(db)
+elif name == "systemd-creds":
+    if args[:1] == ["has-tpm2"]:
+        sys.exit(int(os.environ.get("FAKE_TPM2_RC", "1")))
+    if args[:4] != ["encrypt", "--name=pepper", "--with-key=auto", "-"] or len(args) != 5:
+        fail("unexpected systemd-creds", 97)
+    data = sys.stdin.buffer.read()
+    with open(os.path.join(WORLD, "creds-input.hex"), "w", encoding="utf-8") as f:
+        f.write(data.hex())
+    fd = os.open(args[4], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    os.write(fd, b"FAKE-SEALED " + hashlib.sha256(data).hexdigest().encode() + b"\n")
+    os.close(fd)
+elif name == "visudo":
+    if args[:1] != ["-cf"] or REAL_VISUDO is None:
+        fail("unexpected visudo call, or no visudo on this machine", 127)
+    sys.exit(subprocess.run([REAL_VISUDO, *args]).returncode)
+elif name == "fallocate":
+    path = args[-1]
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    os.write(fd, bytes(4096))
+    os.close(fd)
+elif name == "mkswap":
+    with open(args[-1], "r+b") as f:
+        f.seek(4086)
+        f.write(b"SWAPSPACE2")
+elif name == "swapon":
+    path = args[-1]
+    with open(os.path.join(ROOT, "proc/swaps"), "a", encoding="utf-8") as f:
+        f.write(f"{path[len(ROOT):]}\tfile\t\t4\t\t0\t\t-2\n")
+elif name == "chrt":
+    assert args[:2] == ["-f", "-p"], args
+    priority, pid = args[2], args[3]
+    if not os.environ.get("FAKE_CHRT_IGNORED"):
+        with open(proc_file(pid, "stat"), encoding="utf-8") as f:
+            head, _, tail = f.read().rpartition(") ")
+        fields = tail.split()
+        fields[37], fields[38] = priority, "1"
+        with open(proc_file(pid, "stat"), "w", encoding="utf-8") as f:
+            f.write(head + ") " + " ".join(fields) + "\n")
+elif name == "taskset":
+    assert args[:2] == ["-p", "-c"], args
+    cores, pid = args[2], args[3]
+    print(f"pid {pid}'s current affinity list: 0-3")
+    print(f"pid {pid}'s new affinity list: {cores}")
+    with open(proc_file(pid, "status"), "w", encoding="utf-8") as f:
+        f.write(f"Name:\tnapi\nCpus_allowed_list:\t{cores}\n")
+elif name == "sudo":
+    rest = args[1:] if args[:1] == ["-n"] else fail("a sudo without -n", 97)
+    if rest == ["visudo", "-c"]:
+        path = os.path.join(ROOT, "etc/sudoers.d/iemmixer-gen3")
+        if not os.path.exists(path) or REAL_VISUDO is None:
+            fail("visudo: unable to open the rule")
+        sys.exit(subprocess.run([REAL_VISUDO, "-cf", path], stdout=subprocess.DEVNULL).returncode)
+    if rest[:2] == ["stat", "-c"] and len(rest) == 4:
+        path = ROOT + rest[3]
+        if not os.path.exists(path):
+            fail("stat: No such file or directory")
+        print(stat_text(rest[2], path))
+        sys.exit(0)
+    if rest[:1] == ["find"] and rest[2:] == ["-name", "pepper.test"]:
+        base = ROOT + rest[1]
+        if not os.path.isdir(base):
+            fail(f"find: '{rest[1]}': No such file or directory")
+        for folder, _, files in os.walk(base):
+            for leaf in files:
+                if leaf == "pepper.test":
+                    print(os.path.join(folder, leaf)[len(ROOT):])
+        sys.exit(0)
+    fail("a password is required")
+else:
+    fail("no stand-in for this name", 97)
+'''
+
+FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
+              "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
+              "chrt", "taskset", "sudo")
+
+
+def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
+    """A /proc/<pid>/stat line: fields 3 to 52, rt_priority field 40, policy 41."""
+    fields = ["S"] + ["0"] * 49
+    fields[40 - 3], fields[41 - 3] = str(priority), str(policy)
+    return f"{pid} ({comm}) " + " ".join(fields) + "\n"
+
+
+def write(path: Path, text: str | bytes, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    else:
+        path.write_text(text, encoding="utf-8")
+    if mode is not None:
+        path.chmod(mode)
+
+
+def kernel_trees(root: Path, applied: bool) -> None:
+    """/sys and /proc as the kernel leaves them (or as napi-priority sets
+    them): the Dante interface and another one whose name starts with it."""
+    for iface in (IFACE, OTHER):
+        write(root / "sys/class/net" / iface / "threaded", "1\n" if applied and iface == IFACE else "0\n")
+    for pid, comm in {**NAPI_THREADS, **OTHER_THREADS}.items():
+        mine = applied and pid in NAPI_THREADS
+        write(root / "proc" / pid / "comm", comm + "\n")
+        write(root / "proc" / pid / "stat", stat_line(pid, comm, 1 if mine else 0, 60 if mine else 0))
+        write(root / "proc" / pid / "status", f"Name:\tx\nCpus_allowed_list:\t{'0' if mine else '0-3'}\n")
+    write(root / "proc/interrupts", INTERRUPTS)
+    for irq in (*IRQS, *OTHER_IRQS):
+        write(root / "proc/irq" / irq / "smp_affinity_list", "0\n" if applied and irq in IRQS else "0-3\n")
+
+
+class World(unittest.TestCase):
+    """A phase C box: the stack's units with their 10-user.conf drop-ins, the
+    synthetic band's test pepper, dantesync installed (not yet enabled),
+    systemd-timesyncd, rsyslog, irqbalance, the apt timers, no swap, the
+    kernel trees as the kernel leaves them."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = self.tmp / "root"
+        self.world = self.tmp / "world"
+        self.stage = self.tmp / "home" / ".cache" / "iem-gen3-provision"
+        self.worktmp = self.tmp / "tmp"
+        for folder in (self.root, self.world, self.stage, self.worktmp):
+            folder.mkdir(parents=True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        for name in FAKE_NAMES:
+            p = self.bin / name
+            p.write_text(f"#!{sys.executable}\n{FAKE}", encoding="utf-8")
+            p.chmod(0o755)
+        for name in STAGE_FILES:
+            shutil.copyfile(HERE / name, self.stage / name)
+        write(self.stage / "ntp-server", NTP + "\n")
+        write(self.stage / "roster-ids", "".join(p + "\n" for p in roster_people()))
+        self.env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+                    "FAKE_WORLD": str(self.world), "FAKE_ROOT": str(self.root),
+                    "IEM_PROVISION_ROOT": str(self.root), "IEM_VERIFY_ROOT": str(self.root),
+                    "TMPDIR": str(self.worktmp)}
+        self.build_box()
+
+    def build_box(self) -> None:
+        r = self.root
+        # The programs sudo-lines.txt names, where sudo's secure_path finds them.
+        for program in self.template_programs():
+            write(r / ("usr/sbin" if program == "visudo" else "usr/bin") / program, "#!/bin/sh\n", 0o755)
+        write(r / "usr/local/bin/dantesync", "#!/bin/sh\n", 0o755)
+        write(r / "etc/systemd/system/dantesync.service", "[Service]\nUser=root\nExecStart=/usr/local/bin/dantesync\n")
+        write(r / "etc/dantesync/config.json", json.dumps({"ntp_server": NTP, "ntp_server_mode": {"enabled": False}}))
+        write(r / "etc/iemmixer/iem-dante.env", f"IEM_DANTE_IFACE={IFACE}\n")
+        (r / "etc/iemmixer").chmod(0o755)
+        for unit in STACK:
+            write(r / "etc/systemd/system" / unit, "[Service]\nExecStart=/opt/iemmixer/bin/iem-engine run\n")
+            write(r / "etc/systemd/system" / f"{unit}.d" / "10-user.conf", f"[Service]\nUser={ADMIN}\n")
+        secrets = r / "var/lib/iemmixer/site/secrets"
+        for leaf in ("pepper.test", "pin_hashes.json", "jwt_secret"):
+            write(secrets / leaf, f"synthetic {leaf}\n", 0o600)
+        (r / "etc/sudoers.d").mkdir(parents=True)
+        (r / "etc/apt/apt.conf.d").mkdir(parents=True)
+        write(r / "etc/fstab", "# /etc/fstab: static file system information.\nUUID=0000 / ext4 defaults 0 1\n")
+        write(r / "proc/meminfo", "MemTotal:       16123456 kB\nMemFree:         9000000 kB\n")
+        write(r / "proc/swaps", SWAPS_HEADER)
+        kernel_trees(r, applied=False)
+        units = {
+            **{u: {"LoadState": "loaded", "UnitFileState": "disabled", "ActiveState": "inactive", "User": ADMIN,
+                   "DropInPaths": f"/etc/systemd/system/{u}.d/10-user.conf"} for u in STACK},
+            "dantesync.service": {"LoadState": "loaded", "UnitFileState": "disabled", "ActiveState": "inactive",
+                                  "User": "root"},
+            "systemd-journald.service": {"LoadState": "loaded", "UnitFileState": "static", "ActiveState": "active"},
+            "systemd-timesyncd.service": {"LoadState": "loaded", "UnitFileState": "enabled", "ActiveState": "active"},
+            "irqbalance.service": {"LoadState": "loaded", "UnitFileState": "enabled", "ActiveState": "active"},
+            "unattended-upgrades.service": {"LoadState": "loaded", "UnitFileState": "enabled",
+                                            "ActiveState": "active"},
+            "apt-daily.timer": {"LoadState": "loaded", "UnitFileState": "enabled", "ActiveState": "active"},
+            "apt-daily-upgrade.timer": {"LoadState": "loaded", "UnitFileState": "enabled", "ActiveState": "active"},
+            **{t: {"LoadState": "loaded", "UnitFileState": "static", "ActiveState": "inactive"}
+               for t in ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")},
+        }
+        # Phase C's deploy left the standalone device enabled on this box.
+        units["iem-dante.service"]["UnitFileState"] = "enabled"
+        self.save_db({
+            "uid": "0", "user": ADMIN, "next_id": 990, "ntp": "yes", "owners": {},
+            "passwd": {ADMIN: f"{ADMIN}:x:1000:1000::/home/{ADMIN}:/bin/bash", "root": "root:x:0:0::/root:/bin/bash"},
+            "group": {ADMIN: f"{ADMIN}:x:1000:", "systemd-journal": "systemd-journal:x:999:"},
+            "units": units,
+            "packages": {"rsyslog": "install ok installed", "linux-generic": "install ok installed",
+                         "linux-image-generic": "install ok installed",
+                         "linux-headers-generic": "install ok installed",
+                         "linux-image-7.0.0-1-generic": "install ok installed",
+                         "linux-firmware": "install ok installed"},
+        })
+
+    @staticmethod
+    def template_programs() -> set[str]:
+        return {command.split()[0] for _runas, command in template_lines() if not command.startswith("/")}
+
+    # The world.
+
+    def db(self) -> dict:
+        return json.loads((self.world / "db.json").read_text(encoding="utf-8"))
+
+    def save_db(self, db: dict) -> None:
+        (self.world / "db.json").write_text(json.dumps(db, indent=1, sort_keys=True), encoding="utf-8")
+
+    def set_unit(self, unit: str, **props: str) -> None:
+        db = self.db()
+        db["units"].setdefault(unit, {"LoadState": "loaded", "UnitFileState": "disabled",
+                                      "ActiveState": "inactive"}).update(props)
+        self.save_db(db)
+
+    def calls(self) -> list[dict]:
+        log = self.world / "calls.log"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def clear_calls(self) -> None:
+        (self.world / "calls.log").unlink(missing_ok=True)
+
+    def norm(self, arg: str) -> str:
+        """A path in a logged call as the box sees it."""
+        for prefix, shown in ((str(self.stage), "<stage>"), (str(self.worktmp), "<tmp>"), (str(self.root), "")):
+            if arg.startswith(prefix + "/"):
+                rest = arg[len(prefix):]
+                return f"{shown}{rest}" if shown != "<tmp>" else "<tmp>"
+        return arg
+
+    def writes(self) -> list[list[str]]:
+        return [[self.norm(a) for a in c["argv"]] for c in self.calls() if c["write"]]
+
+    def tree(self) -> dict[str, tuple[int, bytes]]:
+        """Every file under the root: (mode, bytes)."""
+        out = {}
+        for path in sorted(self.root.rglob("*")):
+            if path.is_file():
+                out[str(path.relative_to(self.root))] = (path.stat().st_mode, path.read_bytes())
+        return out
+
+    def snapshot(self) -> Path:
+        saved = self.tmp / f"saved-{len(list(self.tmp.glob('saved-*')))}"
+        shutil.copytree(self.root, saved / "root", symlinks=True)
+        shutil.copyfile(self.world / "db.json", saved / "db.json")
+        return saved
+
+    def restore(self, saved: Path) -> None:
+        shutil.rmtree(self.root)
+        shutil.copytree(saved / "root", self.root, symlinks=True)
+        shutil.copyfile(saved / "db.json", self.world / "db.json")
+        self.clear_calls()
+
+    # The scripts.
+
+    def provision(self, *argv: str, **env: str) -> subprocess.CompletedProcess:
+        args = list(argv) or ["--admin", ADMIN, "--ntp-file", str(self.stage / "ntp-server"),
+                              "--roster-file", str(self.stage / "roster-ids")]
+        return subprocess.run(["bash", str(self.stage / "provision-root.sh"), *args], env={**self.env, **env},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+
+    def provisioned(self) -> subprocess.CompletedProcess:
+        r = self.provision()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    @staticmethod
+    def steps(r: subprocess.CompletedProcess) -> dict[str, str]:
+        out = {}
+        for line in r.stdout.splitlines():
+            m = re.fullmatch(r"([a-z-]+) (changed|unchanged)", line)
+            if m:
+                out[m.group(1)] = m.group(2)
+        return out
+
+    def deploy_units(self) -> None:
+        """What deploy.sh installs: phase D's units, then daemon-reload."""
+        for name in (*STACK, "iem-alarm@.service"):
+            shutil.copyfile(HERE / name, self.root / "etc/systemd/system" / name)
+        self.run_fake("systemctl", "daemon-reload")
+
+    def run_fake(self, name: str, *args: str) -> None:
+        subprocess.run([str(self.bin / name), *args], env=self.env, check=True, capture_output=True)
+
+    def verify(self, **env: str) -> subprocess.CompletedProcess:
+        with open(VERIFY, "rb") as script:
+            return subprocess.run([sys.executable, "-"], stdin=script, env={**self.env, **env},
+                                  capture_output=True, text=True, timeout=120)
+
+    def verify_line(self, r: subprocess.CompletedProcess) -> dict[str, int]:
+        lines = r.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1, r.stdout)
+        return json.loads(lines[0])["verify"]
+
+
+class ProvisionRootTests(World):
+    def test_the_first_run_changes_every_step_in_order_and_starts_nothing_of_the_stack(self) -> None:
+        r = self.provisioned()
+        self.assertEqual(self.steps(r), {step: "changed" for step in STEPS})
+        self.assertEqual([line.split()[0] for line in r.stdout.splitlines() if line.endswith("changed")], list(STEPS))
+        tmp_install = ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", "<tmp>"]
+        napi_calls = []
+        for pid in sorted(NAPI_THREADS):
+            napi_calls += [["chrt", "-f", "-p", "60", pid], ["taskset", "-p", "-c", "0", pid]]
+        self.assertEqual(self.writes(), [
+            ["groupadd", "--system", "iemmixer"],
+            ["useradd", "--system", "--gid", "iemmixer", "--no-create-home", "--home-dir", "/nonexistent",
+             "--shell", "/usr/sbin/nologin", "iemmixer"],
+            ["usermod", "--append", "--groups", "iemmixer", ADMIN],
+            ["install", "-d", "-m", "0700", "-o", "root", "-g", "root", "--", "/etc/credstore.encrypted"],
+            ["install", "-d", "-m", "0700", "-o", "iemmixer", "-g", "iemmixer", "--", "/var/lib/iemmixer/mint"],
+            ["systemd-creds", "encrypt", "--name=pepper", "--with-key=auto", "-",
+             "/etc/credstore.encrypted/iemmixer-pepper"],
+            ["systemctl", "daemon-reload"],
+            [*tmp_install, "/etc/systemd/journald.conf.d/50-iemmixer.conf"],
+            ["install", "-d", "-m", "2755", "-o", "root", "-g", "systemd-journal", "--", "/var/log/journal"],
+            ["systemctl", "restart", "systemd-journald.service"],
+            ["apt-get", "purge", "-y", "rsyslog"],
+            [*tmp_install, "/etc/apt/apt.conf.d/20auto-upgrades"],
+            ["apt-mark", "hold", "linux-generic", "linux-image-generic", "linux-headers-generic"],
+            ["systemctl", "mask", "unattended-upgrades.service", "apt-daily.timer", "apt-daily-upgrade.timer"],
+            ["systemctl", "mask", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
+            ["fallocate", "-l", "8G", "--", "/swapfile"],
+            ["mkswap", "--", "/swapfile"],
+            ["swapon", "--", "/swapfile"],
+            ["timedatectl", "set-ntp", "false"],
+            ["systemctl", "disable", "--now", "systemd-timesyncd.service"],
+            ["systemctl", "enable", "--now", "dantesync.service"],
+            ["install", "-D", "-m", "0755", "-o", "root", "-g", "root", "--", "<stage>/napi-priority",
+             "/usr/local/lib/iemmixer/napi-priority"],
+            ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", "<stage>/iem-napi.service",
+             "/etc/systemd/system/iem-napi.service"],
+            ["systemctl", "daemon-reload"],
+            ["systemctl", "mask", "--now", "irqbalance.service"],
+            ["systemctl", "enable", "iem-napi.service"],
+            ["systemctl", "restart", "iem-napi.service"],
+            *napi_calls,
+            ["systemctl", "disable", "iem-dante.service"],
+            ["install", "-D", "-m", "0440", "-o", "root", "-g", "root", "--", "<tmp>",
+             "/etc/sudoers.d/.iemmixer-gen3.new"],
+        ])
+        # Nothing of the stack started, stopped or restarted.
+        for call in self.writes():
+            if call[0] == "systemctl" and call[1] in ("start", "restart", "stop", "enable"):
+                self.assertFalse(set(call) & set(STACK), call)
+        # The files, byte for byte, with their modes and owners.
+        r = self.root
+        journald = (r / "etc/systemd/journald.conf.d/50-iemmixer.conf").read_text(encoding="utf-8")
+        self.assertTrue(journald.endswith("[Journal]\nStorage=persistent\nSystemMaxUse=1G\nMaxRetentionSec=30day\n"),
+                        journald)
+        upgrades = (r / "etc/apt/apt.conf.d/20auto-upgrades").read_text(encoding="utf-8")
+        self.assertTrue(upgrades.endswith('APT::Periodic::Update-Package-Lists "0";\n'
+                                          'APT::Periodic::Unattended-Upgrade "0";\n'), upgrades)
+        self.assertEqual((r / "usr/local/lib/iemmixer/napi-priority").read_bytes(), NAPI.read_bytes())
+        self.assertEqual((r / "usr/local/lib/iemmixer/napi-priority").stat().st_mode & 0o777, 0o755)
+        self.assertEqual((r / "etc/systemd/system/iem-napi.service").read_bytes(), NAPI_UNIT.read_bytes())
+        self.assertEqual((r / "etc/sudoers.d/iemmixer-gen3").stat().st_mode & 0o777, 0o440)
+        self.assertFalse((r / "etc/sudoers.d/.iemmixer-gen3.new").exists())
+        self.assertEqual((r / "etc/credstore.encrypted/iemmixer-pepper").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((r / "etc/credstore.encrypted").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((r / "var/lib/iemmixer/mint").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.db()["owners"][str((r / "var/lib/iemmixer/mint").resolve())], "iemmixer iemmixer")
+        self.assertEqual((r / "swapfile").stat().st_mode & 0o777, 0o600)
+        self.assertIn("/swapfile none swap sw 0 0\n", (r / "etc/fstab").read_text(encoding="utf-8"))
+        # Phase C's leftovers are gone; the band's other secrets stay.
+        for unit in STACK:
+            self.assertFalse((r / "etc/systemd/system" / f"{unit}.d").exists(), unit)
+        secrets = r / "var/lib/iemmixer/site/secrets"
+        self.assertEqual(sorted(p.name for p in secrets.iterdir()), ["jwt_secret"])
+        # The box's state.
+        db = self.db()
+        self.assertEqual(db["passwd"]["iemmixer"], "iemmixer:x:991:990::/nonexistent:/usr/sbin/nologin")
+        self.assertEqual(db["group"]["iemmixer"], f"iemmixer:x:990:{ADMIN}")
+        self.assertEqual(db["ntp"], "no")
+        self.assertNotIn("rsyslog", db["packages"])
+        for package in ("linux-generic", "linux-image-generic", "linux-headers-generic"):
+            self.assertEqual(db["packages"][package], "hold ok installed")
+        self.assertEqual(db["packages"]["linux-image-7.0.0-1-generic"], "install ok installed")
+        u = db["units"]
+        self.assertEqual((u["dantesync.service"]["UnitFileState"], u["dantesync.service"]["ActiveState"]),
+                         ("enabled", "active"))
+        self.assertEqual((u["iem-napi.service"]["UnitFileState"], u["iem-napi.service"]["ActiveState"]),
+                         ("enabled", "active"))
+        self.assertEqual(u["systemd-timesyncd.service"]["ActiveState"], "inactive")
+        for unit in STACK:
+            self.assertEqual((u[unit]["UnitFileState"], u[unit]["ActiveState"], u[unit]["DropInPaths"]),
+                             ("disabled", "inactive", ""), unit)
+        # The kernel trees: the Dante interface's set, the other one's not.
+        proc = r / "proc"
+        self.assertEqual((r / f"sys/class/net/{IFACE}/threaded").read_text().strip(), "1")
+        self.assertEqual((r / f"sys/class/net/{OTHER}/threaded").read_text().strip(), "0")
+        for irq in IRQS:
+            self.assertEqual((proc / "irq" / irq / "smp_affinity_list").read_text().strip(), "0")
+        for irq in OTHER_IRQS:
+            self.assertEqual((proc / "irq" / irq / "smp_affinity_list").read_text().strip(), "0-3")
+
+    def test_the_second_run_changes_nothing(self) -> None:
+        self.provisioned()
+        before = self.tree()
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r), {step: "unchanged" for step in STEPS})
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_the_pepper_is_made_once_never_overwritten_and_its_bytes_go_nowhere(self) -> None:
+        r = self.provisioned()
+        data = bytes.fromhex((self.world / "creds-input.hex").read_text())
+        self.assertEqual(len(data), 32)
+        credential = self.root / "etc/credstore.encrypted/iemmixer-pepper"
+        sealed = credential.read_bytes()
+        self.assertEqual(sealed, b"FAKE-SEALED " + hashlib.sha256(data).hexdigest().encode() + b"\n")
+        # Its bytes are in no file under the root, on no command line, in no
+        # output (raw or hex).
+        for path in self.root.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(data, path.read_bytes(), path)
+        calls = (self.world / "calls.log").read_bytes()
+        self.assertNotIn(data.hex().encode(), calls)
+        self.assertNotIn(json.dumps(data.decode("latin-1"))[1:-1].encode(), calls)
+        self.assertNotIn(data.hex(), r.stdout + r.stderr)
+        # Never made again, never overwritten: a second run, and a run on a
+        # box whose credential came another way.
+        self.clear_calls()
+        self.provisioned()
+        self.assertEqual(credential.read_bytes(), sealed)
+        credential.write_bytes(b"another credential\n")
+        self.provisioned()
+        self.assertEqual(credential.read_bytes(), b"another credential\n")
+        self.assertFalse([c for c in self.writes() if c[0] == "systemd-creds"])
+
+    def test_an_empty_or_open_credential_is_refused_never_overwritten(self) -> None:
+        credential = self.root / "etc/credstore.encrypted/iemmixer-pepper"
+        write(credential, b"", 0o600)
+        r = self.provision()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("never overwritten", r.stderr)
+        self.assertEqual(credential.read_bytes(), b"")
+        self.assertFalse([c for c in self.writes() if c[0] == "systemd-creds"])
+        write(credential, b"sealed elsewhere\n", 0o644)
+        r = self.provision()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is 644 root, not 600 root", r.stderr)
+        self.assertEqual(credential.read_bytes(), b"sealed elsewhere\n")
+
+    def test_refusals_change_nothing(self) -> None:
+        def no_dantesync() -> None:
+            (self.root / "usr/local/bin/dantesync").unlink()
+
+        def other_ntp() -> None:
+            write(self.root / "etc/dantesync/config.json", json.dumps({"ntp_server": "other-master.test"}))
+
+        def not_json() -> None:
+            write(self.root / "etc/dantesync/config.json", "{not json")
+
+        def not_root() -> None:
+            db = self.db()
+            db["uid"] = "1000"
+            self.save_db(db)
+
+        cases = [
+            (not_root, "not root"),
+            (no_dantesync, "dantesync is not installed"),
+            (other_ntp, "a follower of another NTP server"),
+            (not_json, "cannot be read (JSONDecodeError)"),
+            (lambda: self.set_unit("ptp4l.service", UnitFileState="enabled"), "ptp4l.service is enabled or running"),
+            (lambda: self.set_unit("phc2sys.service", ActiveState="active"), "phc2sys.service is enabled or running"),
+            (lambda: self.set_unit("iem-engine.service", ActiveState="active"), "iem-engine.service is active"),
+            (lambda: self.set_unit("iem-dante.service", ActiveState="activating"), "iem-dante.service is activating"),
+        ]
+        saved = self.snapshot()
+        for change, want in cases:
+            with self.subTest(want=want):
+                self.restore(saved)
+                change()
+                before, db = self.tree(), self.db()
+                r = self.provision()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(want, r.stderr)
+                self.assertIn("nothing changed", r.stderr)
+                self.assertEqual(self.writes(), [])
+                self.assertEqual(self.tree(), before)
+                self.assertEqual(self.db(), db)
+                self.assertEqual(self.steps(r), {})
+
+    def test_a_bad_command_line_is_exit_2_and_changes_nothing(self) -> None:
+        ntp, roster = str(self.stage / "ntp-server"), str(self.stage / "roster-ids")
+        cases = [
+            [],
+            ["--admin", ADMIN, "--ntp-file", ntp],
+            ["--admin", "root", "--ntp-file", ntp, "--roster-file", roster],
+            ["--admin", "iemmixer", "--ntp-file", ntp, "--roster-file", roster],
+            ["--admin", "Bad Name", "--ntp-file", ntp, "--roster-file", roster],
+            ["--admin", ADMIN, "--ntp-file", str(self.tmp / "missing"), "--roster-file", roster],
+            ["--admin", ADMIN, "--ntp-file", ntp, "--roster-file", roster, "--extra"],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.clear_calls()
+                r = self.provision(*argv) if argv else subprocess.run(
+                    ["bash", str(self.stage / "provision-root.sh")], env=self.env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertEqual(self.calls(), [])
+        write(self.stage / "roster-ids", "member1\nnot an id\n")
+        r = self.provision()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not a plain member id", r.stderr)
+
+    def test_without_the_dante_interface_napi_is_enabled_and_applied_once_deploy_wrote_it(self) -> None:
+        env = self.root / "etc/iemmixer/iem-dante.env"
+        env.unlink()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["napi"], "changed")
+        self.assertIn("napi: no Dante interface yet", r.stdout)
+        self.assertNotIn(["systemctl", "restart", "iem-napi.service"], self.writes())
+        self.assertEqual(self.db()["units"]["iem-napi.service"]["UnitFileState"], "enabled")
+        self.assertEqual((self.root / f"sys/class/net/{IFACE}/threaded").read_text().strip(), "0")
+        # deploy.sh writes the interface; the next run applies and reads back.
+        write(env, f"IEM_DANTE_IFACE={IFACE}\n")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["napi"], "changed")
+        self.assertIn(["systemctl", "restart", "iem-napi.service"], self.writes())
+        self.assertEqual((self.root / f"sys/class/net/{IFACE}/threaded").read_text().strip(), "1")
+
+    def test_a_priority_that_no_longer_holds_is_set_again_and_one_that_cannot_hold_fails(self) -> None:
+        self.provisioned()
+        write(self.root / "proc/irq" / IRQS[1] / "smp_affinity_list", "0-3\n")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["napi"], "changed")
+        self.assertIn(["systemctl", "restart", "iem-napi.service"], self.writes())
+        self.assertEqual((self.root / "proc/irq" / IRQS[1] / "smp_affinity_list").read_text().strip(), "0")
+        # A thread's priority that does not take: the run fails loudly.
+        write(self.root / "proc" / "4102" / "stat", stat_line("4102", NAPI_THREADS["4102"], 0, 0))
+        r = self.provision(FAKE_CHRT_IGNORED="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("iem-napi", r.stderr)
+        self.assertEqual(self.steps(r).get("napi"), None)
+
+    def test_swap_is_sized_to_the_memory_and_a_box_with_swap_keeps_its_own(self) -> None:
+        for mem_kb, want in ((900_000, "2G"), (3_500_000, "4G"), (16_123_456, "8G")):
+            with self.subTest(mem_kb=mem_kb):
+                (self.root / "swapfile").unlink(missing_ok=True)
+                write(self.root / "proc/swaps", SWAPS_HEADER)
+                write(self.root / "proc/meminfo", f"MemTotal:       {mem_kb} kB\n")
+                self.clear_calls()
+                self.provisioned()
+                self.assertIn(["fallocate", "-l", want, "--", "/swapfile"], self.writes())
+        fstab = (self.root / "etc/fstab").read_text(encoding="utf-8")
+        self.assertEqual(fstab.count("/swapfile none swap sw 0 0\n"), 1)
+        # A box with its own active swap keeps it.
+        (self.root / "swapfile").unlink()
+        write(self.root / "proc/swaps", SWAPS_HEADER + "/swap.img\tfile\t\t4194300\t\t0\t\t-2\n")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["swap"], "unchanged")
+        self.assertFalse([c for c in self.writes() if c[0] in ("fallocate", "mkswap", "swapon")])
+
+    def test_no_site_value_is_printed(self) -> None:
+        r = self.provisioned()
+        r2 = self.provision()
+        for out in (r.stdout + r.stderr, r2.stdout + r2.stderr):
+            for value in (NTP, ADMIN, IFACE):
+                self.assertNotIn(value, out)
+
+
+class SudoersTests(World):
+    def sudoers_rules(self, path: Path) -> list[tuple[str, str, str]]:
+        """(user, runas, command) of every rule, as sudo's own parser reads it."""
+        cvtsudoers = shutil.which("cvtsudoers") or "/usr/bin/cvtsudoers"
+        r = subprocess.run([cvtsudoers, "-f", "json", str(path)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rules = []
+        for spec in json.loads(r.stdout)["User_Specs"]:
+            users = [u["username"] for u in spec["User_List"]]
+            for cmnd in spec["Cmnd_Specs"]:
+                self.assertEqual(cmnd["Options"], [{"authenticate": False}])
+                runas = [u["username"] for u in cmnd["runasusers"]]
+                for c in cmnd["Commands"]:
+                    rules.append((users[0], runas[0], c["command"]))
+                self.assertEqual((len(users), len(runas)), (1, 1))
+        return rules
+
+    def real_visudo(self, path: Path) -> subprocess.CompletedProcess:
+        visudo = next((p for p in ("/usr/sbin/visudo", "/usr/bin/visudo", "/sbin/visudo") if os.access(p, os.X_OK)),
+                      None)
+        self.assertIsNotNone(visudo, "this machine has no visudo; CI's runner has it")
+        return subprocess.run([visudo, "-cf", str(path)], capture_output=True, text=True)
+
+    def test_every_line_of_the_template_is_in_the_sudoers_file(self) -> None:
+        self.provisioned()
+        sudoers = self.root / "etc/sudoers.d/iemmixer-gen3"
+        self.assertEqual(self.real_visudo(sudoers).returncode, 0)
+        want = []
+        for runas, command in template_lines():
+            for text in sorted(expand(command)):
+                program, _, args = text.partition(" ")
+                if not program.startswith("/"):
+                    program = ("/usr/sbin/" if program == "visudo" else "/usr/bin/") + program
+                want.append((ADMIN, runas, f"{program} {args}"))
+        rules = self.sudoers_rules(sudoers)
+        self.assertEqual(sorted(rules), sorted(set(want)))
+        self.assertEqual(len(rules), len(set(rules)), "a rule twice")
+        # The PIN commands' '=' and ':' are escaped as sudoers needs them.
+        self.assertIn(r"--property\=LoadCredentialEncrypted\=pepper\:/etc/credstore.encrypted/iemmixer-pepper",
+                      sudoers.read_text(encoding="utf-8"))
+        # Live 3's by-hand lines are in the template.
+        lines = set(template_lines())
+        self.assertIn(("root", "systemctl restart iem-engine"), lines)
+        self.assertIn(("root", "systemctl reboot"), lines)
+
+    def test_the_rule_escapes_what_sudoers_reads_as_syntax_and_a_bare_command_takes_no_arguments(self) -> None:
+        write(self.stage / "sudo-lines.txt", "# a synthetic template\n\n"
+              "root | systemctl show --property=Id,User a:b#c\n"
+              "iemmixer | cat [x]*?!^\n"
+              "root | /opt/zyx/bin/tool\n"
+              "root | stat -c %a.%U.%s /x/{slot}\n")
+        self.provisioned()
+        sudoers = self.root / "etc/sudoers.d/iemmixer-gen3"
+        self.assertEqual(self.real_visudo(sudoers).returncode, 0)
+        self.assertEqual(self.sudoers_rules(sudoers), [
+            (ADMIN, "root", "/usr/bin/systemctl show --property=Id,User a:b#c"),
+            (ADMIN, "iemmixer", r"/usr/bin/cat \[x\]\*\?\!\^"),
+            (ADMIN, "root", '/opt/zyx/bin/tool ""'),
+            (ADMIN, "root", "/usr/bin/stat -c %a.%U.%s /x/a"),
+            (ADMIN, "root", "/usr/bin/stat -c %a.%U.%s /x/b"),
+        ])
+
+    def test_a_template_the_rule_cannot_be_made_from_is_refused_with_nothing_changed(self) -> None:
+        cases = [
+            ("root | zyxtool --now\n", "names zyxtool, which is in none of sudo's secure_path folders"),
+            ("root | cat {nothing}\n", "a placeholder that is none of"),
+            ("admin | cat x\n", "runs a command as neither root nor iemmixer"),
+            ("root | cat 'x y'\n", "a quote or a backslash"),
+            ("root cat x\n", "not '<runas> | <command>'"),
+        ]
+        for text, want in cases:
+            with self.subTest(want=want):
+                write(self.stage / "sudo-lines.txt", text)
+                before = self.tree()
+                self.clear_calls()
+                r = self.provision()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(want, r.stderr)
+                self.assertIn("nothing changed", r.stderr)
+                self.assertEqual(self.writes(), [])
+                self.assertEqual(self.tree(), before)
+
+
+class NapiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = self.tmp / "root"
+        self.world = self.tmp / "world"
+        self.world.mkdir()
+        (self.world / "db.json").write_text("{}", encoding="utf-8")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("chrt", "taskset"):
+            p = bin_dir / name
+            p.write_text(f"#!{sys.executable}\n{FAKE}", encoding="utf-8")
+            p.chmod(0o755)
+        kernel_trees(self.root, applied=False)
+        self.env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "FAKE_WORLD": str(self.world), "FAKE_ROOT": str(self.root),
+                    "IEM_NAPI_SYS": str(self.root / "sys"), "IEM_NAPI_PROC": str(self.root / "proc"),
+                    "IEM_NAPI_IFACE_WAIT": "3", "IEM_NAPI_THREAD_WAIT": "3"}
+
+    def napi(self, *args: str, **env: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(NAPI), *(args or (IFACE,))], env={**self.env, **env},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+    def calls(self) -> list[list[str]]:
+        log = self.world / "calls.log"
+        return [json.loads(line)["argv"] for line in log.read_text().splitlines()] if log.exists() else []
+
+    def read(self, rel: str) -> str:
+        return (self.root / rel).read_text(encoding="utf-8").strip()
+
+    def test_it_sets_every_value_and_reads_it_back(self) -> None:
+        r = self.napi()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("2 NAPI threads SCHED_FIFO 60 on core 0; 2 interrupts on core 0", r.stdout)
+        self.assertEqual(self.read(f"sys/class/net/{IFACE}/threaded"), "1")
+        for pid in NAPI_THREADS:
+            fields = self.read(f"proc/{pid}/stat").rsplit(") ", 1)[1].split()
+            self.assertEqual((fields[38], fields[37]), ("1", "60"), pid)
+            self.assertIn("Cpus_allowed_list:\t0", self.read(f"proc/{pid}/status"))
+        for irq in IRQS:
+            self.assertEqual(self.read(f"proc/irq/{irq}/smp_affinity_list"), "0")
+        expected = []
+        for pid in sorted(NAPI_THREADS):
+            expected += [["chrt", "-f", "-p", "60", pid], ["taskset", "-p", "-c", "0", pid]]
+        self.assertEqual(self.calls(), expected)
+        # The other interface (its name starts with the Dante one's) and
+        # every other thread are untouched.
+        self.assertEqual(self.read(f"sys/class/net/{OTHER}/threaded"), "0")
+        for pid in OTHER_THREADS:
+            self.assertIn("Cpus_allowed_list:\t0-3", self.read(f"proc/{pid}/status"))
+        for irq in OTHER_IRQS:
+            self.assertEqual(self.read(f"proc/irq/{irq}/smp_affinity_list"), "0-3")
+        self.assertNotIn(IFACE, r.stdout + r.stderr)
+
+    def test_check_only_reads_and_names_each_value_that_does_not_hold(self) -> None:
+        r = self.napi("--check", IFACE)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("threaded NAPI is off", r.stderr)
+        for pid in NAPI_THREADS:
+            self.assertIn(f"NAPI thread {pid}: policy and priority 0 0, not 1 60", r.stderr)
+            self.assertIn(f"NAPI thread {pid} runs on cores 0-3, not 0", r.stderr)
+        for irq in IRQS:
+            self.assertIn(f"interrupt {irq} runs on cores 0-3, not 0", r.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.read(f"sys/class/net/{IFACE}/threaded"), "0")
+        kernel_trees(self.root, applied=True)
+        r = self.napi("--check", IFACE)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "")
+        self.assertEqual(self.calls(), [])
+
+    def test_a_value_that_does_not_take_fails(self) -> None:
+        r = self.napi(FAKE_CHRT_IGNORED="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("policy and priority 0 0, not 1 60", r.stderr)
+        self.assertIn("did not read back as set", r.stderr)
+
+    def test_no_interface_no_thread_or_no_interrupt_fails_within_its_wait(self) -> None:
+        r = self.napi("ethz7")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the Dante interface did not appear within 3 tenths of a second", r.stderr)
+        for pid in NAPI_THREADS:
+            shutil.rmtree(self.root / "proc" / pid)
+        r = self.napi()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("NAPI threads did not appear within 3 tenths of a second", r.stderr)
+        kernel_trees(self.root, applied=False)
+        write(self.root / "proc/interrupts", INTERRUPTS.replace(f"{IFACE}-TxRx", "other-TxRx"))
+        r = self.napi()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no interrupt of /proc/interrupts names the Dante interface", r.stderr)
+
+    def test_a_bad_command_line_is_exit_2(self) -> None:
+        for args in (["--check"], [IFACE, IFACE], ["bad name"], ["a" * 16]):
+            with self.subTest(args=args):
+                r = subprocess.run(["bash", str(NAPI), *args], env=self.env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+        r = self.napi(IEM_NAPI_THREAD_WAIT="soon")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.calls(), [])
+
+    def test_the_unit_runs_it_at_boot_before_the_clock_and_the_stack(self) -> None:
+        unit = parse_unit(NAPI_UNIT)
+        self.assertEqual(unit["Service"]["Type"], ["oneshot"])
+        self.assertEqual(unit["Service"]["RemainAfterExit"], ["yes"])
+        self.assertEqual(unit["Service"]["EnvironmentFile"], ["/etc/iemmixer/iem-dante.env"])
+        self.assertEqual(unit["Service"]["ExecStart"], ["/usr/local/lib/iemmixer/napi-priority ${IEM_DANTE_IFACE}"])
+        self.assertEqual(unit["Service"]["SendSIGKILL"], ["no"])
+        self.assertEqual(unit["Unit"]["ConditionPathExists"], ["/etc/iemmixer/iem-dante.env"])
+        self.assertEqual(unit["Unit"]["Before"][0].split(),
+                         ["dantesync.service", "iem-engine.service", "iem-dante.service"])
+        self.assertEqual(unit["Install"]["WantedBy"], ["multi-user.target"])
+        # Ordering only: a failure here holds back neither the clock nor the stack.
+        for key in ("Requires", "RequiredBy", "BindsTo", "PartOf", "Requisite"):
+            self.assertNotIn(key, unit["Unit"])
+            self.assertNotIn(key, unit["Install"])
+
+
+class VerifyTests(World):
+    def good_box(self) -> None:
+        self.provisioned()
+        self.deploy_units()
+        self.clear_calls()
+
+    def test_a_provisioned_and_deployed_box_passes(self) -> None:
+        self.good_box()
+        r = self.verify(FAKE_TPM2_RC="0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = self.verify_line(r)
+        self.assertEqual(line, {"pass": 1, **{check: 1 for check in CHECKS}, "tpm2": 1})
+        self.assertEqual(r.stderr, "")
+        # Read only: no call it made changes anything.
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.verify_line(self.verify())["tpm2"], 0)
+
+    def test_each_check_fails_alone_naming_itself(self) -> None:
+        self.good_box()
+        saved = self.snapshot()
+
+        def db_change(change):
+            def apply() -> None:
+                db = self.db()
+                change(db)
+                self.save_db(db)
+            return apply
+
+        def unit(name: str, **props: str):
+            return db_change(lambda db: db["units"][name].update(props))
+
+        def drop_in() -> None:
+            write(self.root / "etc/systemd/system/iem-server.service.d/10-user.conf", f"[Service]\nUser={ADMIN}\n")
+            self.run_fake("systemctl", "daemon-reload")
+
+        cases = {
+            "user": (db_change(lambda db: db["group"].update(iemmixer="iemmixer:x:990:")),
+                     "the admin is not in the group iemmixer"),
+            "units": (drop_in, "iem-server.service does not run as iemmixer"),
+            "boot": (unit("iem-engine.service", UnitFileState="enabled"), "iem-engine.service is enabled at boot"),
+            "sudoers": (lambda: (self.root / "etc/sudoers.d/iemmixer-gen3").unlink(), "sudo -n visudo -c fails"),
+            "pepper": (lambda: (self.root / "etc/credstore.encrypted/iemmixer-pepper").chmod(0o644),
+                       "the pepper's credential is not 600 root"),
+            "no_test_pepper": (lambda: write(self.root / "var/lib/iemmixer/site/secrets/pepper.test", "x\n"),
+                               "a plain test pepper is on the box"),
+            "journal": (db_change(lambda db: db["packages"].update(rsyslog="install ok installed")),
+                        "rsyslog is installed"),
+            "apt": (db_change(lambda db: db["packages"].update({"linux-image-generic": "install ok installed"})),
+                    "an installed kernel package is not held"),
+            "sleep": (unit("suspend.target", UnitFileState="static", LoadState="loaded"),
+                      "suspend.target is not masked"),
+            "swap": (lambda: write(self.root / "proc/swaps", SWAPS_HEADER), "no active swap"),
+            "clock": (db_change(lambda db: db["units"].update({"chrony.service": {
+                "LoadState": "loaded", "UnitFileState": "enabled", "ActiveState": "active"}})),
+                "chrony.service is enabled or running beside dantesync"),
+            "napi": (lambda: write(self.root / "proc/irq" / IRQS[0] / "smp_affinity_list", "0-3\n"),
+                     "an interrupt of the Dante interface is not on core 0 alone"),
+        }
+        self.assertEqual(sorted(cases), sorted(CHECKS))
+        for check, (change, reason) in cases.items():
+            with self.subTest(check=check):
+                self.restore(saved)
+                change()
+                r = self.verify()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                line = self.verify_line(r)
+                self.assertEqual({k: v for k, v in line.items() if v == 0 and k != "tpm2"},
+                                 {"pass": 0, check: 0})
+                self.assertEqual(r.stderr.splitlines(), [f"verify_box: {check}: {reason}"])
+
+    def test_more_ways_each_check_fails(self) -> None:
+        self.good_box()
+        saved = self.snapshot()
+        threads = self.root / "proc" / "4101"
+
+        def unit(name: str, **props: str):
+            return lambda: self.set_unit(name, **props)
+
+        cases = [
+            ("units", lambda: (self.root / "etc/systemd/system/iem-alarm@.service").unlink(),
+             "iem-alarm@.service is not installed"),
+            ("units", unit("iem-dante.service", LoadState="not-found"), "iem-dante.service is not installed"),
+            ("clock", unit("dantesync.service", ActiveState="failed"), "dantesync is not enabled and running"),
+            ("clock", unit("ptp4l.service", ActiveState="active"), "ptp4l.service is enabled or running"),
+            ("napi", unit("irqbalance.service", ActiveState="active"), "irqbalance runs"),
+            ("napi", unit("iem-napi.service", UnitFileState="disabled"), "iem-napi is not enabled and active"),
+            ("napi", lambda: write(threads / "stat", stat_line("4101", NAPI_THREADS["4101"], 1, 50)),
+             "a NAPI thread is not SCHED_FIFO 60"),
+            ("napi", lambda: write(threads / "status", "Cpus_allowed_list:\t0-1\n"),
+             "a NAPI thread is not on core 0 alone"),
+            ("napi", lambda: write(self.root / f"sys/class/net/{IFACE}/threaded", "0\n"),
+             "threaded NAPI is off on the Dante interface"),
+            ("napi", lambda: write(self.root / "etc/iemmixer/iem-dante.env", "IEM_DANTE_IFACE=\n"),
+             "no Dante interface in /etc/iemmixer/iem-dante.env"),
+            ("journal", lambda: write(self.root / "etc/systemd/journald.conf.d/50-iemmixer.conf",
+                                      "[Journal]\nStorage=auto\n"), "journald is not persistent, 1G, 30day"),
+            ("apt", unit("apt-daily.timer", UnitFileState="enabled"), "apt-daily.timer is not masked"),
+            ("apt", lambda: write(self.root / "etc/apt/apt.conf.d/20auto-upgrades",
+                                  'APT::Periodic::Unattended-Upgrade "1";\n'),
+             "20auto-upgrades does not turn unattended upgrades off"),
+            ("user", db_set_passwd(self, "iemmixer:x:991:990::/nonexistent:/bin/bash"), "the service user can log in"),
+            ("pepper", lambda: (self.root / "etc/credstore.encrypted/iemmixer-pepper").unlink(),
+             "the pepper's credential is not there (sudo -n stat)"),
+        ]
+        for check, change, reason in cases:
+            with self.subTest(reason=reason):
+                self.restore(saved)
+                change()
+                r = self.verify()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertEqual(self.verify_line(r)[check], 0)
+                self.assertIn(f"verify_box: {check}: {reason}", r.stderr)
+
+    def test_before_the_first_phase_d_deploy_units_fails(self) -> None:
+        # Phase C's units without their drop-ins name no user: verify says so
+        # until deploy.sh installs the service user's units.
+        self.provisioned()
+        r = self.verify()
+        self.assertEqual(r.returncode, 1)
+        line = self.verify_line(r)
+        self.assertEqual({k for k, v in line.items() if v == 0 and k != "tpm2"}, {"pass", "units"})
+        self.assertIn("verify_box: units: iem-engine.service does not run as iemmixer", r.stderr)
+
+    def test_every_sudo_line_verify_sends_is_in_the_template(self) -> None:
+        self.good_box()
+        self.verify()
+        sent = [" ".join(c["argv"]) for c in self.calls() if c["argv"][0] == "sudo"]
+        self.assertEqual(len(sent), 3)
+        allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
+        for runas, command, _listed in sudo_lines(sent):
+            self.assertIn((runas, command), allowed, command)
+
+    def test_the_line_names_no_value(self) -> None:
+        self.good_box()
+        write(self.root / "proc/swaps", SWAPS_HEADER)
+        r = self.verify()
+        for value in (ADMIN, IFACE, NTP):
+            self.assertNotIn(value, r.stdout + r.stderr)
+        line = self.verify_line(r)
+        self.assertTrue(all(isinstance(v, int) for v in line.values()), line)
+        self.assertEqual(list(line), ["pass", *CHECKS, "tpm2"])
+
+
+def db_set_passwd(case: World, line: str):
+    def apply() -> None:
+        db = case.db()
+        db["passwd"]["iemmixer"] = line
+        case.save_db(db)
+    return apply
+
+
+# provision.sh's box: ssh and scp in a temporary folder (its home).
+FAKE_SSH = r'''
+import json, os, shutil, sys
+box = os.environ["FAKE_BOX"]
+args = sys.argv[1:]
+data = sys.stdin.buffer.read() if not sys.stdin.isatty() else b""
+with open(os.path.join(box, "calls.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": ["ssh"] + args, "stdin": data.decode("utf-8", "replace")}) + "\n")
+while args and args[0] == "-o":
+    args = args[2:]
+cmd = " ".join(args[1:])
+home = os.path.join(box, "home")
+env = os.environ.get
+if cmd == "id -un":
+    print(env("FAKE_ADMIN", "boxadmin"))
+elif cmd == "systemctl is-active iem-server iem-engine iem-dante":
+    states = env("FAKE_STATES", "inactive inactive inactive").split()
+    print("\n".join(states))
+    sys.exit(0 if all(s == "active" for s in states) else 3)
+elif cmd.startswith("mkdir -p "):
+    os.makedirs(os.path.join(home, cmd.split()[-1]), exist_ok=True)
+elif cmd.startswith("sudo -n bash .cache/iem-gen3-provision/provision-root.sh "):
+    print("user changed")
+    print("sudoers changed")
+    sys.exit(int(env("FAKE_ROOT_RC", "0")))
+elif cmd == "python3 -":
+    print('{"verify":{"pass":1}}')
+    sys.stderr.write(env("FAKE_VERIFY_ERR", ""))
+    sys.exit(int(env("FAKE_VERIFY_RC", "0")))
+else:
+    sys.stderr.write("unexpected command: " + cmd + "\n")
+    sys.exit(97)
+'''
+
+FAKE_SCP = r'''
+import json, os, shutil, sys
+box = os.environ["FAKE_BOX"]
+args = sys.argv[1:]
+with open(os.path.join(box, "calls.log"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": ["scp"] + args, "stdin": ""}) + "\n")
+words = []
+while args:
+    if args[0] == "-o":
+        args = args[2:]
+    elif args[0] == "-q":
+        args = args[1:]
+    else:
+        words.append(args.pop(0))
+*sources, dest = words
+folder = os.path.join(box, "home", dest.split(":", 1)[1])
+for src in sources:
+    shutil.copy(src, os.path.join(folder, os.path.basename(src)))
+if os.environ.get("FAKE_FLAG_ON") == "scp":
+    open(os.environ["IEMMIXER_EVENT_NOW"], "w").write("now\n")
+'''
+
+HOST = "tester@gen3.test"
+BOX_ADMIN = "boxadmin"
+STAGE = ".cache/iem-gen3-provision"
+
+
+class ProvisionShTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.box = self.tmp / "box"
+        (self.box / "home").mkdir(parents=True)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name, body in (("ssh", FAKE_SSH), ("scp", FAKE_SCP)):
+            p = bin_dir / name
+            p.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+            p.chmod(0o755)
+        self.flag = self.tmp / "config" / "EVENT-NOW"
+        self.flag.parent.mkdir()
+        self.ops = self.tmp / "gen3-dantesync.json"
+        self.ops.write_text(json.dumps({"ntp_server": NTP, "system": {"gm_allowlist": ["10.0.0.11"]}}),
+                            encoding="utf-8")
+        self.env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BOX": str(self.box),
+                    "IEMMIXER_EVENT_NOW": str(self.flag)}
+
+    def provision(self, *argv: str, **env: str) -> subprocess.CompletedProcess:
+        args = list(argv) or ["--host", HOST, "--ntp-from", str(self.ops)]
+        return subprocess.run(["bash", str(PROVISION), *args], env={**self.env, **env}, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=60)
+
+    def calls(self) -> list[dict]:
+        log = self.box / "calls.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def remote(self) -> list[str]:
+        out = []
+        for call in self.calls():
+            args = call["argv"][1:]
+            if call["argv"][0] != "ssh":
+                out.append("scp")
+                continue
+            while args and args[0] == "-o":
+                args = args[2:]
+            self.assertEqual(args[0], HOST)
+            out.append(" ".join(args[1:]))
+        return out
+
+    def test_it_copies_runs_the_root_script_then_verify_and_exits_with_verify(self) -> None:
+        r = self.provision()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        root_line = (f"sudo -n bash {STAGE}/provision-root.sh --admin {BOX_ADMIN} --ntp-file {STAGE}/ntp-server "
+                     f"--roster-file {STAGE}/roster-ids")
+        self.assertEqual(self.remote(), ["id -un", "systemctl is-active iem-server iem-engine iem-dante",
+                                         f"mkdir -p {STAGE}", "scp", root_line, "python3 -"])
+        self.assertTrue(all("BatchMode=yes" in c["argv"] for c in self.calls()))
+        stage = self.box / "home" / STAGE
+        for name in STAGE_FILES:
+            self.assertEqual((stage / name).read_bytes(), (HERE / name).read_bytes(), name)
+        self.assertEqual((stage / "ntp-server").read_text(), NTP + "\n")
+        self.assertEqual((stage / "roster-ids").read_text().split(), roster_people())
+        self.assertEqual(sorted(p.name for p in stage.iterdir()), sorted([*STAGE_FILES, "ntp-server", "roster-ids"]))
+        # verify_box.py goes to the box's python3 on stdin, nothing left there.
+        self.assertEqual(self.calls()[-1]["stdin"], VERIFY.read_text(encoding="utf-8"))
+        self.assertIn("user changed", r.stdout)
+        self.assertIn('{"verify":{"pass":1}}', r.stdout)
+        # No site value printed.
+        for value in (NTP, BOX_ADMIN, "10.0.0.11"):
+            self.assertNotIn(value, r.stdout + r.stderr)
+        # Its only sudo is the root script's, which runs on the admin's own
+        # rule: it has no line in the template (it would be all of root).
+        lines = sudo_lines(self.remote())
+        self.assertEqual(lines, [("root", root_line[len("sudo -n "):], False)])
+        self.assertNotIn("bash", {command.split()[0] for _runas, command in template_lines()})
+        # verify's exit is its own.
+        for rc in ("1", "3"):
+            r = self.provision(FAKE_VERIFY_RC=rc, FAKE_VERIFY_ERR="verify_box: units: x\n")
+            self.assertEqual(r.returncode, int(rc))
+            self.assertIn("verify_box: units", r.stderr)
+
+    def test_the_flag_refuses_before_any_call_and_right_before_the_root_script(self) -> None:
+        self.flag.write_text("now\n")
+        r = self.provision()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("an event is on", r.stderr)
+        self.assertIn("nothing was sent", r.stderr)
+        self.assertEqual(self.calls(), [])
+        self.flag.unlink()
+        r = self.provision(FAKE_FLAG_ON="scp")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("nothing changed on the box", r.stderr)
+        self.assertEqual(self.remote()[-1], "scp")
+
+    def test_a_running_stack_or_a_root_login_refuses_before_anything_is_sent(self) -> None:
+        for states, want in (("active inactive inactive", "iem-server is 'active'"),
+                             ("inactive inactive activating", "iem-dante is 'activating'"),
+                             ("inactive deactivating inactive", "iem-engine is 'deactivating'")):
+            with self.subTest(states=states):
+                (self.box / "calls.log").unlink(missing_ok=True)
+                r = self.provision(FAKE_STATES=states)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(want, r.stderr)
+                self.assertIn("nothing was sent", r.stderr)
+                self.assertEqual(self.remote(), ["id -un", "systemctl is-active iem-server iem-engine iem-dante"])
+        (self.box / "calls.log").unlink()
+        r = self.provision(FAKE_ADMIN="root")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("logs in as root", r.stderr)
+        self.assertEqual(self.remote(), ["id -un"])
+
+    def test_a_root_script_that_fails_runs_no_verify(self) -> None:
+        r = self.provision(FAKE_ROOT_RC="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("provision-root.sh failed on the box", r.stderr)
+        self.assertNotIn("python3 -", self.remote())
+
+    def test_a_bad_command_line_or_ops_file_is_exit_2_with_nothing_sent(self) -> None:
+        bad_json = self.tmp / "bad.json"
+        bad_json.write_text("{not json", encoding="utf-8")
+        no_ntp = self.tmp / "no-ntp.json"
+        no_ntp.write_text(json.dumps({"ntp_server": " "}), encoding="utf-8")
+        cases = [
+            [],
+            ["--host", HOST],
+            ["--ntp-from", str(self.ops)],
+            ["--host", "-oProxyCommand=x", "--ntp-from", str(self.ops)],
+            ["--host", HOST, "--ntp-from", str(self.tmp / "missing.json")],
+            ["--host", HOST, "--ntp-from", str(bad_json)],
+            ["--host", HOST, "--ntp-from", str(no_ntp)],
+            ["--host", HOST, "--ntp-from", str(self.ops), "--now"],
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                r = self.provision(*argv) if argv else subprocess.run(
+                    ["bash", str(PROVISION)], env=self.env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertNotIn(NTP, r.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

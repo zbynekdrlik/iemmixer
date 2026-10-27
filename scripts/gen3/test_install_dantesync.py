@@ -20,6 +20,8 @@ import threading
 import unittest
 from pathlib import Path
 
+from test_deploy import expand, sudo_lines, template_lines
+
 HERE = Path(__file__).resolve().parent
 INSTALL = HERE / "install-dantesync.sh"
 PROBE = HERE / "dantesync_probe.py"
@@ -257,6 +259,17 @@ class InstallTests(unittest.TestCase):
         # No site value of the config is ever printed (P6).
         for value in (GM, "ntp-master.test"):
             self.assertNotIn(value, r.stdout + r.stderr)
+
+    def test_every_sudo_line_the_install_sends_is_in_the_template(self) -> None:
+        # Every time service the box may have, so each disable line is sent.
+        r = self.install(FAKE_TIME="systemd-timesyncd chrony ntp time-sync-coordinator")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
+        lines = sudo_lines(self.remote())
+        # ss, three installs, daemon-reload, four disables, set-ntp, enable, restart.
+        self.assertEqual(len(lines), 12, lines)
+        for runas, command, _listed in lines:
+            self.assertIn((runas, command), allowed, command)
 
     def test_only_the_time_services_on_the_box_are_disabled(self) -> None:
         for present, want in (("", []), ("ntp time-sync-coordinator", ["ntp", "time-sync-coordinator"])):
