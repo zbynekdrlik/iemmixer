@@ -93,7 +93,8 @@ class Gen3DataTests(Base):
         self.scripts: list[str] = []
         self.sent: list[tuple[str, bytes]] = []
         self.states = "inactive\ninactive\ninactive\n"
-        self.tasks = "[not set]\n0\n[not set]\n"
+        # As the box prints it (2026-10-27): each unit's value, a blank line between units.
+        self.tasks = "[not set]\n\n[not set]\n\n[not set]\n"
         self.stat = "600.root.180\n"
         self.encrypt_code = 0
         self.mode = "644"   # what systemd-creds leaves under sudo's umask 0022 (the box, 2026-10-27)

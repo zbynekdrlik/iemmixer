@@ -96,7 +96,8 @@ class SwitchTests(Base):
             return (0 if self.box_running else 3), b"", b""
         if command == sw.data.TASKS:
             busy = self.box_running or self.lingering
-            return 0, (b"3\n2\n[not set]\n" if busy else b"0\n0\n[not set]\n"), b""
+            # As the box prints it (2026-10-27): a blank line between units.
+            return 0, (b"3\n\n2\n\n[not set]\n" if busy else b"0\n\n0\n\n[not set]\n"), b""
         if command == sw.STACK_STATE:
             if self.box_running:
                 return 3, b"active\nactive\ninactive\n", b""
