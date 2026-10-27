@@ -54,15 +54,15 @@
 
 - [x] **Step 1: Tests:** the read-back; the refusals (another device, a silent card, a name Dante does not hold); `set_name` sent from `rename` alone (the source test).
 - [x] **Step 2:** Implement (`dante_card.py rename <ip> <expected> <new>`; the check that no other device announces the new name is the caller's: the dev box's mDNS does not reach the card's subnet).
-- [x] **Step 3:** Push; CI green (fb71c11). **Live, 2026-10-27:** the card took a spare name and its own back in ~0.6 s each, read back; **the stage rack and the FOH card stayed connected to it for the whole 45 s it held the spare name** (a receiver whose flow continues does not resolve the name again), so the takeover alone does not switch the band: re-patching the subscribers is asked of the owner on #72.
+- [x] **Step 3:** Push; CI green (fb71c11). **Live, 2026-10-27:** the card took a spare name and its own back in ~0.6 s each, read back; the stage rack and the FOH card stayed with the card while no device held its name (45 s). **The full takeover, the same day:** with our device started under the card's name and TX labels, both receivers asked it for their flows within 8 s, and went back to the card within 5 s once it stopped and the card's name returned; nothing changed on either (#72, the correction of 2026-10-27; the re-patch question withdrawn).
 
-### Task 3: Our device takes a name (`iem-dante`)
+### Task 3: Our device takes the card's name (a takeover config)
 
-**Interfaces:** ARC 0x1001 answered and saved to `state.toml` before the reply (the 0x2013/0x3001 pattern), re-announced with a goodbye for the old name; `ctl name <new>` on the control socket for the tools; a takeover table in the device config (TX number → TX name) applied by `ctl tx-names <file>`; mDNS conflicts read from the mdns-sd daemon's events: a name another device holds is never announced, the device keeps its old name, and health gains the reason `name_conflict`.
+**As proven live on 2026-10-27:** no ARC 0x1001 support is needed. The switch writes a takeover device config: the ops device config with `name` = the card's name, `state_file` = a state file of its own (a saved name in the usual state file would win over the config), and the TX names = the card's TX labels read live by IP (dante_card.py `read`), so every channel a receiver subscribes to by name exists on our device; the way back installs the ops config again.
 
-- [ ] **Step 1: Tests:** rename persisted before the reply and answered as Dante Controller expects (byte layout from a capture of Dante Controller renaming our device); the goodbye; a conflict event leaves the old name and raises the reason; TX names from the table.
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green (mutants on the new code).
+- [ ] **Step 1: Tests:** `takeover_config(ops_text, card_labels, card_name) -> str` (pure): name, state file and TX names replaced, everything else byte for byte; the card's labels must cover our TX count and be unique, else refused; a name another device holds is checked by the switch's survey (Task 7).
+- [ ] **Step 2:** Implement; push; CI green.
+- [ ] **Step 3 (open):** an mDNS conflict (another device announcing our name) is not detected by our device (mdns-sd renames silently); the switch's order (the card renamed and read back first) prevents it; detection in the device is a later improvement, recorded here.
 
 ### Task 4: The RX mirror
 
