@@ -78,7 +78,8 @@ class Gen3TunnelTests(Base):
         self.pc_reachable, self.box_build = True, BOX
         self.pc_connects = True           # the PC's connector registers with the edge
         self.patch(ssh_ps=self.ssh_ps)
-        for name, fake in (("box", self.box), ("public_hash", self.public), ("POLL_S", 0.0), ("PUBLIC_S", 0.0)):
+        for name, fake in (("box", self.box), ("public_hash", self.public), ("POLL_S", 0.0), ("PUBLIC_S", 0.0),
+                           ("PC_READY_S", 0.0)):
             patcher = mock.patch.object(tunnel, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)

@@ -24,9 +24,11 @@ DEVICE = (HERE.parent.parent / "config" / "test-dante-device.toml").read_text(en
 class TemplateTests(unittest.TestCase):
     def test_every_sudo_command_is_a_line_of_the_template(self) -> None:
         lines = template()
-        for command in (sw.INSTALL_CONFIG, sw.STOP, sw.START, sw.ENABLE, sw.DISABLE, sw.DISABLE_TUNNEL,
-                        sw.RESET_FAILED):
+        for command in (sw.INSTALL_CONFIG, sw.STOP, sw.START, sw.ENABLE, sw.DISABLE, sw.DISABLE_TUNNEL):
             self.assertIn(("root", command.removeprefix("sudo -n ")), lines, command)
+        # reset-failed is the template's {units} line, here with all three in its order.
+        self.assertIn(("root", "systemctl reset-failed {units}"), lines)
+        self.assertEqual(sw.RESET_FAILED, "sudo -n systemctl reset-failed iem-dante iem-engine iem-server")
         self.assertIn(("iemmixer", sw.RESET_STATE.removeprefix("sudo -n -u iemmixer ")), lines)
 
 
