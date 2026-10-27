@@ -10,7 +10,8 @@
 # it lists a command that has one. Plan Task 9's provision turns this file into
 # the box's sudoers rule for its admin user (each program by its absolute
 # path, NOPASSWD); the tests check that every `sudo -n` line a tool sends is an
-# expansion of a line here (test_deploy.py for deploy.sh).
+# expansion of a line here (test_deploy.py for deploy.sh; test_iempc_gen3.py
+# for iempc gen3-mix, the live guard's stop and "ide event"'s stop).
 
 # scripts/gen3/deploy.sh: the new slot, filled while the stack runs.
 root | install -D -m 0755 .cache/iem-gen3-deploy/iem-engine /opt/iemmixer/slot-{slot}/bin/iem-engine
@@ -50,3 +51,13 @@ root | systemctl disable iem-dante iem-engine iem-server
 root | systemctl reset-failed {units}
 root | systemctl start iem-engine iem-server
 root | systemctl start iem-dante
+
+# scripts/iem-pc/iempc_gen3.py (iempc gen3-mix): the browser's tokens, as the
+# service user (the JWT secret's owner) in its mint folder: any left from an
+# earlier run removed, minted with the box server's own key, each read back
+# over ssh's stdout, removed again whatever happened.
+iemmixer | rm -f /var/lib/iemmixer/mint/engineer.token /var/lib/iemmixer/mint/member.token
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub engineer --engineer --seconds 900 --out /var/lib/iemmixer/mint/engineer.token
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub {member} --seconds 900 --out /var/lib/iemmixer/mint/member.token
+iemmixer | cat /var/lib/iemmixer/mint/engineer.token
+iemmixer | cat /var/lib/iemmixer/mint/member.token
