@@ -60,8 +60,8 @@
 
 **As proven live on 2026-10-27:** no ARC 0x1001 support is needed. The switch writes a takeover device config: the ops device config with `name` = the card's name, `state_file` = a state file of its own (a saved name in the usual state file would win over the config), and the TX names = the card's TX labels read live by IP (dante_card.py `read`), so every channel a receiver subscribes to by name exists on our device; the way back installs the ops config again.
 
-- [ ] **Step 1: Tests:** `takeover_config(ops_text, card_labels, card_name) -> str` (pure): name, state file and TX names replaced, everything else byte for byte; the card's labels must cover our TX count and be unique, else refused; a name another device holds is checked by the switch's survey (Task 7).
-- [ ] **Step 2:** Implement; push; CI green.
+- [x] **Step 1: Tests:** `takeover_config(ops_text, card_labels, card_name) -> str` (pure): name, state file and TX names replaced, everything else byte for byte; the card's labels must cover our TX count and be unique, else refused; a name another device holds is checked by the switch's survey (Task 7).
+- [x] **Step 2:** Implement; push; CI green.
 - [ ] **Step 3 (open):** an mDNS conflict (another device announcing our name) is not detected by our device (mdns-sd renames silently); the switch's order (the card renamed and read back first) prevents it; detection in the device is a later improvement, recorded here.
 
 ### Task 4: The RX mirror
@@ -92,15 +92,15 @@
 
 **Interfaces:** `iempc gen3-switch to-3|to-2 [--dry-run]`. **to-3:** preflight (no flag; the survey: every device subscribed to the card is covered by the takeover table, else refuse naming the device's role; the box healthy on its test name; the active side 2) → data to-box → the box's stack on the band site → RX mirror → the card renamed (read back) → our device renamed and TX names applied (read back) → every surveyed subscriber resolved to the box (read by IP) → tunnel to-box (read back) → the box's units enabled at boot → active side 3. **to-2:** the reverse, the box renamed first. Each step's undo runs when a later step fails; the final line names the side that serves, read from the devices. `iempc event` reads the active side: 3 → the flag and the PC's switch, the box untouched; 2 → as today.
 
-- [ ] **Step 1: Tests** (stand-ins for every device call): the order both ways; every undo path; the dry run sends nothing; the event's two cases; refusals.
-- [ ] **Step 2:** Implement; the always-apply section of CLAUDE.md and the event memory gain the two signals; push; CI green; open the dev→main PR.
+- [x] **Step 1: Tests** (stand-ins for every device call): the order both ways; every undo path; the dry run sends nothing; the event's two cases; refusals.
+- [x] **Step 2:** Implement; the always-apply section of CLAUDE.md and the event memory gain the two signals; push; CI green; open the dev→main PR.
 
 ### Task 8: Live — the switch without the band
 
-- [ ] **Step 1:** Dev time (no flag). The survey again with the band's devices on.
-- [ ] **Step 2:** `gen3-switch to-3`: the stage rack's and the FOH card's subscriptions resolved to the box, a member's page on the public URL names the box's build with the member's existing session, a member's mix heard on the stage rack's path (the HIL return: phase D's loop), health healthy, the PC live.
-- [ ] **Step 3:** `gen3-switch to-2`: everything read back equal to before (the card's name and subscriptions, the subscribers, the URL, the band's data), the box stopped and not enabled.
-- [ ] **Step 4:** Record on #72 (numbers and states only).
+- [x] **Step 1:** Dev time (no flag). The survey again with the band's devices on.
+- [x] **Step 2:** `gen3-switch to-3`: the stage rack's and the FOH card's subscriptions resolved to the box, a member's page on the public URL names the box's build with the member's existing session, a member's mix heard on the stage rack's path (the HIL return: phase D's loop), health healthy, the PC live.
+- [x] **Step 3:** `gen3-switch to-2`: everything read back equal to before (the card's name and subscriptions, the subscribers, the URL, the band's data), the box stopped and not enabled.
+- [x] **Step 4:** Record on #72 (numbers and states only). **Done 2026-10-27:** to-3 in 12 s (the receivers on our device, the public URL on the box, the FOH inputs complete ~50 s after the start), to-2 in 5 s, everything read back equal to before; two live defects fixed red then green (the public read's User-Agent, the card's own returns under its usual name).
 
 ### Task 9: The band test (on the owner's signal)
 
