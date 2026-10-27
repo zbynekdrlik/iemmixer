@@ -276,7 +276,9 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         flag(ip)
         record(ip, 3)   # from here "ide event" keeps the box (undone: 2 again)
         undo.append(lambda: stop_box(ip, s))
-        must(ip, s, RESET_FAILED, "clearing a unit left failed")
+        # Best effort, as deploy's: it exits 1 for a unit not loaded; a unit it
+        # leaves failed makes the start below fail, which undoes.
+        on_box(host, RESET_FAILED)
         must(ip, s, START, "starting the engine and the server")
         if not wait(lambda: on_box(host, HEALTH)[0] == 0 and answers_as(ip, s["GEN3_DANTE_IP"], name), HEALTH_S):
             raise Failed(f"the box is not healthy under the card's name within {HEALTH_S} s")
