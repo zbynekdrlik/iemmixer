@@ -101,6 +101,8 @@ class SwitchTests(Base):
             self.box_running = False
         if command == sw.RESET_FAILED:
             self.failed_units = False
+            # Live, 2026-10-27: reset-failed exits 1 when a named unit is not loaded (iem-dante, never started).
+            return 1, b"", b"Unit iem-dante.service not loaded."
         return 0, b"", b""
 
     def copy(self, host, local, remote) -> int:
