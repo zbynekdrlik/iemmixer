@@ -93,6 +93,7 @@ class Gen3DataTests(Base):
         self.scripts: list[str] = []
         self.sent: list[tuple[str, bytes]] = []
         self.states = "inactive\ninactive\ninactive\n"
+        self.tasks = "[not set]\n0\n[not set]\n"
         self.stat = "600.root.180\n"
         self.encrypt_code = 0
         self.mode = "644"   # what systemd-creds leaves under sudo's umask 0022 (the box, 2026-10-27)
@@ -112,6 +113,8 @@ class Gen3DataTests(Base):
         self.sent.append((command, stdin))
         if command.startswith("systemctl is-active"):
             return 0, self.states.encode(), b""
+        if command == getattr(data, "TASKS", None):
+            return 0, self.tasks.encode(), b""
         if command == data.RECEIVE:
             out, err = io.StringIO(), io.StringIO()
             with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
@@ -135,7 +138,7 @@ class Gen3DataTests(Base):
         self.assertEqual(code, 0, err)
         self.assertEqual(docs, [{"gen3_data": {"members": len(BAND), "bytes": len(zipped(BAND)), "dry_run": False,
                                                "written": len(BAND)}}])
-        self.assertEqual(self.commands(), ["systemctl is-active iem-server iem-engine iem-dante", data.RECEIVE])
+        self.assertEqual(self.commands(), [data.STATES, data.TASKS, data.RECEIVE])
         self.assertEqual((self.site / "secrets" / "jwt_secret").read_bytes(), b"zyxqw-jwt")
         self.assertEqual((self.engine / "current.json").read_bytes(), b'{"rev": 7}')
         self.assertEqual(self.scripts, [data.pc_script(ip.load_env(ip.env_path())["PC_ROOT"])])
@@ -171,14 +174,24 @@ class Gen3DataTests(Base):
         code, docs, err = self.run_main("gen3-data", "--dry-run")
         self.assertEqual(code, 0, err)
         self.assertTrue(docs[0]["gen3_data"]["dry_run"])
-        self.assertEqual(self.commands(), ["systemctl is-active iem-server iem-engine iem-dante"])
+        self.assertEqual(self.commands(), [data.STATES, data.TASKS])
         self.sent.clear()
         self.states = "active\nactive\ninactive\n"
         code, docs, err = self.run_main("gen3-data")
         self.assertEqual((code, docs), (1, []))
         self.assertIn("the box's stack is not stopped", err)
         self.assertEqual(self.scripts[-1:], [data.pc_script(ip.load_env(ip.env_path())["PC_ROOT"])])   # the dry run's
-        self.assertEqual(self.commands(), ["systemctl is-active iem-server iem-engine iem-dante"])
+        self.assertEqual(self.commands(), [data.STATES, data.TASKS])
+
+    def test_a_failed_unit_with_no_process_left_is_stopped_and_one_with_a_process_is_not(self) -> None:
+        # The reviews of PR #83: an engine exit 2/3 leaves its unit `failed` (not running); a stop past its
+        # bound (SendSIGKILL=no) leaves `failed` or, after reset-failed, `inactive` with its process alive.
+        self.states, self.tasks = "failed\ninactive\ninactive\n", "0\n[not set]\n[not set]\n"
+        self.assertEqual(self.run_main("gen3-data", "--dry-run")[0], 0)
+        self.states, self.tasks = "inactive\ninactive\ninactive\n", "2\n[not set]\n[not set]\n"
+        code, docs, err = self.run_main("gen3-data", "--dry-run")
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("the box's stack is not stopped", err)
 
     def test_a_zip_that_does_not_match_its_manifest_or_lacks_the_engine_state_sends_nothing(self) -> None:
         self.pc_answer = answer(BAND, {**{k: hashlib.sha256(v).hexdigest() for k, v in BAND.items()},

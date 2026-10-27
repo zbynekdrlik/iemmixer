@@ -55,6 +55,9 @@ class SwitchTests(Base):
         self.renames_take = True
         self.after_manifest = {"engine/current.json": "a"}
         self.failed_units = False         # a unit left `failed` (exit 2/3, a crash loop) until reset-failed
+        self.reset_clears = True          # reset-failed clears `failed` (False: a unit it does not reach)
+        self.lingering = False            # a process left in a unit's group after its stop (SendSIGKILL=no)
+        self.helper_running = False       # an earlier rename's dante_card.py still running
         fakes = {
             (sw.iempc_dante, "ask_card"): self.ask_card, (sw.data, "box"): self.box, (sw, "copy"): self.copy,
             (sw, "answers_as"): self.answers_as, (sw.data, "send_band"): self.send_band,
@@ -62,6 +65,7 @@ class SwitchTests(Base):
             (sw.tunnel, "credential_ok"): lambda *a, **k: None, (sw.tunnel, "to_box"): self.to_box,
             (sw.tunnel, "to_pc"): self.to_pc, (sw.switch, "mirror"): self.mirror, (sw, "POLL_S"): 0.0,
             (sw.data, "band_zip"): lambda *a: (b"", self.after_manifest),
+            (sw, "helper_busy"): lambda ip_mod: self.helper_running, (sw, "HELPER_WAIT_S"): 0.0,
             (sw, "HEALTH_S"): 0.0, (sw, "TX_S"): 0.0}
         for (module, name), fake in fakes.items():
             patcher = mock.patch.object(module, name, fake)
@@ -90,6 +94,9 @@ class SwitchTests(Base):
             return 0, b'{"tx": [{"flow": 1, "live": 1}]}', b""
         if command == sw.HEALTH:
             return (0 if self.box_running else 3), b"", b""
+        if command == sw.data.TASKS:
+            busy = self.box_running or self.lingering
+            return 0, (b"3\n2\n[not set]\n" if busy else b"0\n0\n[not set]\n"), b""
         if command == sw.STACK_STATE:
             if self.box_running:
                 return 3, b"active\nactive\ninactive\n", b""
@@ -100,7 +107,8 @@ class SwitchTests(Base):
         if command == sw.STOP and self.stops:
             self.box_running = False
         if command == sw.RESET_FAILED:
-            self.failed_units = False
+            if self.reset_clears:
+                self.failed_units = False
             # Live, 2026-10-27: reset-failed exits 1 when a named unit is not loaded (iem-dante, never started).
             return 1, b"", b"Unit iem-dante.service not loaded."
         return 0, b"", b""
@@ -219,6 +227,56 @@ class SwitchTests(Base):
         code, docs, err = self.run_main("gen3-switch", "to-2")
         self.assertEqual(code, 0, err)
         self.assertEqual((self.side(), self.card_name), (2, CARD))
+
+    def test_failed_units_that_reset_failed_does_not_clear_still_count_as_stopped(self) -> None:
+        self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 0)
+        self.failed_units, self.reset_clears = True, False
+        code, docs, err = self.run_main("gen3-switch", "to-2")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.side(), self.card_name), (2, CARD))
+
+    def test_a_process_left_after_the_stop_keeps_the_card_on_its_spare_name(self) -> None:
+        # Never two devices under one name: inactive units with a process still in their group are not stopped.
+        self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 0)
+        self.lingering = True
+        code, docs, err = self.run_main("gen3-switch", "to-2")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.card_name, SPARE)
+        self.assertNotIn(f"rename {CARD}", self.events[-3:])
+
+    def test_a_rename_still_running_keeps_the_cards_name_untouched(self) -> None:
+        self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 0)
+        self.helper_running = True
+        code, docs, err = self.run_main("gen3-switch", "to-2")
+        self.assertEqual(code, 1)
+        self.assertIn("the card's rename is still running", err)
+        self.assertEqual(self.card_name, SPARE)
+
+    def test_a_signal_during_the_undo_does_not_cut_it_short(self) -> None:
+        import os
+        import signal
+        original = self.box
+
+        def box(host, command, stdin, timeout):
+            if command == sw.STOP and "url to pc" in self.events:   # the undo's stop
+                os.kill(os.getpid(), signal.SIGTERM)
+            return original(host, command, stdin, timeout)
+        self.fail_at = "url to box"
+        with mock.patch.object(sw.data, "box", box):
+            code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertEqual(code, 1)
+        self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
+
+    def test_sighup_during_the_switch_is_undone(self) -> None:
+        import os
+        import signal
+
+        def mirror(ip_mod, card, ours, also=()):
+            os.kill(os.getpid(), signal.SIGHUP)
+            return 29, None
+        with mock.patch.object(sw.switch, "mirror", mirror), self.assertRaises(SystemExit):
+            self.run_main("gen3-switch", "to-3")
+        self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
 
     def test_sigterm_during_the_switch_is_undone(self) -> None:
         import os
