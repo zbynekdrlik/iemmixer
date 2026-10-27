@@ -15,6 +15,7 @@
 # tool sends is an expansion of a line here (test_deploy.py for deploy.sh;
 # test_iempc_gen3.py for iempc gen3-mix, the live guard's stop and "ide
 # event"'s stop; test_install_dantesync.py for install-dantesync.sh;
+# test_install_cloudflared.py for install-cloudflared.sh;
 # test_provision.py for verify_box.py, and that every line here is in the
 # rendered rule). provision.sh's own `sudo -n bash ... provision-root.sh` runs
 # on the admin's own passwordless rule (phase D) and never gets a line here:
@@ -36,13 +37,15 @@ root | mv -T /opt/iemmixer/bin /opt/iemmixer/bin.phase-c
 root | ln -sfn slot-{slot}/bin /opt/iemmixer/bin.next
 root | mv -T /opt/iemmixer/bin.next /opt/iemmixer/bin
 
-# deploy.sh: the units, the device config, the test site and roster.
+# deploy.sh: the units, the device config, phase E's receiver of the band's
+# data, the test site and roster.
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.service /etc/systemd/system/iem-dante.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-engine.service /etc/systemd/system/iem-engine.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-server.service /etc/systemd/system/iem-server.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd/system/iem-alarm@.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
+root | install -D -m 0755 .cache/iem-gen3-deploy/band_receive.py /opt/iemmixer/lib/band_receive.py
 root | install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site
 root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml
 root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/roster.toml /var/lib/iemmixer/site/roster.toml
@@ -84,6 +87,13 @@ root | timedatectl set-ntp false
 root | systemctl enable dantesync
 root | systemctl restart dantesync
 
+# scripts/gen3/install-cloudflared.sh (phase E Task 6): the pinned release's
+# .deb, held, and the band's tunnel connector's unit (systemctl daemon-reload
+# is deploy's line above); never enabled or started here.
+root | dpkg -i .cache/cloudflared-install/cloudflared-linux-amd64.deb
+root | apt-mark hold cloudflared
+root | install -D -m 0644 .cache/cloudflared-install/iem-tunnel.service /etc/systemd/system/iem-tunnel.service
+
 # scripts/gen3/verify_box.py (read only): the rule itself, the pepper's
 # credential (mode, owner, size; never its bytes), no plain test pepper, the
 # stack's state all the service user's (the first path that is not), the
@@ -98,3 +108,23 @@ root | cat /sys/module/drm_kms_helper/parameters/poll
 # reboot.
 root | systemctl restart iem-engine
 root | systemctl reboot
+
+# iempc gen3-data (phase E, #72): the band's files received as the service
+# user with the stack stopped, and the PC's pepper into the credential.
+iemmixer | python3 -I /opt/iemmixer/lib/band_receive.py /var/lib/iemmixer/site /var/lib/iemmixer/engine
+root | systemd-creds encrypt --name=pepper --with-key=auto - /etc/credstore.encrypted/iemmixer-pepper
+root | chmod 0600 /etc/credstore.encrypted/iemmixer-pepper
+
+# iempc gen3-tunnel (phase E, #72): the PC's connector token into the
+# box's credential, and the box's connector started and stopped.
+root | systemd-creds encrypt --name=tunnel --with-key=auto - /etc/credstore.encrypted/iemmixer-tunnel
+root | chmod 0600 /etc/credstore.encrypted/iemmixer-tunnel
+root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-tunnel
+root | systemctl start iem-tunnel
+root | systemctl stop iem-tunnel
+
+# iempc gen3-switch (phase E, #72): while 3.x serves the band the box's
+# engine, server and connector start at boot; the way back disables them.
+root | systemctl enable iem-engine iem-server iem-tunnel
+root | systemctl disable iem-tunnel
+iemmixer | rm -f /var/lib/iem-dante/takeover.toml

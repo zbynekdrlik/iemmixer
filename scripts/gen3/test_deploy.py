@@ -455,7 +455,7 @@ class DeployTests(unittest.TestCase):
         self.repo = self.tmp / "checkout"
         (self.repo / "scripts" / "gen3").mkdir(parents=True)
         (self.repo / "config").mkdir()
-        for path in (DEPLOY, TEMPLATE, *(HERE / name for name in UNIT_FILES)):
+        for path in (DEPLOY, TEMPLATE, HERE / "band_receive.py", *(HERE / name for name in UNIT_FILES)):
             shutil.copyfile(path, self.repo / "scripts" / "gen3" / path.name)
         for path in (TEST_SITE, TEST_ROSTER):
             shutil.copyfile(path, self.repo / "config" / path.name)
@@ -649,6 +649,7 @@ class DeployTests(unittest.TestCase):
         f"sudo -n install -D -m 0644 {STAGE}/iem-alarm@.service /etc/systemd/system/iem-alarm@.service",
         f"sudo -n install -D -m 0644 {STAGE}/dante-device.toml /etc/iemmixer/dante-device.toml",
         f"sudo -n install -D -m 0644 {STAGE}/iem-dante.env /etc/iemmixer/iem-dante.env",
+        f"sudo -n install -D -m 0755 {STAGE}/band_receive.py /opt/iemmixer/lib/band_receive.py",
         "sudo -n install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site",
         f"sudo -n install -D -o iemmixer -g iemmixer -m 0600 {STAGE}/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml",
         f"sudo -n install -D -o iemmixer -g iemmixer -m 0600 {STAGE}/roster.toml /var/lib/iemmixer/site/roster.toml"])
@@ -712,13 +713,14 @@ class DeployTests(unittest.TestCase):
             "root root 0644 /opt/iemmixer/slot-a/bin/BUILD", "root root 0644 /opt/iemmixer/slot-a/bin/SHA256SUMS",
             *(f"root root 0644 /etc/systemd/system/{n}" for n in UNIT_FILES),
             "root root 0644 /etc/iemmixer/dante-device.toml", "root root 0644 /etc/iemmixer/iem-dante.env",
+            "root root 0755 /opt/iemmixer/lib/band_receive.py",
             "dir iemmixer iemmixer 0700 /var/lib/iemmixer/site",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/iemmixer.toml",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/roster.toml"])
         self.assertFalse(any(" enable " in command for command in self.remote()))
         # The copy: the bundle's six files and the box's own files, one scp.
         self.assertEqual(self.scp_names(), sorted([*SLOT_FILES, *UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "iemmixer.toml", "roster.toml"]))
+                                                   "band_receive.py", "iemmixer.toml", "roster.toml"]))
         # The attestation of exactly the bundle's SHA256SUMS, by this
         # repository's CI workflow, before any call.
         self.assertEqual(self.gh_calls(), [{
@@ -865,7 +867,7 @@ class DeployTests(unittest.TestCase):
         # and the configs copied; no slot filled; no attestation asked.
         self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True))
         self.assertEqual(self.scp_names(), sorted([*UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "iemmixer.toml", "roster.toml"]))
+                                                   "band_receive.py", "iemmixer.toml", "roster.toml"]))
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(self.link(), "slot-a/bin")
         self.assert_slot_holds("a", first)
@@ -1386,6 +1388,13 @@ class DeployTests(unittest.TestCase):
             (with_value("--config", str(self.tmp)), "--config is not a file"),
             (full + ["--back"], "--back takes no --bundle"),
             (back + ["--pins"], "--back takes no --pins"),
+            (full + ["--site-file", str(self.config)], "--site-file and --roster-file go together"),
+            (full + ["--roster-file", str(self.config)], "--site-file and --roster-file go together"),
+            (full + ["--site-file", str(self.tmp / "missing"), "--roster-file", str(self.config)],
+             "--site-file is not a file"),
+            (full + ["--site-file", str(self.config), "--roster-file", str(self.tmp)], "--roster-file is not a file"),
+            (full + ["--pins", "--site-file", str(self.config), "--roster-file", str(self.config)],
+             "the band's PINs come with iempc gen3-data"),
             ([a for a in back if a not in ("--sha", self.sha)], "--sha is missing"),
         ]
         for argv, want in cases:
@@ -1398,6 +1407,45 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.gh_calls(), [])
 
+
+    def test_a_deploy_while_3x_serves_the_band_is_refused(self) -> None:
+        # Phase E (#72): the switch recorded side 3; a deploy would stop the box that plays the band.
+        state = self.tmp / "iempc-state"
+        state.mkdir()
+        (state / "gen3-side.json").write_text('{\n "side": 3,\n "at": "2026-10-27T12:00:00+00:00"\n}', encoding="utf-8")
+        r = self.deploy(IEMPC_STATE=str(state))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("3.x serves the band", r.stderr)
+        self.assertEqual(self.calls(), [])
+        (state / "gen3-side.json").write_text('{\n "side": 2,\n "at": "2026-10-27T13:00:00+00:00"\n}', encoding="utf-8")
+        self.assertEqual(self.deploy(IEMPC_STATE=str(state)).returncode, 0)
+
+    # Phase E (#72): the box on the band's site and roster from the ops repo.
+
+    def site_files(self, site: str) -> tuple[Path, Path]:
+        ops = self.tmp / "ops"
+        ops.mkdir(exist_ok=True)
+        (ops / "site.toml").write_text(site, encoding="utf-8")
+        (ops / "roster.toml").write_text("[[people]]\nid = 'zyxqw'\n", encoding="utf-8")
+        return ops / "site.toml", ops / "roster.toml"
+
+    def test_the_bands_site_goes_without_back_to_reaper_and_its_roster_as_given(self) -> None:
+        body = "".join(line for line in TEST_SITE.read_text(encoding="utf-8").splitlines(keepends=True)
+                       if not line.startswith("back_to_reaper"))
+        site, roster = self.site_files('back_to_reaper = ["iemmode.exe", "event"]\n' + body)
+        r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.installed("/var/lib/iemmixer/site/iemmixer.toml").decode(), body)
+        self.assertEqual(self.installed("/var/lib/iemmixer/site/roster.toml"), roster.read_bytes())
+        self.assertNotIn("pin", " ".join(" ".join(c) for c in self.calls() if c and c[0] == "ssh").replace(
+            "pin_changes", ""))
+
+    def test_a_back_to_reaper_on_more_lines_is_refused_before_anything_is_copied(self) -> None:
+        site, roster = self.site_files('back_to_reaper = [\n  "iemmode.exe",\n  "event",\n]\n')
+        r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the site's back_to_reaper is not one line", r.stderr)
+        self.assertEqual([c for c in self.calls() if c and c[0] == "scp"], [])
 
 class UnitTests(unittest.TestCase):
     """The units (phase C plan Task 6 Interfaces, choice 5; phase D plan Task 5,
@@ -1482,14 +1530,16 @@ class UnitTests(unittest.TestCase):
                 for key in ("StartLimitIntervalSec", "StartLimitBurst", "StartLimitInterval"):
                     self.assertNotIn(key, unit["Service"])
 
-    def test_no_unit_holds_a_capability(self) -> None:
+    def test_only_the_server_holds_a_capability_and_only_to_bind_port_80(self) -> None:
         # dantesync is the box's one PTP owner (owner, 2026-10-26): our
-        # device never opens UDP 319/320 and every port of the stack is above
-        # 1024, so no unit needs a capability.
+        # device never opens UDP 319/320 and its ports are above 1024. The
+        # server listens on port 80, the band's tunnel's origin (phase E, #72),
+        # and holds that one capability, nothing else.
         for name, unit in self.all_four().items():
+            want = "CAP_NET_BIND_SERVICE" if name == "iem-server" else ""
             with self.subTest(unit=name):
-                self.assertEqual(one(unit, "Service", "CapabilityBoundingSet"), "")
-                self.assertEqual(one(unit, "Service", "AmbientCapabilities"), "")
+                self.assertEqual(one(unit, "Service", "CapabilityBoundingSet"), want)
+                self.assertEqual(one(unit, "Service", "AmbientCapabilities"), want)
 
     def test_the_pepper_credential_only_on_the_server(self) -> None:
         # Choice 5: systemd decrypts the box's credential into the server's
@@ -1547,7 +1597,7 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(one(server, "Service", "ExecStart"), "/opt/iemmixer/bin/iem-server")
         env = dict(item.split("=", 1) for item in shlex.split(one(server, "Service", "Environment")))
         self.assertEqual(env, {"IEMMIXER_CONFIG": opts["--site"], "IEMMIXER_ENGINE_PIPE": opts["--pipe"],
-                               "PORT": "8080", "RUST_LOG": "info"})
+                               "PORT": "80", "RUST_LOG": "info"})
         # The site is where deploy.sh copies it, in the folders the units own.
         deploy = DEPLOY.read_text(encoding="utf-8")
         self.assertIn("SITE=$SITEDIR/iemmixer.toml", deploy)

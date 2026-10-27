@@ -114,6 +114,21 @@ def start_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
         return None
 
 
+def gen3_serves() -> bool:
+    """Whether the Gen 3 box serves the band (phase E, #72: `iempc gen3-switch
+    to-3` recorded side 3). A record that cannot be read counts as serving:
+    stopping the box then could take the band's audio away, keeping it
+    running harms nothing (a warning says so)."""
+    path = core.STATE_DIR / "gen3-side.json"   # never made here: a broken state folder is no side record
+    if not path.exists():
+        return False
+    try:
+        return core.read_json(path, {}).get("side") != 2
+    except Exception as e:   # unreadable: keep the box (the docstring)
+        gen3_warning(f"{path.name} cannot be read ({type(e).__name__}): the Gen 3 stack is kept running")
+        return True
+
+
 def launch_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
     host = env.get("GEN3_HOST", "")
     if not host:
@@ -121,6 +136,10 @@ def launch_gen3_stop(env: dict[str, str]) -> Gen3Stop | None:
         return None
     if host.startswith("-"):
         gen3_warning("GEN3_HOST must be an ssh destination, not an option: not stopped")
+        return None
+    if gen3_serves():
+        gen3_say("iempc: 3.x serves the band (iempc gen3-switch, gen3-side.json): the Gen 3 stack is kept running; "
+                 "`iempc gen3-switch to-2` is the way back")
         return None
     bound = max(1, math.ceil(GEN3_STOP_S))
     cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={bound}", "-o", "ServerAliveInterval=1",

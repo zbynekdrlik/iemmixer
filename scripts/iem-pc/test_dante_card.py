@@ -25,6 +25,7 @@ sys.path.insert(0, str(HERE))
 import dante_card  # noqa: E402
 
 IP, NAME = "192.0.2.10", "Zyxqw-Iem-Card"
+SPARE = "Zyxqw-Iem-Card-2x"
 
 
 class Channel:
@@ -47,6 +48,7 @@ class Card:
         self.partial = None                           # "tx" or "rx": that kind's last channel missing
         self.no_counts = False                        # names itself, reports no channel counts
         self.after_write = None                       # called after each write that returned
+        self.keeps_name = False                       # set_name returns, the name stays
         self.reads = 0
 
     def device(self, ip: str):
@@ -89,6 +91,13 @@ class Device:
 
     async def reset_channel_name(self, kind: str, number: int) -> None:
         await self._write(kind, number, None)
+
+    async def set_name(self, name: str) -> None:
+        self.card.calls.append(("set_name", name))
+        if ("name", 0) in self.card.raise_on:
+            raise self.card.raise_on[("name", 0)]
+        if not self.card.keeps_name:
+            self.card.name = name
 
     async def _write(self, kind: str, number: int, label: str | None) -> None:
         self.card.calls.append(("set_channel_name", kind, number, label) if label is not None
@@ -216,6 +225,67 @@ class HelperTests(unittest.TestCase):
             self.assertIn(f"incomplete read of the card's {partial or 'tx'} channels", err)
         self.assertEqual(self.writes(), [])
 
+    def rename(self, new: str = SPARE, expected: str = NAME) -> tuple[int, dict | None, str]:
+        code, out, err = self.run_helper("rename", IP, expected, new)
+        return code, (json.loads(out) if out else None), err
+
+    def test_rename_gives_the_card_a_new_name_and_reads_it_back(self) -> None:
+        # Gen 3 phase E's switch (#72): the card takes a spare name, so the
+        # box can take the card's.
+        code, doc, err = self.rename()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc, {"renamed": True, "name": SPARE, "error": None})
+        self.assertEqual(self.writes(), [("set_name", SPARE)])
+        self.assertEqual((self.card.reads, self.card.opened), (2, [IP, IP]))
+        # And back, from the spare name.
+        code, doc, err = self.rename(NAME, SPARE)
+        self.assertEqual((code, doc), (0, {"renamed": True, "name": NAME, "error": None}), err)
+
+    def test_a_rename_the_card_does_not_take_or_that_fails_is_reported_with_the_name_it_holds(self) -> None:
+        self.card.keeps_name = True
+        code, doc, err = self.rename()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc, {"renamed": False, "name": NAME, "error": "the card does not hold the new name"})
+        self.card.keeps_name = False
+        self.card.raise_on[("name", 0)] = ConnectionRefusedError(111, "Connection refused")
+        code, doc, err = self.rename()
+        self.assertEqual(code, 0, err)
+        self.assertEqual((doc["renamed"], doc["name"]), (False, NAME))
+        self.assertIn("renaming failed (ConnectionRefusedError", doc["error"])
+        # A card silent after the command: not read back, the name unknown.
+        self.card.raise_on.clear()
+        self.card.after_write = None
+        self.card.calls.clear()
+        original = Device.set_name
+
+        async def then_silent(device, name):
+            await original(device, name)
+            self.card.silent = True
+        with mock.patch.object(Device, "set_name", then_silent):
+            code, doc, err = self.rename()
+        self.assertEqual((code, doc["renamed"], doc["name"]), (0, False, None), err)
+        self.assertIn("not read back: the card did not answer", doc["error"])
+
+    def test_a_rename_of_another_device_or_of_a_silent_card_sends_nothing(self) -> None:
+        self.card.name = "Qwxyz-Other-Card"
+        code, doc, err = self.rename()
+        self.assertEqual((code, doc), (1, None))
+        self.assertIn("not the expected one: nothing was renamed", err)
+        self.assertNotIn("Qwxyz", err)
+        self.card.name, self.card.silent = NAME, True
+        code, doc, err = self.rename()
+        self.assertEqual((code, doc), (1, None))
+        self.assertIn("the card did not answer: nothing was renamed", err)
+        self.assertEqual(self.writes(), [])
+
+    def test_a_name_dante_does_not_hold_is_refused_before_the_card_is_asked(self) -> None:
+        for new in ("", "X" * 32, "-zyxqw", "zyxqw-", "zyx qw", "zyx.qw", "zyx@qw", "Zyx" + chr(0x17D), NAME):
+            code, doc, err = self.rename(new)
+            self.assertEqual((code, doc), (2, None), new)
+            self.assertTrue(err.startswith("dante_card: "), new)
+        self.assertEqual((self.card.opened, self.card.calls), ([], []))
+        self.assertEqual(self.rename("Z" * 31)[0], 0)   # 31 characters: the longest Dante holds
+
     def test_a_channel_the_card_lacks_writes_nothing(self) -> None:
         changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},
                    {"type": "rx", "channel": 9, "label": "09 ZYXQW mic"}]
@@ -279,16 +349,20 @@ class SourceTests(unittest.TestCase):
     never run against a card in CI)."""
     SOURCE = (HERE / "dante_card.py").read_text(encoding="utf-8")
 
-    def test_the_helper_calls_no_command_but_its_reads_and_its_label_writes(self) -> None:
+    def test_the_helper_calls_no_command_but_its_reads_its_label_writes_and_its_rename(self) -> None:
         forbidden = ("add_subscription", "remove_subscription", "set_latency", "set_sample_rate", "set_encoding",
-                     "set_gain_level", "set_name", "reset_name", "identify", "dante_command", "dante_send_command",
+                     "set_gain_level", "reset_name", "identify", "dante_command", "dante_send_command",
                      "get_volume", "socket")
         for name in forbidden:
             self.assertIsNone(re.search(rf"\b{name}\b", self.SOURCE), name)
         for raw in (r"\bcommand_\w+", r"\.sockets\b", r"\.send\("):
             self.assertIsNone(re.search(raw, self.SOURCE), raw)
         self.assertEqual(set(re.findall(r"await device\.(\w+)\(", self.SOURCE)),
-                         {"get_controls", "set_channel_name", "reset_channel_name"})
+                         {"get_controls", "set_channel_name", "reset_channel_name", "set_name"})
+        # The card's own name is set in one place: the rename verb's function.
+        self.assertEqual(len(re.findall(r"\.set_name\(", self.SOURCE)), 1)
+        body = self.SOURCE.split("async def rename(", 1)[1].split("\ndef ", 1)[0].split("\nasync def ", 1)[0]
+        self.assertIn("await device.set_name(", body)
         self.assertEqual(re.findall(r"device\.(\w+) *=", self.SOURCE), ["ipv4", "services"])
 
     def test_only_the_helper_imports_netaudio(self) -> None:

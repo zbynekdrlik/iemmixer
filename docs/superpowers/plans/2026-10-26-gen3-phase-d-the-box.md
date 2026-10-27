@@ -61,9 +61,9 @@ As Task 1.
 **Interfaces:**
 - Produces: the RX thread keeps per flow slot the least lateness in ns of each second (`fetch_min` of our now in ns minus the packet's stamp in ns, one per placed packet); the heartbeat's `take_max_lateness` also moves it to `RxShared::last_min_lateness_ns(slot) -> Option<u64>` (`None` for a second without a packet); the status's `rx` flows gain `lateness_min_ns` (absent when `None`). The live guard's lines report it per RX flow (`judge`), never a trip.
 
-- [ ] **Step 1: Tests:** `the_least_lateness_of_a_second_is_kept_in_ns`; `a_second_without_packets_has_no_least_lateness`; the status's `lateness_min_ns` numbers only; the guard's `judge` in its lines; `tests/hot_path.rs` unchanged and green (one atomic more per packet).
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): the packets' judge of the box's clock (#72)`.
+- [x] **Step 1: Tests:** `the_least_lateness_of_a_second_is_kept_in_ns`; `a_second_without_packets_has_no_least_lateness`; the status's `lateness_min_ns` numbers only; the guard's `judge` in its lines; `tests/hot_path.rs` unchanged and green (one atomic more per packet).
+- [x] **Step 2:** Implement.
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): the packets' judge of the box's clock (#72)`.
 
 ### Task 4: The PIN pepper from a systemd credential (`iem-server`)
 
@@ -76,9 +76,9 @@ As Task 1.
   - `Some(c)`: the pepper is `c/pepper`, exactly 32 bytes, never created or written; missing or another length is an error naming the credential (never bytes); a `pepper.test` in `dir` is an error: `a plain test pepper lies beside the systemd credential: remove <path> and give every PIN again`; one info line `PIN pepper from the systemd credential`.
   - `None`: today's owner-only `pepper.test` and its warning (CI and local runs; the box's units always pass the credential). Windows unchanged.
 
-- [ ] **Step 1: Tests:** `the_credential_is_the_pepper`; `a_credential_of_another_length_is_an_error`; `a_credentials_folder_without_the_pepper_is_an_error_never_the_test_file`; `a_test_pepper_beside_the_credential_is_an_error`; `nothing_is_written_with_a_credential`; the existing test-file tests unchanged; `startup_tests.rs`: `start_up_refuses_a_short_credential_before_any_port`.
-- [ ] **Step 2:** Implement; the security-baseline bullet: Linux reads the systemd credential, the plain file is test-only.
-- [ ] **Step 3:** Push; CI green (also `windows`). Commit: `feat(server): the PIN pepper from a systemd credential on Linux (#72)`.
+- [x] **Step 1: Tests:** `the_credential_is_the_pepper`; `a_credential_of_another_length_is_an_error`; `a_credentials_folder_without_the_pepper_is_an_error_never_the_test_file`; `a_test_pepper_beside_the_credential_is_an_error`; `nothing_is_written_with_a_credential`; the existing test-file tests unchanged; `startup_tests.rs`: `start_up_refuses_a_short_credential_before_any_port`.
+- [x] **Step 2:** Implement; the security-baseline bullet: Linux reads the systemd credential, the plain file is test-only.
+- [x] **Step 3:** Push; CI green (also `windows`). Commit: `feat(server): the PIN pepper from a systemd credential on Linux (#72)`.
 
 ### Task 5: The units under the service user, and the alarm unit
 
@@ -93,9 +93,9 @@ As Task 1.
   - `iem-alarm@.service`: `Type=oneshot`, `User=iemmixer`, `Group=iemmixer`, `SyslogIdentifier=iem-alarm`, `Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml`, `ExecStart=/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} ${MONITOR_EXIT_STATUS})"`, `ExecStart=/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"`, `TimeoutStartSec=30`, `SendSIGKILL=no`; no `OnFailure=` (an alarm never loops), no `[Install]`, no shell.
   - `ctl::bind_control`: the socket 0660 (who may connect is the 0750 runtime folder's group).
 
-- [ ] **Step 1: Tests:** `UnitTests` gains: `User`/`Group` on all three and the alarm unit; `OnFailure`, `RestartMode=direct`, the backoff and the start limit on all three; the capability only on engine and device; the credential only on the server; runtime folder modes; the alarm unit has no `OnFailure`, no `[Install]`, no shell and its stop bound; phase C's tests kept (Conflicts both ways, no ordering between engine and server, `--site`/`--pipe` against the server's variables). `ctl`: `the_control_socket_is_0660`. `systemd-analyze verify` clean on the four (by hand on a scratch root, as phase C).
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green. Commit: `feat(gen3): the units run as the service user and raise an alarm when they stay down (#72)`.
+- [x] **Step 1: Tests:** `UnitTests` gains: `User`/`Group` on all three and the alarm unit; `OnFailure`, `RestartMode=direct`, the backoff and the start limit on all three; the capability only on engine and device; the credential only on the server; runtime folder modes; the alarm unit has no `OnFailure`, no `[Install]`, no shell and its stop bound; phase C's tests kept (Conflicts both ways, no ordering between engine and server, `--site`/`--pipe` against the server's variables). `ctl`: `the_control_socket_is_0660`. `systemd-analyze verify` clean on the four (by hand on a scratch root, as phase C).
+- [x] **Step 2:** Implement.
+- [x] **Step 3:** Push; CI green. Commit: `feat(gen3): the units run as the service user and raise an alarm when they stay down (#72)`.
 
 ### Task 6: Health (`iem-dante-dev health`)
 
@@ -111,9 +111,9 @@ As Task 1.
   - `health::verdict(units: &Units, first: Option<&Status>, second: Option<&Status>, server: &ServerAnswer, own_build: &str, now_mono_us: u64) -> Verdict` (pure): `State::{Healthy, Degraded, Failed, Stopped}` and reasons, fixed words: `unit_failed`, `restarted` (NRestarts > 0), `clock_not_ready` (the host unit active over 30 s and not ready), `holdover`, `pump_free` (clock ready, `media` 0), `pump_stalled` (blocks did not rise between the reads), `pump_rebootstrap` (rebootstraps rose), `server_down`, `build_mismatch` (`git_hash` not a prefix of this binary's build). Healthy: engine and server active and no reason, or the standalone device active alone with a ready clock and no reason. Stopped: all three inactive, none failed.
   - Glue (the `systemctl` call, two control-socket reads a second apart, an HTTP/1.0 `GET /api/version` to 127.0.0.1 within 2 s over `TcpStream`) excluded per function with its reason.
 
-- [ ] **Step 1: Tests:** one per reason and per state; `stopped_exits_3`; `the_standalone_device_alone_can_be_healthy`; `unknown_systemd_words_read_as_other`; `the_line_is_numbers_and_fixed_words` (parsed, every string from the fixed set).
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green. Commit: `feat(dante): a health command for the box (#72)`.
+- [x] **Step 1: Tests:** one per reason and per state; `stopped_exits_3`; `the_standalone_device_alone_can_be_healthy`; `unknown_systemd_words_read_as_other`; `the_line_is_numbers_and_fixed_words` (parsed, every string from the fixed set).
+- [x] **Step 2:** Implement.
+- [x] **Step 3:** Push; CI green. Commit: `feat(dante): a health command for the box (#72)`.
 
 ### Task 7: Deploy into slots, attested, from one commit
 
@@ -130,9 +130,9 @@ As Task 1.
   - `sudo-lines.txt`: one line per `sudo -n` command any Gen 3 tool sends, `<runas> | <command exactly as sent>`, placeholders `{slot}` (`a`, `b`), `{member}` (each roster id) and `{units}` (each ordered non-empty subset of `iem-dante iem-engine iem-server`); Task 9 turns it into the sudoers file.
   - CI `gen3-attest` (pushes only, `needs: [gen3-bin]`, `id-token: write`, `attestations: write`, `contents: read`): downloads `gen3-bundle-<sha>` and attests `SHA256SUMS` by digest (subject `gen3-SHA256SUMS-<sha>`), as `attest` does for the PC's zip.
 
-- [ ] **Step 1: Tests** (stand-in ssh/scp/gh first on PATH, `PC_ENV` a temporary file): the order for none → a, a → b, b → a; the stack is stopped only after the new slot holds verified sums; the phase C folder moved aside once, never deleted, never twice; `--back` (a slot whose `BUILD` is not `--sha`, or whose sums fail, refuses with nothing stopped; only units and configs copied); HEAD, dirty tree and attestation refusals with nothing sent; site and roster owned by `iemmixer`; `--pins` through `systemd-run`, each PIN only on stdin, never on a command line or printed; health polled until healthy, a health never healthy fails after the wait with its last line; no `10-user.conf` installed; `every_sudo_line_deploy_sends_is_in_the_template` (each recorded `sudo -n` call, every mode and slot, is an expansion of a `sudo-lines.txt` line).
-- [ ] **Step 2:** Implement (`set -euo pipefail`).
-- [ ] **Step 3:** Push; CI green. Commit: `feat(gen3): deploys into two slots, attested, from one commit (#72)`.
+- [x] **Step 1: Tests** (stand-in ssh/scp/gh first on PATH, `PC_ENV` a temporary file): the order for none → a, a → b, b → a; the stack is stopped only after the new slot holds verified sums; the phase C folder moved aside once, never deleted, never twice; `--back` (a slot whose `BUILD` is not `--sha`, or whose sums fail, refuses with nothing stopped; only units and configs copied); HEAD, dirty tree and attestation refusals with nothing sent; site and roster owned by `iemmixer`; `--pins` through `systemd-run`, each PIN only on stdin, never on a command line or printed; health polled until healthy, a health never healthy fails after the wait with its last line; no `10-user.conf` installed; `every_sudo_line_deploy_sends_is_in_the_template` (each recorded `sudo -n` call, every mode and slot, is an expansion of a `sudo-lines.txt` line).
+- [x] **Step 2:** Implement (`set -euo pipefail`).
+- [x] **Step 3:** Push; CI green. Commit: `feat(gen3): deploys into two slots, attested, from one commit (#72)`.
 
 ### Task 8: The dev box's tools beside the service user
 
@@ -145,9 +145,9 @@ As Task 1.
   - `gen3-mix`'s `mint_tokens`: `sudo -n -u iemmixer rm -f /var/lib/iemmixer/mint/engineer.token /var/lib/iemmixer/mint/member.token`, then `sudo -n -u iemmixer /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub engineer --engineer --seconds 900 --out /var/lib/iemmixer/mint/engineer.token` (and `--sub <member> … member.token`), each copied by `sudo -n -u iemmixer cat <file>` over ssh's stdout straight into a new 0600 file of the dev box's `gen3-mix-*` folder (never printed), and in the `finally` the same `rm -f` (a failure is a warning naming the command). Everything else of gen3-mix as in phase C.
   - The live guard's 10-second line adds `clock_source`, `clock_rejected`, `clock_holdovers`, `clock_re_anchors`, `clock_offset_ns` when the status has them; its end line adds `judge: [{flow, n, min, p1, p50, p99, max, slope_ns_per_s}]` for every RX flow that reported `lateness_min_ns` (nearest-rank percentiles; the least-squares slope over (t_s, lateness)). Reported, never a trip.
 
-- [ ] **Step 1: Tests:** `MixTests`: the mint, copy and removal lines exactly as sent, the token never on a command line or printed, removed on every exit; `test_live_guard.py`: the judge on synthetic reads (percentiles by nearest rank, the slope exact on a line, flows without `lateness_min_ns` absent), the clock fields absent change nothing, never a trip; `every_sudo_line_gen3_mix_the_guard_and_the_event_stop_send_is_in_the_template` (`iempc_event`'s Gen 3 stop included).
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green. Commit: `feat(gen3): gen3-mix and the live guard beside the service user and our clock (#72)`.
+- [x] **Step 1: Tests:** `MixTests`: the mint, copy and removal lines exactly as sent, the token never on a command line or printed, removed on every exit; `test_live_guard.py`: the judge on synthetic reads (percentiles by nearest rank, the slope exact on a line, flows without `lateness_min_ns` absent), the clock fields absent change nothing, never a trip; `every_sudo_line_gen3_mix_the_guard_and_the_event_stop_send_is_in_the_template` (`iempc_event`'s Gen 3 stop included).
+- [x] **Step 2:** Implement.
+- [x] **Step 3:** Push; CI green. Commit: `feat(gen3): gen3-mix and the live guard beside the service user and our clock (#72)`.
 
 ### Task 9: Provision and verify the box
 
@@ -162,18 +162,18 @@ As Task 1.
   - `provision-root.sh` (root, `set -euo pipefail`, idempotent: each step prints `<step> changed` or `<step> unchanged`; `IEM_PROVISION_ROOT` prefixes every path it writes and commands are called by name: the tests' seams). Steps: `user` (system group and user `iemmixer`, nologin, no home; the admin in the group); `folders` (`/etc/iemmixer` 0755, `/etc/credstore.encrypted` 0700 root, `/var/lib/iemmixer/mint` 0700 `iemmixer`); `pepper` (only when absent: `head -c 32 /dev/urandom | systemd-creds encrypt --name=pepper --with-key=auto - /etc/credstore.encrypted/iemmixer-pepper` under umask 077; never overwritten); `phase-c` (removes phase C's `10-user.conf` drop-ins of the three units and the synthetic band's `pepper.test` and `pin_hashes.json` under `/var/lib/iemmixer/site`: `deploy --pins` gives every test PIN again); `journal` (`/etc/systemd/journald.conf.d/50-iemmixer.conf`: `Storage=persistent`, `SystemMaxUse=1G`, `MaxRetentionSec=30day`; `/var/log/journal`; journald restarted only when changed; rsyslog purged when installed); `apt` (the installed `linux-generic*`, `linux-image-generic*` and `linux-headers-generic*` packages held; `20auto-upgrades` with both values `"0"`; `unattended-upgrades.service`, `apt-daily.timer`, `apt-daily-upgrade.timer` masked); `sleep` (sleep, suspend, hibernate and hybrid-sleep targets masked); `clock` (`timedatectl set-ntp false`, `systemctl enable --now dantesync`, refused when dantesync is not installed: run `install-dantesync.sh` first; never timesyncd, chrony or ptp4l beside it); `napi` (the Dante NIC's packet priority, choice 1: a oneshot unit `iem-napi.service`, enabled, run at boot before dantesync, that sets `/sys/class/net/<the Dante interface>/threaded` to 1, gives its NAPI kernel thread `SCHED_FIFO` at a priority above dantesync's 50 and the audio threads' 45, and pins it and the NIC's interrupt to one core; the interface from `/etc/iemmixer/iem-dante.env`; each value read back); `display` (added after Live 4's first run: `/etc/tmpfiles.d/iemmixer-display.conf` turns the display drivers' output polling off at every boot, `w /sys/module/drm_kms_helper/parameters/poll - - - - N`, applied with `systemd-tmpfiles --create` when the parameter is not N and read back; a box without the parameter has nothing to apply); `stack` (the stack's installed units disabled); `sudoers` (`/etc/sudoers.d/iemmixer-gen3`, 0440: `sudo-lines.txt` expanded for the admin, each program as its absolute path, `(root)` or `(iemmixer)` from the line's runas, `NOPASSWD`; written to a temporary file, `visudo -cf` must pass before it is moved into place). It never starts or restarts the stack; it restarts only journald and the time owner when their step changed.
   - `verify_box.py` (read-only; one numbers-and-fixed-words JSON line; exit 0 only when every check passes; each failing check's name on stderr): `user`, `units` (installed, `User=iemmixer`, no `10-user.conf`), `boot` (none of the stack's units enabled), `sudoers` (`sudo -n visudo -c`), `pepper` (`sudo -n stat -c '%a %U %s'` of the credential: `600 root`, not empty), `no_test_pepper`, `journal`, `apt`, `sleep`, `clock` (dantesync active and enabled, timesyncd, chrony and ptp4l neither active nor enabled). Added after Live 4's first run: `display` (the tmpfiles.d file, and `sudo -n cat /sys/module/drm_kms_helper/parameters/poll` reading N on a box that has the parameter; a template line).
 
-- [ ] **Step 1: Tests** (`test_provision.py`): the root script on a temporary root with stand-in commands: the first run every step `changed`, the files byte for byte, the commands in order; the second run every step `unchanged` and no state-changing command; the pepper never overwritten, its bytes on no command line and in no file under the root; the sudoers file passes the runner's real `visudo -cf`; refusals (not root, `dantesync` not installed); `provision.sh`'s refusals with nothing sent; `verify_box.py` on stand-in outputs naming each failing check; `every_line_of_the_template_is_in_the_sudoers_file`; `install-dantesync.sh`'s sudo lines are in the template.
-- [ ] **Step 2:** Implement.
-- [ ] **Step 3:** Push; CI green; `mutants-list` within the shard matrix (resize before the PR if not). Open the dev→main PR (auto-merge when every gate is green). Commit: `feat(gen3): provision and verify the box (#72)`.
+- [x] **Step 1: Tests** (`test_provision.py`): the root script on a temporary root with stand-in commands: the first run every step `changed`, the files byte for byte, the commands in order; the second run every step `unchanged` and no state-changing command; the pepper never overwritten, its bytes on no command line and in no file under the root; the sudoers file passes the runner's real `visudo -cf`; refusals (not root, `dantesync` not installed); `provision.sh`'s refusals with nothing sent; `verify_box.py` on stand-in outputs naming each failing check; `every_line_of_the_template_is_in_the_sudoers_file`; `install-dantesync.sh`'s sudo lines are in the template.
+- [x] **Step 2:** Implement.
+- [x] **Step 3:** Push; CI green; `mutants-list` within the shard matrix (resize before the PR if not). Open the dev→main PR (auto-merge when every gate is green). Commit: `feat(gen3): provision and verify the box (#72)`.
 
 ### Task 10: Live 1 — provisioned, the stack on dantesync's clock (the baseline)
 
-- [ ] **Step 1:** Dev time only. The live guard runs as a background task of its own for the whole session (phase C's lesson).
-- [ ] **Step 2:** Stop the stack; `provision.sh --ntp-from <ops dantesync config>`. Expected: every step `changed` (or `unchanged` where the box already was), verify passes. Again: every step `unchanged`, verify passes. The admin's passwordless rule stays until phase G (Task 9's note); verify checks that the generated `sudoers.d/iemmixer` holds every template line.
-- [ ] **Step 3:** From a checkout at the merge's SHA: `deploy.sh --bundle <its gen3-bundle> --sha <sha> --config <ops device config> --iface <Dante interface> --pins`. Expected: phase C's `bin` moved aside, slot a installed, health healthy within 30 s; `ps -o user=` of engine and server is `iemmixer`; the server's journal says `PIN pepper from the systemd credential`; no `pepper.test` on the box.
-- [ ] **Step 4:** Load (the same in Live 4): `ctl source S sine 1000 -30` on a spare TX S outside the site; our RX R (the box input's channel) on our TX S and a spare RX Q on our TX T (the member's mix's first TX), raw 0x3010 on our own device; `ctl check Q sine 1000`; a spare RX J outside the site on the IEM card's spare HIL TX X (our RX only, as phase C Live 3). `live_guard.py --seconds 1800`. Record: the guard's end line (`judge` for J's flow, clock counts, pump counts), Q's discontinuities, J's holes and late, dantesync's mode before and after (`dantesync_probe.py`) and its journal's spike, mode and DSYX lines.
-- [ ] **Step 5:** The same load for 30 minutes again with the NIC's packet priority applied (choice 1's threaded NAPI at RT priority and its core; provision's `napi` step): record the judge's spread, dantesync's spike rejections, its mode and the DSYX replies past 200 ms, before and after.
-- [ ] **Step 6:** Record on #72 (numbers only) and on zbynekdrlik/dantesync#136 (the judge's numbers under load, before and after the packet priority, no site data).
+- [x] **Step 1:** Dev time only. The live guard runs as a background task of its own for the whole session (phase C's lesson).
+- [x] **Step 2:** Stop the stack; `provision.sh --ntp-from <ops dantesync config>`. Expected: every step `changed` (or `unchanged` where the box already was), verify passes. Again: every step `unchanged`, verify passes. The admin's passwordless rule stays until phase G (Task 9's note); verify checks that the generated `sudoers.d/iemmixer` holds every template line.
+- [x] **Step 3:** From a checkout at the merge's SHA: `deploy.sh --bundle <its gen3-bundle> --sha <sha> --config <ops device config> --iface <Dante interface> --pins`. Expected: phase C's `bin` moved aside, slot a installed, health healthy within 30 s; `ps -o user=` of engine and server is `iemmixer`; the server's journal says `PIN pepper from the systemd credential`; no `pepper.test` on the box.
+- [x] **Step 4:** Load (the same in Live 4): `ctl source S sine 1000 -30` on a spare TX S outside the site; our RX R (the box input's channel) on our TX S and a spare RX Q on our TX T (the member's mix's first TX), raw 0x3010 on our own device; `ctl check Q sine 1000`; a spare RX J outside the site on the IEM card's spare HIL TX X (our RX only, as phase C Live 3). `live_guard.py --seconds 1800`. Record: the guard's end line (`judge` for J's flow, clock counts, pump counts), Q's discontinuities, J's holes and late, dantesync's mode before and after (`dantesync_probe.py`) and its journal's spike, mode and DSYX lines.
+- [x] **Step 5:** The same load for 30 minutes again with the NIC's packet priority applied (choice 1's threaded NAPI at RT priority and its core; provision's `napi` step): record the judge's spread, dantesync's spike rejections, its mode and the DSYX replies past 200 ms, before and after.
+- [x] **Step 6:** Record on #72 (numbers only) and on zbynekdrlik/dantesync#136 (the judge's numbers under load, before and after the packet priority, no site data).
 
 ### Task 11: removed (owner, 2026-10-26)
 
@@ -181,13 +181,14 @@ No own follower to compare (choice 2).
 
 ### Task 12: Live 3 — supervision, health, the way back, a reboot
 
-- [ ] **Step 1:** `sudo systemctl restart iem-engine`: exit 0 within 10 s (journal: save, fade, flow stops, goodbyes), health healthy again within 30 s, no `iem-alarm` line.
-- [ ] **Step 2:** The event's command `sudo -n systemctl stop iem-server iem-engine iem-dante`: all three inactive within 10 s; health `stopped`, exit 3; no alarm.
-- [ ] **Step 3:** Crash loop: deploy with `--iface` of an interface the box lacks (exit 1 each start): three starts, then `start-limit-hit`; one `iem-alarm` line naming `iem-engine.service` and `start-limit-hit`; `notify` answered (0 devices: plain HTTP); health `failed`, exit 1. Deploy with the right interface: healthy (deploy resets the count).
-- [ ] **Step 4:** Exit 3: a scratch copy of the ops device config with fewer TX channels than the site needs (never committed), deployed: one start, `exit-code` 3, no restart, one alarm. Deploy the right config: healthy.
-- [ ] **Step 5:** The way back: deploy the bundle of Task 9's dev push (a second SHA, from its checkout) into the other slot; then, from the merge's checkout, `deploy.sh --back --sha <merge sha>`: the link moves back, nothing copied but units and configs, `--version` names the merge's SHA, health healthy.
-- [ ] **Step 6:** With the stack running, `sudo -n systemctl reboot`. Back over ssh: `journalctl -b -1 -u iem-engine` shows the engine's shutdown and exit 0; the stack's units disabled and inactive; nothing on UDP 319, 320, 4440, 4455, 8700, 8800 or TCP 8080; the time owner as provisioned; verify passes; health `stopped`. Start the stack (deploy): healthy.
-- [ ] **Step 7:** Record on #72 (numbers and states only).
+- [x] **Step 1:** `sudo systemctl restart iem-engine`: exit 0 within 10 s (journal: save, fade, flow stops, goodbyes), health healthy again within 30 s, no `iem-alarm` line.
+- [x] **Step 2:** The event's command `sudo -n systemctl stop iem-server iem-engine iem-dante`: all three inactive within 10 s; health `stopped`, exit 3; no alarm.
+- [x] **Step 3:** Crash loop: deploy with `--iface` of an interface the box lacks (exit 1 each start): three starts, then `start-limit-hit`; one `iem-alarm` line naming `iem-engine.service` and `start-limit-hit`; `notify` answered (0 devices: plain HTTP); health `failed`, exit 1. Deploy with the right interface: healthy (deploy resets the count).
+- [x] **Step 4:** Exit 3: a scratch copy of the ops device config with fewer TX channels than the site needs (never committed), deployed: one start, `exit-code` 3, no restart, one alarm. Deploy the right config: healthy.
+- [x] **Step 5:** The way back: deploy the bundle of Task 9's dev push (a second SHA, from its checkout) into the other slot; then, from the merge's checkout, `deploy.sh --back --sha <merge sha>`: the link moves back, nothing copied but units and configs, `--version` names the merge's SHA, health healthy.
+  - **Done 2026-10-27** (with Live 4's two builds: slot-a 6f01d85, slot-b c59859a): `--back` to slot-a from 6f01d85's checkout, then `--back` to slot-b from c59859a's: each time the link moved, nothing but units and configs copied, `--version` named the slot's SHA, health healthy; the stack stopped after.
+- [x] **Step 6:** With the stack running, `sudo -n systemctl reboot`. Back over ssh: `journalctl -b -1 -u iem-engine` shows the engine's shutdown and exit 0; the stack's units disabled and inactive; nothing on UDP 319, 320, 4440, 4455, 8700, 8800 or TCP 8080; the time owner as provisioned; verify passes; health `stopped`. Start the stack (deploy): healthy.
+- [x] **Step 7:** Record on #72 (numbers and states only).
 
 ### Task 13: Live 4 — two hours and the browser loop (phase D done)
 

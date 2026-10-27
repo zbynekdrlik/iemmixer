@@ -1,8 +1,10 @@
 # iemmixer's server and UI on the Gen 3 box (#72 phase C, plan
 # docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md Task 6,
 # choice 4), installed by scripts/gen3/deploy.sh; rules in .claude/rules/gen3.md.
-# The build CI's e2e job runs (features standalone,audio): plain HTTP on the
-# LAN at port 8080, the UI embedded, no TLS and no tunnel. Its data is the
+# The build CI's e2e job runs (features standalone,audio): plain HTTP on
+# port 80, the UI embedded, no TLS (phase E, #72: port 80 is the band's
+# tunnel's origin, http://127.0.0.1:80 as on the PC; the box's own connector
+# reaches it while 3.x serves the band). Its data is the
 # public synthetic test band (config/test-site.toml as iemmixer.toml and
 # config/test-roster.toml as roster.toml), which deploy.sh copies into
 # /var/lib/iemmixer/site; the server writes its secrets and the band's data
@@ -21,7 +23,7 @@
 # engine and the device (plan Task 7).
 
 [Unit]
-Description=iemmixer Gen 3 server and UI (phase D: the public test band, plain HTTP on 8080)
+Description=iemmixer Gen 3 server and UI (plain HTTP on port 80)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 Wants=network-online.target
 After=network-online.target
@@ -38,7 +40,7 @@ Type=exec
 User=iemmixer
 Group=iemmixer
 ExecStart=/opt/iemmixer/bin/iem-server
-Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml IEMMIXER_ENGINE_PIPE=/run/iemmixer/engine.sock PORT=8080 RUST_LOG=info
+Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml IEMMIXER_ENGINE_PIPE=/run/iemmixer/engine.sock PORT=80 RUST_LOG=info
 # The PIN pepper: $CREDENTIALS_DIRECTORY/pepper, exactly 32 bytes; a plain
 # test pepper in the site folder beside it is an error, never a fall back
 # (.claude/rules/security-baseline.md).
@@ -60,9 +62,9 @@ SendSIGKILL=no
 # names the same.
 StateDirectory=iemmixer
 StateDirectoryMode=0750
-# No capability: port 8080.
-CapabilityBoundingSet=
-AmbientCapabilities=
+# One capability, to bind port 80 (phase E: the tunnel's origin), nothing else.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

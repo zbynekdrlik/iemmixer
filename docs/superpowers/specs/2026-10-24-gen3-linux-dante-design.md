@@ -9,7 +9,7 @@ Status: draft for the owner's reading, 2026-10-24. Decisions are the owner's fro
 - **Pracujeme ako pri 2.0:** na našich skutočných linuxových boxoch v našej Dante sieti, s testami na živom hardvéri. Začíname na dev boxe, ktorý v Dante sieti už je.
 - **Najprv musí fungovať celok** (zariadenie v Dante Controlleri, zvuk dnu a von, mixovanie, stránky členov). **Latencia sa doťahuje až na konci.** Teraz sa nič nekupuje.
 - **Kapela nesmie nič spozorovať:** rovnaká latencia od mikrofónu po ucho ako dnes, žiadne praskanie. Nižšia latencia nie je cieľ.
-- **Nasadenie ako pri 2.0:** nová krabička beží vedľa dnešného PC, potom prepnutie, dnešné PC ostáva istý čas ako záloha.
+- **Nasadenie (vlastník, 27.10.2026):** kapela 3.x vyskúša sama, bez upozornenia. Prepnutie Dante medzi 2.x a 3.x je jeden príkaz na každú stranu, na pokyn vlastníka: box prevezme meno IEM karty, karta dostane náhradné meno. Ak kapela zareaguje, späť na 2.x; ak nie, vlastník potvrdí a 3.x ostane, 2.x ešte chvíľu ako záloha.
 
 ## 1. Intent and why
 
@@ -94,16 +94,16 @@ Ordered by what makes the device usable:
 | B. Audio through | A real Dante device's channel is received, and our TX is heard by a real receiver, sample-exact against the sender (a send-vs-return check like songplayer's loop check). | dev box |
 | C. Engine on Linux | iemmixer's engine runs on Linux with the Dante backend; the server, UI and a member's mix work end to end at a relaxed latency. | dev box |
 | D. The box | A camera-box-style appliance image runs the 3.0 stack headless; deploy, logs and health checks work. | a Linux box we have *(which one: decided when the phase starts)* |
-| E. Beside today's PC | The box runs beside today's PC on spare or test channels, never a band member's channel, with HIL and live tests as in 2.x. | Dante network |
+| E. The band test *(owner, 2026-10-27; replaces "beside today's PC")* | The band plays through 3.x without being told. The box holds the band's data and receives the IEM card's inputs; one command switches the Dante patching to 3.x (name takeover, §5.5) and one switches back, on the owner's signal. Mic-to-ear of 2.x and 3.x is measured and recorded before the band test, which does not wait for phase F (owner, 2026-10-27: the band has played with much worse latencies; latency improves as an ongoing process). Reactions: back to 2.x; none: the owner confirms. | Dante network, the band |
 | F. Latency | PREEMPT_RT, core and IRQ plan, NIC tuning (Intel, moderation off, audio queue), small packets, the B = 32 cycle; measured mic-to-ear equal to today. Hardware bought only if this phase needs it. | the box |
-| G. Cutover | As in 2.0: the owner's signal, today's PC kept as fallback for a while. | — |
+| G. Cutover | The owner's confirmation after E's band test; 3.x stays, today's PC kept as fallback for a while. | — |
 
 ### 5.5 Clock on the dev box, events, names *(my calls, from the builder check)*
 
 - **Dev box clock (phases A–C):** the dev box keeps its dantesync; our device reads time from the steered system clock there and never runs a second PTP owner. Our own PTP follower is built and proven on the 3.0 box (phase D), where dantesync is not installed. Sample alignment comes from packet timestamps anyway (§5.2).
 - **Never a grandmaster:** our device never sends PTP Announce or Sync in any phase. It is a follower only, so it can never win the BMC on the band's network.
 - **Owner's event signals:** "ide event" freezes all 3.0 work, as it freezes PC work today, and takes our experimental device off the network (its service stopped) until "event skončil". After the cutover the box follows the same lifecycle rules as today's PC.
-- **Names:** until the cutover the device runs under its own test name, and the IEM card keeps its name. At the cutover the card goes offline first, then the box takes the card's device name and TX channel names. Going back is the reverse, through one tool command driven by the owner's signal (the `iemmode event` analogue). The box persists its own RX subscriptions.
+- **Names:** outside a switch the device runs under its own test name, and the IEM card keeps its name. Switching to 3.x, the card is renamed first (one ARC device-name write to it by IP, kept in the card across reboots; owner, 2026-10-27: the card is not switched off), then the box takes the freed device name and the card's TX channel names; every device subscribed to the card by name follows (the members' path through the stage rack, and the FOH console's card: survey on #72, 2026-10-27), so the box carries every TX channel any of them receives. Going back is the reverse (the box to its test name first, then the card's name back), through one tool command each way driven by the owner's signal (the `iemmode event` analogue); each step read back before the next. The box persists its own RX subscriptions (the card's RX table mirrored).
 - **Baseline:** before phase F, today's settings are read (read-only) from the IEM card and the receivers, and today's mic-to-ear latency is measured with the existing HIL loop. That number is phase F's target. The receivers' latency settings bound our TX timing in every phase, so they are read before phase B.
 - **Protocol capture:** no switch mirror port. Reference traffic comes from what our boxes legitimately see: multicast from any box on the subnet, ARC on the Dante Controller PC, and the flows our own device takes part in. inferno fills the rest.
 
@@ -111,7 +111,7 @@ Ordered by what makes the device usable:
 
 - Unit and protocol tests run in CI on Linux (packet codec, mDNS records, ARC messages, servo, the RT contract as today).
 - Function is proven on the real Dante network: the dev box against real Dante devices and Dante Controller, the same way 2.x proved itself with HIL and live tests on the IEM PC.
-- Every live test uses spare or test channels. Our device's own RX subscriptions are ours to set (receiving from the stagebox takes one of its flow slots). The receiver for our TX in phases B and E is the IEM card's spare HIL return inputs (owner, #72, 2026-10-24). They subscribe to our device's test TX only for a test, never on a band member's channel, and the subscription is removed afterwards. No other device's subscriptions are changed.
+- Every live test uses spare or test channels. Our device's own RX subscriptions are ours to set (receiving from the stagebox takes one of its flow slots). The receiver for our TX in phases B–D is the IEM card's spare HIL return inputs (owner, #72, 2026-10-24); in phase E's band test the band's own receivers follow the name takeover, on the owner's signal. They subscribe to our device's test TX only for a test, never on a band member's channel, and the subscription is removed afterwards. No other device's subscriptions are changed.
 
 ## 6. Left to the builder
 
@@ -122,6 +122,6 @@ Ordered by what makes the device usable:
 ## 7. Risks
 
 - **Protocol gaps:** fields inferno names `unknown*`; Dante Controller's strictness. Mitigation: capture the real IEM card's traffic as reference (read-only), compare field by field.
-- **Name takeover:** the old card and the box must never be online under the same name at once.
+- **Name takeover:** the old card and the box must never be online under the same name at once (order: the card's rename first, read back). A device subscribed to the card that the switch does not account for loses its channels: the survey is repeated with the band's devices on before each switch. The sources' flow capacity while both the card and the box receive them is checked before the band test.
 - **Subnets:** the stagebox and the IEM card sit on a different routed subnet than the dev box. Phase B may need a box with a leg in that subnet; resolved when phase B starts, without changing other devices.
 - **Latency:** unproven at B = 32 on a small box until phase F. Accepted by the owner: function first, better hardware if needed.

@@ -14,6 +14,11 @@ does, so the card is addressed by its IP on the ARC port, never discovered.
                                         channel, label}; stdout: one JSON
                                         object {sent, failed, error, read_back,
                                         mismatches, tx, rx}
+  rename <ip> <expected-name> <new-name>
+                                        stdout: one JSON object {renamed, name,
+                                        error} (Gen 3 phase E's switch, #72:
+                                        the card takes a spare name so the box
+                                        can take the card's, and back)
 
 <ip> is a unicast IPv4 address. Before anything is read out or written, the
 device answering at <ip> must name itself <expected-name> and give a complete
@@ -21,12 +26,19 @@ read: a name, and as many TX and RX channels as it reports (netaudio's
 get_controls leaves its error None whether the card answered or not, so
 silence shows only as an empty read). Else nothing is written, exit 1.
 
-It writes channel labels only: a label equal to the channel's default (its
-number) is a reset of the label, any other a new label. Nothing else of the
-card (routing, its clock, its audio format, its own name) and no other device
-is ever touched: only `get_controls`, `set_channel_name` and
-`reset_channel_name` of the one device are called (test_dante_card checks the
-source).
+It writes channel labels and, through `rename` alone, the card's own name: a
+label equal to the channel's default (its number) is a reset of the label,
+any other a new label. Nothing else of the card (routing, its clock, its
+audio format) and no other device is ever touched: only `get_controls`,
+`set_channel_name`, `reset_channel_name` and `set_name` of the one device are
+called (test_dante_card checks the source). The new name must be one Dante
+holds (1 to 31 letters, digits and hyphens, no hyphen at either end); that
+no other device announces it is the caller's check (the dev box's mDNS does
+not reach the card's subnet).
+
+A rename, once sent, ends with one JSON line, exit 0: `renamed` is whether a
+fresh read finds the card under the new name, `name` the name it holds then
+(null when it did not answer), `error` what went wrong, else null.
 
 Once writing has started, the helper always ends with one JSON line, exit 0,
 whatever happens, so the caller learns which labels changed:
@@ -52,6 +64,7 @@ import asyncio
 import contextlib
 import ipaddress
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -61,6 +74,8 @@ MAX_LABEL = 31
 MAX_CHANNEL = 255
 # Characters Dante refuses in a channel label.
 FORBIDDEN = frozenset("=.@")
+# A Dante device name: letters, digits and hyphens, 1 to 31, no hyphen at an end.
+DEVICE_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,29}[A-Za-z0-9])?")
 
 
 class Usage(Exception):
@@ -198,10 +213,38 @@ async def write(ip: str, expected: str, flag: Path, changes: list[dict]) -> dict
             "mismatches": mismatches, "tx": after["tx"] if after else None, "rx": after["rx"] if after else None}
 
 
+async def held_name(ip: str) -> str | None:
+    """The name the device at `ip` answers with now, None when it is silent."""
+    device = open_device(ip)
+    with contextlib.redirect_stdout(sys.stderr):
+        await device.get_controls()
+    return device.name or None
+
+
+async def rename(ip: str, expected: str, new: str) -> dict:
+    try:
+        device = await connect(ip, expected)
+    except Refused as e:
+        raise Refused(f"{e}: nothing was renamed") from None
+    errors: list[str] = []
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            await device.set_name(new)
+    except Exception as e:   # reported below, never swallowed; the name is read back all the same
+        errors.append(f"renaming failed ({reason(e)})")
+    name = await held_name(ip)
+    if name is None:
+        errors.append("not read back: the card did not answer")
+    elif name != new and not errors:
+        errors.append("the card does not hold the new name")
+    return {"renamed": name == new, "name": name, "error": "; ".join(errors) or None}
+
+
 def main(argv: list[str], stdin) -> int:
     try:
-        if not argv or (argv[0], len(argv)) not in (("read", 3), ("write", 4)):
-            raise Usage("usage: dante_card.py read <ip> <expected-name> | write <ip> <expected-name> <flag>")
+        if not argv or (argv[0], len(argv)) not in (("read", 3), ("write", 4), ("rename", 4)):
+            raise Usage("usage: dante_card.py read <ip> <expected-name> | write <ip> <expected-name> <flag> | "
+                        "rename <ip> <expected-name> <new-name>")
         verb, ip, expected = argv[:3]
         if not unicast_ipv4(ip):
             raise Usage("<ip> is not a unicast IPv4 address")
@@ -209,6 +252,12 @@ def main(argv: list[str], stdin) -> int:
             raise Usage("<expected-name> is empty or not printable")
         if verb == "read":
             out = asyncio.run(read(ip, expected))
+        elif verb == "rename":
+            new = argv[3]
+            if not DEVICE_NAME.fullmatch(new) or new == expected:
+                raise Usage("<new-name> is not a Dante device name (1 to 31 letters, digits and hyphens, no hyphen "
+                            "at either end) other than <expected-name>")
+            out = asyncio.run(rename(ip, expected, new))
         else:
             flag = Path(argv[3])
             if not flag.is_absolute():
