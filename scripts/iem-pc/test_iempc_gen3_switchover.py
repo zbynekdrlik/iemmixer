@@ -26,6 +26,7 @@ class TemplateTests(unittest.TestCase):
         lines = template()
         for command in (sw.INSTALL_CONFIG, sw.STOP, sw.START, sw.ENABLE, sw.DISABLE, sw.DISABLE_TUNNEL):
             self.assertIn(("root", command.removeprefix("sudo -n ")), lines, command)
+        self.assertIn(("iemmixer", sw.RESET_STATE.removeprefix("sudo -n -u iemmixer ")), lines)
 
 
 class SwitchTests(Base):
@@ -47,12 +48,16 @@ class SwitchTests(Base):
         self.events: list[str] = []
         self.installed: list[str] = []
         self.fail_at: str | None = None
+        self.stops = True                 # STOP stops the stack
+        self.renames_take = True
+        self.after_manifest = {"engine/current.json": "a"}
         fakes = {
             (sw.iempc_dante, "ask_card"): self.ask_card, (sw.data, "box"): self.box, (sw, "copy"): self.copy,
             (sw, "answers_as"): self.answers_as, (sw.data, "send_band"): self.send_band,
             (sw.data, "pepper"): lambda *a: self.events.append("pepper"),
             (sw.tunnel, "credential_ok"): lambda *a, **k: None, (sw.tunnel, "to_box"): self.to_box,
             (sw.tunnel, "to_pc"): self.to_pc, (sw.switch, "mirror"): self.mirror, (sw, "POLL_S"): 0.0,
+            (sw.data, "band_zip"): lambda *a: (b"", self.after_manifest),
             (sw, "HEALTH_S"): 0.0, (sw, "TX_S"): 0.0}
         for (module, name), fake in fakes.items():
             patcher = mock.patch.object(module, name, fake)
@@ -70,6 +75,8 @@ class SwitchTests(Base):
             return {"name": self.card_name, "tx": {str(n): f"ZYXQW out {n:02d}" for n in range(1, 129)}}
         self.assertEqual((verb, card.name), ("rename", self.card_name))
         self.step(f"rename {extra[0]}")
+        if not self.renames_take:
+            return {"renamed": False, "name": self.card_name, "error": "the card does not hold the new name"}
         self.card_name = extra[0]
         return {"renamed": True, "name": extra[0], "error": None}
 
@@ -79,10 +86,12 @@ class SwitchTests(Base):
             return 0, b'{"tx": [{"flow": 1, "live": 1}]}', b""
         if command == sw.HEALTH:
             return (0 if self.box_running else 3), b"", b""
+        if command == sw.STACK_STATE:
+            return 0, (b"active\nactive\ninactive\n" if self.box_running else b"inactive\n" * 3), b""
         self.step(command)
         if command == sw.START:
             self.box_running = True
-        if command == sw.STOP:
+        if command == sw.STOP and self.stops:
             self.box_running = False
         return 0, b"", b""
 
@@ -97,7 +106,7 @@ class SwitchTests(Base):
 
     def send_band(self, ip_mod, env, host, event) -> dict:
         self.step("band")
-        return {"members": 8, "bytes": 1, "written": 8}
+        return {"members": 8, "bytes": 1, "written": 8, "manifest": {"engine/current.json": "a"}}
 
     def mirror(self, ip_mod, card, ours, also=()):
         self.assertEqual(also, (CARD,))
@@ -121,11 +130,11 @@ class SwitchTests(Base):
     def test_to_3_runs_its_steps_in_order_and_records_the_side(self) -> None:
         code, docs, err = self.run_main("gen3-switch", "to-3")
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.events, [sw.STOP, "band", "pepper", sw.INSTALL_CONFIG, f"rename {SPARE}", sw.START,
-                                       "mirror", "url to box", sw.ENABLE])
+        self.assertEqual(self.events, [sw.STOP, "band", "pepper", sw.INSTALL_CONFIG, sw.RESET_STATE,
+                                       f"rename {SPARE}", sw.START, "mirror", "url to box", sw.ENABLE])
         self.assertEqual(docs, [{"gen3_switch": {"serves": "3.x", "steps": ["band", "config", "card", "start",
                                                                             "mirror", "url", "boot"],
-                                                 "files": 8, "mirrored": 29}}])
+                                                 "files": 8, "mirrored": 29, "changed_during_switch": 0}}])
         taken = tomllib.loads(self.installed[0])
         self.assertEqual((taken["name"], taken["tx"][0]), (CARD, "ZYXQW out 01"))
         self.assertEqual((self.side(), self.card_name, self.serves_url), (3, SPARE, "box"))
@@ -139,11 +148,62 @@ class SwitchTests(Base):
         code, docs, err = self.run_main("gen3-switch", "to-3")
         self.assertEqual((code, docs), (1, []))
         self.assertIn("stopped after ['band', 'config', 'card', 'start', 'mirror']", err)
-        self.assertIn("2.x serves again", err)
+        self.assertIn("undone: 2.x serves again", err)
         after = self.events[self.events.index("url to box") + 1:]
-        self.assertEqual(after, [sw.STOP, f"rename {CARD}", sw.INSTALL_CONFIG])
+        self.assertEqual(after, ["url to pc", sw.STOP, f"rename {CARD}", sw.INSTALL_CONFIG])
         self.assertEqual(tomllib.loads(self.installed[-1])["name"], tomllib.loads(DEVICE)["name"])
         self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
+
+    def test_a_failed_start_is_undone_with_the_box_stopped_before_the_card_gets_its_name(self) -> None:
+        self.fail_at = sw.START
+        code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.events[self.events.index(sw.START) + 1:], [sw.STOP, f"rename {CARD}", sw.INSTALL_CONFIG])
+        self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
+
+    def test_a_box_that_does_not_stop_keeps_the_card_on_its_spare_name(self) -> None:
+        # Never two devices under one name: the name goes back only once our stack reads stopped.
+        self.fail_at, self.stops = "mirror", False
+        code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertEqual(code, 1)
+        self.assertIn("our device may still hold the card's name", err)
+        self.assertIn("run `iempc gen3-switch to-2`", err)
+        self.assertEqual((self.side(), self.card_name), (3, SPARE))
+        self.assertNotIn(f"rename {CARD}", self.events)
+
+    def test_a_rename_that_does_not_take_is_undone_by_reading_the_card(self) -> None:
+        self.renames_take = False
+        code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertEqual(code, 1)
+        self.assertIn("did not take the name", err)
+        self.assertNotIn(sw.START, self.events)
+        self.assertEqual((self.side(), self.card_name), (2, CARD))
+
+    def test_the_flag_during_the_switch_goes_back_to_2x(self) -> None:
+        def mirror(ip_mod, card, ours, also=()):
+            self.step("mirror")
+            ip.EVENT_NOW.parent.mkdir(parents=True, exist_ok=True)
+            ip.EVENT_NOW.write_text("ide event\n", encoding="utf-8")
+            return 29, None
+        with mock.patch.object(sw.switch, "mirror", mirror):
+            code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertNotEqual(code, 0)   # a PC command whose flag came meanwhile goes on with the event path
+        self.assertIn("the flag appeared", err)
+        self.assertNotIn("url to box", self.events)
+        self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
+
+    def test_an_interrupt_is_undone_and_raised_again(self) -> None:
+        def mirror(ip_mod, card, ours, also=()):
+            raise KeyboardInterrupt
+        with mock.patch.object(sw.switch, "mirror", mirror), self.assertRaises(KeyboardInterrupt):
+            self.run_main("gen3-switch", "to-3")
+        self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
+
+    def test_files_the_pc_changed_during_the_switch_are_counted(self) -> None:
+        self.after_manifest = {"engine/current.json": "b", "server/lineups/x.json": "c"}
+        code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[0]["gen3_switch"]["changed_during_switch"], 2)
 
     def test_to_2_moves_the_url_first_then_the_box_and_the_card(self) -> None:
         self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 0)
@@ -177,10 +237,13 @@ class SwitchTests(Base):
 
     def test_missing_or_bad_settings_are_refused(self) -> None:
         text = ip.env_path().read_text(encoding="utf-8")
-        ip.env_path().write_text(text.replace(f"GEN3_CARD_SPARE={SPARE}", f"GEN3_CARD_SPARE={CARD}"), encoding="utf-8")
-        code, docs, err = self.run_main("gen3-switch", "to-3")
-        self.assertEqual((code, docs, self.events), (1, [], []))
-        self.assertIn("must differ", err)
+        for bad in (text.replace(f"GEN3_CARD_SPARE={SPARE}", f"GEN3_CARD_SPARE={CARD.lower()}"),
+                    text.replace(f"GEN3_CARD_SPARE={SPARE}", f"GEN3_CARD_SPARE={OURS}"),
+                    text.replace("GEN3_HOST=admin@192.0.2.40", "GEN3_HOST=-oProxyCommand=x")):
+            ip.env_path().write_text(bad, encoding="utf-8")
+            code, docs, err = self.run_main("gen3-switch", "to-3")
+            self.assertEqual((code, docs, self.events), (1, [], []))
+            self.assertTrue("must differ" in err or "not an option" in err, err)
 
 
 if __name__ == "__main__":

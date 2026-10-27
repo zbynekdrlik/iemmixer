@@ -128,13 +128,26 @@ class ReceiveTests(unittest.TestCase):
             self.assertEqual(self.run_main(archive(BAND))[0], 1)
         self.assertEqual(self.tree(), before)
 
-    def test_a_staging_left_by_an_earlier_run_refuses(self) -> None:
+    def test_a_staging_left_by_an_earlier_run_is_moved_aside_and_the_run_goes_on(self) -> None:
+        # The review of PR #83: refusing left it for a person to clean up,
+        # and no tool may delete on the box.
         (self.site / ".lineups.incoming").mkdir()
-        before = self.tree()
+        (self.site / ".lineups.incoming" / "half.json").write_text("{", encoding="utf-8")
         code, doc, err = self.run_main(archive(BAND))
-        self.assertEqual((code, doc), (1, None))
-        self.assertIn("an earlier run's staging is still there", err)
-        self.assertEqual(self.tree(), before)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.site / f".lineups.incoming.before-{STAMP}" / "half.json").read_text(encoding="utf-8"),
+                         "{")
+        self.assertIn(f".lineups.incoming.before-{STAMP}", doc["kept"])
+
+    def test_a_band_item_the_pc_no_longer_has_is_moved_aside(self) -> None:
+        (self.site / "presets").mkdir()
+        (self.site / "presets" / "old.json").write_text("{}", encoding="utf-8")
+        code, doc, err = self.run_main(archive(BAND))
+        self.assertEqual(code, 0, err)
+        self.assertFalse((self.site / "presets").exists())
+        self.assertTrue((self.site / f".presets.before-{STAMP}" / "old.json").exists())
+        self.assertIn(f".presets.before-{STAMP}", doc["kept"])
+        self.assertTrue((self.site / "iemmixer.toml").exists())   # the site's own files stay
 
     def test_a_missing_or_linked_target_refuses_and_usage_is_exit_2(self) -> None:
         self.engine.rename(self.root / "elsewhere")

@@ -74,6 +74,8 @@ class Gen3TunnelTests(Base):
         self.mode = "644"
         self.sent: list[tuple[str, bytes]] = []
         self.scripts: list[str] = []
+        self.order: list[str] = []        # the PC's scripts and the box's commands, as sent
+        self.pc_reachable, self.box_build = True, BOX
         self.patch(ssh_ps=self.ssh_ps)
         for name, fake in (("box", self.box), ("public_hash", self.public), ("POLL_S", 0.0), ("PUBLIC_S", 0.0)):
             patcher = mock.patch.object(tunnel, name, fake)
@@ -82,6 +84,9 @@ class Gen3TunnelTests(Base):
 
     def ssh_ps(self, env, script, timeout, event) -> str:
         self.scripts.append(script)
+        self.order.append(script)
+        if not self.pc_reachable:
+            raise ip.StepError("ssh failed (exit 255): zyxqw no route")
         if script == tunnel.TOKEN_SCRIPT:
             return (self.pc_token or "no-token") + "\n"
         if script == tunnel.PC_STOP:
@@ -96,6 +101,7 @@ class Gen3TunnelTests(Base):
 
     def box(self, host: str, command: str, stdin: bytes, timeout: float) -> tuple[int, bytes, bytes]:
         self.sent.append((command, stdin))
+        self.order.append(command)
         if command == tunnel.ENCRYPT:
             self.mode = "644"
             return 0, b"", b""
@@ -115,7 +121,7 @@ class Gen3TunnelTests(Base):
         if command == tunnel.BOX_STATE:
             return 0, (b"active\n" if self.running == "box" else b"inactive\n"), b""
         if command == tunnel.BOX_VERSION:
-            return 0, ('{"git_hash": "%s"}' % BOX).encode(), b""
+            return 0, ('{"git_hash": "%s"}' % self.box_build).encode(), b""
         self.fail(f"an unexpected box command: {command}")
 
     def public(self, url: str) -> str | None:
@@ -131,7 +137,9 @@ class Gen3TunnelTests(Base):
         self.assertEqual(docs, [{"gen3_tunnel": {"token": "stored"}}])
         self.assertEqual(self.commands(), [tunnel.ENCRYPT, tunnel.CHMOD, tunnel.STAT])
         self.assertEqual(self.sent[0][1], CONNECTOR.encode())
-        self.assertNotIn(CONNECTOR, str(docs) + err + " ".join(self.commands()))
+        import base64
+        for form in (CONNECTOR, base64.b64encode(CONNECTOR.encode()).decode()):
+            self.assertNotIn(form, str(docs) + err + " ".join(self.commands()))
 
     def test_no_token_on_the_pc_changes_nothing_on_the_box(self) -> None:
         self.pc_token = ""
@@ -145,8 +153,16 @@ class Gen3TunnelTests(Base):
         self.assertEqual(code, 0, err)
         self.assertEqual(docs, [{"gen3_tunnel": {"serves": "box", "build": BOX}}])
         self.assertEqual((self.running, self.pc_mode), ("box", "Disabled"))
-        self.assertLess(self.scripts.index(tunnel.PC_STOP), len(self.scripts))
-        self.assertEqual(self.commands()[-1], tunnel.BOX_START)
+        # The box's connector is up before the PC's goes: never no connector.
+        self.assertLess(self.order.index(tunnel.BOX_START), self.order.index(tunnel.PC_STOP))
+
+    def test_the_same_build_on_both_sides_is_refused(self) -> None:
+        self.mode, self.box_build = "600", PC
+        code, docs, err = self.run_main("gen3-tunnel", "to-box")
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("cannot tell them apart", err)
+        self.assertNotIn(tunnel.BOX_START, self.order)
+        self.assertNotIn(tunnel.PC_STOP, self.order)
 
     def test_a_box_that_does_not_take_the_url_puts_the_pcs_connector_back(self) -> None:
         self.mode, self.box_connects = "600", False
@@ -168,8 +184,15 @@ class Gen3TunnelTests(Base):
         code, docs, err = self.run_main("gen3-tunnel", "to-pc")
         self.assertEqual(code, 0, err)
         self.assertEqual(docs, [{"gen3_tunnel": {"serves": "pc", "build": PC}}])
-        self.assertEqual(self.commands()[:2], [tunnel.BOX_STOP, tunnel.BOX_STATE])
+        self.assertLess(self.order.index(tunnel.PC_START), self.order.index(tunnel.BOX_STOP))
         self.assertEqual((self.running, self.pc_mode), ("pc", "Auto"))
+
+    def test_a_pc_out_of_reach_on_the_way_back_leaves_the_boxs_connector_running(self) -> None:
+        self.running, self.pc_mode, self.pc_reachable = "box", "Disabled", False
+        code, docs, err = self.run_main("gen3-tunnel", "to-pc")
+        self.assertEqual((code, docs), (1, []))
+        self.assertEqual(self.running, "box")
+        self.assertNotIn(tunnel.BOX_STOP, self.order)
 
     def test_during_an_event_only_the_way_back_runs(self) -> None:
         spec = ip.COMMANDS["gen3-tunnel"]

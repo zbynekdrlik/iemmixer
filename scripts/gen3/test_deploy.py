@@ -1408,6 +1408,18 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.gh_calls(), [])
 
 
+    def test_a_deploy_while_3x_serves_the_band_is_refused(self) -> None:
+        # Phase E (#72): the switch recorded side 3; a deploy would stop the box that plays the band.
+        state = self.tmp / "iempc-state"
+        state.mkdir()
+        (state / "gen3-side.json").write_text('{\n "side": 3,\n "at": "2026-10-27T12:00:00+00:00"\n}', encoding="utf-8")
+        r = self.deploy(IEMPC_STATE=str(state))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("3.x serves the band", r.stderr)
+        self.assertEqual(self.calls(), [])
+        (state / "gen3-side.json").write_text('{\n "side": 2,\n "at": "2026-10-27T13:00:00+00:00"\n}', encoding="utf-8")
+        self.assertEqual(self.deploy(IEMPC_STATE=str(state)).returncode, 0)
+
     # Phase E (#72): the box on the band's site and roster from the ops repo.
 
     def site_files(self, site: str) -> tuple[Path, Path]:
