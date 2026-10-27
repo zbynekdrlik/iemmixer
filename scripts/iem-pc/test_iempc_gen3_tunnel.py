@@ -29,6 +29,38 @@ class TemplateTests(unittest.TestCase):
             self.assertFalse(command.startswith("sudo"), command)
 
 
+class PublicHashTests(unittest.TestCase):
+    """The public URL's read (2026-10-27, live: the band's tunnel answered
+    Python's default User-Agent with 403 and curl's with 200)."""
+
+    def test_the_read_names_itself_and_reads_the_git_hash(self) -> None:
+        import http.server
+        import threading
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:   # noqa: N802 (the stdlib's name)
+                seen.append((self.path, self.headers.get("User-Agent", "")))
+                ok = not self.headers.get("User-Agent", "").startswith("Python-urllib")
+                body = b'{"git_hash": "zyxqw12"}' if ok else b"forbidden"
+                self.send_response(200 if ok else 403)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        got = tunnel.public_hash(f"http://127.0.0.1:{server.server_port}/")
+        thread.join(5)
+        self.assertEqual(got, "zyxqw12")
+        self.assertEqual(seen[0][0], "/api/version")
+        self.assertTrue(seen[0][1].startswith("iempc"), seen[0][1])
+
+
 class Gen3TunnelTests(Base):
     def setUp(self) -> None:
         super().setUp()
