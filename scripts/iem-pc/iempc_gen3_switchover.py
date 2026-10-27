@@ -241,9 +241,12 @@ def name_back(ip, s: dict[str, str]) -> None:
 
 
 def helper_busy(ip) -> bool:
-    """Whether the card helper recorded last (iempc_dante's record) still runs."""
-    pid = ip.read_json(ip.state_dir() / iempc_dante.RECORD, {}).get("pid")
-    return type(pid) is int and iempc_dante.running(pid)
+    """Whether any card helper (dante_card.py) runs on this box, recorded or
+    not: a signal between its start and its pid record leaves it unrecorded."""
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and iempc_dante.running(int(entry.name)):
+            return True
+    return False
 
 
 def flag(ip) -> None:
