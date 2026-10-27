@@ -75,6 +75,7 @@ class ListTests(unittest.TestCase):
         self.assertIn(("iemmixer", data.RECEIVE.removeprefix("sudo -n -u iemmixer ")), lines)
         self.assertIn(("root", data.ENCRYPT.removeprefix("sudo -n ")), lines)
         self.assertIn(("root", data.STAT.removeprefix("sudo -n ")), lines)
+        self.assertIn(("root", data.CHMOD.removeprefix("sudo -n ")), lines)
 
 
 class Gen3DataTests(Base):
@@ -94,6 +95,7 @@ class Gen3DataTests(Base):
         self.states = "inactive\ninactive\ninactive\n"
         self.stat = "600.root.180\n"
         self.encrypt_code = 0
+        self.mode = "644"   # what systemd-creds leaves under sudo's umask 0022 (the box, 2026-10-27)
         self.patch(ssh_ps=self.ssh_ps)
         patcher = mock.patch.object(data, "box", self.box)
         patcher.start()
@@ -116,9 +118,13 @@ class Gen3DataTests(Base):
                 code = band_receive.main([str(self.site), str(self.engine)], io.BytesIO(stdin))
             return code, out.getvalue().encode(), err.getvalue().encode()
         if command == data.ENCRYPT:
+            self.mode = "644"
             return self.encrypt_code, b"", b"zyxqw: refused" if self.encrypt_code else b""
+        if command == getattr(data, "CHMOD", None):
+            self.mode = "600"
+            return 0, b"", b""
         if command == data.STAT:
-            return 0, self.stat.encode(), b""
+            return 0, self.stat.replace("600", self.mode).encode(), b""
         self.fail(f"an unexpected box command: {command}")
 
     def commands(self) -> list[str]:
@@ -138,7 +144,7 @@ class Gen3DataTests(Base):
         code, docs, err = self.run_main("gen3-data", "--pepper")
         self.assertEqual(code, 0, err)
         self.assertEqual(docs[0]["gen3_data"]["pepper"], "replaced")
-        self.assertEqual(self.commands()[-2:], [data.ENCRYPT, data.STAT])
+        self.assertEqual(self.commands()[-3:], [data.ENCRYPT, data.CHMOD, data.STAT])
         self.assertEqual(self.sent[-2][1], PEPPER)
         shown = json.dumps(docs) + err
         for form in (PEPPER.hex(), base64.b64encode(PEPPER).decode()):
@@ -152,7 +158,7 @@ class Gen3DataTests(Base):
         self.assertIn("the PC's pepper is not 32 bytes", err)
         self.assertNotIn(data.ENCRYPT, self.commands())
         self.patch(ssh_ps=self.ssh_ps)
-        self.stat = "644.root.180\n"
+        self.stat = "640.root.180\n"
         code, docs, err = self.run_main("gen3-data", "--pepper")
         self.assertEqual(code, 1)
         self.assertIn("does not read back as 600 root", err)
