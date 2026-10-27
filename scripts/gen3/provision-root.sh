@@ -15,8 +15,9 @@ set -euo pipefail
 # Idempotent: write and enable only, each step a line `<step> changed` or
 # `<step> unchanged`; a second run changes nothing. It never starts, stops or
 # restarts the stack; it restarts journald when its configuration changed,
-# starts the box's time owner (dantesync) when it is not running, and runs
-# iem-napi (the Dante interface's packet priority) when it does not hold.
+# starts the box's time owner (dantesync) when it is not running, runs
+# iem-napi (the Dante interface's packet priority) when it does not hold, and
+# turns the display output polling off when it is on.
 # Refused with nothing changed: not root, dantesync not installed (the box's
 # one time owner comes from install-dantesync.sh, never from here) or its
 # config not the ops follower config --ntp-file's NTP server names, a PTP
@@ -65,7 +66,13 @@ set -euo pipefail
 #             stack); irqbalance masked (it would move the interrupt off its
 #             core); run now and read back once deploy.sh has written the
 #             Dante interface (/etc/iemmixer/iem-dante.env).
-#   stack     none of the stack's units enabled (nothing of it starts at
+#   display   /etc/tmpfiles.d/iemmixer-display.conf: the display drivers'
+#             output polling off (drm_kms_helper's poll N) at every boot,
+#             applied with systemd-tmpfiles and read back when the box has
+#             the parameter. The box has no screen; the i915 driver's poll
+#             (every ~10 s, waking the GPU) held a CPU ~2 ms and the engine's
+#             pump, woken onto it, missed its blocks (Live 4).
+#   stack    none of the stack's units enabled (nothing of it starts at
 #             boot).
 #   sudoers   /etc/sudoers.d/iemmixer-gen3 (0440): sudo-lines.txt for the
 #             admin, NOPASSWD, each program by the absolute path sudo's
@@ -97,6 +104,8 @@ AUTO_UPGRADES=/etc/apt/apt.conf.d/20auto-upgrades
 SWAPFILE=/swapfile
 NAPI_HELPER=/usr/local/lib/iemmixer/napi-priority
 NAPI_UNIT=/etc/systemd/system/iem-napi.service
+DISPLAY_CONF=/etc/tmpfiles.d/iemmixer-display.conf
+POLL_PARAM=/sys/module/drm_kms_helper/parameters/poll
 ENVFILE=/etc/iemmixer/iem-dante.env
 SUDOERS=/etc/sudoers.d/iemmixer-gen3
 # sudo's secure_path on Ubuntu, in its order: where sudo finds a program the
@@ -414,6 +423,14 @@ cat > "$work/20auto-upgrades" << 'EOF'
 APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Unattended-Upgrade "0";
 EOF
+cat > "$work/iemmixer-display.conf" << 'EOF'
+# The Gen 3 box (#72 phase D, Live 4): no display output polling. The box has
+# no screen; the i915 driver's poll (every ~10 s, waking the GPU) held a CPU
+# for ~2 ms, and the engine's pump, woken onto that CPU, missed its blocks.
+# Applied at every boot by systemd-tmpfiles. Written by
+# scripts/gen3/provision-root.sh.
+w /sys/module/drm_kms_helper/parameters/poll - - - - N
+EOF
 
 # --- The steps. ---
 
@@ -690,6 +707,19 @@ step_napi() {
   [ "$active_state" = active ] || die "iem-napi is '$active_state' after it ran, not active (journalctl -u iem-napi on the box)"
 }
 
+step_display() {
+  put_file 0644 root root "$DISPLAY_CONF" "$work/iemmixer-display.conf"
+  if [ ! -e "$R$POLL_PARAM" ]; then
+    echo "display: no display output polling on this box (no $POLL_PARAM)"
+    return 0
+  fi
+  [ "$(cat -- "$R$POLL_PARAM")" != N ] || return 0
+  systemd-tmpfiles --create "$R$DISPLAY_CONF"
+  changed=1
+  [ "$(cat -- "$R$POLL_PARAM")" = N ] ||
+    die "display output polling is still on after systemd-tmpfiles --create $DISPLAY_CONF ($POLL_PARAM is not N)"
+}
+
 step_stack() {
   local unit
   local -a todo=()
@@ -722,7 +752,7 @@ step_sudoers() {
   changed=1
 }
 
-for step in user folders state pepper phase-c journal apt sleep swap clock napi stack sudoers; do
+for step in user folders state pepper phase-c journal apt sleep swap clock napi display stack sudoers; do
   changed=0
   "step_${step//-/_}"
   if [ "$changed" = 1 ]; then
