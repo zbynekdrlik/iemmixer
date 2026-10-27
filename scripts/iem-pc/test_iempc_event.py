@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import iempc_core as core  # noqa: E402
 from iempc_test_support import ENV, OK, SHA, Base, FakeClock, ip  # noqa: E402
 
 
@@ -407,6 +408,24 @@ class Gen3StopTests(Base):
 
     def gen3_warnings(self, err: str) -> list[str]:
         return [line for line in err.splitlines() if "WARNING" in line and "Gen 3" in line]
+
+    def test_while_3x_serves_the_band_the_event_keeps_the_box_running(self) -> None:
+        # Phase E (#72): after `iempc gen3-switch to-3` the box serves the
+        # band; "ide event" must not take its audio away.
+        self.gen3_host()
+        self.ssh_program(0)
+        core.write_json(core.state_dir() / "gen3-side.json", {"side": 3, "at": "2026-10-27T12:00:00+00:00"})
+        out, err = io.StringIO(), io.StringIO()
+        code = self.run_streams("event", out=out, err=err)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertFalse(self.ssh_log.exists())
+        self.assertIn("3.x serves the band", err.getvalue() + out.getvalue())
+        # Back on 2.x the event stops the box again.
+        core.write_json(core.state_dir() / "gen3-side.json", {"side": 2, "at": "2026-10-27T13:00:00+00:00"})
+        ip.EVENT_NOW.unlink()
+        code = self.run_streams("event", out=io.StringIO(), err=io.StringIO())
+        self.assertEqual(code, 0)
+        self.assertTrue(self.ssh_log.exists())
 
     def test_the_flag_exists_when_the_stop_starts(self) -> None:
         self.gen3_host()

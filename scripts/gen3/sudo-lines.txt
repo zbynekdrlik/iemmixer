@@ -122,3 +122,8 @@ root | chmod 0600 /etc/credstore.encrypted/iemmixer-tunnel
 root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-tunnel
 root | systemctl start iem-tunnel
 root | systemctl stop iem-tunnel
+
+# iempc gen3-switch (phase E, #72): while 3.x serves the band the box's
+# engine, server and connector start at boot; the way back disables them.
+root | systemctl enable iem-engine iem-server iem-tunnel
+root | systemctl disable iem-tunnel

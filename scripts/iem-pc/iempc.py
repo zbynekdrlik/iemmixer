@@ -97,7 +97,9 @@ and the card's keys: iempc_gen3_switch.py, #72 phase E); `gen3-data` reads
 the PC's band files (PC_ROOT) and writes them onto GEN3_HOST
 (iempc_gen3_data.py); GEN3_PUBLIC_URL (optional: the band's public https://
 URL, read by `gen3-tunnel` to see which connector serves it,
-iempc_gen3_tunnel.py).
+iempc_gen3_tunnel.py), GEN3_CARD_SPARE and GEN3_DEVICE_CONFIG (optional:
+the IEM card's spare Dante name while 3.x serves, and the ops device config
+file; `gen3-switch` refuses without them, iempc_gen3_switchover.py).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -124,6 +126,7 @@ import iempc_event
 import iempc_gen3
 import iempc_gen3_data
 import iempc_gen3_switch
+import iempc_gen3_switchover
 import iempc_gen3_tunnel
 import iempc_live
 import iempc_roster
@@ -296,6 +299,12 @@ def cmd_gen3_tunnel(ctx: Ctx) -> int:
     return iempc_gen3_tunnel.run(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_switch(ctx: Ctx) -> int:
+    """The switch between iemmixer 2.x and 3.x on the owner's signal; the code lives in iempc_gen3_switchover.py
+    (#72 phase E)."""
+    return iempc_gen3_switchover.run(ctx, sys.modules[__name__])
+
+
 def cmd_dispatch_hil(ctx: Ctx) -> int:
     """The ops hil.yml dispatch; the code lives in iempc_bundle.py (#36)."""
     return iempc_bundle.cmd_dispatch_hil(ctx, sys.modules[__name__])
@@ -359,6 +368,8 @@ COMMANDS: dict[str, Spec] = {
     "gen3-data": Spec(cmd_gen3_data, pc=True, dev_time=True, locked=True),
     # Not dev time: `to-pc` is the way back to 2.x during an event too; `token` and `to-box` refuse the flag.
     "gen3-tunnel": Spec(cmd_gen3_tunnel, pc=True, dev_time=False, locked=True),
+    # Not dev time: `to-2` is the owner's way back during an event too; `to-3` refuses the flag.
+    "gen3-switch": Spec(cmd_gen3_switch, pc=True, dev_time=False, locked=True),
 }
 
 
@@ -416,6 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
     mirror = sub.add_parser("gen3-mirror")
     mirror.add_argument("--dry-run", action="store_true", help="list the changes, send nothing")
     mirror.add_argument("--clear", action="store_true", help="unsubscribe every RX of our device instead")
+    flip = sub.add_parser("gen3-switch")
+    flip.add_argument("target", choices=("to-3", "to-2"), help="which iemmixer serves the band: 3.x (the Gen 3 box) "
+                                                               "or 2.x (the IEM PC and its card)")
+    flip.add_argument("--dry-run", action="store_true", help="check the settings and the card, change nothing")
     tunnel = sub.add_parser("gen3-tunnel")
     tunnel.add_argument("verb", choices=("token", "to-box", "to-pc"),
                         help="token: the PC's connector token into the box's credential; to-box / to-pc: which "

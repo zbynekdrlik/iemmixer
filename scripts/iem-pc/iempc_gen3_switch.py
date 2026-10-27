@@ -171,6 +171,30 @@ def send_changes(ip, host: str, changes: list[dict]) -> tuple[list[dict], str | 
     return done, None
 
 
+def apply(ip, card_doc, card_name: str, ours: Device, changes: list[dict],
+          clear: bool = False) -> tuple[list[dict], list[dict] | None, str | None]:
+    """`changes` sent to our device, then its table read again: what was sent,
+    what still differs (None: not read back) and what stopped (None: nothing)."""
+    done, stopped = send_changes(ip, ours.host, changes)
+    try:
+        left = mirror_plan(card_doc, read(ip, ours, "our device"), card_name, clear)
+    except (PlanError, ip.StepError) as e:
+        left, stopped = None, "; ".join(x for x in (stopped, f"not read back: {e}") if x)
+    return done, left, stopped
+
+
+def mirror(ip, card: Device, ours: Device) -> tuple[int, str | None]:
+    """Our RX table made the card's (the switch's step): how many changes were
+    sent, and what went wrong (None: all read back)."""
+    card_doc = read(ip, card, "the card")
+    try:
+        changes = mirror_plan(card_doc, read(ip, ours, "our device"), card.name)
+    except PlanError as e:
+        return 0, str(e)
+    done, left, stopped = apply(ip, card_doc, card.name, ours, changes)
+    return len(done), stopped or (f"{len(left)} rx channels did not read back as wanted" if left else None)
+
+
 def run_mirror(ctx, ip) -> int:
     """`iempc gen3-mirror` (dev time, locked; no PC call)."""
     args = ctx.args
@@ -183,11 +207,7 @@ def run_mirror(ctx, ip) -> int:
     if args.dry_run:
         ip.emit({"gen3_mirror": {"dry_run": True, "changes": changes}})
         return 0
-    done, stopped = send_changes(ip, ours.host, changes)
-    try:
-        left = mirror_plan(card_doc, read(ip, ours, "our device"), card.name, args.clear)
-    except (PlanError, ip.StepError) as e:
-        left, stopped = None, "; ".join(x for x in (stopped, f"not read back: {e}") if x)
+    done, left, stopped = apply(ip, card_doc, card.name, ours, changes, args.clear)
     ip.emit({"gen3_mirror": {"sent": len(done), "of": len(changes), "left": left, "error": stopped}})
     if stopped or left:
         print(f"iempc: gen3-mirror: {stopped or f'{len(left)} rx channels did not read back as wanted'}",

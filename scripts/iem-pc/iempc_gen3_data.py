@@ -149,18 +149,10 @@ def pepper(ip, env: dict[str, str], host: str, event: str) -> None:
         raise ip.StepError("gen3-data: the box's pepper credential does not read back as 600 root")
 
 
-def run(ctx, ip) -> int:
-    """`iempc gen3-data` (dev time, locked)."""
-    args, env = ctx.args, ctx.env
-    host = env.get("GEN3_HOST", "")
-    if not host or host.startswith("-"):
-        raise ip.Refused("gen3-data: no GEN3_HOST in the private env (the Gen 3 box's ssh destination)")
+def send_band(ip, env: dict[str, str], host: str, event: str) -> dict:
+    """The PC's band files onto the box (stopped) and read back: the counts."""
     stopped(ip, host)
-    raw, manifest = band_zip(ip, env, ctx.watch(abandon=True))
-    report = {"members": len(manifest), "bytes": len(raw), "dry_run": bool(args.dry_run)}
-    if args.dry_run:
-        ip.emit({"gen3_data": report})
-        return 0
+    raw, manifest = band_zip(ip, env, event)
     if ip.event_now():
         raise ip.Refused("gen3-data: the flag appeared: nothing was sent to the box")
     code, out, err = box(host, RECEIVE, raw, BOX_S)
@@ -173,7 +165,27 @@ def run(ctx, ip) -> int:
         raise ip.StepError("gen3-data: the box's receiver gave no answer to read back") from None
     if written != manifest:
         raise ip.StepError("gen3-data: what the box wrote does not read back as the PC's files")
-    report["written"] = len(written)
+    return {"members": len(manifest), "bytes": len(raw), "written": len(written)}
+
+
+def host_of(ip, env: dict[str, str], cmd: str) -> str:
+    host = env.get("GEN3_HOST", "")
+    if not host or host.startswith("-"):
+        raise ip.Refused(f"{cmd}: no GEN3_HOST in the private env (the Gen 3 box's ssh destination)")
+    return host
+
+
+def run(ctx, ip) -> int:
+    """`iempc gen3-data` (dev time, locked)."""
+    args, env = ctx.args, ctx.env
+    host = host_of(ip, env, "gen3-data")
+    if args.dry_run:
+        stopped(ip, host)
+        raw, manifest = band_zip(ip, env, ctx.watch(abandon=True))
+        ip.emit({"gen3_data": {"members": len(manifest), "bytes": len(raw), "dry_run": True}})
+        return 0
+    report = {**send_band(ip, env, host, ctx.watch(abandon=True)), "dry_run": False}
+    report = {k: report[k] for k in ("members", "bytes", "dry_run", "written")}
     if args.pepper:
         pepper(ip, env, host, ctx.watch(abandon=False))
         report["pepper"] = "replaced"
