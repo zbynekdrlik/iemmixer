@@ -993,6 +993,7 @@ fn run(clock: &dyn PtpClock, shared: Arc<TxShared>) {
             "TX thread runs at normal priority: RLIMIT_RTPRIO allows no SCHED_FIFO"
         );
     }
+    place("TX thread", shared.cfg.io_cpu);
     let mut tx = Transmitter::new(Arc::clone(&shared));
     while !shared.stopping() {
         let now = clock.now_ns();
@@ -1018,6 +1019,42 @@ pub(crate) fn ask_realtime(priority: i32) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn ask_realtime(_priority: i32) -> bool {
+    false
+}
+
+/// Pins the calling thread, named `thread` in the log, to `cpu` when the
+/// device config names one (#72 phase F: the pump and the RX/TX threads on
+/// isolated cores); a refusal (no such CPU) leaves it where it was.
+pub(crate) fn place(thread: &str, cpu: Option<usize>) {
+    let Some(cpu) = cpu else {
+        return;
+    };
+    if pin_to_cpu(cpu) {
+        info!(thread, cpu, "pinned to its CPU");
+    } else {
+        warn!(thread, cpu, "not pinned: the kernel refused that CPU");
+    }
+}
+
+/// Pins the calling thread to `cpu` alone; `false` when the kernel refuses
+/// it (no such CPU, or outside the thread's cpuset).
+#[cfg(target_os = "linux")]
+pub(crate) fn pin_to_cpu(cpu: usize) -> bool {
+    if cpu >= crate::device::MAX_CPU {
+        return false;
+    }
+    // SAFETY: an all-zero cpu_set_t is a valid empty set; CPU_SET writes
+    // inside it (cpu is below CPU_SETSIZE); pid 0 is the calling thread and
+    // the call only reads the set.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn pin_to_cpu(_cpu: usize) -> bool {
     false
 }
 

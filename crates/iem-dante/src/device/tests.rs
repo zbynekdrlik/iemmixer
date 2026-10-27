@@ -77,6 +77,7 @@ fn a_config_reads_the_test_device() {
     );
     assert_eq!(cfg.tx_margin_ns, 250_000);
     assert_eq!(cfg.tx_fpp_max, 32);
+    assert_eq!((cfg.pump_cpu, cfg.io_cpu), (None, None), "no CPU pinned");
     assert_eq!(
         cfg.state_file,
         PathBuf::from("/var/lib/iem-dante/state.toml")
@@ -363,6 +364,28 @@ fn the_tx_side_settings_are_read() {
     assert_eq!(cfg.latency_ns, 1_000_000, "the RX playout stays");
     assert_eq!(cfg.advertised_latency_ns(), 250_000);
     assert_eq!((cfg.tx_margin_ns, cfg.tx_fpp_max), (30_000, 16));
+}
+
+#[test]
+fn the_threads_cpus_are_read_and_bounded() {
+    let text = config_with(
+        "latency_ns =",
+        "latency_ns = 1000000\npump_cpu = 3\nio_cpu = 2",
+    );
+    let cfg = DeviceConfig::from_toml(&text).unwrap();
+    assert_eq!((cfg.pump_cpu, cfg.io_cpu), (Some(3), Some(2)));
+    for (line, field) in [("pump_cpu = 1024", "pump_cpu"), ("io_cpu = 1024", "io_cpu")] {
+        let found = problems(&config_with(
+            "latency_ns =",
+            &format!("latency_ns = 1000000\n{line}"),
+        ));
+        assert_eq!(found, vec![format!("{field}: 0 to 1023")]);
+    }
+    DeviceConfig::from_toml(&config_with(
+        "latency_ns =",
+        "latency_ns = 1000000\nio_cpu = 1023",
+    ))
+    .unwrap();
 }
 
 #[test]

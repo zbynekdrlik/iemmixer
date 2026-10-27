@@ -63,7 +63,7 @@ use tracing::{info, warn};
 use crate::clock::{PtpClock, to_samples};
 use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
-use crate::media::tx::{DISCONTINUITY, TxShared, ask_realtime, ns_of};
+use crate::media::tx::{DISCONTINUITY, TxShared, ask_realtime, ns_of, place};
 
 /// The engine's block, frames: the B = 32 of the RT contract.
 pub const BLOCK: u64 = 32;
@@ -592,6 +592,7 @@ fn run<P: Process>(clock: &dyn PtpClock, mut pump: Pump<P>, stop: &AtomicBool) {
             "engine pump runs at normal priority: RLIMIT_RTPRIO allows no SCHED_FIFO"
         );
     }
+    place("engine pump", pump.tx.cfg.pump_cpu);
     let rate = pump.tx.cfg.sample_rate;
     let period = Duration::from_nanos(pump.stats.period_ns);
     let mut deadline: Option<Instant> = None;

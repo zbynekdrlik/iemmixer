@@ -63,7 +63,7 @@ use tracing::{info, warn};
 
 use super::packet::{self, MEDIA_HEADER};
 use super::ring::Ring;
-use super::tx::{Cell, MAX_CHANNELS, ask_realtime, ns_of};
+use super::tx::{Cell, MAX_CHANNELS, ask_realtime, ns_of, place};
 use crate::clock::{self, PtpClock};
 use crate::wire::MAX_DATAGRAM;
 
@@ -734,11 +734,15 @@ impl Receiver {
 
 /// Starts the RX thread: it receives `shared`'s flows on `clock` until
 /// [`RxShared::stop`].
-pub fn spawn(clock: Arc<dyn PtpClock>, shared: Arc<RxShared>) -> io::Result<JoinHandle<()>> {
+pub fn spawn(
+    clock: Arc<dyn PtpClock>,
+    shared: Arc<RxShared>,
+    cpu: Option<usize>,
+) -> io::Result<JoinHandle<()>> {
     let rx = Receiver::new(Arc::clone(&shared))?;
     std::thread::Builder::new()
         .name("dante-rx".to_string())
-        .spawn(move || run(clock.as_ref(), &shared, rx))
+        .spawn(move || run(clock.as_ref(), &shared, rx, cpu))
 }
 
 /// What a failed wait means for the RX thread: an interrupt (a signal) is
@@ -754,7 +758,7 @@ fn failed_wait(shared: &RxShared, e: &io::Error) -> bool {
 
 /// The RX thread's loop (glue: every decision is [`Receiver`]'s and
 /// [`failed_wait`]'s).
-fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver) {
+fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver, cpu: Option<usize>) {
     if ask_realtime(RX_PRIORITY) {
         info!(priority = RX_PRIORITY, "RX thread runs SCHED_FIFO");
     } else {
@@ -763,6 +767,7 @@ fn run(clock: &dyn PtpClock, shared: &RxShared, mut rx: Receiver) {
             "RX thread runs at normal priority: RLIMIT_RTPRIO allows no SCHED_FIFO"
         );
     }
+    place("RX thread", cpu);
     info!(
         bytes = shared.recv_buffer(),
         asked = RECV_BUFFER_BYTES,

@@ -211,7 +211,11 @@ impl Media {
     /// cannot start, the TX thread is ended again.
     pub fn spawn_threads(&self) -> std::io::Result<Threads> {
         let tx = tx::spawn(Arc::clone(&self.clock), Arc::clone(&self.tx))?;
-        match rx::spawn(Arc::clone(&self.clock), Arc::clone(&self.rx)) {
+        match rx::spawn(
+            Arc::clone(&self.clock),
+            Arc::clone(&self.rx),
+            self.tx.cfg.io_cpu,
+        ) {
             Ok(rx) => Ok(Threads { tx, rx }),
             Err(e) => {
                 self.tx.stop();

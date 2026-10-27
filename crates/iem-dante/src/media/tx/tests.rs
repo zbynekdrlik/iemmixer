@@ -1265,3 +1265,28 @@ fn the_tx_thread_sends_nothing_before_the_clock_is_ready() {
     shared.stop();
     join_within(thread, Duration::from_secs(2));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_thread_pins_itself_to_one_cpu_and_a_missing_cpu_is_refused() {
+    std::thread::spawn(|| {
+        assert!(pin_to_cpu(0), "CPU 0 exists on every runner");
+        // SAFETY: an all-zero cpu_set_t is valid; the call fills it.
+        let only_zero = unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            assert_eq!(
+                libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set),
+                0
+            );
+            (0..crate::device::MAX_CPU)
+                .filter(|&c| libc::CPU_ISSET(c, &set))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(only_zero, vec![0]);
+        assert!(!pin_to_cpu(1023), "no runner has 1024 CPUs");
+        assert!(!pin_to_cpu(crate::device::MAX_CPU), "past CPU_SETSIZE");
+        place("test thread", None);
+    })
+    .join()
+    .unwrap();
+}

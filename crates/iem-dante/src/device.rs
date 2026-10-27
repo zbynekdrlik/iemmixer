@@ -99,6 +99,15 @@ pub struct DeviceConfig {
     /// [`FPP_MAX`] when left out. The IEM card sends 16.
     #[serde(default = "default_tx_fpp_max")]
     pub tx_fpp_max: u16,
+    /// The CPU the engine pump runs on (#72 phase F: an isolated core of
+    /// its own), below [`MAX_CPU`]; anywhere the kernel puts it when left
+    /// out.
+    #[serde(default)]
+    pub pump_cpu: Option<usize>,
+    /// The CPU the RX and TX threads run on, below [`MAX_CPU`]; anywhere
+    /// when left out.
+    #[serde(default)]
+    pub io_cpu: Option<usize>,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
 }
@@ -178,6 +187,11 @@ impl DeviceConfig {
         if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {
             out.push(format!("tx_fpp_max: {FPP_MIN} to {FPP_MAX}"));
         }
+        for (field, cpu) in [("pump_cpu", self.pump_cpu), ("io_cpu", self.io_cpu)] {
+            if cpu.is_some_and(|c| c >= MAX_CPU) {
+                out.push(format!("{field}: 0 to {}", MAX_CPU - 1));
+            }
+        }
         if !(BLOCK..=MAX_WORK_MARGIN).contains(&self.work_margin) {
             out.push(format!("work_margin: {BLOCK} to {MAX_WORK_MARGIN} samples"));
         }
@@ -202,6 +216,8 @@ fn default_tx_fpp_max() -> u16 {
 
 /// The largest `tx_margin_ns` a config may set (1 ms).
 pub const MAX_TX_MARGIN_NS: u64 = 1_000_000;
+/// The CPUs a `pump_cpu` or `io_cpu` may name: Linux's `CPU_SETSIZE`.
+pub const MAX_CPU: usize = 1024;
 
 const DEVICE_NAME_RULE: &str = "name: not a valid Dante device name \
      (1 to 31 of A-Z a-z 0-9 and '-', no '-' at either end)";
