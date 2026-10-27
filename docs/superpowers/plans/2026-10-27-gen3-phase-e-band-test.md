@@ -82,11 +82,11 @@
 
 ### Task 6: The box serves the band's URL
 
-**Interfaces:** provision step `tunnel` (cloudflared from its signed apt repository, its unit not enabled, the token as the credential `tunnel` loaded by the unit); the server unit with TLS on 443 (the server's TLS build in the gen3 bundle, `CAP_NET_BIND_SERVICE` only for that bind); `iempc gen3-tunnel to-box|to-pc` (stops one connector, waits until the tunnel has none, starts the other; reads the public `/api/version` back and checks it names the expected build).
+**As built (2026-10-27; the design comment on #72):** the tunnel's ingress sends the public host to `http://127.0.0.1:80` (read from the PC's connector's metrics `/config`). (a) The box's server listens on port 80 with `CAP_NET_BIND_SERVICE`, its one capability (0de49db; health reads port 80). (b) `scripts/gen3/install-cloudflared.sh` puts a pinned cloudflared `.deb` (the PC's version, 2026.2.0, by sha256) on the box, held, with `iem-tunnel.service` (DynamicUser, the token a credential, `--token-file %d/tunnel`, Type=notify), never enabled or started (51eb0a2, merged 1cce40d). (c) `iempc gen3-tunnel token|to-box|to-pc` (4f5defc): the token streamed into the box's credential; `to-box` stops and disables the PC's service, starts the box's unit and reads the public URL's `git_hash` as the box's, putting the PC's back on any failure; `to-pc` the reverse, allowed during an event.
 
-- [ ] **Step 1: Read first:** the ingress the tunnel uses (from the PC's connector, read-only), `tunnel-watchdog.md`, the server's TLS path (`lib.rs`).
-- [ ] **Step 2: Tests:** provision and verify for the step; the order of the connector switch; the refusal when both or none run after the bound.
-- [ ] **Step 3:** Implement; push; CI green.
+- [x] **Step 1: Read first** (the ingress, the watchdog, the server's TLS path: no TLS on the box, plain HTTP on loopback as on the PC).
+- [x] **Step 2: Tests** (`test_install_cloudflared.py`, `test_iempc_gen3_tunnel.py`, the unit and capability tests).
+- [x] **Step 3:** Implement; push. **Live so far:** cloudflared installed and held on the box, the token stored (600 root), the box provisioned and verified. The move itself is part of Task 8.
 
 ### Task 7: The switch and the signals
 
