@@ -1388,6 +1388,13 @@ class DeployTests(unittest.TestCase):
             (with_value("--config", str(self.tmp)), "--config is not a file"),
             (full + ["--back"], "--back takes no --bundle"),
             (back + ["--pins"], "--back takes no --pins"),
+            (full + ["--site-file", str(self.config)], "--site-file and --roster-file go together"),
+            (full + ["--roster-file", str(self.config)], "--site-file and --roster-file go together"),
+            (full + ["--site-file", str(self.tmp / "missing"), "--roster-file", str(self.config)],
+             "--site-file is not a file"),
+            (full + ["--site-file", str(self.config), "--roster-file", str(self.tmp)], "--roster-file is not a file"),
+            (full + ["--pins", "--site-file", str(self.config), "--roster-file", str(self.config)],
+             "the band's PINs come with iempc gen3-data"),
             ([a for a in back if a not in ("--sha", self.sha)], "--sha is missing"),
         ]
         for argv, want in cases:
@@ -1400,6 +1407,33 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.gh_calls(), [])
 
+
+    # Phase E (#72): the box on the band's site and roster from the ops repo.
+
+    def site_files(self, site: str) -> tuple[Path, Path]:
+        ops = self.tmp / "ops"
+        ops.mkdir(exist_ok=True)
+        (ops / "site.toml").write_text(site, encoding="utf-8")
+        (ops / "roster.toml").write_text("[[people]]\nid = 'zyxqw'\n", encoding="utf-8")
+        return ops / "site.toml", ops / "roster.toml"
+
+    def test_the_bands_site_goes_without_back_to_reaper_and_its_roster_as_given(self) -> None:
+        body = "".join(line for line in TEST_SITE.read_text(encoding="utf-8").splitlines(keepends=True)
+                       if not line.startswith("back_to_reaper"))
+        site, roster = self.site_files('back_to_reaper = ["iemmode.exe", "event"]\n' + body)
+        r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.installed("/var/lib/iemmixer/site/iemmixer.toml").decode(), body)
+        self.assertEqual(self.installed("/var/lib/iemmixer/site/roster.toml"), roster.read_bytes())
+        self.assertNotIn("pin", " ".join(" ".join(c) for c in self.calls() if c and c[0] == "ssh").replace(
+            "pin_changes", ""))
+
+    def test_a_back_to_reaper_on_more_lines_is_refused_before_anything_is_copied(self) -> None:
+        site, roster = self.site_files('back_to_reaper = [\n  "iemmode.exe",\n  "event",\n]\n')
+        r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the site's back_to_reaper is not one line", r.stderr)
+        self.assertEqual([c for c in self.calls() if c and c[0] == "scp"], [])
 
 class UnitTests(unittest.TestCase):
     """The units (phase C plan Task 6 Interfaces, choice 5; phase D plan Task 5,

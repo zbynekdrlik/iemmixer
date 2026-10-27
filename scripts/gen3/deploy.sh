@@ -53,7 +53,9 @@ set -euo pipefail
 #   own), the config, the interface (written as /etc/iemmixer/iem-dante.env)
 #   phase E's receiver of the band's data (band_receive.py, into
 #   /opt/iemmixer/lib, root's, 0755; #72), and this checkout's public test
-#   site and roster go by scp into
+#   site and roster, or with --site-file and --roster-file the band's from
+#   the ops repo (phase E: the site's one-line back_to_reaper left out, no
+#   --pins: the band's PINs come with `iempc gen3-data`), go by scp into
 #   ~/.cache/iem-gen3-deploy on the box (overwritten, never deleted); `sudo -n
 #   install` puts the units, the config and the env in place, makes
 #   /var/lib/iemmixer/site the service user's (0700) and puts the site and the
@@ -150,8 +152,8 @@ env_value_of() {
 
 usage() {
   echo "deploy.sh: $*" >&2
-  echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins]" >&2
-  echo "       deploy.sh --host <user@host> --back --sha <40 hex> --config <path> --iface <name> [--start engine|device]" >&2
+  echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins | --site-file <path> --roster-file <path>]" >&2
+  echo "       deploy.sh --host <user@host> --back --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--site-file <path> --roster-file <path>]" >&2
   exit 2
 }
 
@@ -160,10 +162,10 @@ on_box() {
   ssh "${SSH_OPTS[@]}" "$host" "$@"
 }
 
-host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0
+host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0 site_file="" roster_file=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --host | --bundle | --sha | --config | --iface | --start)
+    --host | --bundle | --sha | --config | --iface | --start | --site-file | --roster-file)
       [ $# -ge 2 ] || usage "$1 needs a value"
       case "$1" in
         --host) host="$2" ;;
@@ -172,6 +174,8 @@ while [ $# -gt 0 ]; do
         --config) config="$2" ;;
         --iface) iface="$2" ;;
         --start) start="$2" ;;
+        --site-file) site_file="$2" ;;
+        --roster-file) roster_file="$2" ;;
       esac
       shift 2
       ;;
@@ -197,6 +201,12 @@ done
 if [ "$back" = 1 ]; then
   [ -z "$bundle" ] || usage "--back takes no --bundle: it goes back to the build the other slot holds"
   [ "$pins" = 0 ] || usage "--back takes no --pins: going back leaves the PINs as they are"
+fi
+if [ -n "$site_file$roster_file" ]; then
+  [ -n "$site_file" ] && [ -n "$roster_file" ] || usage "--site-file and --roster-file go together"
+  [ -f "$site_file" ] || usage "--site-file is not a file"
+  [ -f "$roster_file" ] || usage "--roster-file is not a file"
+  [ "$pins" = 0 ] || usage "--site-file takes no --pins: the band's PINs come with iempc gen3-data"
 fi
 case "$host" in -*) usage "--host must be an ssh destination, not an option" ;; esac
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || usage "--sha is not 40 lowercase hex digits"
@@ -232,8 +242,8 @@ fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-test_site="$repo/config/test-site.toml"
-test_roster="$repo/config/test-roster.toml"
+test_site="${site_file:-$repo/config/test-site.toml}"
+test_roster="${roster_file:-$repo/config/test-roster.toml}"
 for unit in "${UNITS[@]}" "$RECEIVER"; do
   [ -f "$here/$unit" ] || die "$here/$unit is missing"
 done
@@ -382,7 +392,19 @@ fi
 
 printf 'IEM_DANTE_IFACE=%s\n' "$iface" > "$work/iem-dante.env"
 cp -- "$config" "$work/dante-device.toml"
-cp -- "$test_site" "$work/iemmixer.toml"
+if [ -n "$site_file" ]; then
+  # The engineer's "Back to REAPER" runs iemmode on the PC: the box has none,
+  # so the band's one-line back_to_reaper is left out of the box's copy
+  # (phase E, #72).
+  reaper_lines="$(grep -c '^back_to_reaper' -- "$test_site" || true)"
+  if [ "$reaper_lines" != 0 ]; then
+    [ "$reaper_lines" = 1 ] && grep '^back_to_reaper' -- "$test_site" | grep -q ']' ||
+      die "the site's back_to_reaper is not one line: write it on one line, or leave it out"
+  fi
+  grep -v '^back_to_reaper[[:space:]]*=' -- "$test_site" > "$work/iemmixer.toml" || true
+else
+  cp -- "$test_site" "$work/iemmixer.toml"
+fi
 cp -- "$test_roster" "$work/roster.toml"
 for unit in "${UNITS[@]}" "$RECEIVER"; do
   cp -- "$here/$unit" "$work/$unit"
