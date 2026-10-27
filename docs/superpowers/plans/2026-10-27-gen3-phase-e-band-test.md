@@ -62,7 +62,7 @@
 
 - [x] **Step 1: Tests:** `takeover_config(ops_text, card_labels, card_name) -> str` (pure): name, state file and TX names replaced, everything else byte for byte; the card's labels must cover our TX count and be unique, else refused; a name another device holds is checked by the switch's survey (Task 7).
 - [x] **Step 2:** Implement; push; CI green.
-- [ ] **Step 3 (open):** an mDNS conflict (another device announcing our name) is not detected by our device (mdns-sd renames silently); the switch's order (the card renamed and read back first) prevents it; detection in the device is a later improvement, recorded here.
+- [x] **Step 3 (dropped, owner 2026-10-27 on #72: the switch is temporary code):** an mDNS conflict (another device announcing our name) is not detected by our device (mdns-sd renames silently); the switch's order (the card renamed and read back first) prevents it; detection in the device is a later improvement, recorded here.
 
 ### Task 4: The RX mirror
 
