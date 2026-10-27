@@ -85,10 +85,12 @@ root | systemctl enable dantesync
 root | systemctl restart dantesync
 
 # scripts/gen3/verify_box.py (read only): the rule itself, the pepper's
-# credential (mode, owner, size; never its bytes), no plain test pepper.
+# credential (mode, owner, size; never its bytes), no plain test pepper, the
+# stack's state all the service user's (the first path that is not).
 root | visudo -c
 root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-pepper
 root | find /var/lib/iemmixer -name pepper.test
+root | find -P /var/lib/iemmixer /var/lib/iem-dante -not -user iemmixer -print -quit -o -not -group iemmixer -print -quit
 
 # Dev time by hand (plan Live 3): the engine's restart, the box's graceful
 # reboot.

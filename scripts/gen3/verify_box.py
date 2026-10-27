@@ -22,6 +22,11 @@ Prints one JSON line of numbers, `{"verify": {"pass": 0|1, "<check>": 0|1, ...,
   root, not empty.
 - no_test_pepper: `sudo -n find /var/lib/iemmixer -name pepper.test` finds
   none (the server refuses a plain test pepper beside the credential).
+- state: `sudo -n find -P /var/lib/iemmixer /var/lib/iem-dante -not -user
+  iemmixer -print -quit -o -not -group iemmixer -print -quit` exits 0 and
+  finds nothing: the stack's whole state is the service user's (phase C ran
+  the stack as the admin; deploy.sh --pins writes site/secrets as iemmixer
+  before any unit starts).
 - journal: journald persistent, 1 GiB, 30 days; /var/log/journal; no rsyslog.
 - apt: no unattended upgrades (20auto-upgrades, the apt timers and the
   service masked); every installed kernel meta package held.
@@ -66,14 +71,18 @@ JOURNAL = {"Storage": "persistent", "SystemMaxUse": "1G", "MaxRetentionSec": "30
 AUTO_UPGRADES = "/etc/apt/apt.conf.d/20auto-upgrades"
 NO_UPGRADES = ('APT::Periodic::Update-Package-Lists "0";', 'APT::Periodic::Unattended-Upgrade "0";')
 ENVFILE = "/etc/iemmixer/iem-dante.env"
+# The stack's state folders, and find's question about them (provision-root.sh
+# asks the same): the first path not owned by the service user and its group.
+STATE_DIRS = ("/var/lib/iemmixer", "/var/lib/iem-dante")
+FOREIGN = ("-not", "-user", SERVICE_USER, "-print", "-quit", "-o", "-not", "-group", SERVICE_USER, "-print", "-quit")
 ENABLED = {"enabled", "enabled-runtime", "linked", "linked-runtime", "alias", "indirect"}
 RUNNING = {"active", "activating", "deactivating", "reloading", "refreshing"}
 PRIORITY = 60
 CORE = "0"
 FIFO = 1
 IFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
-CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "journal", "apt", "sleep", "swap",
-          "clock", "napi")
+CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "apt", "sleep",
+          "swap", "clock", "napi")
 
 
 class Failed(Exception):
@@ -204,6 +213,14 @@ def check_no_test_pepper(box: Box) -> None:
         raise Failed("the service user's folder cannot be searched (sudo -n find)")
     if r.stdout.strip():
         raise Failed("a plain test pepper is on the box")
+
+
+def check_state(box: Box) -> None:
+    r = run("sudo", "-n", "find", "-P", *STATE_DIRS, *FOREIGN)
+    if r.returncode != 0:
+        raise Failed("the stack's state folders cannot be searched (sudo -n find)")
+    if r.stdout.strip():
+        raise Failed("a file of the stack's state is not the service user's")
 
 
 def check_journal(box: Box) -> None:

@@ -49,11 +49,17 @@ INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
  NMI:          0          0          0          0   Non-maskable interrupts
 """
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
-STEPS = ("user", "folders", "pepper", "phase-c", "journal", "apt", "sleep", "swap", "clock", "napi", "stack",
-         "sudoers")
-CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "journal", "apt", "sleep", "swap",
-          "clock", "napi")
+STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "apt", "sleep", "swap", "clock", "napi",
+         "stack", "sudoers")
+CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "apt", "sleep",
+          "swap", "clock", "napi")
 STACK = ("iem-engine.service", "iem-server.service", "iem-dante.service")
+# The stack's state folders (the units' StateDirectory=), and find's question
+# about them: the first path not owned by iemmixer:iemmixer.
+STATE_DIRS = ("var/lib/iemmixer", "var/lib/iem-dante")
+FOREIGN = ["-not", "-user", "iemmixer", "-print", "-quit", "-o", "-not", "-group", "iemmixer", "-print", "-quit"]
+FIND_STATE = ["find", "-P", "/var/lib/iemmixer", "/var/lib/iem-dante", *FOREIGN]
+CHOWN_STATE = ["chown", "-R", "-h", "iemmixer:iemmixer", "--", "/var/lib/iemmixer", "/var/lib/iem-dante"]
 
 # One stand-in for every command the box's scripts call by name, dispatched
 # on its own name. The box's state is FAKE_WORLD/db.json; each call is one
@@ -66,7 +72,7 @@ ROOT = os.environ["FAKE_ROOT"]
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 DB = os.path.join(WORLD, "db.json")
-READS = {"id", "getent", "stat", "dpkg-query", "visudo", "sudo"}
+READS = {"id", "getent", "stat", "dpkg-query", "visudo", "sudo", "find"}
 UNIT_DEFAULT = {"LoadState": "not-found", "UnitFileState": "", "ActiveState": "inactive", "User": "",
                 "DropInPaths": ""}
 REAL_VISUDO = next((p for p in ("/usr/sbin/visudo", "/usr/bin/visudo", "/sbin/visudo") if os.access(p, os.X_OK)), None)
@@ -150,6 +156,41 @@ def proc_file(pid, leaf):
     return os.path.join(os.environ["IEM_NAPI_PROC"], pid, leaf)
 
 
+# find's question about the stack's state (provision-root.sh, and verify_box.py
+# through sudo): the first path not owned by iemmixer:iemmixer.
+FOREIGN = ["-not", "-user", "iemmixer", "-print", "-quit", "-o", "-not", "-group", "iemmixer", "-print", "-quit"]
+
+
+def owner_key(path):
+    """The owners' key of the path itself: a link's own, never its target's."""
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+
+
+def walk(top):
+    """top and everything under it, depth first, never through a link."""
+    yield top
+    if os.path.isdir(top) and not os.path.islink(top):
+        for entry in sorted(os.listdir(top)):
+            yield from walk(os.path.join(top, entry))
+
+
+def find_foreign(tops, shown):
+    """find -P <tops> FOREIGN: the first path that is not iemmixer's, shown
+    as the caller sees it; a top that is not there is an error, the others
+    still searched."""
+    owners, rc = load()["owners"], 0
+    for top in tops:
+        if not os.path.lexists(top):
+            sys.stderr.write(f"find: '{shown(top)}': No such file or directory\n")
+            rc = 1
+            continue
+        for path in walk(top):
+            if owners.get(owner_key(path), "root root") != "iemmixer iemmixer":
+                print(shown(path))
+                sys.exit(rc)
+    sys.exit(rc)
+
+
 if name == "id":
     db = load()
     if args == ["-u"]:
@@ -215,6 +256,20 @@ elif name == "install":
     db = load()
     for target in (positional if dirs else positional[-1:]):
         db["owners"][os.path.realpath(target)] = f"{owner or 'root'} {group or 'root'}"
+    save(db)
+elif name == "find":
+    if args[:1] != ["-P"] or args[-len(FOREIGN):] != FOREIGN or len(args) <= 1 + len(FOREIGN):
+        fail("unexpected find", 97)
+    find_foreign(args[1:-len(FOREIGN)], lambda p: p)
+elif name == "chown":
+    if args[:4] != ["-R", "-h", "iemmixer:iemmixer", "--"] or len(args) < 5:
+        fail("unexpected chown", 97)
+    db = load()
+    for top in args[4:]:
+        if not os.path.lexists(top):
+            fail(f"cannot access '{top}': No such file or directory")
+        for path in walk(top):
+            db["owners"][owner_key(path)] = "iemmixer iemmixer"
     save(db)
 elif name == "stat":
     rest = [a for a in args if a != "--"]
@@ -374,6 +429,8 @@ elif name == "sudo":
             fail("stat: No such file or directory")
         print(stat_text(rest[2], path))
         sys.exit(0)
+    if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
+        find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
     if rest[:1] == ["find"] and rest[2:] == ["-name", "pepper.test"]:
         base = ROOT + rest[1]
         if not os.path.isdir(base):
@@ -390,7 +447,7 @@ else:
 
 FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
               "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
-              "chrt", "taskset", "sudo")
+              "chrt", "taskset", "sudo", "find", "chown")
 
 
 def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
@@ -427,6 +484,7 @@ def kernel_trees(root: Path, applied: bool) -> None:
 
 class World(unittest.TestCase):
     """A phase C box: the stack's units with their 10-user.conf drop-ins, the
+    stack's state the admin's (phase C ran the stack as the admin) with the
     synthetic band's test pepper, dantesync installed (not yet enabled),
     systemd-timesyncd, rsyslog, irqbalance, the apt timers, no swap, the
     kernel trees as the kernel leaves them."""
@@ -469,9 +527,26 @@ class World(unittest.TestCase):
         for unit in STACK:
             write(r / "etc/systemd/system" / unit, "[Service]\nExecStart=/opt/iemmixer/bin/iem-engine run\n")
             write(r / "etc/systemd/system" / f"{unit}.d" / "10-user.conf", f"[Service]\nUser={ADMIN}\n")
+        # Phase C's state, all the admin's: the server's secrets (0600 in a
+        # 0775 folder, the admin's umask), its site, roster status, push
+        # subscriptions and lineups, the engine's persistence, the device's
+        # state file and its phase B copy.
         secrets = r / "var/lib/iemmixer/site/secrets"
-        for leaf in ("pepper.test", "pin_hashes.json", "jwt_secret"):
+        for leaf in ("pepper.test", "pin_hashes.json", "jwt_secret", "vapid_private"):
             write(secrets / leaf, f"synthetic {leaf}\n", 0o600)
+        for rel, mode in (("site/iemmixer.toml", 0o644), ("site/roster.toml", 0o644),
+                          ("site/roster.status.json", 0o644), ("site/push_subscriptions.json", 0o600),
+                          ("site/push_subs_v2_migrated", 0o644), ("site/lineups/active.json", 0o644),
+                          ("site/lineups/lineup1/customizations/member1.json", 0o644),
+                          ("engine/current.json", 0o644), ("engine/baseline.json", 0o644)):
+            write(r / "var/lib/iemmixer" / rel, f"synthetic {rel}\n", mode)
+        for leaf in ("state.toml", "state.toml.phase-b-32x16"):
+            write(r / "var/lib/iem-dante" / leaf, f"synthetic {leaf}\n", 0o644)
+        for rel, mode in (("var/lib/iemmixer", 0o755), ("var/lib/iem-dante", 0o755), ("var/lib/iemmixer/site", 0o755),
+                          ("var/lib/iemmixer/site/secrets", 0o775)):
+            (r / rel).chmod(mode)
+        owners = {str(path.resolve()): f"{ADMIN} {ADMIN}"
+                  for top in STATE_DIRS for path in (r / top, *(r / top).rglob("*"))}
         (r / "etc/sudoers.d").mkdir(parents=True)
         (r / "etc/apt/apt.conf.d").mkdir(parents=True)
         write(r / "etc/fstab", "# /etc/fstab: static file system information.\nUUID=0000 / ext4 defaults 0 1\n")
@@ -496,7 +571,7 @@ class World(unittest.TestCase):
         # Phase C's deploy left the standalone device enabled on this box.
         units["iem-dante.service"]["UnitFileState"] = "enabled"
         self.save_db({
-            "uid": "0", "user": ADMIN, "next_id": 990, "ntp": "yes", "owners": {},
+            "uid": "0", "user": ADMIN, "next_id": 990, "ntp": "yes", "owners": owners,
             "passwd": {ADMIN: f"{ADMIN}:x:1000:1000::/home/{ADMIN}:/bin/bash", "root": "root:x:0:0::/root:/bin/bash"},
             "group": {ADMIN: f"{ADMIN}:x:1000:", "systemd-journal": "systemd-journal:x:999:"},
             "units": units,
@@ -524,6 +599,21 @@ class World(unittest.TestCase):
         db["units"].setdefault(unit, {"LoadState": "loaded", "UnitFileState": "disabled",
                                       "ActiveState": "inactive"}).update(props)
         self.save_db(db)
+
+    def set_owner(self, rel: str, owner: str) -> None:
+        db = self.db()
+        db["owners"][str((self.root / rel).resolve())] = owner
+        self.save_db(db)
+
+    def state(self) -> dict[str, tuple[int, str]]:
+        """Every path of the stack's state folders, the folders included:
+        (mode, 'owner group')."""
+        owners, out = self.db()["owners"], {}
+        for top in STATE_DIRS:
+            for path in (self.root / top, *sorted((self.root / top).rglob("*"))):
+                out[str(path.relative_to(self.root))] = (path.lstat().st_mode & 0o7777,
+                                                         owners.get(str(path.resolve()), "root root"))
+        return out
 
     def calls(self) -> list[dict]:
         log = self.world / "calls.log"
@@ -623,6 +713,9 @@ class ProvisionRootTests(World):
             ["usermod", "--append", "--groups", "iemmixer", ADMIN],
             ["install", "-d", "-m", "0700", "-o", "root", "-g", "root", "--", "/etc/credstore.encrypted"],
             ["install", "-d", "-m", "0700", "-o", "iemmixer", "-g", "iemmixer", "--", "/var/lib/iemmixer/mint"],
+            ["install", "-d", "-m", "0750", "-o", "iemmixer", "-g", "iemmixer", "--", "/var/lib/iemmixer"],
+            ["install", "-d", "-m", "0750", "-o", "iemmixer", "-g", "iemmixer", "--", "/var/lib/iem-dante"],
+            CHOWN_STATE,
             ["systemd-creds", "encrypt", "--name=pepper", "--with-key=auto", "-",
              "/etc/credstore.encrypted/iemmixer-pepper"],
             ["systemctl", "daemon-reload"],
@@ -680,7 +773,7 @@ class ProvisionRootTests(World):
         for unit in STACK:
             self.assertFalse((r / "etc/systemd/system" / f"{unit}.d").exists(), unit)
         secrets = r / "var/lib/iemmixer/site/secrets"
-        self.assertEqual(sorted(p.name for p in secrets.iterdir()), ["jwt_secret"])
+        self.assertEqual(sorted(p.name for p in secrets.iterdir()), ["jwt_secret", "vapid_private"])
         # The box's state.
         db = self.db()
         self.assertEqual(db["passwd"]["iemmixer"], "iemmixer:x:991:990::/nonexistent:/usr/sbin/nologin")
@@ -716,6 +809,63 @@ class ProvisionRootTests(World):
         self.assertEqual(self.steps(r), {step: "unchanged" for step in STEPS})
         self.assertEqual(self.writes(), [])
         self.assertEqual(self.tree(), before)
+
+    def test_phase_c_s_state_becomes_the_service_user_s(self) -> None:
+        # Live on the box (#72 phase D): phase C ran the stack as the admin, so
+        # its state was the admin's, and deploy --pins' `pin set-engineer` as
+        # iemmixer could not write site/secrets (os error 13). systemd's
+        # StateDirectory= takes a tree over only at a unit's start, and the
+        # PINs are given before any.
+        before = self.state()
+        self.assertEqual({owner for _mode, owner in before.values()}, {f"{ADMIN} {ADMIN}"})
+        r = self.provisioned()
+        self.assertEqual(self.steps(r).get("state"), "changed")
+        after = self.state()
+        # Nothing deleted but phase C's test pepper and its PIN hashes (the
+        # phase-c step); mint is the folders step's.
+        gone = {f"var/lib/iemmixer/site/secrets/{leaf}" for leaf in ("pepper.test", "pin_hashes.json")}
+        self.assertEqual(set(after), (set(before) - gone) | {"var/lib/iemmixer/mint"})
+        self.assertEqual({owner for _mode, owner in after.values()}, {"iemmixer iemmixer"})
+        # The two folders 0750 (the stack shares the group), every other mode
+        # as it was: the secrets stay 0600.
+        for path, (mode, _owner) in after.items():
+            want = {"var/lib/iemmixer": 0o750, "var/lib/iem-dante": 0o750, "var/lib/iemmixer/mint": 0o700}
+            self.assertEqual(mode, want.get(path, before.get(path, (None,))[0]), path)
+        for leaf in ("jwt_secret", "vapid_private"):
+            self.assertEqual(after[f"var/lib/iemmixer/site/secrets/{leaf}"][0], 0o600)
+        # One question before the chown and the same one after it, never
+        # through a link.
+        state_calls = [[self.norm(a) for a in c["argv"]] for c in self.calls() if c["argv"][0] in ("find", "chown")]
+        self.assertEqual(state_calls, [FIND_STATE, CHOWN_STATE, FIND_STATE])
+        # A second run asks once and sends no chown.
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r).get("state"), "unchanged")
+        self.assertEqual([c["argv"][0] for c in self.calls() if c["argv"][0] in ("find", "chown")], ["find"])
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.state(), after)
+        # A file of another user, or of the service user in another group, is
+        # taken over again; nothing else is written.
+        for owner in ("root root", "iemmixer root"):
+            with self.subTest(owner=owner):
+                self.set_owner("var/lib/iem-dante/state.toml", owner)
+                self.clear_calls()
+                r = self.provisioned()
+                self.assertEqual(self.steps(r).get("state"), "changed")
+                self.assertEqual(self.writes(), [CHOWN_STATE])
+                self.assertEqual(self.state(), after)
+
+    def test_a_state_folder_that_is_a_link_is_refused_never_followed(self) -> None:
+        elsewhere = self.root / "srv/zyxstate"
+        elsewhere.parent.mkdir(parents=True)
+        shutil.move(self.root / "var/lib/iem-dante", elsewhere)
+        (self.root / "var/lib/iem-dante").symlink_to(elsewhere)
+        r = self.provision()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("/var/lib/iem-dante is no folder", r.stderr)
+        self.assertNotIn("state", self.steps(r))
+        self.assertFalse([c for c in self.writes() if c[0] == "chown" or c[-1].startswith("/var/lib/iem")
+                          and c[-1] != "/var/lib/iemmixer/mint"])
 
     def test_the_pepper_is_made_once_never_overwritten_and_its_bytes_go_nowhere(self) -> None:
         r = self.provisioned()
@@ -1116,6 +1266,11 @@ class VerifyTests(World):
             write(self.root / "etc/systemd/system/iem-server.service.d/10-user.conf", f"[Service]\nUser={ADMIN}\n")
             self.run_fake("systemctl", "daemon-reload")
 
+        def test_pepper() -> None:
+            # The service user's own file: only no_test_pepper fails.
+            write(self.root / "var/lib/iemmixer/site/secrets/pepper.test", "x\n")
+            self.set_owner("var/lib/iemmixer/site/secrets/pepper.test", "iemmixer iemmixer")
+
         cases = {
             "user": (db_change(lambda db: db["group"].update(iemmixer="iemmixer:x:990:")),
                      "the admin is not in the group iemmixer"),
@@ -1124,8 +1279,9 @@ class VerifyTests(World):
             "sudoers": (lambda: (self.root / "etc/sudoers.d/iemmixer-gen3").unlink(), "sudo -n visudo -c fails"),
             "pepper": (lambda: (self.root / "etc/credstore.encrypted/iemmixer-pepper").chmod(0o644),
                        "the pepper's credential is not 600 root"),
-            "no_test_pepper": (lambda: write(self.root / "var/lib/iemmixer/site/secrets/pepper.test", "x\n"),
-                               "a plain test pepper is on the box"),
+            "no_test_pepper": (test_pepper, "a plain test pepper is on the box"),
+            "state": (lambda: self.set_owner("var/lib/iem-dante/state.toml", f"{ADMIN} {ADMIN}"),
+                      "a file of the stack's state is not the service user's"),
             "journal": (db_change(lambda db: db["packages"].update(rsyslog="install ok installed")),
                         "rsyslog is installed"),
             "apt": (db_change(lambda db: db["packages"].update({"linux-image-generic": "install ok installed"})),
@@ -1184,6 +1340,14 @@ class VerifyTests(World):
             ("user", db_set_passwd(self, "iemmixer:x:991:990::/nonexistent:/bin/bash"), "the service user can log in"),
             ("pepper", lambda: (self.root / "etc/credstore.encrypted/iemmixer-pepper").unlink(),
              "the pepper's credential is not there (sudo -n stat)"),
+            ("state", lambda: self.set_owner("var/lib/iemmixer/site/secrets/jwt_secret", "iemmixer root"),
+             "a file of the stack's state is not the service user's"),
+            ("state", lambda: write(self.root / "var/lib/iemmixer/engine/backup.json", "x\n"),
+             "a file of the stack's state is not the service user's"),
+            ("state", lambda: self.set_owner("var/lib/iemmixer", f"{ADMIN} {ADMIN}"),
+             "a file of the stack's state is not the service user's"),
+            ("state", lambda: shutil.rmtree(self.root / "var/lib/iem-dante"),
+             "the stack's state folders cannot be searched (sudo -n find)"),
         ]
         for check, change, reason in cases:
             with self.subTest(reason=reason):
@@ -1208,7 +1372,8 @@ class VerifyTests(World):
         self.good_box()
         self.verify()
         sent = [" ".join(c["argv"]) for c in self.calls() if c["argv"][0] == "sudo"]
-        self.assertEqual(len(sent), 3)
+        self.assertEqual(len(sent), 4)
+        self.assertIn(" ".join(["sudo", "-n", *FIND_STATE]), sent)
         allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
         for runas, command, _listed in sudo_lines(sent):
             self.assertIn((runas, command), allowed, command)

@@ -55,8 +55,11 @@ RestartMode=direct
 TimeoutStopSec=10
 SendSIGKILL=no
 # /var/lib/iemmixer, owned by the service user: the site folder (secrets,
-# lineups, backups beside the site file).
+# lineups, backups beside the site file). 0750 as provision makes it: systemd
+# sets it to this mode at every start (0755 unset), and the engine's unit
+# names the same.
 StateDirectory=iemmixer
+StateDirectoryMode=0750
 # No capability: port 8080.
 CapabilityBoundingSet=
 AmbientCapabilities=
