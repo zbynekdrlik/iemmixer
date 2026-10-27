@@ -241,6 +241,13 @@ fn the_rx_thread_s_passes_do_not_allocate() {
     assert_eq!(violation_count(), 0, "the RX passes allocated");
     let c = shared.lane(0);
     assert_eq!((c.packets, c.refused, c.stray), (300, 0, 0), "{c:?}");
+    // The packets' judge ran inside the passes: the least lateness in ns is
+    // the last packet's.
+    assert_eq!(shared.take_max_lateness(0), 32 * 300 + 64);
+    assert_eq!(
+        shared.last_min_lateness_ns(0),
+        Some(now - ns_of(T + 32 * 299, RATE))
+    );
     assert_eq!(c.keepalives, 1);
     let mut got = [0i32; FPP];
     for (ring, sign) in [(0, 1), (1, -1), (2, 1)] {

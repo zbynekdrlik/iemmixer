@@ -1,0 +1,98 @@
+# The Gen 3 box's sudo rule (#72 phase D, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Tasks 7-9; rules in
+# .claude/rules/gen3.md): one line per command a Gen 3 tool sends through
+# `sudo -n`, written `<runas> | <command exactly as sent>`, the command being
+# what follows `sudo -n` (`root`) or `sudo -n -u <runas>`. Placeholders:
+# {slot} is a and b; {member} each [[people]] id of config/test-roster.toml;
+# {units} each ordered non-empty subset of `iem-dante iem-engine iem-server`
+# (iem-dante, iem-dante iem-engine, ..., iem-server). Lines starting with #
+# and blank lines are no rule. `sudo -n -l <command>` needs no line of its own:
+# it lists a command that has one. A command holds no quote and no backslash
+# (its words are split at spaces). Plan Task 9's provision-root.sh turns this
+# file into the box's sudoers rule for its admin user,
+# /etc/sudoers.d/iemmixer-gen3 (each program by the absolute path sudo's
+# secure_path finds, NOPASSWD); the tests check that every `sudo -n` line a
+# tool sends is an expansion of a line here (test_deploy.py for deploy.sh;
+# test_iempc_gen3.py for iempc gen3-mix, the live guard's stop and "ide
+# event"'s stop; test_install_dantesync.py for install-dantesync.sh;
+# test_provision.py for verify_box.py, and that every line here is in the
+# rendered rule). provision.sh's own `sudo -n bash ... provision-root.sh` runs
+# on the admin's own passwordless rule (phase D) and never gets a line here:
+# it would be all of root.
+
+# scripts/gen3/deploy.sh: the new slot, filled while the stack runs.
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-engine /opt/iemmixer/slot-{slot}/bin/iem-engine
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-server /opt/iemmixer/slot-{slot}/bin/iem-server
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-dante-dev /opt/iemmixer/slot-{slot}/bin/iem-dante-dev
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-soakclient /opt/iemmixer/slot-{slot}/bin/iem-soakclient
+root | install -D -m 0644 .cache/iem-gen3-deploy/BUILD /opt/iemmixer/slot-{slot}/bin/BUILD
+root | install -D -m 0644 .cache/iem-gen3-deploy/SHA256SUMS /opt/iemmixer/slot-{slot}/bin/SHA256SUMS
+
+# The stack's stop: deploy.sh, "ide event" (iempc event) and the live guard.
+root | systemctl stop iem-server iem-engine iem-dante
+
+# deploy.sh: the switch (phase C's folder aside once, then one rename).
+root | mv -T /opt/iemmixer/bin /opt/iemmixer/bin.phase-c
+root | ln -sfn slot-{slot}/bin /opt/iemmixer/bin.next
+root | mv -T /opt/iemmixer/bin.next /opt/iemmixer/bin
+
+# deploy.sh: the units, the device config, the test site and roster.
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.service /etc/systemd/system/iem-dante.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-engine.service /etc/systemd/system/iem-engine.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-server.service /etc/systemd/system/iem-server.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd/system/iem-alarm@.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
+root | install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site
+root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml
+root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/roster.toml /var/lib/iemmixer/site/roster.toml
+
+# deploy.sh --pins: the PIN commands as the service user with the pepper's
+# credential, each PIN on stdin.
+root | systemd-run --quiet --pipe --wait --collect --uid=iemmixer --gid=iemmixer --property=LoadCredentialEncrypted=pepper:/etc/credstore.encrypted/iemmixer-pepper --setenv=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server pin set-engineer
+root | systemd-run --quiet --pipe --wait --collect --uid=iemmixer --gid=iemmixer --property=LoadCredentialEncrypted=pepper:/etc/credstore.encrypted/iemmixer-pepper --setenv=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server pin set-member {member}
+
+# deploy.sh: the start (none of the stack enabled at boot).
+root | systemctl daemon-reload
+root | systemctl disable iem-dante iem-engine iem-server
+root | systemctl reset-failed {units}
+root | systemctl start iem-engine iem-server
+root | systemctl start iem-dante
+
+# scripts/iem-pc/iempc_gen3.py (iempc gen3-mix): the browser's tokens, as the
+# service user (the JWT secret's owner) in its mint folder: any left from an
+# earlier run removed, minted with the box server's own key, each read back
+# over ssh's stdout, removed again whatever happened.
+iemmixer | rm -f /var/lib/iemmixer/mint/engineer.token /var/lib/iemmixer/mint/member.token
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub engineer --engineer --seconds 900 --out /var/lib/iemmixer/mint/engineer.token
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub {member} --seconds 900 --out /var/lib/iemmixer/mint/member.token
+iemmixer | cat /var/lib/iemmixer/mint/engineer.token
+iemmixer | cat /var/lib/iemmixer/mint/member.token
+
+# scripts/gen3/install-dantesync.sh: who holds UDP 319/320, then dantesync as
+# its install.sh puts it (systemctl daemon-reload is deploy's line above), the
+# time services it disables (those the box has), NTP off, enable, restart.
+root | ss -Hulnp
+root | install -D -m 0755 .cache/dantesync-install/dantesync /usr/local/bin/dantesync
+root | install -D -m 0644 .cache/dantesync-install/config.json /etc/dantesync/config.json
+root | install -D -m 0644 .cache/dantesync-install/dantesync.service /etc/systemd/system/dantesync.service
+root | systemctl disable --now systemd-timesyncd
+root | systemctl disable --now chrony
+root | systemctl disable --now ntp
+root | systemctl disable --now time-sync-coordinator
+root | timedatectl set-ntp false
+root | systemctl enable dantesync
+root | systemctl restart dantesync
+
+# scripts/gen3/verify_box.py (read only): the rule itself, the pepper's
+# credential (mode, owner, size; never its bytes), no plain test pepper, the
+# stack's state all the service user's (the first path that is not).
+root | visudo -c
+root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-pepper
+root | find /var/lib/iemmixer -name pepper.test
+root | find -P /var/lib/iemmixer /var/lib/iem-dante -not -user iemmixer -print -quit -o -not -group iemmixer -print -quit
+
+# Dev time by hand (plan Live 3): the engine's restart, the box's graceful
+# reboot.
+root | systemctl restart iem-engine
+root | systemctl reboot

@@ -626,6 +626,7 @@ const WORDS: &[&str] = &[
     "late",
     "unplaced",
     "lateness",
+    "lateness_min_ns",
     "keepalive_errors",
     "recv_errors",
     "rx_poll_errors",
@@ -791,6 +792,72 @@ fn the_status_takes_none_of_what_the_heartbeat_takes() {
     let _ = status(&media);
     let _ = status(&media);
     assert_eq!(media.rx.rings()[0].take_peak(), 1_000_000);
+}
+
+#[test]
+fn the_status_shows_the_packets_judge_in_ns_numbers_only() {
+    use crate::media::rx::{Receiver, RxPlan};
+    let dir = tempfile::tempdir().unwrap();
+    let device = device_at(dir.path());
+    // T: 96 000 000 samples at 96 kHz, a whole second.
+    let media = media_on(&device, Arc::new(ManualClock::new(T)));
+    let lo = Ipv4Addr::LOCALHOST;
+    let plan = RxPlan {
+        src: Some(lo),
+        bps: 3,
+        nslots: 1,
+        latency: 96,
+        live: true,
+        generation: 1,
+    };
+    media.rx.publish(
+        |slot| if slot == 3 { plan } else { RxPlan::default() },
+        |_| None,
+    );
+    let mut receiver = Receiver::new(Arc::clone(&media.rx)).unwrap();
+    let sender = std::net::UdpSocket::bind((lo, 0)).unwrap();
+    // Two packets of flow 4, 40 and 25 samples late.
+    for pos in [96_000_000 - 40, 96_000_000 - 25] {
+        let mut buf = [0u8; 64];
+        let (secs, sub) = crate::clock::stamp(pos, 96_000);
+        let n = crate::media::packet::write(&mut buf, secs, sub, 1, 3, 1, |_, _| 0);
+        sender
+            .send_to(&buf[..n], media.rx.local_addr(3).unwrap())
+            .unwrap();
+    }
+    let deadline = std::time::Instant::now() + BOUND;
+    while media.rx.lane(3).packets < 2 {
+        receiver.wait(std::time::Duration::from_millis(20)).unwrap();
+        receiver.pass(Some(T), 0);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the packets never came"
+        );
+    }
+    // Before the heartbeat took a second: no judge, the key absent.
+    let s = status(&media);
+    assert!(
+        s.contains("\"unplaced\":0,\"lateness\":0,\"keepalives\":0,"),
+        "{s}"
+    );
+    media.rx.take_max_lateness(3);
+    let s = status(&media);
+    for word in strings_of_json(&s) {
+        assert!(WORDS.contains(&word.as_str()), "{word:?} in {s}");
+    }
+    // The least: 25 samples, 260 416 ns (the stamp at 999 999 739 584 ns,
+    // rounded up); the largest 40 samples.
+    assert!(
+        s.contains(
+            "\"rx\":[{\"flow\":4,\"granted\":0,\"fpp\":0,\"channels\":0,\"latency\":0,\
+             \"packets\":2,\"refused\":0,\"stray\":0,\"out_of_order\":0,\"late\":0,\
+             \"unplaced\":0,\"lateness\":40,\"lateness_min_ns\":260416,\"keepalives\":0,\
+             \"keepalive_errors\":0,\"recv_errors\":0}],"
+        ),
+        "{s}"
+    );
+    // The status takes nothing: read again, the same second.
+    assert_eq!(value_of(&status(&media), "lateness_min_ns"), "260416");
 }
 
 #[test]
@@ -1122,13 +1189,32 @@ mod socket {
     }
 
     #[tokio::test]
-    async fn the_control_socket_is_the_service_user_s_and_replaces_a_stale_one() {
+    async fn the_control_socket_is_0660() {
+        // Phase D: the service user's socket, open to its group (the admin
+        // user's `ctl status`, the live guard, health); who may reach it at
+        // all is the 0750 runtime folder's group. Whatever the umask.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = bind_control(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_socket());
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o660);
+        // A stale socket replaced is 0660 again.
+        drop(listener);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let again = bind_control(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o660);
+        drop(again);
+    }
+
+    #[tokio::test]
+    async fn the_control_socket_serves_and_replaces_a_stale_one() {
         let (dir, media) = media();
         let path = dir.path().join("control.sock");
         let listener = bind_control(&path).unwrap();
         let meta = std::fs::symlink_metadata(&path).unwrap();
         assert!(meta.file_type().is_socket());
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         // Served: a client gets its answer.
         let server = tokio::spawn(serve_control(listener, Arc::clone(&media)));
         let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();

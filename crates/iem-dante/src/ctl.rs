@@ -3,8 +3,10 @@
 
 //! The device's local control socket (Gen 3 phase B, plan Task 7):
 //! [`SOCKET`] in the unit's runtime directory (`RuntimeDirectory=iem-dante`,
-//! mode 0700; the socket itself 0600, [`bind_control`]): the service's user
-//! only. One request a connection, one line each way ([`session`]);
+//! mode 0750; the socket itself 0660, [`bind_control`]): the service user
+//! and its group (phase D: the box's admin user is in the group `iemmixer`,
+//! for `ctl status`, the live guard and health). One request a connection,
+//! one line each way ([`session`]);
 //! `iem-dante-dev ctl <request>` is the client.
 //!
 //! - `status`: one JSON line, numbers only: keys and a few fixed words
@@ -589,7 +591,10 @@ impl Json {
 ///   `fpp`, `channels`, `latency` (samples), `packets`, `refused`, `stray`,
 ///   `out_of_order`, `late`, `unplaced`, `lateness` (the largest in the
 ///   heartbeat's last second, samples; the status takes nothing),
-///   `keepalives`, `keepalive_errors`, `recv_errors`; `rx_poll_errors`.
+///   `lateness_min_ns` (the packets' judge, phase D: the least lateness of
+///   that second in ns, our clock's now less the packets' own stamps; absent
+///   for a second without a placed packet), `keepalives`,
+///   `keepalive_errors`, `recv_errors`; `rx_poll_errors`.
 /// - `channels`: each RX channel subscribed or whose ring counted anything
 ///   (written, or read by the echo or a check): `rx`, `status`
 ///   (ARC 0x3000's code, 0 without a subscription), its ring's `written`,
@@ -736,6 +741,9 @@ fn rx_part(j: &mut Json, media: &Media) {
         j.num("late", lane.late);
         j.num("unplaced", lane.unplaced);
         j.num("lateness", media.rx.last_lateness(slot));
+        if let Some(ns) = media.rx.last_min_lateness_ns(slot) {
+            j.num("lateness_min_ns", ns);
+        }
         j.num("keepalives", lane.keepalives);
         j.num("keepalive_errors", lane.keepalive_errors);
         j.num("recv_errors", lane.recv_errors);
@@ -863,7 +871,8 @@ mod socket {
 
     /// Listens at `path`: a socket an earlier run left there is replaced;
     /// anything else there is refused (never removed). The socket is the
-    /// service's user's only (0600).
+    /// service user's and its group's (0660, whatever the umask): who may
+    /// reach it at all is the runtime folder's (0750) group.
     pub fn bind_control(path: &Path) -> io::Result<UnixListener> {
         if let Ok(m) = std::fs::symlink_metadata(path) {
             if !m.file_type().is_socket() {
@@ -876,7 +885,7 @@ mod socket {
         }
         // Nothing there, or a path that cannot be read: the bind says why.
         let listener = UnixListener::bind(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
         Ok(listener)
     }
 

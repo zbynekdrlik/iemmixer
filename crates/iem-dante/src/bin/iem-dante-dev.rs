@@ -36,6 +36,12 @@
 //! <path>] <request>` sends one request to that socket and prints the
 //! answer line: exit 0 for `ok` or the status, 1 for an error answer or a
 //! socket it cannot reach, 2 for the command line.
+//!
+//! Phase D (plan Task 6): `iem-dante-dev health [--socket <path>]
+//! [--server-port <n>]` prints the box's health as one JSON line
+//! (`iem_dante::health`, which reads the units, the control socket and the
+//! server and judges them): exit 0 healthy, 1 degraded or failed (or
+//! stdout closed), 3 stopped, 2 for the command line.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
@@ -59,6 +65,7 @@ mod linux {
 
     use iem_dante::clock::{DANTESYNC, MonoClock, POLL, Poller};
     use iem_dante::daemon::{ClockLines, Command, USAGE, ctl_succeeded, parse_args, version_line};
+    use iem_dante::health;
     use iem_dante::host::{self, Host, Signals};
     use tokio::time::MissedTickBehavior;
     use tracing::error;
@@ -80,6 +87,7 @@ mod linux {
             }
             Ok(Command::Clock { seconds }) => return clock(seconds),
             Ok(Command::Ctl { socket, request }) => return ctl_request(&socket, &request),
+            Ok(Command::Health(opts)) => return health_line(&opts),
             Ok(Command::Run(opts)) => opts,
             Err(msg) => {
                 eprintln!("iem-dante-dev: {msg}\n\n{USAGE}");
@@ -143,6 +151,17 @@ mod linux {
             }
             ExitCode::SUCCESS
         })
+    }
+
+    /// `health`: the box's verdict, one line on stdout, its state's exit
+    /// code.
+    fn health_line(opts: &health::Options) -> ExitCode {
+        let verdict = health::check(opts);
+        if let Err(e) = writeln!(std::io::stdout(), "{}", verdict.line()) {
+            eprintln!("iem-dante-dev health: stdout: {e}");
+            return ExitCode::from(1);
+        }
+        ExitCode::from(verdict.state.exit_code())
     }
 
     /// `ctl`: one request line to the control socket at `path`, its answer

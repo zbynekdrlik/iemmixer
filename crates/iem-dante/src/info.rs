@@ -410,8 +410,9 @@ pub trait Beat: Send + Sync {
 /// the media clock, dantesync's frequency adjustment as the clock's poller
 /// keeps it, the TX side (its channels' peaks), the RX side (its rings'
 /// peaks, its slots' lateness) and the manager (which slots hold a granted
-/// flow). Each beat takes the peaks and the lateness, so the next one
-/// reports its own second (the control socket's status takes neither).
+/// flow). Each beat takes the peaks and every slot's lateness (the largest
+/// in samples and the packets' least in ns), so the next one reports its
+/// own second (the control socket's status takes none of them).
 /// Before the media clock is ready the heartbeat is the header alone.
 #[derive(Clone)]
 pub struct Sources {
@@ -441,9 +442,13 @@ impl Beat for Sources {
                 .map(|ring| peak_byte(ring.take_peak()))
                 .collect(),
             rate: self.tx.cfg.sample_rate,
+            // Every slot's second is taken, granted or not, so the status's
+            // lateness and the packets' judge never show an ended flow's
+            // last second; only a granted flow's goes into the record.
             lateness: std::array::from_fn(|slot| {
+                let taken = self.rx.take_max_lateness(slot);
                 if granted[slot] {
-                    u32::try_from(self.rx.take_max_lateness(slot).min(i32::MAX as u64)).unwrap_or(0)
+                    u32::try_from(taken.min(i32::MAX as u64)).unwrap_or(0)
                 } else {
                     0
                 }

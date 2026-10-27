@@ -97,12 +97,15 @@ rules as `gen3-loop`; in this order:
    channels: a flow without T fails as not heard, never passes). Then
    `iemmode status` and no ops HIL run, as gen3-loop, and the box's build
    (`iem-engine --version`: its 40-hex commit, LIVE_SHA).
-3. An engineer and a member token minted on the box with its server's own
-   JWT secret (`iem-soakclient token`, TOKEN_SECONDS), copied into a folder of
-   this box's state (owner-only) and removed on the box right after, whatever
-   happened; their `{engineer, member}` file (LIVE_TOKENS) goes with its
-   folder on every exit. A token is never on a command line and never
-   printed; no PIN anywhere.
+3. An engineer and a member token minted on the box as its service user
+   (`sudo -n -u iemmixer`, #72 phase D Task 8) with its server's own JWT
+   secret (`iem-soakclient token`, TOKEN_SECONDS) in the service user's mint
+   folder, each read back over ssh's stdout (`cat`) into a new owner-only
+   file of a folder of this box's state (owner-only) and removed on the box
+   right after, whatever happened; their `{engineer, member}` file
+   (LIVE_TOKENS) goes with its folder on every exit. A token is never on a
+   command line and never printed; no PIN anywhere. Each of these commands
+   is a line of scripts/gen3/sudo-lines.txt.
 4. One HIL job (`iemmode job-begin`; ended as gen3-loop ends it): the engine
    restarted with the HIL flags, the device's counters, `ctl source T echo R
    D` and N bursts (the echo's round trips), `ctl source T engine`, the
@@ -578,7 +581,12 @@ ENGINE_BIN = "/opt/iemmixer/bin/iem-engine"
 SOAKCLIENT = "/opt/iemmixer/bin/iem-soakclient"
 # The path of the box server's JWT key file, beside its site file.
 SIGNER_PATH = "/var/lib/iemmixer/site/secrets/jwt_secret"
-BOX_TOKENS = ".cache/iem-gen3-mix"   # under the box user's home: each token there only between its mint and its copy
+# The service user's mint folder on the box (#72 phase D Task 8; provision
+# makes it, 0700 iemmixer): each token there only between its mint and its read.
+BOX_TOKENS = "/var/lib/iemmixer/mint"
+# Every call on the box's tokens runs as the service user, the jwt_secret's
+# owner: a line of scripts/gen3/sudo-lines.txt each.
+AS_SERVICE = ("sudo", "-n", "-u", "iemmixer")
 TOKENS = ("engineer", "member")
 TOKEN_SECONDS = 900   # the run: the job, 3 N bursts and four browser steps
 JWT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
@@ -742,35 +750,53 @@ def box_token(name: str) -> str:
 
 
 def mint_tokens(ip, ctx, host: str, member: str, folder: Path) -> Path:
-    """An engineer and a member token minted on the box with its server's
-    own JWT secret, copied into `folder` (this box's, owner-only) and removed
-    on the box whatever happened; returns their `{engineer, member}` file
+    """An engineer and a member token minted on the box as the service user
+    with its server's own JWT secret, each read back over ssh's stdout into a
+    new owner-only file of `folder` (this box's, owner-only) and removed on
+    the box whatever happened; returns their `{engineer, member}` file
     (LIVE_TOKENS), owner-only. A token never travels on a command line and is
-    never printed."""
-    words = ["umask", "077", "&&", "mkdir", "-p", BOX_TOKENS, "&&", "rm", "-f", *map(box_token, TOKENS)]
-    for name in TOKENS:
-        sub = ["--sub", "engineer", "--engineer"] if name == "engineer" else ["--sub", member]
-        words += ["&&", SOAKCLIENT, "token", "--jwt-secret-file", SIGNER_PATH, *sub, "--seconds", str(TOKEN_SECONDS),
-                  "--out", box_token(name)]
+    never printed. One ssh call per command (one `sudo -n` each, as the sudo
+    template lists it): the removal of any left from an earlier run (the
+    mint never writes over a file), the two mints, the two reads."""
+    remove = [*SSH, host, *AS_SERVICE, "rm", "-f", *map(box_token, TOKENS)]
     try:
-        ip.guarded([*SSH, host, *words], "", CTL_S, ctx.watch(abandon=False))
-        ip.guarded(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                    *(f"{host}:{box_token(name)}" for name in TOKENS), f"{folder}/"], "", CTL_S,
-                   ctx.watch(abandon=False))
+        ip.guarded(remove, "", CTL_S, ctx.watch(abandon=False))
+        for name in TOKENS:
+            sub = ["--sub", "engineer", "--engineer"] if name == "engineer" else ["--sub", member]
+            ip.guarded([*SSH, host, *AS_SERVICE, SOAKCLIENT, "token", "--jwt-secret-file", SIGNER_PATH, *sub,
+                        "--seconds", str(TOKEN_SECONDS), "--out", box_token(name)], "", CTL_S,
+                       ctx.watch(abandon=False))
+        for name in TOKENS:
+            token = ip.guarded([*SSH, host, *AS_SERVICE, "cat", box_token(name)], "", CTL_S,
+                               ctx.watch(abandon=False))
+            keep_token(ip, folder / f"{name}.token", token, name)
     finally:
         remove_box_tokens(ip, host)
     return tokens_file(ip, folder)
 
 
-def remove_box_tokens(ip, host: str) -> None:
-    """`rm -f` of the minted tokens on the box, after any outcome (a flag
-    too: a credential is never left there). A failure is a warning naming
-    the command to run by hand; it never raises."""
+def keep_token(ip, path: Path, token: str, name: str) -> None:
+    """A token read from the box into a new owner-only file (never over
+    one); StepError naming no token when it cannot be written."""
     try:
-        ip.guarded([*SSH, host, "rm", "-f", *map(box_token, TOKENS)], "", CTL_S, "ignore")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token)
+    except OSError as e:
+        raise ip.StepError(f"gen3-mix: the {name} token read from the box was not kept "
+                           f"({e.strerror or type(e).__name__})") from None
+
+
+def remove_box_tokens(ip, host: str) -> None:
+    """`rm -f` of the minted tokens on the box as the service user, after any
+    outcome (a flag too: a credential is never left there). A failure is a
+    warning naming the command to run by hand; it never raises."""
+    words = [*AS_SERVICE, "rm", "-f", *map(box_token, TOKENS)]
+    try:
+        ip.guarded([*SSH, host, *words], "", CTL_S, "ignore")
     except ip.StepError as e:
         print(f"iempc: WARNING: the tokens minted on the Gen 3 box were not removed ({e}): remove them by hand "
-              f"(ssh <GEN3_HOST> rm -f {' '.join(map(box_token, TOKENS))})", file=sys.stderr, flush=True)
+              f"(ssh <GEN3_HOST> {' '.join(words)})", file=sys.stderr, flush=True)
 
 
 def tokens_file(ip, folder: Path) -> Path:

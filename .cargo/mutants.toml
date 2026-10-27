@@ -251,6 +251,16 @@ exclude_re = [
   # end as `Host::ended`), `Host::{ended, stop, wait}` (host/tests.rs runs
   # them over a stand-in device thread), and daemon.rs's `serve`.
   "iem-dante/src/host\\.rs.*\\b(seed|Watch::stop|report|device_thread|serve_device|goodbye)\\b",
+  # `iem-dante-dev health`'s glue (#72 phase D, plan Task 6): `check` reads
+  # the box's own systemd units and CLOCK_MONOTONIC and sleeps the second
+  # between the two control-socket reads, `systemctl_show` runs the box's
+  # systemctl: a test cannot hold the build machine's units (nor stand in
+  # for systemctl without a PATH seam the binary would then carry). Every
+  # decision stays mutated: `parse_units`, `parse_status`, `server_answer`,
+  # `verdict`, `Verdict::line`, `State::exit_code`, and the reads
+  # `read_status` and `ask_server` (health/tests.rs runs them against
+  # stand-ins on a Unix socket and on 127.0.0.1).
+  "iem-dante/src/health\\.rs.*\\bglue::(check|systemctl_show)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).

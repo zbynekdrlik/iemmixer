@@ -8,7 +8,9 @@
 //!   <IPv4>`; `--version` ([`version_line`]: the workspace version and the
 //!   build's commit, CI's `GITHUB_SHA`, "local" otherwise); `clock
 //!   --seconds <n>` (phase B, plan Task 2): the media clock's polls of
-//!   dantesync, one JSON line each ([`ClockLines`]), serving nothing.
+//!   dantesync, one JSON line each ([`ClockLines`]), serving nothing;
+//!   `health [--socket <path>] [--server-port <n>]` (phase D, plan Task 6):
+//!   the box's health ([`crate::health`]).
 //! - [`pick_interface`]: the interface and its one IPv4 address the device
 //!   serves on, from the box's interface list: ARC, CMC and the info
 //!   server bind the address, the mDNS records point at it and are sent on
@@ -72,6 +74,7 @@ usage: iem-dante-dev --config <path> (--iface <name> | --ip <IPv4 address>)
                      [--control <socket path>]
        iem-dante-dev ctl [--socket <path>] <request>
        iem-dante-dev clock --seconds <n>
+       iem-dante-dev health [--socket <path>] [--server-port <n>]
        iem-dante-dev --version
 
 Our own Dante device (Gen 3, #72): ARC on UDP 4440, CMC on UDP 8800, the
@@ -105,7 +108,15 @@ else null), holdover (1 when this poll kept k without a usable reading),
 sample (0 usable, 1 dantesync not locked, 2 no date offset, 3 a date step
 within 2 s, 4 a date slew, 5 no reply), locked, mode and freq_ppb
 (dantesync's, null without a reply). It serves nothing and never opens
-UDP 319 or 320.";
+UDP 319 or 320.
+
+health: the box's health, one JSON line of numbers and fixed words: the
+state (healthy, degraded, failed, stopped), its reasons, the systemd states
+of iem-engine, iem-server and iem-dante, the device's clock and the
+engine's pump from two reads of the control socket (default
+/run/iem-dante/control.sock) a second apart, and whether the server
+answers /api/version on 127.0.0.1 (default port 8080) with this build.
+Exit 0 healthy, 1 degraded or failed, 3 stopped (all three inactive).";
 
 /// What `--version` prints: the name, the version and the build.
 pub fn version_line() -> String {
@@ -144,6 +155,8 @@ pub enum Command {
         socket: PathBuf,
         request: String,
     },
+    /// `health [--socket <path>] [--server-port <n>]`: the box's health.
+    Health(crate::health::Options),
     Version,
     Help,
 }
@@ -151,11 +164,13 @@ pub enum Command {
 /// The command line (without the program's name). `--version` and
 /// `--help` win wherever they stand; anything else is a usage error.
 /// `clock` first selects the clock's polls ([`Command::Clock`]), `ctl` a
-/// control request ([`Command::Ctl`]).
+/// control request ([`Command::Ctl`]), `health` the box's health
+/// ([`Command::Health`]).
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
     match args.split_first() {
         Some((first, rest)) if first == "clock" => return parse_clock(rest),
         Some((first, rest)) if first == "ctl" => return parse_ctl(rest),
+        Some((first, rest)) if first == "health" => return parse_health(rest),
         _ => {}
     }
     let mut config = None;
@@ -218,6 +233,48 @@ fn parse_ctl(args: &[String]) -> Result<Command, String> {
         socket,
         request: words.join(" "),
     })
+}
+
+/// `health`'s own arguments: `--socket <path>` and `--server-port <n>`
+/// (1 to 65535), each at most once; `--help` is the usage.
+fn parse_health(args: &[String]) -> Result<Command, String> {
+    let mut socket = None;
+    let mut port = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let slot = match arg.as_str() {
+            "--help" | "-h" => return Ok(Command::Help),
+            "--socket" => &mut socket,
+            "--server-port" => &mut port,
+            other => return Err(format!("health: unknown argument {other:?}")),
+        };
+        let Some(value) = it.next() else {
+            return Err(format!("{arg} needs a value"));
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{arg} given twice"));
+        }
+    }
+    let socket = match socket {
+        Some(path) if path.is_empty() => return Err("--socket needs a path".into()),
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(crate::ctl::SOCKET),
+    };
+    let server_port = match port {
+        None => crate::health::SERVER_PORT,
+        Some(text) => match text.parse::<u16>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                return Err(format!(
+                    "--server-port {text:?} is not a port from 1 to 65535"
+                ));
+            }
+        },
+    };
+    Ok(Command::Health(crate::health::Options {
+        socket,
+        server_port,
+    }))
 }
 
 /// `clock`'s own arguments: `--seconds <n>`, n from 1.

@@ -28,6 +28,10 @@ mdns-sd = { version = "0.21", default-features = false, features = ["logging"] }
 # features.
 mio = { version = "1", features = ["net", "os-poll"] }
 serde = { version = "1.0", features = ["derive"] }
+# `iem-dante-dev health` (phase D, plan Task 6): it reads the control
+# socket's status line and the server's /api/version, and writes its own
+# line. MIT OR Apache-2.0; already in the engine's closure.
+serde_json = "1.0"
 # The RX flow sockets' receive buffer (SO_RCVBUF; MIT OR Apache-2.0).
 # Already in the lockfile through tokio.
 socket2 = "0.6"

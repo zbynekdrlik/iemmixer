@@ -1,13 +1,18 @@
 //! The PIN pepper: 32 random bytes created once per data directory.
 //! Windows: DPAPI-protected for the current user (`pepper.dpapi`).
-//! Other platforms are test-only: an owner-only plain file (`pepper.test`).
+//! Linux with systemd's credentials folder (`$CREDENTIALS_DIRECTORY`, the
+//! Gen 3 box): the systemd credential `pepper`, sealed on the box and
+//! decrypted by systemd at each start, never created or written here; a
+//! plain test pepper beside it is an error, never a fall back.
+//! Otherwise (CI, local runs) test-only: an owner-only plain file
+//! (`pepper.test`).
 //! A pepper file that exists but cannot be read is an error — never replaced,
 //! because a new pepper would silently invalidate every PIN hash. For the same
 //! reason a missing pepper is created only while no PIN hash exists (first
 //! run); a missing pepper next to stored PIN hashes is an error too.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rand_core::{OsRng, RngCore};
 
@@ -28,9 +33,83 @@ pub const PEPPER_FILE: &str = "pepper.dpapi";
 #[cfg(not(windows))]
 pub const PEPPER_FILE: &str = "pepper.test";
 
-/// Load the pepper from `dir`, creating it on first use (no PIN hash stored
-/// in `dir` yet).
+/// The systemd credential that holds the pepper on Linux: the server's unit
+/// loads it (`LoadCredentialEncrypted=pepper:…`), the PIN commands get it
+/// through `systemd-run`.
+pub const CREDENTIAL: &str = "pepper";
+
+/// Load the pepper ([`load_from`]): on Linux from systemd's credentials
+/// folder when systemd gives this process one (`$CREDENTIALS_DIRECTORY`),
+/// else from `dir`. Windows keeps its DPAPI file.
 pub fn load_or_create(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
+    #[cfg(windows)]
+    let credentials: Option<PathBuf> = None;
+    #[cfg(not(windows))]
+    let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
+    load_from(dir, credentials.as_deref())
+}
+
+/// With systemd's credentials folder `credentials`: the pepper is the
+/// credential [`CREDENTIAL`] there, exactly [`PEPPER_LEN`] bytes, never
+/// created or written; a missing one, one of another length and a plain test
+/// pepper in `dir` are errors (never a fall back to the file). Without it:
+/// the pepper stored in `dir`, created on first use (no PIN hash stored in
+/// `dir` yet).
+pub fn load_from(dir: &Path, credentials: Option<&Path>) -> io::Result<[u8; PEPPER_LEN]> {
+    match credentials {
+        Some(c) => from_credential(dir, c),
+        None => from_file(dir),
+    }
+}
+
+fn from_credential(dir: &Path, credentials: &Path) -> io::Result<[u8; PEPPER_LEN]> {
+    // PINs set with a test pepper never verify with the credential: such a
+    // file is refused, never used and never ignored.
+    let test = dir.join(PEPPER_FILE);
+    let beside = test.try_exists().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "cannot tell whether a plain test pepper lies at {}: {e}",
+                test.display()
+            ),
+        )
+    })?;
+    if beside {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "a plain test pepper lies beside the systemd credential: remove {} and give \
+                 every PIN again",
+                test.display()
+            ),
+        ));
+    }
+    // Errors name the credential and its folder, never its bytes.
+    let named = |what: String| {
+        format!(
+            "the PIN pepper's systemd credential '{CREDENTIAL}' in {} {what}",
+            credentials.display()
+        )
+    };
+    let raw = std::fs::read(credentials.join(CREDENTIAL))
+        .map_err(|e| io::Error::new(e.kind(), named(format!("cannot be read: {e}"))))?;
+    let pepper = <[u8; PEPPER_LEN]>::try_from(raw.as_slice()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            named(format!("holds {} bytes, not {PEPPER_LEN}", raw.len())),
+        )
+    })?;
+    tracing::info!(
+        credential = CREDENTIAL,
+        "PIN pepper from the systemd credential"
+    );
+    Ok(pepper)
+}
+
+/// The pepper stored in `dir`, created on first use (no PIN hash stored in
+/// `dir` yet).
+fn from_file(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
     let path = dir.join(PEPPER_FILE);
     match std::fs::read(&path) {
         Ok(stored) => {
@@ -78,7 +157,7 @@ pub fn load_or_create(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
 #[cfg(not(windows))]
 fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
     tracing::warn!(
-        "PIN pepper stored unprotected: only Windows protects it (DPAPI); other platforms are test-only"
+        "PIN pepper stored unprotected in a test file: Windows protects it with DPAPI, Linux takes systemd's credential (CREDENTIALS_DIRECTORY)"
     );
     Ok(data.to_vec())
 }
@@ -214,6 +293,161 @@ mod tests {
         let stored = std::fs::read(dir.path().join(PEPPER_FILE)).unwrap();
         assert_ne!(stored, pepper.to_vec());
         assert!(stored.len() > PEPPER_LEN);
+    }
+
+    /// A credentials folder holding `bytes` as the credential, as systemd
+    /// decrypts it for the server (`LoadCredentialEncrypted=pepper:…`).
+    fn credentials_with(bytes: &[u8]) -> tempfile::TempDir {
+        let c = tempfile::tempdir().unwrap();
+        std::fs::write(c.path().join(CREDENTIAL), bytes).unwrap();
+        c
+    }
+
+    fn synthetic() -> [u8; PEPPER_LEN] {
+        std::array::from_fn(|i| 0x40 + i as u8)
+    }
+
+    /// Every file below `dir` with its bytes, sorted.
+    fn files(dir: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(files(&path));
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn the_credential_is_the_pepper() {
+        let c = credentials_with(&synthetic());
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_from(dir.path(), Some(c.path())).unwrap(), synthetic());
+        // Next to PIN hashes too: the credential is the pepper they were
+        // made with, never a missing one.
+        write_pin_store(dir.path(), &format!(r#"{{"engineer":"{PHC}"}}"#));
+        assert_eq!(load_from(dir.path(), Some(c.path())).unwrap(), synthetic());
+        logs_assert(|lines: &[&str]| {
+            let from = lines
+                .iter()
+                .filter(|l| l.contains("PIN pepper from the systemd credential"))
+                .count();
+            match (from, lines.iter().any(|l| l.contains("unprotected"))) {
+                (2, false) => Ok(()),
+                other => Err(format!("one info line per load, no warning: {other:?}")),
+            }
+        });
+    }
+
+    #[test]
+    fn a_credential_of_another_length_is_an_error() {
+        for len in [0, 1, PEPPER_LEN - 1, PEPPER_LEN + 1, 2 * PEPPER_LEN] {
+            let bytes = vec![b'q'; len];
+            let c = credentials_with(&bytes);
+            let dir = tempfile::tempdir().unwrap();
+            let err = load_from(dir.path(), Some(c.path())).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{len}: {err}");
+            let msg = err.to_string();
+            assert_eq!(
+                msg,
+                format!(
+                    "the PIN pepper's systemd credential '{CREDENTIAL}' in {} holds {len} bytes, \
+                     not {PEPPER_LEN}",
+                    c.path().display()
+                )
+            );
+            assert!(len == 0 || !msg.contains("qq"), "never the bytes: {msg}");
+            assert!(!dir.path().join(PEPPER_FILE).exists(), "no test pepper");
+            assert_eq!(std::fs::read(c.path().join(CREDENTIAL)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_credentials_folder_without_the_pepper_is_an_error_never_the_test_file() {
+        let c = tempfile::tempdir().unwrap();
+        std::fs::write(c.path().join("other"), synthetic()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_from(dir.path(), Some(c.path())).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(&format!(
+                "the PIN pepper's systemd credential '{CREDENTIAL}' in {} cannot be read: ",
+                c.path().display()
+            )),
+            "{msg}"
+        );
+        assert!(!dir.path().join(PEPPER_FILE).exists(), "no test pepper");
+        // A folder systemd names but that is gone: the same.
+        let gone = c.path().join("gone");
+        let err = load_from(dir.path(), Some(&gone)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        assert!(err.to_string().contains(CREDENTIAL), "{err}");
+        assert!(!dir.path().join(PEPPER_FILE).exists(), "no test pepper");
+    }
+
+    #[test]
+    fn a_test_pepper_beside_the_credential_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let test = load_from(dir.path(), None).unwrap();
+        let path = dir.path().join(PEPPER_FILE);
+        let stored = std::fs::read(&path).unwrap();
+        let c = credentials_with(&synthetic());
+        let err = load_from(dir.path(), Some(c.path())).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a plain test pepper lies beside the systemd credential: remove {} and give \
+                 every PIN again",
+                path.display()
+            )
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), stored, "left as it was");
+        // Without the credential the test pepper is still today's.
+        assert_eq!(load_from(dir.path(), None).unwrap(), test);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_test_pepper_that_cannot_be_looked_for_is_an_error() {
+        // `dir` is a file: whether a test pepper lies there cannot be told,
+        // so the credential is not taken.
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("secrets");
+        std::fs::write(&dir, b"").unwrap();
+        let c = credentials_with(&synthetic());
+        let err = load_from(&dir, Some(c.path())).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        assert!(
+            err.to_string()
+                .contains(&dir.join(PEPPER_FILE).display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_written_with_a_credential() {
+        let c = credentials_with(&synthetic());
+        let before = files(c.path());
+        // A secrets folder that does not exist yet stays so.
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("secrets");
+        load_from(&dir, Some(c.path())).unwrap();
+        assert!(!dir.exists(), "no folder made");
+        // One that exists keeps exactly what it held.
+        let dir = tempfile::tempdir().unwrap();
+        write_pin_store(dir.path(), "{}");
+        let held = files(dir.path());
+        load_from(dir.path(), Some(c.path())).unwrap();
+        assert_eq!(files(dir.path()), held);
+        assert_eq!(files(c.path()), before, "the credential untouched");
     }
 
     #[cfg(unix)]
