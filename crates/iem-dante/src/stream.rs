@@ -13,8 +13,9 @@
 //!   those stamps (an RX channel that is not routed to a flow is silence
 //!   and reads nothing, so it counts no hole), its outputs go into the
 //!   engine's TX rings ([`crate::media::tx::TxShared::engine_ring`]) at
-//!   kB + D, **D = B + P + W** ([`Timing::offset`]), W = [`WORK_MARGIN`]
-//!   (1 ms of work margin): RX media time plus a fixed processing offset.
+//!   kB + D, **D = B + P + W** ([`Timing::offset`]), W the device's
+//!   `work_margin` ([`WORK_MARGIN`], 1 ms, unless the config sets it): RX
+//!   media time plus a fixed processing offset.
 //!   The TX thread sends them as [`crate::media::source::Source::Engine`]:
 //!   the packet stamped kB + D leaves at kB + D + fpp + 250 µs, so a block
 //!   that ends within W of its due time is always in time, whatever either
@@ -66,8 +67,12 @@ use crate::media::tx::{DISCONTINUITY, TxShared, ask_realtime, ns_of};
 /// The engine's block, frames: the B = 32 of the RT contract.
 pub const BLOCK: u64 = 32;
 /// W: how late a block may run and still be sent in time, samples (1 ms
-/// at 96 kHz). A pump later than this re-bootstraps.
+/// at 96 kHz). A pump later than this re-bootstraps. The default of the
+/// device's `work_margin` (#72 phase F sweeps it without a build).
 pub const WORK_MARGIN: u64 = 96;
+/// The largest `work_margin` a config may set, samples (about 43 ms at
+/// 96 kHz): far beyond any useful margin, well inside the rings.
+pub const MAX_WORK_MARGIN: u64 = 4096;
 /// The pump thread's `SCHED_FIFO` priority when `RLIMIT_RTPRIO` allows it:
 /// below the TX and RX threads' 45 and dantesync's 50.
 pub const ENGINE_PRIORITY: i32 = 40;
@@ -110,7 +115,7 @@ pub struct Timing {
     pub block: u64,
     /// P: the playout point behind media now (the device's latency).
     pub playout: u64,
-    /// W: the work margin ([`WORK_MARGIN`]).
+    /// W: the work margin (the device's `work_margin`).
     pub margin: u64,
 }
 

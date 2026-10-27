@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+use crate::stream::{BLOCK, MAX_WORK_MARGIN, WORK_MARGIN};
+
 /// The longest device or channel name, in bytes: Dante Controller ignores a
 /// device with a longer name (inferno's `device_info.rs`), and Dante's
 /// channel labels hold 31 characters too.
@@ -73,6 +75,10 @@ pub struct DeviceConfig {
     /// The latency the channels advertise, in ns (1 to `u32::MAX`, the
     /// width Dante's flow descriptors give it).
     pub latency_ns: u64,
+    /// W, the engine pump's work margin in samples: [`BLOCK`] to
+    /// [`MAX_WORK_MARGIN`], [`WORK_MARGIN`] when the config leaves it out.
+    #[serde(default = "default_work_margin")]
+    pub work_margin: u64,
     /// Where the state ([`DeviceState`]) is kept.
     pub state_file: PathBuf,
 }
@@ -134,11 +140,18 @@ impl DeviceConfig {
         if self.latency_ns == 0 || self.latency_ns > u64::from(u32::MAX) {
             out.push(format!("latency_ns: 1 to {}", u32::MAX));
         }
+        if !(BLOCK..=MAX_WORK_MARGIN).contains(&self.work_margin) {
+            out.push(format!("work_margin: {BLOCK} to {MAX_WORK_MARGIN} samples"));
+        }
         if self.state_file.as_os_str().is_empty() {
             out.push("state_file: empty".to_string());
         }
         out
     }
+}
+
+fn default_work_margin() -> u64 {
+    WORK_MARGIN
 }
 
 const DEVICE_NAME_RULE: &str = "name: not a valid Dante device name \

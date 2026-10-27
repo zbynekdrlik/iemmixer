@@ -46,7 +46,7 @@ use iem_dante::daemon::{Options, Place};
 use iem_dante::device::DeviceConfig;
 use iem_dante::host::{self, Host, HostError, Signals, Stopped};
 use iem_dante::media::source::Source;
-use iem_dante::stream::{self, BLOCK, Map, Pump, PumpStats, Timing, WORK_MARGIN};
+use iem_dante::stream::{self, BLOCK, Map, Pump, PumpStats, Timing};
 use tracing::{info, warn};
 
 use crate::SAMPLE_RATE;
@@ -92,12 +92,13 @@ pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, En
 }
 
 /// The pump's timing on the device `cfg`: B = 32, P = the device's latency
-/// in samples (the playout point its RX checks read at), W = 1 ms.
+/// in samples (the playout point its RX checks read at), W = the device's
+/// `work_margin` (1 ms unless the config sets it).
 pub fn timing(cfg: &DeviceConfig) -> Timing {
     Timing {
         block: BLOCK,
         playout: to_samples(cfg.latency_ns, cfg.sample_rate),
-        margin: WORK_MARGIN,
+        margin: cfg.work_margin,
     }
 }
 

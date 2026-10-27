@@ -68,6 +68,7 @@ fn a_config_reads_the_test_device() {
     assert_eq!(cfg.sample_rate, 96_000);
     assert_eq!(cfg.encoding, 24);
     assert_eq!(cfg.latency_ns, 1_000_000);
+    assert_eq!(cfg.work_margin, 96, "W defaults to 1 ms");
     assert_eq!(
         cfg.state_file,
         PathBuf::from("/var/lib/iem-dante/state.toml")
@@ -379,6 +380,14 @@ fn the_config_is_checked_field_by_field() {
             config_with("state_file =", "state_file = \"\""),
             "state_file: empty",
         ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\nwork_margin = 31"),
+            "work_margin: 32 to 4096 samples",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\nwork_margin = 4097"),
+            "work_margin: 32 to 4096 samples",
+        ),
     ];
     for (text, want) in cases {
         let found = problems(&text);
@@ -389,6 +398,8 @@ fn the_config_is_checked_field_by_field() {
     for (line, ok) in [
         ("latency_ns =", "latency_ns = 4294967295"),
         ("latency_ns =", "latency_ns = 1"),
+        ("latency_ns =", "latency_ns = 1000000\nwork_margin = 32"),
+        ("latency_ns =", "latency_ns = 1000000\nwork_margin = 4096"),
         ("sample_rate =", "sample_rate = 48000"),
         ("encoding =", "encoding = 32"),
         (
