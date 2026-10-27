@@ -417,6 +417,9 @@ elif name == "chrt":
 elif name == "systemd-tmpfiles":
     # Its `w` lines: the argument written to a file that exists.
     assert args[:1] == ["--create"] and len(args) == 2, args
+    rc = int(os.environ.get("FAKE_TMPFILES_RC", "0"))
+    if rc:
+        fail(f"Failed to write to {args[1]}: Permission denied", rc)
     if not os.environ.get("FAKE_TMPFILES_IGNORED"):
         with open(args[1], encoding="utf-8") as f:
             for line in f:
@@ -447,6 +450,8 @@ elif name == "sudo":
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
     if rest[:1] == ["cat"] and len(rest) == 2:
+        if os.environ.get("FAKE_SUDO_CAT_REFUSED"):
+            fail("a password is required")
         path = ROOT + rest[1]
         if not os.path.exists(path):
             fail(f"cat: {rest[1]}: No such file or directory")
@@ -1055,6 +1060,12 @@ class ProvisionRootTests(World):
         self.assertEqual(r.returncode, 1)
         self.assertIn("display output polling is still on", r.stderr)
         self.assertIsNone(self.steps(r).get("display"))
+        # One systemd-tmpfiles refuses (it exits 73 when it cannot write a
+        # value) fails the run the same way, with the step's own words.
+        r = self.provision(FAKE_TMPFILES_RC="73")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"systemd-tmpfiles --create {DISPLAY_CONF} failed (exit 73)", r.stderr)
+        self.assertIsNone(self.steps(r).get("display"))
         # A box without the parameter (no display driver): the file is
         # written, nothing to apply or read back.
         shutil.rmtree(self.root / "sys/module/drm_kms_helper")
@@ -1426,6 +1437,14 @@ class VerifyTests(World):
                 self.assertEqual(r.returncode, 1, r.stdout)
                 self.assertEqual(self.verify_line(r)[check], 0)
                 self.assertIn(f"verify_box: {check}: {reason}", r.stderr)
+
+    def test_display_fails_when_the_polling_cannot_be_read(self) -> None:
+        # A box whose sudoers predates the display step's template line.
+        self.good_box()
+        r = self.verify(FAKE_SUDO_CAT_REFUSED="1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(self.verify_line(r)["display"], 0)
+        self.assertIn("verify_box: display: the display output polling cannot be read (sudo -n cat)", r.stderr)
 
     def test_a_box_without_display_output_polling_passes_display_on_the_file_alone(self) -> None:
         self.good_box()
