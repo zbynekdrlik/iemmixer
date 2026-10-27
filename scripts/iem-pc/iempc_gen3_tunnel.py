@@ -40,6 +40,7 @@ PC_S = 120
 BOX_S = 90
 PUBLIC_S = 60
 POLL_S = 2.0
+USER_AGENT = "iempc-gen3-tunnel/1 (iemmixer)"
 
 TOKEN_SCRIPT = (f"$s = Get-CimInstance Win32_Service -Filter \"Name='{SERVICE}'\"; "
                 "if ($s -and $s.PathName -match '--token\\s+(\\S+)') { $Matches[1] } else { 'no-token' }")
@@ -59,8 +60,10 @@ def box(host: str, command: str, data: bytes, timeout: float) -> tuple[int, byte
 def public_hash(url: str) -> str | None:
     """The public URL's /api/version `git_hash`, None when it does not answer
     (tests replace it)."""
+    # A named User-Agent: the tunnel answers Python's default one with 403 (2026-10-27).
+    request = urllib.request.Request(url.rstrip("/") + "/api/version", headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/api/version", timeout=5) as r:
+        with urllib.request.urlopen(request, timeout=5) as r:
             return json.loads(r.read().decode()).get("git_hash")
     except (OSError, ValueError, AttributeError):
         return None
