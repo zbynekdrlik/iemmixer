@@ -12,6 +12,10 @@ id = "GHSA-wrw7-89jp-8q8g"
 reason = "alias of RUSTSEC-2024-0429 (glib, Linux GTK stack only)"
 
 [[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+reason = "block-buffer 0.10.4 only under digest 0.10 (sha1, sha2, blake2: axum's WebSocket handshake, argon2, our file hashes); the cursor is corrupted only when the buffer's compress or generator callback panics, the panic is caught and the buffer used again, and digest 0.10's callbacks are the hash compression functions, which do not panic (no ReadBuffer: no XOF is used); the fix, 0.12.1, belongs to digest 0.11, which argon2 0.5 and axum 0.8 do not take"
+
+[[IgnoredVulns]]
 id = "RUSTSEC-2026-0097"
 reason = "rand 0.7.3 only in tauri-utils' build-time codegen (phf_generator 0.8 via kuchikiki); the unsoundness needs rand::rng() with a custom logger, which rand 0.7 does not have"
 

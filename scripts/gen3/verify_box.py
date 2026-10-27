@@ -38,6 +38,10 @@ Prints one JSON line of numbers, `{"verify": {"pass": 0|1, "<check>": 0|1, ...,
 - napi: iem-napi enabled and active, irqbalance not running; on the Dante
   interface of /etc/iemmixer/iem-dante.env threaded NAPI 1, each of its NAPI
   threads SCHED_FIFO 60 on core 0, each of its interrupts on core 0.
+- display: /etc/tmpfiles.d/iemmixer-display.conf turns the display output
+  polling off at boot, and on a box with the parameter `sudo -n cat
+  /sys/module/drm_kms_helper/parameters/poll` reads N (the i915 driver's poll
+  held a CPU ~2 ms and made the engine's pump miss blocks, Live 4).
 
 `tpm2` is 1 when `systemd-creds has-tpm2` says the box has a usable TPM2: the
 key `--with-key=auto` sealed the pepper with besides the host key. Its output
@@ -81,8 +85,11 @@ PRIORITY = 60
 CORE = "0"
 FIFO = 1
 IFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
+DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
+POLL_PARAM = "/sys/module/drm_kms_helper/parameters/poll"
+POLL_OFF = f"w {POLL_PARAM} - - - - N"
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "apt", "sleep",
-          "swap", "clock", "napi")
+          "swap", "clock", "napi", "display")
 
 
 class Failed(Exception):
@@ -345,6 +352,22 @@ def check_napi(box: Box) -> None:
     for irq in irqs:
         if read(f"/proc/irq/{irq}/smp_affinity_list").strip() != CORE:
             raise Failed("an interrupt of the Dante interface is not on core 0 alone")
+
+
+def check_display(box: Box) -> None:
+    try:
+        lines = {" ".join(line.split()) for line in read(DISPLAY_CONF).splitlines()}
+    except FileNotFoundError:
+        lines = set()
+    if POLL_OFF not in lines:
+        raise Failed(f"no {DISPLAY_CONF} turning display output polling off")
+    if not os.path.exists(at(POLL_PARAM)):
+        return
+    r = run("sudo", "-n", "cat", POLL_PARAM)
+    if r.returncode != 0:
+        raise Failed("the display output polling cannot be read (sudo -n cat)")
+    if r.stdout.strip() != "N":
+        raise Failed("display output polling is on")
 
 
 def tpm2() -> int:
