@@ -2,7 +2,10 @@
 and 3): the decisions on synthetic status reads, and the guard itself
 against a stand-in `ssh` first on PATH that plays the box (its status reads
 from a scripted list, the stop) on a clock that moves only when the guard
-sleeps. Every value is synthetic (P6)."""
+sleeps; from #72 phase D (plan
+docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Tasks 3 and 8) the
+packets' judge, its summary in the end's line and the clock's counts in the
+lines. Every value is synthetic (P6)."""
 from __future__ import annotations
 
 import contextlib
@@ -279,12 +282,27 @@ class WatchTests(unittest.TestCase):
 
     def test_a_status_of_another_shape_is_no_sample(self) -> None:
         rx = ordinary(1)["rx"][0]
+        clock = status()["clock"]
         for broken in ({"requests": "none"}, {"uncounted": -1}, {"clock": None}, {"tx": [{"flow": 1}]},
                        {"sent": [{"peer": "1", "op": 256, "n": 1}]},
                        {"rx": [{**rx, "lateness_min_ns": -1}]}, {"rx": [{**rx, "lateness_min_ns": "1"}]},
-                       {"rx": [{**rx, "lateness_min_ns": None}]}, {"rx": [{**rx, "lateness_min_ns": 1.5}]}):
+                       {"rx": [{**rx, "lateness_min_ns": None}]}, {"rx": [{**rx, "lateness_min_ns": 1.5}]},
+                       {"clock": {**clock, "holdovers": -1}}, {"clock": {**clock, "re_anchors": "2"}},
+                       {"clock": {**clock, "ready": None}}, {"clock": {**clock, "holdover": True}},
+                       {"clock": {**clock, "freq_ppb": 1.5}}):
             with self.assertRaises(ValueError, msg=broken):
                 lg.sample(0.0, 0.1, {**status(), **broken})
+
+    def test_the_clock_s_counts_are_kept_when_the_status_has_them(self) -> None:
+        doc = status(polls=7)
+        doc["clock"].update(holdovers=3, re_anchors=1, holdover=1, freq_ppb=-12)
+        self.assertEqual(lg.sample(0.0, 0.1, doc).clock,
+                         {"ready": 1, "holdover": 1, "holdovers": 3, "re_anchors": 1, "freq_ppb": -12})
+        # A status without them (an older device's) is a sample all the same, without them.
+        bare = status(polls=7)
+        bare["clock"] = {"polls": 7}
+        s = lg.sample(0.0, 0.1, bare)
+        self.assertEqual((s.clock, s.polls), ({}, 7))
 
     def test_the_judge_keeps_each_rx_flow_s_seconds_and_never_trips(self) -> None:
         watch = lg.Watch(RATE)
@@ -313,6 +331,54 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(a, {1: lg.Least(3, 9, 6, 3), 2: lg.Least(4, 4, 4, 1)})
         lg.judged(a, {1: lg.Least(8, 12, 10, 4)})
         self.assertEqual(a[1], lg.Least(3, 12, 10, 7))
+
+    def test_the_summary_takes_percentiles_by_nearest_rank(self) -> None:
+        rng = random.Random(8)
+        values = list(range(1, 101))   # 1 ... 100 ns, read in any order
+        rng.shuffle(values)
+        hundred = [(float(t), ns) for t, ns in enumerate(values)]
+        three = [(0.0, 30), (1.0, 10), (2.0, 20)]
+        summary = lg.judge_summary({4: hundred, 2: three})
+        self.assertEqual([e["flow"] for e in summary["judge"]], [2, 4])
+        by_flow = {e["flow"]: {k: v for k, v in e.items() if k != "slope_ns_per_s"} for e in summary["judge"]}
+        self.assertEqual(by_flow[4], {"flow": 4, "n": 100, "min": 1, "p1": 1, "p50": 50, "p99": 99, "max": 100})
+        # The rank is ceil(p n / 100): 1, 2 and 3 of three.
+        self.assertEqual(by_flow[2], {"flow": 2, "n": 3, "min": 10, "p1": 10, "p50": 20, "p99": 30, "max": 30})
+        # Two hundred reads: the 2nd, the 100th and the 198th.
+        two = lg.judge_summary({1: [(float(t), 10 * t) for t in range(1, 201)]})["judge"][0]
+        self.assertEqual((two["p1"], two["p50"], two["p99"]), (20, 1000, 1980))
+
+    def test_the_slope_is_the_least_squares_line_exact_on_a_line(self) -> None:
+        # Uneven reads (the guard's), lateness growing 4 000 ns a second, and
+        # one falling 250 ns a second.
+        times = [1000.0 + 0.5 * k for k in range(0, 120, 3)]
+        rising = [(t, 100_000 + round(4000 * (t - 1000.0))) for t in times]
+        falling = [(t, 900_000 - round(250 * (t - 1000.0))) for t in times]
+        flat = [(t, 375_007) for t in times]
+        summary = {e["flow"]: e for e in lg.judge_summary({1: rising, 2: falling, 3: flat})["judge"]}
+        self.assertEqual(summary[1]["slope_ns_per_s"], 4000.0)
+        self.assertEqual(summary[2]["slope_ns_per_s"], -250.0)
+        self.assertEqual(summary[3]["slope_ns_per_s"], 0.0)
+        # A saw-tooth: the least-squares line through it, not its ends.
+        saw = [(1000.0 + k, 250_000 + 1000 * (k % 4)) for k in range(12)]
+        self.assertEqual(lg.judge_summary({1: saw})["judge"][0]["slope_ns_per_s"], 104.895)
+        # One read, or reads all at one time, has no line: null.
+        for points in ([(5.0, 7)], [(5.0, 7), (5.0, 9)]):
+            self.assertIsNone(lg.judge_summary({1: points})["judge"][0]["slope_ns_per_s"], points)
+        # No RX flow with a judge: no summary.
+        self.assertEqual(lg.judge_summary({}), {})
+
+    def test_the_watch_keeps_each_read_s_judge_for_the_summary(self) -> None:
+        watch = lg.Watch(RATE)
+        for t in range(8):
+            self.assertIsNone(feed(watch, judged(t), 100.0 + t))
+        doc = judged(8)
+        del doc["rx"][0]["lateness_min_ns"]   # flow 1: a second without a packet
+        self.assertIsNone(feed(watch, doc, 108.0))
+        peaks = watch.take_peaks()
+        self.assertEqual(peaks.series[1], [(100.0 + t, 250_000 + 1000 * (t % 4)) for t in range(8)])
+        self.assertEqual(peaks.series[2], [(100.0 + t, 900_000) for t in range(5, 9)])
+        self.assertEqual(watch.peaks.series, {})
 
     def test_a_read_at_the_same_moment_is_waited_past(self) -> None:
         watch = lg.Watch(RATE)
@@ -434,12 +500,61 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(line["judge"], [
             {"flow": 1, "min_ns": 250_000, "max_ns": 253_000, "last_ns": 252_000, "reads": 11},
             {"flow": 2, "min_ns": 900_000, "max_ns": 900_000, "last_ns": 900_000, "reads": 6}])
-        # The end's line: the whole run.
+        # The end's line: the whole run's summary, every read of each flow
+        # (12 reads at 0 ... 11 s, three of each of 250 000 ... 253 000 ns).
         self.assertEqual(end["judge"], [
-            {"flow": 1, "min_ns": 250_000, "max_ns": 253_000, "last_ns": 253_000, "reads": 12},
-            {"flow": 2, "min_ns": 900_000, "max_ns": 900_000, "last_ns": 900_000, "reads": 7}])
+            {"flow": 1, "n": 12, "min": 250_000, "p1": 250_000, "p50": 251_000, "p99": 253_000, "max": 253_000,
+             "slope_ns_per_s": 104.895},
+            {"flow": 2, "n": 7, "min": 900_000, "p1": 900_000, "p50": 900_000, "p99": 900_000, "max": 900_000,
+             "slope_ns_per_s": 0.0}])
         for doc in docs:
             numbers_only(self, {k: v for k, v in doc.items() if k != "end"})
+
+    def test_a_judge_with_one_read_has_no_slope_and_never_trips(self) -> None:
+        # Flow 1 has a packet in one second only: its summary has no line.
+        plan = [ordinary(t) for t in range(15)]
+        plan[3]["rx"][0]["lateness_min_ns"] = 10_000_000_000   # ten seconds late
+        self.plan(plan)
+        code, docs, err = self.guard("--seconds", "6")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(self.STOP, self.commands())
+        self.assertEqual(docs[-1]["judge"], [{"flow": 1, "n": 1, "min": 10_000_000_000, "p1": 10_000_000_000,
+                                              "p50": 10_000_000_000, "p99": 10_000_000_000,
+                                              "max": 10_000_000_000, "slope_ns_per_s": None}])
+
+    def test_the_lines_carry_the_clock_s_counts_and_never_trip(self) -> None:
+        def clocked(t: int) -> dict:
+            doc = ordinary(t)
+            doc["clock"].update(holdovers=t // 4, re_anchors=1 if t >= 7 else 0, holdover=1 if t == 10 else 0,
+                                freq_ppb=-12 - t)
+            return doc
+        self.plan([clocked(t) for t in range(15)])
+        code, docs, err = self.guard("--seconds", "12")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(self.STOP, self.commands())
+        line, end = docs[0], docs[-1]
+        # The last read's: at 10 s in the line, at 11 s at the end.
+        self.assertEqual({k: v for k, v in line.items() if k.startswith("clock_")},
+                         {"clock_ready": 1, "clock_holdover": 1, "clock_holdovers": 2, "clock_re_anchors": 1,
+                          "clock_freq_ppb": -22})
+        self.assertEqual({k: v for k, v in end.items() if k.startswith("clock_")},
+                         {"clock_ready": 1, "clock_holdover": 0, "clock_holdovers": 2, "clock_re_anchors": 1,
+                          "clock_freq_ppb": -23})
+        for doc in docs:
+            numbers_only(self, {k: v for k, v in doc.items() if k != "end"})
+
+        # A status without them (an older device's) changes nothing else:
+        # the same lines but for the clock's keys, every read a sample.
+        def bare(t: int) -> dict:
+            doc = ordinary(t)
+            doc["clock"] = {"polls": doc["clock"]["polls"]}
+            return doc
+        (self.box / "reads").unlink()
+        self.plan([bare(t) for t in range(15)])
+        code, without, err = self.guard("--seconds", "12")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(d["reads"], d["failed"]) for d in without], [(11, 0), (12, 0)])
+        self.assertEqual(without, [{k: v for k, v in d.items() if not k.startswith("clock_")} for d in docs])
 
     def test_the_engine_s_pump_counts_are_reported_and_never_trip(self) -> None:
         def with_engine(t: int) -> dict:

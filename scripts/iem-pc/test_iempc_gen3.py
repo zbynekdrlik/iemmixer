@@ -3,13 +3,15 @@ plan Task 8 Steps 2 and 3) and `iempc gen3-mix` (#72 phase C, plan Task 8).
 FakePc stands in for the PC (the guard's replies as an engine with the D5(b)
 probe would give them: `Card`, `MixCard`), a stand-in `ssh` and `scp` first on
 PATH for the Gen 3 box (its status reads from a scripted list, the source
-settings, the event's stop, the engine's version, the tokens' mint, copy and
-removal in a folder that plays the box user's home) and a stand-in `npx` for
+settings, the event's stop, the engine's version, and the tokens' mint, read
+and removal as the service user in a folder that plays the box's mint folder,
+#72 phase D Task 8) and a stand-in `npx` for
 the browser step (it records what it was given and opens or closes the box's
 test input). Every value is synthetic (P6): the spare outputs are 94 and 95,
 the test site's; the ids and channels are the test site's."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
@@ -23,6 +25,13 @@ import iempc_gen3 as gen3  # noqa: E402
 from iempc_test_support import OK, SHA, Base, ip  # noqa: E402
 from test_iempc_live import RunningGuardCases  # noqa: E402
 
+# The Gen 3 tools beside: the live guard (its stop), and the sudo template read
+# as the deploy's tests read it (sudo-lines.txt, #72 phase D Task 7): only
+# those functions, so none of test_deploy's tests runs here.
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "gen3"))
+import live_guard  # noqa: E402
+from test_deploy import expand, sudo_lines, template_lines  # noqa: E402
+
 GEN3 = "tester@gen3.test"
 SLOT, OTHER = 94, 95   # the test site's spare HIL outputs
 JOB = 4242
@@ -31,8 +40,10 @@ STATUS_CMD = f"{GEN3} /opt/iemmixer/bin/iem-dante-dev ctl status"
 
 # The Gen 3 box: `ssh` answers `ctl status` from FAKE_GEN3/statuses.json (one
 # entry per read, the last repeated; null: no socket), a source setting with
-# FAKE_SOURCE_ANSWER (default ok) on stderr as the box's `1>&2` sends it, and
-# the event's stop; every call is logged as one JSON line.
+# FAKE_SOURCE_ANSWER (default ok) on stderr as the box's `1>&2` sends it, the
+# event's stop, the engine's version and gen3-mix's tokens as the service user
+# (FAKE_MINT_FAILS, FAKE_CAT_FAILS: that token's call fails; FAKE_RM_FAILS:
+# a removal of a token there fails); every call is logged as one JSON line.
 FAKE_SSH = r'''
 import json, os, sys
 box = os.environ["FAKE_GEN3"]
@@ -61,51 +72,59 @@ elif words in (["sudo", "-n", "systemctl", "stop", "iem-dante"],
     sys.exit(0)
 elif words == ["/opt/iemmixer/bin/iem-engine", "--version"]:
     print(os.environ["FAKE_ENGINE_VERSION"])
-elif words[:2] == ["umask", "077"]:
-    # The mint: each `--out` gets its token (FAKE_TOKENS), a new owner-only
-    # file under the box's home, as `iem-soakclient token` writes it.
-    home = os.path.join(box, "home")
-    os.makedirs(os.path.join(home, ".cache", "iem-gen3-mix"), exist_ok=True)
-    tokens = json.loads(os.environ["FAKE_TOKENS"])
-    for i, word in enumerate(words):
-        if word == "--out":
-            name = os.path.basename(words[i + 1]).split(".")[0]
-            if os.environ.get("FAKE_MINT_FAILS") == name:
-                sys.stderr.write("secret-unreadable\n")
-                sys.exit(1)
-            fd = os.open(os.path.join(home, words[i + 1]), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.write(fd, (tokens[name] + "\n").encode())
-            os.close(fd)
-            print("token-written")
-elif words[:2] == ["rm", "-f"]:
-    for path in words[2:]:
-        if os.path.exists(os.path.join(box, "home", path)):
-            os.remove(os.path.join(box, "home", path))
+elif words[:4] == ["sudo", "-n", "-u", "iemmixer"]:
+    # As the service user, in the box's mint folder (FAKE_GEN3/root plays the
+    # box's root; provision made the folder): the mint writes each `--out` as
+    # `iem-soakclient token` does (a new owner-only file: never over one an
+    # earlier run left), `cat` prints a token, `rm -f` removes them.
+    rest = words[4:]
+    root = os.path.join(box, "root")
+    if rest[:2] == ["/opt/iemmixer/bin/iem-soakclient", "token"]:
+        out = rest[rest.index("--out") + 1]
+        name = os.path.basename(out).split(".")[0]
+        if os.environ.get("FAKE_MINT_FAILS") == name:
+            sys.stderr.write("secret-unreadable\n")
+            sys.exit(1)
+        try:
+            fd = os.open(root + out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            sys.stderr.write("cannot create the token file: File exists\n")
+            sys.exit(1)
+        os.write(fd, (json.loads(os.environ["FAKE_TOKENS"])[name] + "\n").encode())
+        os.close(fd)
+        sys.stderr.write("token-written\n")
+    elif rest[:1] == ["cat"] and len(rest) == 2:
+        if os.environ.get("FAKE_CAT_FAILS") == os.path.basename(rest[1]).split(".")[0]:
+            sys.stderr.write("cat: Permission denied\n")
+            sys.exit(1)
+        try:
+            sys.stdout.write(open(root + rest[1]).read())
+        except FileNotFoundError:
+            sys.stderr.write("cat: No such file or directory\n")
+            sys.exit(1)
+    elif rest[:2] == ["rm", "-f"]:
+        held = [p for p in rest[2:] if os.path.exists(root + p)]
+        if held and os.environ.get("FAKE_RM_FAILS"):
+            sys.stderr.write("rm: Read-only file system\n")
+            sys.exit(1)
+        for path in held:
+            os.remove(root + path)
+    else:
+        sys.stderr.write("unexpected command as the service user: " + " ".join(rest) + "\n")
+        sys.exit(97)
 else:
     sys.stderr.write("unexpected command: " + " ".join(words) + "\n")
     sys.exit(97)
 '''
 
-# The box's scp: copies `<host>:<path>` sources out of the box's home into the
-# last argument (a folder); FAKE_SCP_FAILS makes it fail. Logged with ssh's calls.
+# The box's scp: gen3-mix copies nothing with it since phase D (the tokens come
+# over ssh's stdout); a call is logged with ssh's and fails.
 FAKE_SCP = r'''
-import json, os, shutil, sys
-box = os.environ["FAKE_GEN3"]
-args = sys.argv[1:]
-with open(os.path.join(box, "calls.log"), "a") as f:
-    f.write(json.dumps(["scp", *args]) + "\n")
-if os.environ.get("FAKE_SCP_FAILS"):
-    sys.stderr.write("scp: Connection closed\n")
-    sys.exit(1)
-rest = []
-it = iter(args)
-for a in it:
-    if a == "-o":
-        next(it)
-    elif a != "-q":
-        rest.append(a)
-for src in rest[:-1]:
-    shutil.copy(os.path.join(box, "home", src.split(":", 1)[1]), rest[-1])
+import json, os, sys
+with open(os.path.join(os.environ["FAKE_GEN3"], "calls.log"), "a") as f:
+    f.write(json.dumps(["scp", *sys.argv[1:]]) + "\n")
+sys.stderr.write("scp: not the way\n")
+sys.exit(1)
 '''
 
 # The browser step: records its arguments, folder, LIVE_* values, the token
@@ -555,15 +574,17 @@ D = 320   # the engine's offset: B 32 + P 192 + W 96
 R, T = 102, 73   # mic2's RX and member2's first TX in the test site
 VERSION_CMD = f"{GEN3} /opt/iemmixer/bin/iem-engine --version"
 SIGNER_PATH = "/var/lib/iemmixer/site/secrets/jwt_secret"
-BOX_TOKENS = [".cache/iem-gen3-mix/engineer.token", ".cache/iem-gen3-mix/member.token"]
-MINT = (f"{GEN3} umask 077 && mkdir -p .cache/iem-gen3-mix && rm -f {' '.join(BOX_TOKENS)} && "
-        f"/opt/iemmixer/bin/iem-soakclient token --jwt-secret-file {SIGNER_PATH} --sub engineer --engineer "
-        f"--seconds 900 "
-        f"--out {BOX_TOKENS[0]} && "
-        f"/opt/iemmixer/bin/iem-soakclient token --jwt-secret-file {SIGNER_PATH} --sub member2 --seconds 900 "
-        f"--out {BOX_TOKENS[1]}")
-COPY = f"scp {GEN3}:{BOX_TOKENS[0]} {GEN3}:{BOX_TOKENS[1]} "
-REMOVE = f"{GEN3} rm -f {' '.join(BOX_TOKENS)}"
+# The tokens on the box: the service user's mint folder (#72 phase D Task 8).
+MINT_DIR = "/var/lib/iemmixer/mint"
+BOX_TOKENS = [f"{MINT_DIR}/engineer.token", f"{MINT_DIR}/member.token"]
+AS_SERVICE = f"{GEN3} sudo -n -u iemmixer"
+REMOVE = f"{AS_SERVICE} rm -f {' '.join(BOX_TOKENS)}"
+MINT = [f"{AS_SERVICE} /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file {SIGNER_PATH} --sub engineer "
+        f"--engineer --seconds 900 --out {BOX_TOKENS[0]}",
+        f"{AS_SERVICE} /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file {SIGNER_PATH} --sub member2 "
+        f"--seconds 900 --out {BOX_TOKENS[1]}"]
+COPY = [f"{AS_SERVICE} cat {BOX_TOKENS[0]}", f"{AS_SERVICE} cat {BOX_TOKENS[1]}"]
+TOKEN_CALLS = [REMOVE, *MINT, *COPY, REMOVE]   # cleared, minted, read, removed
 SOURCE = f"{GEN3} /opt/iemmixer/bin/iem-dante-dev ctl source"
 
 
@@ -631,6 +652,8 @@ class MixBase(LoopBase):
                                                "FAKE_ENGINE_VERSION": f"iem-engine 2.0.0-dev.45+{BUILD}"})
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.mint_dir = self.box / "root" / MINT_DIR.lstrip("/")
+        self.mint_dir.mkdir(parents=True)   # provision's (Task 9): the service user's, 0700
         self.plan(window())
         self.card = MixCard(self.box)
         self.pc.replies[("status",)] = self.card.status
@@ -665,10 +688,14 @@ class MixBase(LoopBase):
     def signals(self) -> int:
         return sum(1 for w in self.iemmode_words() if w[0] == "test-signal")
 
+    def remote(self) -> list[str]:
+        """The box's ssh calls as the box's shell gets them: the command
+        after the host (no scp: gen3-mix has none)."""
+        return [c[len(GEN3) + 1:] for c in self.box_calls() if c.startswith(f"{GEN3} ")]
+
     def assert_no_token_left(self, err: str, docs: list) -> None:
         """No token on either side, none printed, none on a command line."""
-        left = sorted(p.name for p in (self.box / "home").rglob("*.token")) if (self.box / "home").exists() else []
-        self.assertEqual(left, [])
+        self.assertEqual(sorted(p.name for p in (self.box / "root").rglob("*.token")), [])
         self.assertEqual(sorted(p.name for p in ip.state_dir().glob("gen3-mix-*")), [])
         calls = (self.box / "calls.log").read_text(encoding="utf-8")
         for token in TOKENS.values():
@@ -691,12 +718,9 @@ class MixTests(MixBase):
         modes = {tuple(args[:1]): event for _, args, event in self.pc.calls}
         self.assertEqual((modes[("job-begin",)], modes[("activate",)], modes[("test-signal",)], modes[("job-end",)],
                           modes[("status",)]), ("finish", "finish", "abandon", "finish", "abandon"))
-        calls = self.box_calls()
-        self.assertEqual(calls[:3], [STATUS_CMD, VERSION_CMD, MINT])
-        self.assertTrue(calls[3].startswith(COPY) and calls[3].endswith("/"), calls[3])
-        self.assertEqual(Path(calls[3][len(COPY):]).parent, ip.state_dir())
-        self.assertEqual(calls[4:], [REMOVE, STATUS_CMD, f"{SOURCE} {T} echo {R} {D} 1>&2", f"{SOURCE} {T} engine 1>&2",
-                                     STATUS_CMD])
+        self.assertEqual(self.box_calls(), [STATUS_CMD, VERSION_CMD, *TOKEN_CALLS, STATUS_CMD,
+                                            f"{SOURCE} {T} echo {R} {D} 1>&2", f"{SOURCE} {T} engine 1>&2",
+                                            STATUS_CMD])
         steps = self.steps()
         self.assertEqual([s["step"] for s in steps], ["closes", "opens", "closes"])
         for s, title in zip(steps, (gen3.CLOSES, gen3.OPENS, gen3.CLOSES)):
@@ -720,7 +744,8 @@ class MixTests(MixBase):
         self.assertEqual((code, docs[-1]["gen3_mix"]["pass"]), (0, 1), err)
         sources = [c for c in self.box_calls() if c.startswith(SOURCE)]
         self.assertEqual(sources, [f"{SOURCE} 75 echo 115 {D} 1>&2", f"{SOURCE} 75 engine 1>&2"])
-        self.assertIn("--sub member3 --seconds 900", self.box_calls()[2])
+        self.assertIn("--sub member3 --seconds 900 --out /var/lib/iemmixer/mint/member.token",
+                      self.box_calls()[4])
         self.assertEqual({(s["live"]["LIVE_MEMBER"], s["live"]["LIVE_TEST_INPUT"]) for s in self.steps()},
                          {("member3", "keys")})
 
@@ -779,7 +804,9 @@ class MixTests(MixBase):
         self.assert_no_token_left(err, docs)
 
     def test_tokens_that_were_not_minted_or_copied_refuse_with_nothing_changed(self) -> None:
-        for env in ({"FAKE_MINT_FAILS": "member"}, {"FAKE_MINT_FAILS": "engineer"}, {"FAKE_SCP_FAILS": "1"}):
+        for env, made in (({"FAKE_MINT_FAILS": "engineer"}, MINT[:1]), ({"FAKE_MINT_FAILS": "member"}, MINT),
+                          ({"FAKE_CAT_FAILS": "engineer"}, [*MINT, COPY[0]]),
+                          ({"FAKE_CAT_FAILS": "member"}, [*MINT, *COPY])):
             self.again()
             with mock.patch.dict(os.environ, env):
                 code, docs, err = self.loop()
@@ -787,8 +814,65 @@ class MixTests(MixBase):
             self.assertIn("no mix test: the browser's tokens were not minted", err)
             self.assertIn("(nothing was changed: no HIL job, no source)", err)
             self.assertEqual(self.iemmode_words(), [["status"]], env)
-            self.assertEqual(self.box_calls()[-1], REMOVE, env)   # removed on the box whatever happened
+            # Removed on the box whatever happened, as the service user.
+            self.assertEqual(self.box_calls()[2:], [REMOVE, *made, REMOVE], env)
             self.assert_no_token_left(err, docs)
+
+    def test_a_token_an_earlier_run_left_on_the_box_is_removed_before_the_mint(self) -> None:
+        # The mint writes a new file and never over one (iem-soakclient's
+        # create_new), so the removal before it lets a run follow one whose
+        # removal failed.
+        (self.mint_dir / "engineer.token").write_text("zyxhead.zyxstale.zyxsig\n", encoding="utf-8")
+        code, docs, err = self.loop()
+        self.assertEqual((code, docs[-1]["gen3_mix"]["pass"]), (0, 1), err)
+        self.assertEqual({tuple(sorted(s["tokens"].items())) for s in self.steps()}, {tuple(sorted(TOKENS.items()))})
+        self.assert_no_token_left(err, docs)
+
+    def test_a_removal_that_fails_on_the_box_is_a_warning_naming_the_command(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_RM_FAILS": "1"}):
+            code, docs, err = self.loop()
+        self.assertEqual((code, docs[-1]["gen3_mix"]["pass"]), (0, 1), err)
+        self.assertIn("iempc: WARNING: the tokens minted on the Gen 3 box were not removed (", err)
+        self.assertIn(f"remove them by hand (ssh <GEN3_HOST> sudo -n -u iemmixer rm -f {' '.join(BOX_TOKENS)})",
+                      err)
+        self.assertEqual(sorted(p.name for p in self.mint_dir.iterdir()), ["engineer.token", "member.token"])
+        for token in TOKENS.values():
+            self.assertNotIn(token, err + json.dumps(docs))
+        self.assertNotIn(GEN3, err)
+
+    def test_every_sudo_line_gen3_mix_the_guard_and_the_event_stop_send_is_in_the_template(self) -> None:
+        # A whole run, a run the flag ends during a browser step (the event
+        # path's stop of the Gen 3 stack, iempc_event), and the live guard's
+        # stop (live_guard.Box.stop), each against the stand-in ssh.
+        stop = "sudo -n systemctl stop iem-server iem-engine iem-dante"
+        sent: list[str] = []
+        code, docs, err = self.loop()
+        self.assertEqual(code, 0, err)
+        sent += self.remote()
+        self.again()
+        with mock.patch.dict(os.environ, {"FAKE_SPEC_FLAG": "opens"}):
+            code, docs, err = self.loop()
+        self.assertEqual(code, ip.PREEMPTED, err)
+        self.assertIn(stop, self.remote())
+        sent += self.remote()
+        self.again()
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(live_guard.Box(GEN3).stop(), 0)
+        self.assertEqual(self.remote(), [stop])
+        sent += self.remote()
+        allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
+        lines = sudo_lines(sent)
+        for runas, command, listed in lines:
+            self.assertIn((runas, command), allowed, command)
+            self.assertFalse(listed, command)
+        seen = {(runas, command) for runas, command, _listed in lines}
+        for want in (REMOVE, *MINT, *COPY):
+            self.assertIn(("iemmixer", want[len(AS_SERVICE) + 1:]), seen)
+        self.assertIn(("root", stop[len("sudo -n "):]), seen)
+        # One mint line for every person of the test roster.
+        member = [c for _r, c in template_lines() if "--sub {member}" in c]
+        self.assertEqual(len(member), 1)
+        self.assertIn(MINT[1][len(AS_SERVICE) + 1:], expand(member[0]))
 
     def test_a_job_begin_refusal_leaves_no_token_and_no_source(self) -> None:
         self.pc.replies[("job-begin", str(JOB))] = (1, json.dumps({"ok": False, "detail": "HIL job 77 has not ended"}))

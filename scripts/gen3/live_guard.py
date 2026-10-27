@@ -34,11 +34,24 @@ The packets' judge (#72 phase D, plan
 docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 3): each RX
 flow's `lateness_min_ns` in the status (the least lateness of the
 heartbeat's last second in ns: our clock against the stamps the
-grandmaster's time put on the audio) goes into the lines as `judge`, one
-entry per RX flow that had one in the line's reads: `flow`, `min_ns` and
-`max_ns` (the smallest and the largest of those seconds), `last_ns` (the
-last read's) and `reads` (how many reads had one); the end's line over the
-whole run. Reported, never a trip; no `judge` when no RX flow had one.
+grandmaster's time put on the audio) goes into the 10-second lines as
+`judge`, one entry per RX flow that had one in the line's reads: `flow`,
+`min_ns` and `max_ns` (the smallest and the largest of those seconds),
+`last_ns` (the last read's) and `reads` (how many reads had one). The end's
+line sums up the whole run per RX flow (plan Task 8): `judge` [{flow, n,
+min, p1, p50, p99, max, slope_ns_per_s}], every read that had one (n; a
+second can be read twice or missed: the guard reads about once a
+heartbeat), its percentiles by nearest rank (the value of rank ceil(p n /
+100) in the sorted reads) in ns, and the least-squares slope of lateness
+over the reads' time in ns a second (null for one read, or reads all at one
+time). Reported, never a trip; no `judge` when no RX flow had one.
+
+The box's clock (dantesync's, read by the device; owner, 2026-10-26): the
+lines add the last read's `clock_ready`, `clock_holdover`, `clock_holdovers`
+(runs of holdover), `clock_re_anchors` and `clock_freq_ppb` (dantesync's
+frequency adjustment) when the status's `clock` has them, cumulative where
+the status's are. Reported, never a trip; a status without them changes
+nothing else.
 
 The rates never read high from the ssh's own timing: a read's status was
 taken somewhere between the read's start and its end, so a rate divides by
@@ -57,13 +70,15 @@ is $IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW. Exit 2 before any
 call: a bad command line, no env file or GEN3_HOST, or the flag already there
 (every Gen 3 script refuses during an event).
 
-P6: stdout holds keys, numbers and fixed words only (the status's own peer
-ids and opcodes, never an address or a name); stderr names no value of the
-private env. Stdlib only, runs under `python3 -I`."""
+P6: stdout holds keys, numbers and fixed words only (null for a slope the
+judge cannot draw; the status's own peer ids and opcodes, never an address
+or a name); stderr names no value of the private env. Stdlib only, runs
+under `python3 -I`."""
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -90,6 +105,11 @@ ARC_READS_MAX = 1   # within FLOW_SPAN_S, of one peer
 PACKET_MARGIN = 1.25
 RATES = (44100, 48000, 88200, 96000, 176400, 192000)
 UNCOUNTED = ("uncounted",)
+# The status's clock fields the lines carry (the device's, from dantesync's
+# time server): all but freq_ppb are counts or flags, never below 0.
+CLOCK_COUNTS = ("ready", "holdover", "holdovers", "re_anchors")
+CLOCK_SIGNED = ("freq_ppb",)
+PERCENTILES = (1, 50, 99)   # the end's judge, by nearest rank
 EXIT_TRIPPED = 1
 EXIT_USAGE = 2
 
@@ -123,6 +143,9 @@ class Sample:
     # heartbeat's last second, ns, for the flows whose status has one.
     # Reported in the lines, never a trip.
     judge: dict[int, int] = field(default_factory=dict)
+    # The box's clock (phase D Task 8): the CLOCK_COUNTS and CLOCK_SIGNED
+    # fields the status's `clock` has, by name. Reported, never a trip.
+    clock: dict[str, int] = field(default_factory=dict)
 
 
 def number(doc: dict, key: str) -> int:
@@ -130,6 +153,19 @@ def number(doc: dict, key: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(key)
     return value
+
+
+def clock_fields(clock: dict) -> dict[str, int]:
+    """The clock fields the lines carry, those the status's `clock` has (an
+    older device's has fewer: nothing else changes); ValueError for one that
+    is there but no integer (or below 0, but for the frequency)."""
+    out = {key: number(clock, key) for key in CLOCK_COUNTS if key in clock}
+    for key in CLOCK_SIGNED:
+        if key in clock:
+            if type(clock[key]) is not int:
+                raise ValueError(key)
+            out[key] = clock[key]
+    return out
 
 
 def entries(status: dict, key: str) -> list[dict]:
@@ -153,11 +189,13 @@ def sample(t0: float, t1: float, status: dict) -> Sample:
     rx = {number(e, "flow"): (number(e, "fpp"), number(e, "packets")) for e in entries(status, "rx")}
     judge = {number(e, "flow"): number(e, "lateness_min_ns") for e in entries(status, "rx")
              if "lateness_min_ns" in e}
+    clock = status.get("clock")
     return Sample(t=(t0 + t1) / 2, u=(t1 - t0) / 2, requests=requests, flow_requests=flow_requests,
                   arc_reads=arc_reads, tx=tx, rx=rx,
                   tx_live=sum(1 for e in entries(status, "tx") if e.get("live") == 1),
                   rx_granted=sum(1 for e in entries(status, "rx") if e.get("granted") == 1),
-                  polls=number(status.get("clock"), "polls"), pump=pump_counts(status), judge=judge)
+                  polls=number(clock, "polls"), pump=pump_counts(status), judge=judge,
+                  clock=clock_fields(clock))
 
 
 def pump_counts(status: dict) -> tuple[int, int, int] | None:
@@ -220,12 +258,15 @@ def judged(into: dict[int, Least], later: dict[int, Least]) -> None:
 @dataclass
 class Peaks:
     """The largest values seen since the last line (what the lines print),
-    and the packets' judge of the reads since then."""
+    and the packets' judge of the reads since then: per RX flow its Least
+    (the line's) and each read's (t, least lateness in ns) (the end's
+    summary)."""
     request_rate: float = 0.0
     flow_requests: int = 0
     packet_ratio: float = 0.0
     arc_reads: int = 0
     judge: dict[int, Least] = field(default_factory=dict)
+    series: dict[int, list[tuple[float, int]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -241,6 +282,8 @@ class Watch:
 
     def feed(self, s: Sample) -> Trip | None:
         judged(self.peaks.judge, {flow: Least(ns, ns, ns, 1) for flow, ns in s.judge.items()})
+        for flow, ns in s.judge.items():
+            self.peaks.series.setdefault(flow, []).append((s.t, ns))
         a = self.last
         if a is not None and s.t + s.u <= a.t - a.u:
             return None   # no time between them (a clock that did not move): wait for the next
@@ -444,24 +487,37 @@ class Tally:
     flow_requests: int = 0
     packet_ratio: float = 0.0
     arc_reads: int = 0
-    judge: dict[int, Least] = field(default_factory=dict)
+    # The whole run's reads of the packets' judge, per RX flow (t, ns): at
+    # most one a second a flow (an event's two hours: 7 200).
+    series: dict[int, list[tuple[float, int]]] = field(default_factory=dict)
 
     def add(self, p: Peaks) -> None:
         self.request_rate = max(self.request_rate, p.request_rate)
         self.flow_requests = max(self.flow_requests, p.flow_requests)
         self.packet_ratio = max(self.packet_ratio, p.packet_ratio)
         self.arc_reads = max(self.arc_reads, p.arc_reads)
-        judged(self.judge, p.judge)
+        for flow, points in p.series.items():
+            self.series.setdefault(flow, []).extend(points)
 
 
-def figures(t: float, tally: Tally, peaks: Peaks, watch: Watch) -> dict:
+def figures(t: float, tally: Tally, peaks: Peaks, watch: Watch, judge: dict) -> dict:
+    """A line's numbers: `peaks` its largest values, `judge` its packets'
+    judge (the 10-second line's per-line entries, the end's summary)."""
     last = watch.last
     return {"t_s": round(t, 1), "reads": tally.reads, "failed": tally.failed,
             "request_rate_max": round(peaks.request_rate, 1), "flow_requests_5s_max": peaks.flow_requests,
             "arc_reads_5s_max": peaks.arc_reads,
             "packet_ratio_max": round(peaks.packet_ratio, 3), "tx_flows": last.tx_live if last else 0,
             "rx_flows": last.rx_granted if last else 0, "restarts": watch.restarts,
-            **pump_figures(last), **judge_figures(peaks.judge)}
+            **clock_figures(last), **pump_figures(last), **judge}
+
+
+def clock_figures(last: Sample | None) -> dict:
+    """The box's clock for a line: the last read's fields, as `clock_<name>`;
+    none the status lacks."""
+    if last is None:
+        return {}
+    return {f"clock_{key}": last.clock[key] for key in (*CLOCK_COUNTS, *CLOCK_SIGNED) if key in last.clock}
 
 
 def pump_figures(last: Sample | None) -> dict:
@@ -481,6 +537,37 @@ def judge_figures(judge: dict[int, Least]) -> dict:
                        "reads": j.reads} for flow, j in sorted(judge.items())]}
 
 
+def judge_summary(series: dict[int, list[tuple[float, int]]]) -> dict:
+    """The end's packets' judge (pure): per RX flow, by flow, its reads' count
+    `n`, `min`, the PERCENTILES by nearest rank and `max` (ns), and
+    `slope_ns_per_s`; none without a flow that had one."""
+    if not series:
+        return {}
+    out = []
+    for flow, points in sorted(series.items()):
+        values = sorted(ns for _, ns in points)
+        n = len(values)
+        entry = {"flow": flow, "n": n, "min": values[0]}
+        for p in PERCENTILES:
+            entry[f"p{p}"] = values[max(1, -(-p * n // 100)) - 1]   # rank ceil(p n / 100), from 1
+        entry.update(max=values[-1], slope_ns_per_s=slope(points))
+        out.append(entry)
+    return {"judge": out}
+
+
+def slope(points: list[tuple[float, int]]) -> float | None:
+    """The least-squares slope of the points (t in s, lateness in ns), ns a
+    second to 0.001; None without two distinct times."""
+    n = len(points)
+    t_mean = math.fsum(t for t, _ in points) / n
+    y_mean = math.fsum(y for _, y in points) / n
+    sxx = math.fsum((t - t_mean) ** 2 for t, _ in points)
+    if not sxx > 0:
+        return None
+    sxy = math.fsum((t - t_mean) * (y - y_mean) for t, y in points)
+    return round(sxy / sxx, 3) + 0.0   # never -0.0
+
+
 def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: Ending) -> int:
     watch = Watch(rate)
     tally = Tally()
@@ -490,8 +577,8 @@ def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: E
     def end(word: str, code: int, trip: Trip | None = None, stop: int | None = None) -> int:
         tally.add(watch.take_peaks())
         doc = figures(clock.now() - start, tally, Peaks(tally.request_rate, tally.flow_requests, tally.packet_ratio,
-                                                                  tally.arc_reads, tally.judge),
-                      watch)
+                                                        tally.arc_reads),
+                      watch, judge_summary(tally.series))
         doc = {"end": word, **doc}
         if trip is not None:
             doc.update(trip=trip.numbers, stop_exit=stop)
@@ -527,7 +614,7 @@ def run(box: Box, rate: int, seconds: float | None, clock, flag: Path, ending: E
         if clock.now() >= next_line:
             peaks = watch.take_peaks()
             tally.add(peaks)
-            emit(figures(clock.now() - start, tally, peaks, watch))
+            emit(figures(clock.now() - start, tally, peaks, watch, judge_figures(peaks.judge)))
             next_line += LINE_EVERY_S
         wait = tick + READ_EVERY_S - clock.now()
         if wait > 0:
