@@ -356,6 +356,42 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  gen3-attest:
+    name: gen3-attest
+    # Provenance of the Gen 3 bundle (#72 phase D, plan Task 7) by the digest
+    # of its SHA256SUMS, which names the four binaries and BUILD (this commit):
+    # no checkout, no build, as `attest` does for the PC's zip. deploy.sh runs
+    # `gh attestation verify` on that SHA256SUMS before anything leaves the
+    # dev box.
+    if: github.event_name == 'push'
+    needs: [gen3-bin]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    outputs:
+      digest: ${{ steps.d.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gen3-bundle-${{ github.sha }}
+      - name: The bundle is this commit's and whole; the digest of its SHA256SUMS
+        id: d
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GITHUB_SHA" | cmp -s - BUILD \
+            || { echo "::error::the bundle's BUILD is not ${GITHUB_SHA}"; exit 1; }
+          sha256sum --check --strict SHA256SUMS
+          sum="$(sha256sum SHA256SUMS | cut -d' ' -f1)"
+          [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no digest for the bundle's SHA256SUMS"; exit 1; }
+          echo "digest=sha256:$sum" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: gen3-SHA256SUMS-${{ github.sha }}
+          subject-digest: ${{ steps.d.outputs.digest }}
+
   wasm:
     name: wasm
     runs-on: ubuntu-24.04

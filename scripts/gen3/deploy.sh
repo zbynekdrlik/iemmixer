@@ -2,63 +2,79 @@
 # The remote commands name this script's own constant paths, expanded here on purpose.
 # shellcheck disable=SC2029
 set -euo pipefail
-# Puts a CI Gen 3 bundle on the Gen 3 box and starts the stack: the engine
-# with our Dante device inside it and the server, or the standalone device
-# (#72 phase C, plan Task 6; .claude/rules/gen3.md):
+# Puts a CI Gen 3 bundle on the Gen 3 box into one of two slots and starts the
+# stack from it: the engine with our Dante device inside it and the server, or
+# the standalone device (#72 phase C, plan Task 6; phase D, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 7, choice 6;
+# .claude/rules/gen3.md):
 #
 #   deploy.sh --host <user@host> --bundle <the downloaded gen3-bundle-<sha>>
 #             --sha <its commit, 40 hex> --config <the private device config>
 #             --iface <the box's Dante interface> [--start engine|device] [--pins]
+#   deploy.sh --host <user@host> --back --sha <the build in the other slot>
+#             --config <...> --iface <...> [--start engine|device]
 #
+# - One commit: this checkout must be exactly --sha with a clean tree (`git
+#   rev-parse HEAD`, `git status --porcelain`): the units, the test site and
+#   the roster come from it, the binaries from that commit's CI bundle.
 # - Dev time only: refused while the "ide event" flag exists (iempc's
 #   EVENT-NOW: $IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW),
-#   checked again right before anything is installed, right before the start
-#   and once more right after it: a flag that came meanwhile ("ide event"'s
-#   stop may have run before the start) stops all three units again and fails
-#   the deploy.
-# - The bundle (CI's gen3-bin job uploads gen3-bundle-<sha>): its BUILD must
-#   be --sha and a newline, and its SHA256SUMS must list exactly the four
-#   binaries and BUILD and hold for them, on the dev box before anything is
-#   called and again on the box after the copy.
+#   checked again before the new slot is filled, before the stack is stopped,
+#   right before the start and once more right after it: a flag that came
+#   meanwhile ("ide event"'s stop may have run before the start) stops all
+#   three units again and fails the deploy.
+# - The bundle (CI's gen3-bin job uploads gen3-bundle-<sha>, its gen3-attest
+#   job attests the bundle's SHA256SUMS by digest): BUILD is --sha and a
+#   newline, SHA256SUMS lists exactly the four binaries and BUILD and holds for
+#   them, and `gh attestation verify` finds this repository's CI attestation
+#   of that SHA256SUMS, all on the dev box before anything is sent; the sums
+#   again on the box after the copy and in the slot.
 # - "ide event" stops the stack with `ssh <GEN3_HOST> sudo -n systemctl stop
-#   iem-server iem-engine iem-dante` (plan Task 7): a --host that is not the
-#   GEN3_HOST of iempc's private env ($PC_ENV, else
-#   ~/.config/iemmixer/iem-pc.env) is a warning, an env without GEN3_HOST too;
-#   and right after `id -un` (never root) the box's sudo must allow that stop
+#   iem-server iem-engine iem-dante`: a --host that is not the GEN3_HOST of
+#   iempc's private env ($PC_ENV, else ~/.config/iemmixer/iem-pc.env) is a
+#   warning, an env without GEN3_HOST too; the box's sudo must allow that stop
 #   (`sudo -n -l`), else refused before anything is copied.
-# - Then that stop, and none of the three units may still run (`systemctl
-#   is-active`: inactive or failed): a unit no deploy has installed yet is
+# - Two slots: /opt/iemmixer/slot-a/bin and slot-b/bin, and /opt/iemmixer/bin
+#   a link to the one the stack runs from (`readlink`). A deploy fills the
+#   other one (a, while bin is no link) with the four binaries (0755: a
+#   downloaded artifact loses the executable bit), BUILD and SHA256SUMS and
+#   checks its sums while the stack keeps running; only then the stack is
+#   stopped and the link moved in one rename (`ln -sfn` to bin.next, `mv -T`
+#   over bin), so the build before stays untouched in its slot. Phase C's
+#   real bin folder is moved aside once to /opt/iemmixer/bin.phase-c (never
+#   deleted, never moved twice). --back moves the link back to the other slot
+#   without a bundle, after checking that its BUILD is --sha and its sums hold
+#   on the box; only the units and the configs are copied then.
+# - The stop: none of the three units may still run after it (`systemctl
+#   is-active`: inactive or failed); a unit no deploy has installed yet is
 #   "not loaded", so the stop's own exit is not the verdict.
-# - The four binaries, BUILD and SHA256SUMS, the three units (beside this
-#   script), the drop-in naming the box's user (the ssh user, never root), the
-#   config, the interface (written as /etc/iemmixer/iem-dante.env) and the
-#   public test site and roster (this checkout's config/test-site.toml and
-#   config/test-roster.toml) go by scp into ~/.cache/iem-gen3-deploy on the
-#   box (overwritten, never deleted); then `sudo -n install -D` puts the
-#   binaries into /opt/iemmixer/bin (0755: a downloaded artifact loses the
-#   executable bit), each unit's drop-in before the units (no moment has a
-#   unit without its User=), the units, the config and the env;
-#   `sudo -n install -d -o <user> -m 0700 /var/lib/iemmixer/site`, and the
-#   user itself copies the site and the roster there (the server writes
-#   beside them).
+# - The four units beside this script (the engine, the server, the standalone
+#   device and the alarm unit, each under the service user `iemmixer` of its
+#   own), the config, the interface (written as /etc/iemmixer/iem-dante.env)
+#   and this checkout's public test site and roster go by scp into
+#   ~/.cache/iem-gen3-deploy on the box (overwritten, never deleted); `sudo -n
+#   install` puts the units, the config and the env in place, makes
+#   /var/lib/iemmixer/site the service user's (0700) and puts the site and the
+#   roster there as the service user's (0600).
 # - --pins (the server is stopped): `iem-server pin set-engineer` and `pin
-#   set-member <id>` for every [[people]] id of the roster, run as the user on
-#   the box, each PIN (GEN3_ENGINEER_PIN, GEN3_MEMBER_PIN of the private env,
-#   4 digits each) only on that ssh's stdin: never on a command line, never
-#   printed.
+#   set-member <id>` for every [[people]] id of the roster, each through
+#   `systemd-run` as the service user with the PIN pepper's systemd credential,
+#   each PIN (GEN3_ENGINEER_PIN, GEN3_MEMBER_PIN of the private env, 4 digits
+#   each) only on that ssh's stdin: never on a command line, never printed.
 # - `sudo -n systemctl daemon-reload`, `disable iem-dante iem-engine
 #   iem-server` (none starts at boot; an earlier deploy's enable is undone),
-#   `reset-failed iem-dante iem-engine iem-server` (the engine's start limit
-#   counts manual starts too: a deploy is a deliberate new start), then
-#   `start iem-engine iem-server` (--start engine, the default) or `start
-#   iem-dante` (--start device; the units' Conflicts= keep it and the engine
-#   apart).
-# - Read back: the installed binaries' sha256 against SHA256SUMS, `iem-engine
-#   --version` and `iem-dante-dev --version` naming --sha, `systemctl
-#   is-active` of what was started after GEN3_SETTLE_S (3) seconds, and (the
-#   engine) on the box `curl -sf http://127.0.0.1:8080/api/version` within
-#   GEN3_SERVER_WAIT_S (30) tries a second apart, its git_hash a prefix of
-#   --sha.
+#   `reset-failed` of the units systemd holds (the start limit counts manual
+#   starts too: a deploy is a deliberate new start), then `start iem-engine
+#   iem-server` (--start engine, the default) or `start iem-dante` (--start
+#   device; the units' Conflicts= keep it and the engine apart).
+# - Read back: the binaries and BUILD through /opt/iemmixer/bin against the
+#   slot's SHA256SUMS, `iem-engine --version` and `iem-dante-dev --version`
+#   naming --sha, then `/opt/iemmixer/bin/iem-dante-dev health` once a second
+#   until it exits 0 (healthy), at most GEN3_SERVER_WAIT_S (30) tries; its last
+#   line is printed, and a stack not healthy in time fails the deploy.
+# - Every `sudo -n` line this script sends is a line of sudo-lines.txt (with
+#   its placeholders), the template plan Task 9's provision turns into the
+#   box's sudoers file (test_deploy.py checks it).
 #
 # Any failure stops the script: exit 1, 2 for its command line. Site values
 # (host, user, interface, names, PINs) come only from the arguments, the
@@ -66,18 +82,28 @@ set -euo pipefail
 # none is printed.
 
 STAGE=.cache/iem-gen3-deploy
-BINDIR=/opt/iemmixer/bin
+OPT=/opt/iemmixer
+BINDIR=$OPT/bin
+PHASE_C=$OPT/bin.phase-c
+NEXT=$OPT/bin.next
 UNITDIR=/etc/systemd/system
 CONFIG=/etc/iemmixer/dante-device.toml
 ENVFILE=/etc/iemmixer/iem-dante.env
 SITEDIR=/var/lib/iemmixer/site
 SITE=$SITEDIR/iemmixer.toml
 ROSTER=$SITEDIR/roster.toml
+SERVICE_USER=iemmixer
+CREDENTIAL=/etc/credstore.encrypted/iemmixer-pepper
+GITHUB_REPO=zbynekdrlik/iemmixer
+SIGNER=$GITHUB_REPO/.github/workflows/ci.yml
 BINARIES=(iem-engine iem-server iem-dante-dev iem-soakclient)
-UNITS=(iem-dante iem-engine iem-server)
+UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service)
 # The stack's stop, exactly as "ide event" and the live guard run it (plan
 # Task 7) and as the box's sudoers rule allows it.
 STOP="systemctl stop iem-server iem-engine iem-dante"
+# The PIN commands: the server's own binary as the service user, with the
+# pepper's systemd credential and the site, the PIN on stdin (`--pipe`).
+PIN_RUN="systemd-run --quiet --pipe --wait --collect --uid=$SERVICE_USER --gid=$SERVICE_USER --property=LoadCredentialEncrypted=pepper:$CREDENTIAL --setenv=IEMMIXER_CONFIG=$SITE $BINDIR/iem-server pin"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
 
 die() {
@@ -121,10 +147,16 @@ env_value_of() {
 usage() {
   echo "deploy.sh: $*" >&2
   echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins]" >&2
+  echo "       deploy.sh --host <user@host> --back --sha <40 hex> --config <path> --iface <name> [--start engine|device]" >&2
   exit 2
 }
 
-host="" bundle="" sha="" config="" iface="" start=engine pins=0
+# One command line on the box.
+on_box() {
+  ssh "${SSH_OPTS[@]}" "$host" "$@"
+}
+
+host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --host | --bundle | --sha | --config | --iface | --start)
@@ -143,24 +175,37 @@ while [ $# -gt 0 ]; do
       pins=1
       shift
       ;;
+    --back)
+      back=1
+      shift
+      ;;
     *) usage "unknown argument '$1'" ;;
   esac
 done
-for name in host bundle sha config iface; do
+if [ "$back" = 1 ]; then
+  required=(host sha config iface)
+else
+  required=(host bundle sha config iface)
+fi
+for name in "${required[@]}"; do
   [ -n "${!name}" ] || usage "--$name is missing"
 done
+if [ "$back" = 1 ]; then
+  [ -z "$bundle" ] || usage "--back takes no --bundle: it goes back to the build the other slot holds"
+  [ "$pins" = 0 ] || usage "--back takes no --pins: going back leaves the PINs as they are"
+fi
 case "$host" in -*) usage "--host must be an ssh destination, not an option" ;; esac
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || usage "--sha is not 40 lowercase hex digits"
 [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || usage "--iface is not an interface name"
 case "$start" in engine | device) ;; *) usage "--start is engine or device" ;; esac
-[ -d "$bundle" ] || usage "--bundle is not a folder"
-for name in "${BINARIES[@]}" BUILD SHA256SUMS; do
-  [ -f "$bundle/$name" ] || usage "--bundle has no $name: not a gen3 bundle"
-done
+if [ "$back" = 0 ]; then
+  [ -d "$bundle" ] || usage "--bundle is not a folder"
+  for name in "${BINARIES[@]}" BUILD SHA256SUMS; do
+    [ -f "$bundle/$name" ] || usage "--bundle has no $name: not a gen3 bundle"
+  done
+fi
 [ -f "$config" ] || usage "--config is not a file"
-settle="${GEN3_SETTLE_S:-3}"
 tries="${GEN3_SERVER_WAIT_S:-30}"
-[[ "$settle" =~ ^[0-9]{1,3}$ ]] || usage "GEN3_SETTLE_S is not a number of seconds"
 [[ "$tries" =~ ^[1-9][0-9]{0,2}$ ]] || usage "GEN3_SERVER_WAIT_S is not a number of tries"
 
 flag="${IEMMIXER_EVENT_NOW:-$HOME/.config/iemmixer/EVENT-NOW}"
@@ -185,7 +230,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 test_site="$repo/config/test-site.toml"
 test_roster="$repo/config/test-roster.toml"
-for path in "$here/iem-dante.service" "$here/iem-engine.service" "$here/iem-server.service" "$test_site" "$test_roster"; do
+for unit in "${UNITS[@]}"; do
+  [ -f "$here/$unit" ] || die "$here/$unit is missing"
+done
+for path in "$test_site" "$test_roster"; do
   [ -f "$path" ] || die "$path is missing"
 done
 
@@ -218,45 +266,172 @@ for person in roster.get("people", []):
   done
 fi
 
-# The bundle, on the dev box: BUILD is --sha and a newline; SHA256SUMS holds
-# exactly the four binaries and BUILD, each once, and their sums.
-printf '%s\n' "$sha" | cmp -s - "$bundle/BUILD" || die "the bundle's BUILD is not --sha (and a newline): nothing was copied"
-declare -A sums=()
-while IFS= read -r line || [ -n "$line" ]; do
-  [[ "$line" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9_.-]+)$ ]] || die "the bundle's SHA256SUMS has a line that is not '<sha256>  <name>': nothing was copied"
-  name="${BASH_REMATCH[2]}"
-  case " ${BINARIES[*]} BUILD " in *" $name "*) ;; *) die "the bundle's SHA256SUMS names $name, which is not in a gen3 bundle: nothing was copied" ;; esac
-  [ -z "${sums[$name]:-}" ] || die "the bundle's SHA256SUMS names $name twice: nothing was copied"
-  sums[$name]="${BASH_REMATCH[1]}"
-done < "$bundle/SHA256SUMS"
-for name in "${BINARIES[@]}" BUILD; do
-  [ -n "${sums[$name]:-}" ] || die "the bundle's SHA256SUMS has no line for $name: nothing was copied"
-  actual="$(sha256sum "$bundle/$name" | cut -d' ' -f1)"
-  [ "$actual" = "${sums[$name]}" ] || die "$name of the bundle does not have its SHA256SUMS sum on the dev box: nothing was copied"
-done
+# One commit: the units, the site and the roster come from this checkout, so
+# it must be --sha itself, with nothing changed or added (the paths git lists
+# are not printed).
+checkout_exit=0
+checkout="$(git -C "$repo" rev-parse --verify HEAD 2> /dev/null)" || checkout_exit=$?
+[ "$checkout_exit" -eq 0 ] || die "$repo is not a git checkout with a commit: the units and the test site come from the checkout at --sha: nothing was copied"
+[ "$checkout" = "$sha" ] ||
+  die "this checkout is at $checkout, not --sha $sha: the units, the configs and the test site come from the checkout, so it must be --sha (git checkout --detach $sha): nothing was copied"
+changes="$(git -C "$repo" status --porcelain)" || die "git status of this checkout failed: nothing was copied"
+[ -z "$changes" ] ||
+  die "this checkout has $(printf '%s\n' "$changes" | wc -l) changed or untracked paths (git status --porcelain): the units, the configs and the test site must be --sha's own; commit or remove them: nothing was copied"
 
-user="$(ssh "${SSH_OPTS[@]}" "$host" id -un)"
-[[ "$user" =~ ^[a-z_][a-z0-9_.-]*$ ]] || die "the box's user is not a plain user name: nothing was copied"
-[ "$user" != root ] || die "the services run as the box's admin user, not root: nothing was copied"
+declare -A sums=()
+# Reads a SHA256SUMS on stdin into sums: exactly one '<sha256>  <name>' line
+# for each of the four binaries and BUILD, no other name, none twice. $1 says
+# whose it is, $2 what a refusal left undone.
+read_sums() {
+  local line name
+  sums=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9_.-]+)$ ]] || die "$1 SHA256SUMS has a line that is not '<sha256>  <name>': $2"
+    name="${BASH_REMATCH[2]}"
+    case " ${BINARIES[*]} BUILD " in *" $name "*) ;; *) die "$1 SHA256SUMS names $name, which is not in a gen3 bundle: $2" ;; esac
+    [ -z "${sums[$name]:-}" ] || die "$1 SHA256SUMS names $name twice: $2"
+    sums[$name]="${BASH_REMATCH[1]}"
+  done
+  for name in "${BINARIES[@]}" BUILD; do
+    [ -n "${sums[$name]:-}" ] || die "$1 SHA256SUMS has no line for $name: $2"
+  done
+}
+
+if [ "$back" = 0 ]; then
+  # The bundle, on the dev box: BUILD is --sha and a newline; SHA256SUMS
+  # holds exactly the four binaries and BUILD, each once, and their sums;
+  # this repository's CI attested that SHA256SUMS (gen3-attest, by digest).
+  printf '%s\n' "$sha" | cmp -s - "$bundle/BUILD" || die "the bundle's BUILD is not --sha (and a newline): nothing was copied"
+  read_sums "the bundle's" "nothing was copied" < "$bundle/SHA256SUMS"
+  for name in "${BINARIES[@]}" BUILD; do
+    actual="$(sha256sum "$bundle/$name" | cut -d' ' -f1)"
+    [ "$actual" = "${sums[$name]}" ] || die "$name of the bundle does not have its SHA256SUMS sum on the dev box: nothing was copied"
+  done
+  gh attestation verify "$bundle/SHA256SUMS" -R "$GITHUB_REPO" --signer-workflow "$SIGNER" >&2 ||
+    die "gh attestation verify found no attestation of the bundle's SHA256SUMS by $SIGNER: an unattested bundle never leaves the dev box: nothing was copied"
+  echo "deploy.sh: the bundle's SHA256SUMS is attested by this repository's CI"
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT
+
 # "ide event" and the live guard stop the stack with exactly this command: a
 # stack they could not stop is never installed.
-ssh "${SSH_OPTS[@]}" "$host" "sudo -n -l $STOP" > /dev/null ||
-  die "the box's sudo does not allow 'sudo -n $STOP', the stack's stop \"ide event\" runs: add it to the sudoers rule (.claude/rules/gen3.md, Deploy): nothing was copied"
+on_box "sudo -n -l $STOP" > /dev/null ||
+  die "the box's sudo does not allow 'sudo -n $STOP', the stack's stop \"ide event\" runs: add it to the sudoers rule (scripts/gen3/sudo-lines.txt): nothing was copied"
+
+# The slot the stack runs from, and so the one this deploy fills: the other
+# one, slot a while bin is no link (a first deploy, or phase C's folder).
+link_exit=0
+link="$(on_box "readlink $BINDIR")" || link_exit=$?
+phase_c=0
+case "$link_exit" in
+  0)
+    case "$link" in
+      slot-a/bin) target=b ;;
+      slot-b/bin) target=a ;;
+      *) die "$BINDIR is a link, but to neither slot-a/bin nor slot-b/bin: nothing was copied" ;;
+    esac
+    echo "deploy.sh: the stack's build is in $link; this deploy goes into slot-$target"
+    ;;
+  1)
+    # No link: nothing yet, or phase C's real folder, moved aside once.
+    target=a
+    kinds_exit=0
+    kinds="$(on_box "stat -c '%n %F' $BINDIR $PHASE_C 2> /dev/null")" || kinds_exit=$?
+    [ "$kinds_exit" -le 1 ] || die "the box's $BINDIR could not be read (exit $kinds_exit): nothing was copied"
+    bin_kind=none phase_c_kind=none
+    while IFS= read -r line; do
+      case "$line" in
+        "$BINDIR "*) bin_kind="${line#"$BINDIR "}" ;;
+        "$PHASE_C "*) phase_c_kind="${line#"$PHASE_C "}" ;;
+      esac
+    done <<< "$kinds"
+    case "$bin_kind" in
+      none) echo "deploy.sh: the box has no $BINDIR yet; this deploy goes into slot-a" ;;
+      directory)
+        [ "$phase_c_kind" = none ] ||
+          die "$BINDIR is a folder while $PHASE_C exists: phase C's folder is moved aside once, never twice and never over another: nothing was copied"
+        phase_c=1
+        echo "deploy.sh: $BINDIR is phase C's folder: it goes aside to $PHASE_C (kept) and this deploy into slot-a"
+        ;;
+      *) die "$BINDIR is a $bin_kind, neither a slot's link nor phase C's folder: nothing was copied" ;;
+    esac
+    ;;
+  *) die "readlink $BINDIR on the box failed (exit $link_exit): nothing was copied" ;;
+esac
+slot="$OPT/slot-$target/bin"
+
+if [ "$back" = 1 ]; then
+  # Back: the other slot must hold --sha, whole, before anything is touched.
+  on_box "cat $slot/BUILD" > "$work/slot-BUILD" ||
+    die "slot-$target has no BUILD to read: there is no build to go back to: nothing was copied"
+  printf '%s\n' "$sha" | cmp -s - "$work/slot-BUILD" ||
+    die "slot-$target's BUILD is not --sha (and a newline): --back goes only to the build it names: nothing was copied"
+  on_box "cat $slot/SHA256SUMS" > "$work/slot-SHA256SUMS" ||
+    die "slot-$target has no SHA256SUMS to read: nothing was copied"
+  read_sums "slot-$target's" "nothing was copied" < "$work/slot-SHA256SUMS"
+  on_box "cd $slot && sha256sum --check --strict --quiet SHA256SUMS" ||
+    die "slot-$target's SHA256SUMS does not hold on the box: nothing was copied"
+  echo "deploy.sh: slot-$target holds $sha, its sums hold"
+fi
+
+printf 'IEM_DANTE_IFACE=%s\n' "$iface" > "$work/iem-dante.env"
+cp -- "$config" "$work/dante-device.toml"
+cp -- "$test_site" "$work/iemmixer.toml"
+cp -- "$test_roster" "$work/roster.toml"
+for unit in "${UNITS[@]}"; do
+  cp -- "$here/$unit" "$work/$unit"
+done
+
+on_box mkdir -p "$STAGE"
+sources=()
+if [ "$back" = 0 ]; then
+  for name in "${BINARIES[@]}" BUILD SHA256SUMS; do
+    sources+=("$bundle/$name")
+  done
+fi
+for name in "${UNITS[@]}" dante-device.toml iem-dante.env iemmixer.toml roster.toml; do
+  sources+=("$work/$name")
+done
+scp -q "${SSH_OPTS[@]}" "${sources[@]}" "$host:$STAGE/"
+echo "deploy.sh: copied to the box's ~/$STAGE"
+
+if [ "$back" = 0 ]; then
+  on_box "cd $STAGE && sha256sum --check --strict --quiet SHA256SUMS" ||
+    die "the bundle's SHA256SUMS does not hold on the box: nothing installed"
+  refuse_event "copied to ~/$STAGE, nothing installed"
+  # The new slot, while the stack keeps running from the other one.
+  fill="set -e"
+  for name in "${BINARIES[@]}"; do
+    fill+=$'\n'"sudo -n install -D -m 0755 $STAGE/$name $slot/$name"
+  done
+  for name in BUILD SHA256SUMS; do
+    fill+=$'\n'"sudo -n install -D -m 0644 $STAGE/$name $slot/$name"
+  done
+  on_box "$fill" || die "slot-$target could not be filled: the stack was not stopped"
+  on_box "cd $slot && sha256sum --check --strict --quiet SHA256SUMS" ||
+    die "slot-$target's SHA256SUMS does not hold on the box: the stack was not stopped"
+  echo "deploy.sh: slot-$target holds the bundle, its sums hold; the stack was not stopped"
+  refuse_event "slot-$target holds the bundle; the stack was not stopped"
+else
+  refuse_event "copied to ~/$STAGE; the stack was not stopped"
+fi
 
 # Stop the stack, then read what still runs: a unit no deploy has installed
 # yet makes the stop exit 5 ("not loaded") while it stops the others.
 stop_exit=0
-ssh "${SSH_OPTS[@]}" "$host" "sudo -n $STOP" || stop_exit=$?
+on_box "sudo -n $STOP" || stop_exit=$?
 read_exit=0
-states="$(ssh "${SSH_OPTS[@]}" "$host" systemctl is-active iem-server iem-engine iem-dante)" || read_exit=$?
-[ "$read_exit" -ne 255 ] || die "the units' states could not be read after the stop: nothing was copied"
+states="$(on_box systemctl is-active iem-server iem-engine iem-dante)" || read_exit=$?
+[ "$read_exit" -ne 255 ] || die "the units' states could not be read after the stop: nothing was switched"
 mapfile -t state_lines <<< "$states"
-[ "${#state_lines[@]}" -eq 3 ] || die "systemctl is-active did not name the three units' states: nothing was copied"
+[ "${#state_lines[@]}" -eq 3 ] || die "systemctl is-active did not name the three units' states: nothing was switched"
 i=0
 for unit in iem-server iem-engine iem-dante; do
   case "${state_lines[$i]}" in
     inactive | failed) ;;
-    *) die "$unit is '${state_lines[$i]}' after the stop, not stopped (journalctl -u $unit on the box): nothing was copied" ;;
+    *) die "$unit is '${state_lines[$i]}' after the stop, not stopped (journalctl -u $unit on the box): nothing was switched" ;;
   esac
   i=$((i + 1))
 done
@@ -265,56 +440,38 @@ if [ "$stop_exit" -ne 0 ]; then
 fi
 echo "deploy.sh: the stack is stopped"
 
-work="$(mktemp -d)"
-trap 'rm -rf -- "$work"' EXIT
-printf 'IEM_DANTE_IFACE=%s\n' "$iface" > "$work/iem-dante.env"
-printf '[Service]\nUser=%s\n' "$user" > "$work/10-user.conf"
-cp -- "$config" "$work/dante-device.toml"
-cp -- "$test_site" "$work/iemmixer.toml"
-cp -- "$test_roster" "$work/roster.toml"
-for unit in "${UNITS[@]}"; do
-  cp -- "$here/$unit.service" "$work/$unit.service"
-done
+# One rename moves the link: bin is the old slot's or the new one's, never
+# neither (but on the first switch over phase C's folder, which goes aside
+# first: a link cannot replace a folder).
+switch="set -e"
+if [ "$phase_c" = 1 ]; then
+  switch+=$'\n'"sudo -n mv -T $BINDIR $PHASE_C"
+fi
+switch+=$'\n'"sudo -n ln -sfn slot-$target/bin $NEXT"
+switch+=$'\n'"sudo -n mv -T $NEXT $BINDIR"
+on_box "$switch" || die "the switch to slot-$target failed on the box: the stack is stopped; look at $BINDIR there and deploy again"
+if [ "$phase_c" = 1 ]; then
+  echo "deploy.sh: phase C's $BINDIR moved aside to $PHASE_C (kept)"
+fi
+echo "deploy.sh: $BINDIR is slot-$target/bin"
 
-ssh "${SSH_OPTS[@]}" "$host" mkdir -p "$STAGE"
-sources=()
-for name in "${BINARIES[@]}" BUILD SHA256SUMS; do
-  sources+=("$bundle/$name")
-done
-for name in iem-dante.service iem-engine.service iem-server.service 10-user.conf dante-device.toml iem-dante.env \
-  iemmixer.toml roster.toml; do
-  sources+=("$work/$name")
-done
-scp -q "${SSH_OPTS[@]}" "${sources[@]}" "$host:$STAGE/"
-echo "deploy.sh: copied to the box's ~/$STAGE"
-
-ssh "${SSH_OPTS[@]}" "$host" "cd $STAGE && sha256sum --check --strict --quiet SHA256SUMS" ||
-  die "the bundle's SHA256SUMS does not hold on the box: nothing installed"
-
-refuse_event "copied to ~/$STAGE, nothing installed"
 install="set -e"
-for name in "${BINARIES[@]}"; do
-  install+=$'\n'"sudo -n install -D -m 0755 $STAGE/$name $BINDIR/$name"
-done
 for unit in "${UNITS[@]}"; do
-  install+=$'\n'"sudo -n install -D -m 0644 $STAGE/10-user.conf $UNITDIR/$unit.service.d/10-user.conf"
-done
-for unit in "${UNITS[@]}"; do
-  install+=$'\n'"sudo -n install -D -m 0644 $STAGE/$unit.service $UNITDIR/$unit.service"
+  install+=$'\n'"sudo -n install -D -m 0644 $STAGE/$unit $UNITDIR/$unit"
 done
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/dante-device.toml $CONFIG"
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/iem-dante.env $ENVFILE"
-install+=$'\n'"sudo -n install -d -o $user -m 0700 $SITEDIR"
-install+=$'\n'"install -m 0600 $STAGE/iemmixer.toml $SITE"
-install+=$'\n'"install -m 0600 $STAGE/roster.toml $ROSTER"
-ssh "${SSH_OPTS[@]}" "$host" "$install"
-echo "deploy.sh: installed the bundle, the units, the device config and the test site"
+install+=$'\n'"sudo -n install -d -o $SERVICE_USER -g $SERVICE_USER -m 0700 $SITEDIR"
+install+=$'\n'"sudo -n install -D -o $SERVICE_USER -g $SERVICE_USER -m 0600 $STAGE/iemmixer.toml $SITE"
+install+=$'\n'"sudo -n install -D -o $SERVICE_USER -g $SERVICE_USER -m 0600 $STAGE/roster.toml $ROSTER"
+on_box "$install" || die "the units, the device config or the test site could not be installed: the stack is stopped, nothing started"
+echo "deploy.sh: installed the units, the device config and the test site"
 
 # Each PIN goes only into this ssh's stdin (printf is a shell builtin: no
 # process's command line holds it), never onto the box's command line.
 set_pin() {
   local pin="$1" what="$2"
-  printf '%s\n' "$pin" | ssh "${SSH_OPTS[@]}" "$host" "IEMMIXER_CONFIG=$SITE $BINDIR/iem-server pin $what" ||
+  printf '%s\n' "$pin" | on_box "sudo -n $PIN_RUN $what" ||
     die "the box's iem-server did not store the PIN (pin $what): nothing started"
 }
 if [ "$pins" = 1 ]; then
@@ -335,84 +492,74 @@ fi
 # reset-failed only what systemd holds: a unit installed and never started
 # (or long inactive) is not in its memory, and reset-failed of one fails
 # ("not loaded"; Live 1 of phase C); such a unit has no start count to reset.
-held=()
+# The held ones go in one order, as the sudoers rule lists them.
+listed="$(on_box "systemctl list-units --all --plain --no-legend --full iem-dante.service iem-engine.service iem-server.service")" ||
+  die "systemctl list-units on the box failed: nothing started"
+declare -A loaded=()
 while read -r unit _; do
-  case "$unit" in
-    iem-dante.service | iem-engine.service | iem-server.service) held+=("${unit%.service}") ;;
-  esac
-done < <(ssh "${SSH_OPTS[@]}" "$host" "systemctl list-units --all --plain --no-legend --full iem-dante.service iem-engine.service iem-server.service")
+  case "$unit" in iem-dante.service | iem-engine.service | iem-server.service) loaded[$unit]=1 ;; esac
+done <<< "$listed"
+held=()
+for unit in iem-dante iem-engine iem-server; do
+  if [ -n "${loaded[$unit.service]:-}" ]; then held+=("$unit"); fi
+done
 reset=""
 if [ "${#held[@]}" -gt 0 ]; then
   reset="sudo -n systemctl reset-failed ${held[*]}"
 fi
-ssh "${SSH_OPTS[@]}" "$host" "set -e
+on_box "set -e
 sudo -n systemctl daemon-reload
 sudo -n systemctl disable iem-dante iem-engine iem-server${reset:+
 $reset}
-sudo -n systemctl start ${started[*]}"
+sudo -n systemctl start ${started[*]}" ||
+  die "the start on the box failed (journalctl -u iem-engine -u iem-server -u iem-dante there): the stack may be partly up; deploy again, or stop it (sudo $STOP)"
 echo "deploy.sh: started ${started[*]} (none enabled at boot)"
 
 # "ide event" may have come between the check above and the start: its stop
 # then ran first and the start brought the stack up again.
 if [ -e "$flag" ]; then
-  ssh "${SSH_OPTS[@]}" "$host" "sudo -n $STOP" ||
+  on_box "sudo -n $STOP" ||
     die "$flag appeared during the deploy: an event is on, and the stop of the stack after the start failed: it may still run; stop it on the box (sudo $STOP)"
   die "$flag appeared during the deploy: an event is on; the stack stopped again, nothing read back; deploy again in dev time"
 fi
 
+# Read back through the link: the binaries and BUILD are the slot's sums.
 paths=()
-for name in "${BINARIES[@]}"; do
+for name in "${BINARIES[@]}" BUILD; do
   paths+=("$BINDIR/$name")
 done
-installed="$(ssh "${SSH_OPTS[@]}" "$host" sha256sum "${paths[@]}")"
+installed="$(on_box sha256sum "${paths[@]}")"
 declare -A seen=()
 while read -r sum path; do
   [ -n "$sum" ] || continue
   name="${path##*/}"
-  [ -n "${sums[$name]:-}" ] || die "sha256sum on the box named '$path', not an installed binary"
+  [ -n "${sums[$name]:-}" ] || die "sha256sum on the box named '$path', not a file of the slot"
   [ "$sum" = "${sums[$name]}" ] || die "the installed $path's sha256 is $sum, not ${sums[$name]}"
   seen[$name]=1
 done <<< "$installed"
-for name in "${BINARIES[@]}"; do
+for name in "${BINARIES[@]}" BUILD; do
   [ -n "${seen[$name]:-}" ] || die "sha256sum on the box did not read $BINDIR/$name"
 done
 
-engine_version="$(ssh "${SSH_OPTS[@]}" "$host" "$BINDIR/iem-engine" --version)"
+engine_version="$(on_box "$BINDIR/iem-engine" --version)"
 want="^iem-engine [^[:space:]]+[+]$sha\$"
 [[ "$engine_version" =~ $want ]] || die "$BINDIR/iem-engine --version said '$engine_version', not 'iem-engine <version>+$sha'"
-device_version="$(ssh "${SSH_OPTS[@]}" "$host" "$BINDIR/iem-dante-dev" --version)"
+device_version="$(on_box "$BINDIR/iem-dante-dev" --version)"
 want="^iem-dante-dev [^[:space:]]+ $sha\$"
 [[ "$device_version" =~ $want ]] || die "$BINDIR/iem-dante-dev --version said '$device_version', not 'iem-dante-dev <version> $sha'"
 
-sleep "$settle"
-read_exit=0
-states="$(ssh "${SSH_OPTS[@]}" "$host" systemctl is-active "${started[@]}")" || read_exit=$?
-[ "$read_exit" -ne 255 ] || die "the started units' states could not be read"
-mapfile -t state_lines <<< "$states"
-i=0
-for unit in "${started[@]}"; do
-  [ "${state_lines[$i]:-}" = active ] ||
-    die "$unit is '${state_lines[$i]:-}' after $settle s, not active (journalctl -u $unit on the box)"
-  i=$((i + 1))
-done
-
-if [ "$start" = device ]; then
-  echo "deploy.sh: $engine_version; $device_version; sums as SHA256SUMS; iem-dante active (the standalone device; the engine and the server stopped)"
-  exit 0
-fi
-
-# The server answers once it is up: a second apart, a bounded number of tries.
-answer=""
+# Health (iem-dante-dev health: one line of numbers and fixed words; exit 0
+# healthy, 1 degraded or failed, 3 stopped, 2 its command line), once a
+# second until healthy, a bounded number of tries.
+health="" health_exit=0
 for ((n = 1; n <= tries; n++)); do
-  if answer="$(ssh "${SSH_OPTS[@]}" "$host" curl -sf --max-time 5 http://127.0.0.1:8080/api/version)"; then
-    break
-  fi
-  answer=""
+  health_exit=0
+  health="$(on_box "$BINDIR/iem-dante-dev health")" || health_exit=$?
+  health="${health##*$'\n'}"
+  [ "$health_exit" -ne 0 ] || break
+  [ "$health_exit" -ne 2 ] || die "$BINDIR/iem-dante-dev health refused its command line (exit 2): ${health:-no line}"
   if [ "$n" -lt "$tries" ]; then sleep 1; fi
 done
-[ -n "$answer" ] || die "the box's server did not answer /api/version on port 8080 within $tries tries (journalctl -u iem-server on the box)"
-want='"git_hash"[[:space:]]*:[[:space:]]*"([0-9a-f]{7,40})"'
-[[ "$answer" =~ $want ]] || die "the box's /api/version names no git_hash: '$answer'"
-git_hash="${BASH_REMATCH[1]}"
-[[ "$sha" == "$git_hash"* ]] || die "the box's /api/version names $git_hash, not a prefix of $sha"
-echo "deploy.sh: $engine_version; $device_version; sums as SHA256SUMS; iem-engine and iem-server active; /api/version names $git_hash"
+[ "$health_exit" -eq 0 ] ||
+  die "the stack is not healthy after $tries tries a second apart (iem-dante-dev health exit $health_exit; journalctl -u iem-engine -u iem-server -u iem-dante on the box): ${health:-no line}"
+echo "deploy.sh: slot-$target: $engine_version; $device_version; sums as SHA256SUMS; ${started[*]} started; health $health"

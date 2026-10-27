@@ -1,0 +1,52 @@
+# The Gen 3 box's sudo rule (#72 phase D, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Tasks 7-9; rules in
+# .claude/rules/gen3.md): one line per command a Gen 3 tool sends through
+# `sudo -n`, written `<runas> | <command exactly as sent>`, the command being
+# what follows `sudo -n` (`root`) or `sudo -n -u <runas>`. Placeholders:
+# {slot} is a and b; {member} each [[people]] id of config/test-roster.toml;
+# {units} each ordered non-empty subset of `iem-dante iem-engine iem-server`
+# (iem-dante, iem-dante iem-engine, ..., iem-server). Lines starting with #
+# and blank lines are no rule. `sudo -n -l <command>` needs no line of its own:
+# it lists a command that has one. Plan Task 9's provision turns this file into
+# the box's sudoers rule for its admin user (each program by its absolute
+# path, NOPASSWD); the tests check that every `sudo -n` line a tool sends is an
+# expansion of a line here (test_deploy.py for deploy.sh).
+
+# scripts/gen3/deploy.sh: the new slot, filled while the stack runs.
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-engine /opt/iemmixer/slot-{slot}/bin/iem-engine
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-server /opt/iemmixer/slot-{slot}/bin/iem-server
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-dante-dev /opt/iemmixer/slot-{slot}/bin/iem-dante-dev
+root | install -D -m 0755 .cache/iem-gen3-deploy/iem-soakclient /opt/iemmixer/slot-{slot}/bin/iem-soakclient
+root | install -D -m 0644 .cache/iem-gen3-deploy/BUILD /opt/iemmixer/slot-{slot}/bin/BUILD
+root | install -D -m 0644 .cache/iem-gen3-deploy/SHA256SUMS /opt/iemmixer/slot-{slot}/bin/SHA256SUMS
+
+# The stack's stop: deploy.sh, "ide event" (iempc event) and the live guard.
+root | systemctl stop iem-server iem-engine iem-dante
+
+# deploy.sh: the switch (phase C's folder aside once, then one rename).
+root | mv -T /opt/iemmixer/bin /opt/iemmixer/bin.phase-c
+root | ln -sfn slot-{slot}/bin /opt/iemmixer/bin.next
+root | mv -T /opt/iemmixer/bin.next /opt/iemmixer/bin
+
+# deploy.sh: the units, the device config, the test site and roster.
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.service /etc/systemd/system/iem-dante.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-engine.service /etc/systemd/system/iem-engine.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-server.service /etc/systemd/system/iem-server.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd/system/iem-alarm@.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
+root | install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site
+root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml
+root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/roster.toml /var/lib/iemmixer/site/roster.toml
+
+# deploy.sh --pins: the PIN commands as the service user with the pepper's
+# credential, each PIN on stdin.
+root | systemd-run --quiet --pipe --wait --collect --uid=iemmixer --gid=iemmixer --property=LoadCredentialEncrypted=pepper:/etc/credstore.encrypted/iemmixer-pepper --setenv=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server pin set-engineer
+root | systemd-run --quiet --pipe --wait --collect --uid=iemmixer --gid=iemmixer --property=LoadCredentialEncrypted=pepper:/etc/credstore.encrypted/iemmixer-pepper --setenv=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server pin set-member {member}
+
+# deploy.sh: the start (none of the stack enabled at boot).
+root | systemctl daemon-reload
+root | systemctl disable iem-dante iem-engine iem-server
+root | systemctl reset-failed {units}
+root | systemctl start iem-engine iem-server
+root | systemctl start iem-dante
