@@ -51,7 +51,9 @@ set -euo pipefail
 # - The four units beside this script (the engine, the server, the standalone
 #   device and the alarm unit, each under the service user `iemmixer` of its
 #   own), the config, the interface (written as /etc/iemmixer/iem-dante.env)
-#   and this checkout's public test site and roster go by scp into
+#   phase E's receiver of the band's data (band_receive.py, into
+#   /opt/iemmixer/lib, root's, 0755; #72), and this checkout's public test
+#   site and roster go by scp into
 #   ~/.cache/iem-gen3-deploy on the box (overwritten, never deleted); `sudo -n
 #   install` puts the units, the config and the env in place, makes
 #   /var/lib/iemmixer/site the service user's (0700) and puts the site and the
@@ -98,6 +100,8 @@ GITHUB_REPO=zbynekdrlik/iemmixer
 SIGNER=$GITHUB_REPO/.github/workflows/ci.yml
 BINARIES=(iem-engine iem-server iem-dante-dev iem-soakclient)
 UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service)
+RECEIVER=band_receive.py
+LIBDIR=/opt/iemmixer/lib
 # The stack's stop, exactly as "ide event" and the live guard run it (plan
 # Task 7) and as the box's sudoers rule allows it.
 STOP="systemctl stop iem-server iem-engine iem-dante"
@@ -230,7 +234,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 test_site="$repo/config/test-site.toml"
 test_roster="$repo/config/test-roster.toml"
-for unit in "${UNITS[@]}"; do
+for unit in "${UNITS[@]}" "$RECEIVER"; do
   [ -f "$here/$unit" ] || die "$here/$unit is missing"
 done
 for path in "$test_site" "$test_roster"; do
@@ -380,7 +384,7 @@ printf 'IEM_DANTE_IFACE=%s\n' "$iface" > "$work/iem-dante.env"
 cp -- "$config" "$work/dante-device.toml"
 cp -- "$test_site" "$work/iemmixer.toml"
 cp -- "$test_roster" "$work/roster.toml"
-for unit in "${UNITS[@]}"; do
+for unit in "${UNITS[@]}" "$RECEIVER"; do
   cp -- "$here/$unit" "$work/$unit"
 done
 
@@ -391,7 +395,7 @@ if [ "$back" = 0 ]; then
     sources+=("$bundle/$name")
   done
 fi
-for name in "${UNITS[@]}" dante-device.toml iem-dante.env iemmixer.toml roster.toml; do
+for name in "${UNITS[@]}" "$RECEIVER" dante-device.toml iem-dante.env iemmixer.toml roster.toml; do
   sources+=("$work/$name")
 done
 scp -q "${SSH_OPTS[@]}" "${sources[@]}" "$host:$STAGE/"
@@ -461,6 +465,7 @@ for unit in "${UNITS[@]}"; do
 done
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/dante-device.toml $CONFIG"
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/iem-dante.env $ENVFILE"
+install+=$'\n'"sudo -n install -D -m 0755 $STAGE/$RECEIVER $LIBDIR/$RECEIVER"
 install+=$'\n'"sudo -n install -d -o $SERVICE_USER -g $SERVICE_USER -m 0700 $SITEDIR"
 install+=$'\n'"sudo -n install -D -o $SERVICE_USER -g $SERVICE_USER -m 0600 $STAGE/iemmixer.toml $SITE"
 install+=$'\n'"sudo -n install -D -o $SERVICE_USER -g $SERVICE_USER -m 0600 $STAGE/roster.toml $ROSTER"

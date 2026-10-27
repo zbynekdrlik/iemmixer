@@ -455,7 +455,7 @@ class DeployTests(unittest.TestCase):
         self.repo = self.tmp / "checkout"
         (self.repo / "scripts" / "gen3").mkdir(parents=True)
         (self.repo / "config").mkdir()
-        for path in (DEPLOY, TEMPLATE, *(HERE / name for name in UNIT_FILES)):
+        for path in (DEPLOY, TEMPLATE, HERE / "band_receive.py", *(HERE / name for name in UNIT_FILES)):
             shutil.copyfile(path, self.repo / "scripts" / "gen3" / path.name)
         for path in (TEST_SITE, TEST_ROSTER):
             shutil.copyfile(path, self.repo / "config" / path.name)
@@ -649,6 +649,7 @@ class DeployTests(unittest.TestCase):
         f"sudo -n install -D -m 0644 {STAGE}/iem-alarm@.service /etc/systemd/system/iem-alarm@.service",
         f"sudo -n install -D -m 0644 {STAGE}/dante-device.toml /etc/iemmixer/dante-device.toml",
         f"sudo -n install -D -m 0644 {STAGE}/iem-dante.env /etc/iemmixer/iem-dante.env",
+        f"sudo -n install -D -m 0755 {STAGE}/band_receive.py /opt/iemmixer/lib/band_receive.py",
         "sudo -n install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site",
         f"sudo -n install -D -o iemmixer -g iemmixer -m 0600 {STAGE}/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml",
         f"sudo -n install -D -o iemmixer -g iemmixer -m 0600 {STAGE}/roster.toml /var/lib/iemmixer/site/roster.toml"])
@@ -712,13 +713,14 @@ class DeployTests(unittest.TestCase):
             "root root 0644 /opt/iemmixer/slot-a/bin/BUILD", "root root 0644 /opt/iemmixer/slot-a/bin/SHA256SUMS",
             *(f"root root 0644 /etc/systemd/system/{n}" for n in UNIT_FILES),
             "root root 0644 /etc/iemmixer/dante-device.toml", "root root 0644 /etc/iemmixer/iem-dante.env",
+            "root root 0755 /opt/iemmixer/lib/band_receive.py",
             "dir iemmixer iemmixer 0700 /var/lib/iemmixer/site",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/iemmixer.toml",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/roster.toml"])
         self.assertFalse(any(" enable " in command for command in self.remote()))
         # The copy: the bundle's six files and the box's own files, one scp.
         self.assertEqual(self.scp_names(), sorted([*SLOT_FILES, *UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "iemmixer.toml", "roster.toml"]))
+                                                   "band_receive.py", "iemmixer.toml", "roster.toml"]))
         # The attestation of exactly the bundle's SHA256SUMS, by this
         # repository's CI workflow, before any call.
         self.assertEqual(self.gh_calls(), [{
@@ -865,7 +867,7 @@ class DeployTests(unittest.TestCase):
         # and the configs copied; no slot filled; no attestation asked.
         self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True))
         self.assertEqual(self.scp_names(), sorted([*UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "iemmixer.toml", "roster.toml"]))
+                                                   "band_receive.py", "iemmixer.toml", "roster.toml"]))
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(self.link(), "slot-a/bin")
         self.assert_slot_holds("a", first)

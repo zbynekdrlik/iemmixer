@@ -132,7 +132,8 @@ class ReceiveTests(unittest.TestCase):
         self.engine.rename(self.root / "elsewhere")
         self.engine.symlink_to(self.root / "elsewhere")
         self.assertEqual(self.run_main(archive(BAND))[0], 1)
-        self.assertEqual(band_receive.main([str(self.site)], io.BytesIO(b"")), 2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(band_receive.main([str(self.site)], io.BytesIO(b"")), 2)
 
 
 if __name__ == "__main__":
