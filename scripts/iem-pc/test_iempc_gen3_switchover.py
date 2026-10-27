@@ -289,13 +289,12 @@ class SwitchTests(Base):
         self.assertEqual(self.card_name, SPARE)
 
     def test_a_signal_during_the_undo_does_not_cut_it_short(self) -> None:
-        import os
         import signal
         original = self.box
 
         def box(host, command, stdin, timeout):
             if command == sw.STOP and "url to pc" in self.events:   # the undo's stop
-                os.kill(os.getpid(), signal.SIGTERM)
+                signal.raise_signal(signal.SIGTERM)
             return original(host, command, stdin, timeout)
         self.fail_at = "url to box"
         with mock.patch.object(sw.data, "box", box):
@@ -304,22 +303,20 @@ class SwitchTests(Base):
         self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
 
     def test_sighup_during_the_switch_is_undone(self) -> None:
-        import os
         import signal
 
         def mirror(ip_mod, card, ours, also=()):
-            os.kill(os.getpid(), signal.SIGHUP)
+            signal.raise_signal(signal.SIGHUP)
             return 29, None
         with mock.patch.object(sw.switch, "mirror", mirror), self.assertRaises(SystemExit):
             self.run_main("gen3-switch", "to-3")
         self.assertEqual((self.side(), self.card_name, self.box_running), (2, CARD, False))
 
     def test_sigterm_during_the_switch_is_undone(self) -> None:
-        import os
         import signal
 
         def mirror(ip_mod, card, ours, also=()):
-            os.kill(os.getpid(), signal.SIGTERM)
+            signal.raise_signal(signal.SIGTERM)
             return 29, None
         before = signal.getsignal(signal.SIGTERM)
         with mock.patch.object(sw.switch, "mirror", mirror), self.assertRaises(SystemExit):
