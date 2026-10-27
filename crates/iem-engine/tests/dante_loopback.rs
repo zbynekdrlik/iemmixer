@@ -40,7 +40,7 @@ use iem_dante::media::ring::Ring;
 use iem_dante::media::rx::{Receiver, RxCounts};
 use iem_dante::media::source::Source;
 use iem_dante::media::tx::{LaneCounts, Transmitter, ns_of};
-use iem_dante::stream::{Blocks, Map, Pump, PumpStats, PumpView, Timing};
+use iem_dante::stream::{Blocks, Map, Pump, PumpStats, PumpView, Timing, WORK_MARGIN};
 use iem_dante::subscribe::Answer;
 use iem_dante::subscribe::resolve::{Advertised, Own, Resolver};
 use iem_engine::cmd::push_group;
@@ -125,6 +125,7 @@ fn device(dir: &Path) -> Device {
         sample_rate: RATE,
         encoding: BITS,
         latency_ns: 1_000_000,
+        work_margin: WORK_MARGIN,
         state_file: dir.join("state.toml"),
     })
     .unwrap()
