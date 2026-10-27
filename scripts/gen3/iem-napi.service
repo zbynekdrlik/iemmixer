@@ -1,0 +1,40 @@
+# The Gen 3 box's Dante interface's packet priority (#72 phase D, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md choice 1, Task 9's
+# napi step); rules in .claude/rules/gen3.md. Installed and enabled by
+# scripts/gen3/provision-root.sh with its helper
+# /usr/local/lib/iemmixer/napi-priority (scripts/gen3/napi-priority): threaded
+# NAPI on the Dante interface, its NAPI threads SCHED_FIFO 60 on core 0 and
+# its interrupts on core 0, each value read back, at every boot before the
+# box's clock (dantesync) and the stack.
+#
+# Public repository (P6): the interface comes from the file deploy.sh writes
+# on the box, /etc/iemmixer/iem-dante.env (IEM_DANTE_IFACE=), so this unit
+# cannot name the interface's device unit; the helper waits for the interface
+# instead (at most 30 s: udev names it). A box no deploy has written that file
+# on yet skips the unit (a condition, never a failure); provision applies it
+# once the file is there.
+#
+# Never part of the stack: "ide event" stops nothing here, and a failure here
+# holds back neither dantesync nor the stack (ordering only, no Requires=).
+
+[Unit]
+Description=iemmixer Gen 3: the Dante interface's packet priority (threaded NAPI, SCHED_FIFO 60, core 0)
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+ConditionPathExists=/etc/iemmixer/iem-dante.env
+After=systemd-udev-trigger.service
+Before=dantesync.service iem-engine.service iem-dante.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/iemmixer/iem-dante.env
+ExecStart=/usr/local/lib/iemmixer/napi-priority ${IEM_DANTE_IFACE}
+# The helper's own waits (30 s for the interface, 5 s for its threads) fit;
+# a stop runs nothing (the values stay until the next boot) and is never a
+# kill (I8).
+TimeoutStartSec=60
+TimeoutStopSec=10
+SendSIGKILL=no
+
+[Install]
+WantedBy=multi-user.target

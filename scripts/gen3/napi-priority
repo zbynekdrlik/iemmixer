@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# The Gen 3 box's Dante interface's packet priority (#72 phase D, plan
+# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md choice 1, Task 9's
+# napi step; rules in .claude/rules/gen3.md). The Linux counterpart of Waves
+# SoundGrid's in-kernel packet priority and of dantesync's pcap path on
+# Windows: the kernel stamps a PTP packet when it processes it, and the box's
+# SCHED_FIFO audio threads (45, 40) can push that processing back; measured on
+# the box, this priority narrowed the clock's wander by a third (owner,
+# 2026-10-26, zbynekdrlik/dantesync#136).
+#
+#   napi-priority <interface>          set every value, then read each back
+#   napi-priority --check <interface>  read only: exit 0 when every value holds
+#
+# - /sys/class/net/<interface>/threaded 1: the interface's NAPI processing in
+#   kernel threads of their own (napi/<interface>-<id>, one a queue);
+# - each such thread SCHED_FIFO 60 (above dantesync's 50 and every audio
+#   thread) and pinned to core 0 (chrt, taskset);
+# - each interrupt a line of /proc/interrupts names the interface (<interface>
+#   or <interface>-<queue>) on core 0 (/proc/irq/<n>/smp_affinity_list).
+#
+# Run as root by iem-napi.service at boot (before dantesync and the stack),
+# installed and enabled by provision-root.sh at
+# /usr/local/lib/iemmixer/napi-priority. It waits for the interface (udev
+# names it; at most IEM_NAPI_IFACE_WAIT tenths of a second, 300) and, after
+# threaded is set, for its NAPI threads (IEM_NAPI_THREAD_WAIT, 50). Any value
+# that does not read back as set fails it: exit 1; 2 for its command line.
+# IEM_NAPI_SYS and IEM_NAPI_PROC (default /sys, /proc) are the tests' seams.
+# It names no interface, address or name in its output (P6): the interface
+# comes from the box's /etc/iemmixer/iem-dante.env.
+
+SYS="${IEM_NAPI_SYS:-/sys}"
+PROC="${IEM_NAPI_PROC:-/proc}"
+PRIORITY=60
+CORE=0
+# SCHED_FIFO in /proc/<pid>/stat's policy field.
+FIFO=1
+IFACE_WAIT="${IEM_NAPI_IFACE_WAIT:-300}"
+THREAD_WAIT="${IEM_NAPI_THREAD_WAIT:-50}"
+
+die() {
+  echo "napi-priority: $*" >&2
+  exit 1
+}
+
+usage() {
+  echo "napi-priority: $*" >&2
+  echo "usage: napi-priority [--check] <interface>" >&2
+  exit 2
+}
+
+say() {
+  echo "napi-priority: $*" >&2
+}
+
+check_only=0
+if [ "${1:-}" = --check ]; then
+  check_only=1
+  shift
+fi
+[ $# -eq 1 ] || usage "one interface name, nothing else"
+IF="$1"
+[[ "$IF" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || usage "the interface is not an interface name"
+for wait in "$IFACE_WAIT" "$THREAD_WAIT"; do
+  [[ "$wait" =~ ^[0-9]{1,4}$ ]] || usage "IEM_NAPI_IFACE_WAIT and IEM_NAPI_THREAD_WAIT are tenths of a second"
+done
+
+# The pids of the interface's NAPI threads (`napi/<interface>-<id>`, read from
+# /proc/<pid>/comm, the kernel thread's whole name), one a line. A process
+# that ends between the listing and the read is passed over.
+napi_pids() {
+  local comm_file comm id pid
+  for comm_file in "$PROC"/[0-9]*/comm; do
+    [ -f "$comm_file" ] || continue
+    if ! comm="$(cat -- "$comm_file" 2> /dev/null)"; then continue; fi
+    [[ "$comm" == "napi/$IF-"* ]] || continue
+    id="${comm#"napi/$IF-"}"
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    pid="${comm_file#"$PROC"/}"
+    echo "${pid%/comm}"
+  done
+}
+
+# The interrupts a line of /proc/interrupts names the interface on (a word
+# that is the interface or starts with it and a dash, a trailing comma of a
+# shared line dropped), one number a line.
+interface_irqs() {
+  awk -v ifc="$IF" '
+    $1 ~ /^[0-9]+:$/ {
+      for (i = 2; i <= NF; i++) {
+        w = $i
+        sub(/,$/, "", w)
+        if (w == ifc || index(w, ifc "-") == 1) {
+          n = $1
+          sub(/:$/, "", n)
+          print n
+          break
+        }
+      }
+    }
+  ' "$PROC/interrupts"
+}
+
+# "<policy> <rt_priority>" of a thread, from /proc/<pid>/stat (fields 41 and
+# 40; the fields after the comm's closing parenthesis start at field 3).
+thread_sched() {
+  local stat rest
+  local -a field
+  stat="$(cat -- "$PROC/$1/stat")"
+  rest="${stat##*) }"
+  read -r -a field <<< "$rest"
+  echo "${field[38]} ${field[37]}"
+}
+
+# The cores a thread may run on (Cpus_allowed_list of /proc/<pid>/status).
+thread_cpus() {
+  awk -F'\t' '$1 == "Cpus_allowed_list:" { print $2 }' "$PROC/$1/status"
+}
+
+# Every value as it should be (0) or not (1, each one that is not said).
+check() {
+  local ok=0 threaded text pid sched cpus irq affinity
+  local -a pids=() irqs=()
+  threaded="$(cat -- "$SYS/class/net/$IF/threaded")"
+  if [ "$threaded" != 1 ]; then
+    say "threaded NAPI is off on the Dante interface ($threaded, not 1)"
+    ok=1
+  fi
+  text="$(napi_pids)"
+  if [ -n "$text" ]; then mapfile -t pids <<< "$text"; fi
+  if [ "${#pids[@]}" -eq 0 ]; then
+    say "the Dante interface has no NAPI thread"
+    ok=1
+  fi
+  for pid in "${pids[@]}"; do
+    sched="$(thread_sched "$pid")"
+    if [ "$sched" != "$FIFO $PRIORITY" ]; then
+      say "NAPI thread $pid: policy and priority $sched, not $FIFO $PRIORITY (SCHED_FIFO $PRIORITY)"
+      ok=1
+    fi
+    cpus="$(thread_cpus "$pid")"
+    if [ "$cpus" != "$CORE" ]; then
+      say "NAPI thread $pid runs on cores $cpus, not $CORE"
+      ok=1
+    fi
+  done
+  text="$(interface_irqs)"
+  if [ -n "$text" ]; then mapfile -t irqs <<< "$text"; fi
+  if [ "${#irqs[@]}" -eq 0 ]; then
+    say "no interrupt of /proc/interrupts names the Dante interface"
+    ok=1
+  fi
+  for irq in "${irqs[@]}"; do
+    affinity="$(cat -- "$PROC/irq/$irq/smp_affinity_list")"
+    if [ "$affinity" != "$CORE" ]; then
+      say "interrupt $irq runs on cores $affinity, not $CORE"
+      ok=1
+    fi
+  done
+  return "$ok"
+}
+
+if [ "$check_only" = 1 ]; then
+  [ -d "$SYS/class/net/$IF" ] || die "the Dante interface is not there"
+  check
+  exit 0
+fi
+
+# The interface, once udev has named it.
+for ((n = 0; ; n++)); do
+  [ ! -d "$SYS/class/net/$IF" ] || break
+  [ "$n" -lt "$IFACE_WAIT" ] || die "the Dante interface did not appear within $IFACE_WAIT tenths of a second"
+  sleep 0.1
+done
+
+echo 1 > "$SYS/class/net/$IF/threaded"
+
+# The kernel starts one thread a NAPI instance once threaded is set.
+pids_text=""
+for ((n = 0; ; n++)); do
+  pids_text="$(napi_pids)"
+  [ -z "$pids_text" ] || break
+  [ "$n" -lt "$THREAD_WAIT" ] || die "threaded NAPI is on, but the Dante interface's NAPI threads did not appear within $THREAD_WAIT tenths of a second"
+  sleep 0.1
+done
+mapfile -t pids <<< "$pids_text"
+for pid in "${pids[@]}"; do
+  chrt -f -p "$PRIORITY" "$pid"
+  taskset -p -c "$CORE" "$pid" > /dev/null
+done
+
+irqs_text="$(interface_irqs)"
+[ -n "$irqs_text" ] || die "no interrupt of /proc/interrupts names the Dante interface"
+mapfile -t irqs <<< "$irqs_text"
+for irq in "${irqs[@]}"; do
+  echo "$CORE" > "$PROC/irq/$irq/smp_affinity_list"
+done
+
+check || die "a value did not read back as set (above)"
+echo "napi-priority: threaded NAPI on; ${#pids[@]} NAPI threads SCHED_FIFO $PRIORITY on core $CORE; ${#irqs[@]} interrupts on core $CORE"
