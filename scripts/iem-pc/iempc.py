@@ -95,7 +95,9 @@ and GEN3_DANTE_NAME (optional: our Gen 3 device's unicast IPv4 address on
 the Dante network and its device name; `gen3-mirror` refuses without them
 and the card's keys: iempc_gen3_switch.py, #72 phase E); `gen3-data` reads
 the PC's band files (PC_ROOT) and writes them onto GEN3_HOST
-(iempc_gen3_data.py).
+(iempc_gen3_data.py); GEN3_PUBLIC_URL (optional: the band's public https://
+URL, read by `gen3-tunnel` to see which connector serves it,
+iempc_gen3_tunnel.py).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -122,6 +124,7 @@ import iempc_event
 import iempc_gen3
 import iempc_gen3_data
 import iempc_gen3_switch
+import iempc_gen3_tunnel
 import iempc_live
 import iempc_roster
 import iempc_shadow
@@ -287,6 +290,12 @@ def cmd_gen3_data(ctx: Ctx) -> int:
     return iempc_gen3_data.run(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_tunnel(ctx: Ctx) -> int:
+    """The band's tunnel connector between the PC and the Gen 3 box; the code lives in iempc_gen3_tunnel.py (#72
+    phase E)."""
+    return iempc_gen3_tunnel.run(ctx, sys.modules[__name__])
+
+
 def cmd_dispatch_hil(ctx: Ctx) -> int:
     """The ops hil.yml dispatch; the code lives in iempc_bundle.py (#36)."""
     return iempc_bundle.cmd_dispatch_hil(ctx, sys.modules[__name__])
@@ -348,6 +357,8 @@ COMMANDS: dict[str, Spec] = {
     "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
     # Reads the PC, writes only the Gen 3 box (#72 phase E).
     "gen3-data": Spec(cmd_gen3_data, pc=True, dev_time=True, locked=True),
+    # Not dev time: `to-pc` is the way back to 2.x during an event too; `token` and `to-box` refuse the flag.
+    "gen3-tunnel": Spec(cmd_gen3_tunnel, pc=True, dev_time=False, locked=True),
 }
 
 
@@ -405,6 +416,10 @@ def build_parser() -> argparse.ArgumentParser:
     mirror = sub.add_parser("gen3-mirror")
     mirror.add_argument("--dry-run", action="store_true", help="list the changes, send nothing")
     mirror.add_argument("--clear", action="store_true", help="unsubscribe every RX of our device instead")
+    tunnel = sub.add_parser("gen3-tunnel")
+    tunnel.add_argument("verb", choices=("token", "to-box", "to-pc"),
+                        help="token: the PC's connector token into the box's credential; to-box / to-pc: which "
+                             "connector serves the band's public URL")
     data = sub.add_parser("gen3-data")
     data.add_argument("--pepper", action="store_true",
                       help="also the PC's PIN pepper into the box's credential (replaces the box's own)")
