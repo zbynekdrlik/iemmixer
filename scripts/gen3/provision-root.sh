@@ -29,6 +29,15 @@ set -euo pipefail
 #             live guard).
 #   folders   /etc/iemmixer 0755, /etc/credstore.encrypted 0700 root,
 #             /var/lib/iemmixer/mint 0700 iemmixer (gen3-mix's tokens).
+#   state     the stack's state the service user's: /var/lib/iemmixer and
+#             /var/lib/iem-dante 0750 iemmixer:iemmixer (made when missing;
+#             one that is a link refused), and when anything under them is
+#             another user's or group's (phase C ran the stack as the admin),
+#             `chown -R -h` of both, never through a link, read back; modes
+#             kept, nothing deleted. systemd's StateDirectory= takes a tree
+#             over only at a unit's start (and not when its top folder is
+#             right), while deploy.sh --pins writes site/secrets as the
+#             service user before any start.
 #   pepper    only when absent: 32 random bytes straight into `systemd-creds
 #             encrypt --name=pepper --with-key=auto` (the TPM2 with the host
 #             key when the box has one, else the host key) under umask 077 as
@@ -78,6 +87,10 @@ APT_UNITS=(unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer)
 SLEEP_UNITS=(sleep.target suspend.target hibernate.target hybrid-sleep.target)
 KERNEL_PACKAGES=('linux-generic*' 'linux-image-generic*' 'linux-headers-generic*')
 CREDENTIAL=/etc/credstore.encrypted/iemmixer-pepper
+# The stack's state folders (the units' StateDirectory=), and their paths
+# under this run's root.
+STATE_DIRS=(/var/lib/iemmixer /var/lib/iem-dante)
+STATE_PATHS=("$R${STATE_DIRS[0]}" "$R${STATE_DIRS[1]}")
 SECRETS=/var/lib/iemmixer/site/secrets
 JOURNAL_CONF=/etc/systemd/journald.conf.d/50-iemmixer.conf
 AUTO_UPGRADES=/etc/apt/apt.conf.d/20auto-upgrades
@@ -442,6 +455,32 @@ step_folders() {
   put_dir 0700 "$SERVICE_USER" "$SERVICE_USER" /var/lib/iemmixer/mint
 }
 
+# The first path under the stack's state folders (the folders included) that
+# is not owned by the service user and its group, empty when none: the
+# question verify_box.py's `state` check asks. -P: never through a link.
+foreign_state() {
+  find -P "${STATE_PATHS[@]}" -not -user "$SERVICE_USER" -print -quit \
+    -o -not -group "$SERVICE_USER" -print -quit
+}
+
+step_state() {
+  local dir found
+  for dir in "${STATE_DIRS[@]}"; do
+    if [ -L "$R$dir" ] || { [ -e "$R$dir" ] && [ ! -d "$R$dir" ]; }; then
+      die "$dir is no folder: the stack's state is never taken over through it; look at it"
+    fi
+  done
+  for dir in "${STATE_DIRS[@]}"; do
+    put_dir 0750 "$SERVICE_USER" "$SERVICE_USER" "$dir"
+  done
+  found="$(foreign_state)" || die "the stack's state folders could not be searched (find)"
+  [ -n "$found" ] || return 0
+  chown -R -h "$SERVICE_USER:$SERVICE_USER" -- "${STATE_PATHS[@]}"
+  changed=1
+  found="$(foreign_state)" || die "the stack's state folders could not be searched (find) after chown"
+  [ -z "$found" ] || die "the stack's state is not all the service user's after chown -R -h"
+}
+
 step_pepper() {
   local credential="$R$CREDENTIAL" mode
   if [ -e "$credential" ] || [ -L "$credential" ]; then
@@ -683,7 +722,7 @@ step_sudoers() {
   changed=1
 }
 
-for step in user folders pepper phase-c journal apt sleep swap clock napi stack sudoers; do
+for step in user folders state pepper phase-c journal apt sleep swap clock napi stack sudoers; do
   changed=0
   "step_${step//-/_}"
   if [ "$changed" = 1 ]; then

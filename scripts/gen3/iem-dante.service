@@ -59,8 +59,11 @@ RestartPreventExitStatus=2
 TimeoutStopSec=10
 SendSIGKILL=no
 # /var/lib/iem-dante, owned by the service user: the config's state_file
-# (the renamed names and the RX subscriptions) lives there.
+# (the renamed names and the RX subscriptions) lives there. 0750 as
+# provision makes it: systemd sets it to this mode at every start (0755
+# unset), and the engine's unit names the same.
 StateDirectory=iem-dante
+StateDirectoryMode=0750
 # /run/iem-dante, the service user's, open to its group (0750; the socket
 # 0660): the control socket (iem-dante-dev ctl status|source|check), which
 # the admin user, in the group `iemmixer`, reaches; gone when the service

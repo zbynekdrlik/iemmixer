@@ -62,7 +62,10 @@ SendSIGKILL=no
 # /var/lib/iemmixer (the site folder deploy.sh fills, the engine's state in
 # engine/) and /var/lib/iem-dante (the device's state file and its
 # subscriptions, where phase B's device kept them), owned by the service user.
+# 0750 as provision makes them: systemd sets them to this mode at every start
+# (0755 unset), and the server's and the device's units name the same.
 StateDirectory=iemmixer iem-dante
+StateDirectoryMode=0750
 # /run/iemmixer (the engine's pipes, engine.sock and engine.sock.media) and
 # /run/iem-dante (the device's control socket at its phase B path, so
 # `iem-dante-dev ctl status` reads the engine-hosted device), the service
