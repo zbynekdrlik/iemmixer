@@ -33,16 +33,6 @@ class Channel:
         self.number, self.name, self.friendly_name = number, str(number), label
 
 
-class Subscription:
-    """netaudio's DanteSubscription as get_controls fills it: the RX channel by
-    its name (netaudio keeps no number on it), the TX channel and device, the
-    status code."""
-
-    def __init__(self, rx_name: str, tx_channel: str, tx_device: str, status: int) -> None:
-        self.rx_channel_name, self.tx_channel_name, self.tx_device_name = rx_name, tx_channel, tx_device
-        self.status_code = status
-
-
 class Card:
     """The fake card's state, shared by every device opened on it (a fresh
     read after a write sees the write)."""
@@ -59,7 +49,6 @@ class Card:
         self.no_counts = False                        # names itself, reports no channel counts
         self.after_write = None                       # called after each write that returned
         self.keeps_name = False                       # set_name returns, the name stays
-        self.subs: dict[int, tuple[str, str, int]] = {}   # rx number: (tx channel, tx device, status)
         self.reads = 0
 
     def device(self, ip: str):
@@ -79,7 +68,6 @@ class Device:
         self.rx_count = self.tx_count = 0
         self.tx_channels: dict = {}
         self.rx_channels: dict = {}
-        self.subscriptions: list = []
 
     async def get_controls(self) -> None:
         self.card.calls.append(("get_controls",))
@@ -94,7 +82,6 @@ class Device:
         self.tx_count, self.rx_count = len(self.card.labels["tx"]), len(self.card.labels["rx"])
         self.tx_channels = {n: Channel(n, v) for n, v in self.card.labels["tx"].items()}
         self.rx_channels = {n: Channel(n, v) for n, v in self.card.labels["rx"].items()}
-        self.subscriptions = [Subscription(self.rx_channels[n].name, *sub) for n, sub in self.card.subs.items()]
         if self.card.partial:
             channels = getattr(self, f"{self.card.partial}_channels")
             del channels[max(channels)]
@@ -298,32 +285,6 @@ class HelperTests(unittest.TestCase):
             self.assertTrue(err.startswith("dante_card: "), new)
         self.assertEqual((self.card.opened, self.card.calls), ([], []))
         self.assertEqual(self.rename("Z" * 31)[0], 0)   # 31 characters: the longest Dante holds
-
-    def test_subscriptions_prints_each_subscribed_rx_channel_by_number(self) -> None:
-        # Gen 3 phase E (#72): the card's RX table, mirrored onto our device.
-        self.card.subs = {1: ("01 ZYXQW mic", "zyxqw-stagebox", 9), 3: ("3", NAME, 4)}
-        code, out, err = self.run_helper("subscriptions", IP, NAME)
-        self.assertEqual(code, 0, err)
-        self.assertEqual(out.count("\n"), 1)
-        self.assertEqual(json.loads(out), {"name": NAME, "rx_count": 4, "rx": {
-            "1": {"tx_channel": "01 ZYXQW mic", "tx_device": "zyxqw-stagebox", "status": 9},
-            "3": {"tx_channel": "3", "tx_device": NAME, "status": 4}}})
-        self.assertEqual(self.writes(), [])
-        # Another device, or a silent one, is refused as for a read.
-        self.card.name = "Qwxyz-Other-Card"
-        self.assertEqual(self.run_helper("subscriptions", IP, NAME)[:2], (1, ""))
-
-    def test_a_subscription_whose_rx_channel_is_not_on_the_card_is_an_incomplete_read(self) -> None:
-        self.card.subs = {2: ("x", "zyxqw-stagebox", 9)}
-        original = Device.get_controls
-
-        async def renamed_rx(device):
-            await original(device)
-            device.subscriptions[0].rx_channel_name = "zyxqw-gone"
-        with mock.patch.object(Device, "get_controls", renamed_rx):
-            code, out, err = self.run_helper("subscriptions", IP, NAME)
-        self.assertEqual((code, out), (1, ""))
-        self.assertIn("a subscription names no rx channel of the card", err)
 
     def test_a_channel_the_card_lacks_writes_nothing(self) -> None:
         changes = [{"type": "tx", "channel": 1, "label": "ZYXQW inear L 01"},

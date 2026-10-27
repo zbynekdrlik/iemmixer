@@ -1,11 +1,21 @@
-"""ARC subscription writes (opcode 0x3010) by unicast: the one Dante command
-the Gen 3 tools send themselves (#72 phase E). netaudio 0.4.2 refuses a
-self-subscription and a channel name with a space (.claude/rules/gen3.md),
-so the packet is built here, the layout phases B-D sent by hand: a 10-byte
-header (0x27ff, the length, a sequence, the opcode, 0), then `02 01`, the RX
-channel, the offsets of the TX channel's and the TX device's names from the
-packet's start (both 0: unsubscribe), then the two names, each NUL-ended.
-The reply's last header word is its status: 1 is done.
+"""ARC by unicast for Gen 3 phase E (#72): a device's RX table read
+(0x1002 its name, 0x1000 its counts, 0x3000 its RX pages) and subscription
+writes (0x3010). netaudio 0.4.2 refuses a self-subscription and a channel
+name with a space (.claude/rules/gen3.md), and it pages RX by whole pages of
+16, so it never reads the last 8 of our device's 136; both are done here.
+
+Every request is a 10-byte header (0x27ff, the length, a sequence, the
+opcode, a word that is 0 in a request and the status in a reply: 1 done,
+0x8112 more to come on a page) and a body. 0x3000's body is `0001`, the
+first RX channel wanted, `0000`; a reply page is `[slots, count]` and
+`count` 20-byte descriptors (the channel, a word, the shared descriptor's
+offset, the TX channel's, the TX device's and the RX channel's name
+offsets, two status words), names NUL-ended at offsets from the packet's
+start; a page may end early (its size), so the next asks from the channel
+after its last. A TX device "." is the device itself; a TX channel offset 0
+with a TX device names the RX channel's own name. 0x3010's body is `02 01`,
+the RX channel, the offsets of the TX channel's and the TX device's names
+(both 0: unsubscribe), then the two names.
 
 Pure building and reading, plus `send`, the one socket call (tests replace
 it). Names and addresses are never printed by this module."""
@@ -16,8 +26,10 @@ import struct
 
 ARC_PORT = 4440
 OPCODE = 0x3010
+NAME, COUNTS, RX_PAGE = 0x1002, 0x1000, 0x3000
 HEADER = 10
 DONE = 1
+MORE = 0x8112
 MAX_RX = 1024
 MAX_NAME = 31
 # Characters Dante refuses in a channel label (dante_card.FORBIDDEN).
@@ -49,14 +61,76 @@ def subscription(rx: int, tx_channel: str | None, tx_device: str | None, seq: in
     return struct.pack(">HHHHH", 0x27FF, HEADER + len(body), seq, OPCODE, 0) + body
 
 
-def status(reply: bytes, seq: int) -> int:
-    """The reply's status word, once it is the reply to `seq`'s 0x3010."""
+def request(opcode: int, body: bytes, seq: int) -> bytes:
+    """A request: the header, then `body`."""
+    return struct.pack(">HHHHH", 0x27FF, HEADER + len(body), seq, opcode, 0) + body
+
+
+def status(reply: bytes, seq: int, opcode: int = OPCODE) -> int:
+    """The reply's status word, once it is the reply to `seq`'s `opcode`."""
     if len(reply) < HEADER:
         raise ValueError("a reply shorter than its header")
-    _, length, got, opcode, word = struct.unpack(">HHHHH", reply[:HEADER])
-    if got != seq or opcode != OPCODE or length != len(reply):
+    _, length, got, op, word = struct.unpack(">HHHHH", reply[:HEADER])
+    if got != seq or op != opcode or length != len(reply):
         raise ValueError("not the reply to this request")
     return word
+
+
+def label(reply: bytes, offset: int) -> str | None:
+    """The NUL-ended name at `offset`, None for offset 0."""
+    if offset == 0:
+        return None
+    end = reply.find(b"\0", offset)
+    if offset >= len(reply) or end < 0:
+        raise ValueError("a name outside the reply")
+    return reply[offset:end].decode("utf-8", errors="replace")
+
+
+def rx_page(reply: bytes, own: str) -> list[dict]:
+    """A 0x3000 reply page's RX channels: {rx, name, tx_channel, tx_device,
+    status}, tx_* None when not subscribed."""
+    if len(reply) < HEADER + 2:
+        raise ValueError("a page shorter than its count")
+    count, out = reply[HEADER + 1], []
+    for i in range(count):
+        at = HEADER + 2 + 20 * i
+        if at + 16 > len(reply):
+            raise ValueError("a page shorter than its descriptors")
+        n, _, _, c_at, d_at, r_at, _, sub = struct.unpack(">8H", reply[at:at + 16])
+        name, device = label(reply, r_at), label(reply, d_at)
+        channel = (label(reply, c_at) or name) if device else None
+        out.append({"rx": n, "name": name, "tx_channel": channel, "tx_device": own if device == "." else device,
+                    "status": sub})
+    return out
+
+
+def read_rx(ip: str, seq: int = 0x4600) -> dict:
+    """The device at `ip`: {"name", "rx_count", "rx": {"<n>": {tx_channel,
+    tx_device, status}}}, its subscribed RX channels only, every page read."""
+    def ask(opcode: int, body: bytes) -> bytes:
+        nonlocal seq
+        seq = (seq + 1) & 0xFFFF
+        reply = send(ip, request(opcode, body, seq))
+        if status(reply, seq, opcode) not in (DONE, MORE):
+            raise ValueError(f"opcode {opcode:#06x} refused")
+        return reply
+
+    reply = ask(NAME, b"")
+    own = reply[HEADER:].split(b"\0", 1)[0].decode("utf-8", errors="replace")
+    reply = ask(COUNTS, b"")
+    if len(reply) < HEADER + 6:
+        raise ValueError("a counts reply shorter than its counts")
+    rx_count = struct.unpack(">H", reply[HEADER + 4:HEADER + 6])[0]
+    rx, first = {}, 1
+    while first <= rx_count:
+        page = rx_page(ask(RX_PAGE, struct.pack(">HHH", 1, first, 0)), own)
+        if not page or page[0]["rx"] != first or any(b["rx"] != a["rx"] + 1 for a, b in zip(page, page[1:])):
+            raise ValueError(f"the page from rx {first} is not that page")
+        for ch in page:
+            if ch["tx_device"] is not None:
+                rx[str(ch["rx"])] = {k: ch[k] for k in ("tx_channel", "tx_device", "status")}
+        first = page[-1]["rx"] + 1
+    return {"name": own, "rx_count": rx_count, "rx": rx}
 
 
 def send(ip: str, packet: bytes, timeout: float = 2.0) -> bytes:

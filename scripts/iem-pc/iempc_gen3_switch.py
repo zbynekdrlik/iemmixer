@@ -4,9 +4,10 @@ part is the RX mirror (Task 4): our own Dante device's RX table made equal
 to the IEM card's, so the box receives the inputs the card receives.
 
 `iempc gen3-mirror [--dry-run] [--clear]` (dev time, locked, no PC call):
-both tables are read by IP with dante_card.py's `subscriptions` verb (the
-card from DANTE_IEM_HOST/DANTE_IEM_NAME, our device from GEN3_DANTE_IP and
-GEN3_DANTE_NAME, NETAUDIO_PYTHON for both); `mirror_plan` lists what differs;
+both tables are read by IP over ARC (gen3_arc.read_rx: netaudio never reads
+the last 8 of our device's 136 RX), each device first naming itself as
+expected (the card DANTE_IEM_HOST/DANTE_IEM_NAME, our device GEN3_DANTE_IP
+and GEN3_DANTE_NAME); `mirror_plan` lists what differs;
 each change is one ARC 0x3010 to our device (gen3_arc), the flag read before
 each; then our table is read again and must need no change. `--clear`
 unsubscribes every RX of ours instead (the way back frees the sources'
@@ -18,12 +19,13 @@ log or a refusal's words."""
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 
 import dante_card
 import gen3_arc
-import iempc_dante
 
-OURS_KEYS = ("GEN3_DANTE_IP", "GEN3_DANTE_NAME")
+KEYS = (("DANTE_IEM_HOST", "DANTE_IEM_NAME", "the IEM card"), ("GEN3_DANTE_IP", "GEN3_DANTE_NAME",
+                                                               "our Gen 3 device"))
 SEQ_BASE = 0x4700   # our requests' sequence numbers (any 16-bit value; one per change)
 
 
@@ -68,20 +70,40 @@ def mirror_plan(card_doc, ours_doc, card_name: str, clear: bool = False) -> list
     return changes
 
 
-def ours_env(ip, env: dict[str, str]) -> iempc_dante.Card:
-    """Our device from the private env, as dante_card.py reads it (its IP, its
-    expected name, the netaudio python the card's keys name)."""
-    missing = [k for k in OURS_KEYS if not env.get(k)]
-    if missing:
-        raise ip.Refused(f"gen3-mirror: {', '.join(missing)} missing in the private env (GEN3_DANTE_IP: our Gen 3 "
-                         "device's IP on the Dante network, GEN3_DANTE_NAME: its device name)")
-    host, name = env["GEN3_DANTE_IP"], env["GEN3_DANTE_NAME"]
-    if not dante_card.unicast_ipv4(host):
-        raise ip.Refused("gen3-mirror: GEN3_DANTE_IP is not a unicast IPv4 address")
-    if not dante_card.DEVICE_NAME.fullmatch(name):
-        raise ip.Refused("gen3-mirror: GEN3_DANTE_NAME is not a Dante device name")
-    card = iempc_dante.card_env(ip, env, need=True)
-    return iempc_dante.Card(host, name, card.python)
+@dataclass(frozen=True)
+class Device:
+    """A Dante device from the private env: its unicast IP and its expected name."""
+    host: str
+    name: str
+
+
+def devices(ip, env: dict[str, str]) -> tuple[Device, Device]:
+    """The card and our device from the private env; a key missing or not
+    what it names refuses (its value is never printed)."""
+    out = []
+    for host_key, name_key, what in KEYS:
+        missing = [k for k in (host_key, name_key) if not env.get(k)]
+        if missing:
+            raise ip.Refused(f"gen3-mirror: {', '.join(missing)} missing in the private env ({what}'s IP on the "
+                             "Dante network and its device name)")
+        if not dante_card.unicast_ipv4(env[host_key]):
+            raise ip.Refused(f"gen3-mirror: {host_key} is not a unicast IPv4 address")
+        if not dante_card.DEVICE_NAME.fullmatch(env[name_key]):
+            raise ip.Refused(f"gen3-mirror: {name_key} is not a Dante device name")
+        out.append(Device(env[host_key], env[name_key]))
+    return out[0], out[1]
+
+
+def read(ip, device: Device, what: str) -> dict:
+    """`device`'s RX table, once it names itself as expected (StepError: no
+    answer or another device)."""
+    try:
+        doc = gen3_arc.read_rx(device.host)
+    except (OSError, ValueError) as e:
+        raise ip.StepError(f"gen3-mirror: {what} could not be read ({type(e).__name__})") from None
+    if doc["name"] != device.name:
+        raise ip.StepError(f"gen3-mirror: the device answering as {what} is not the expected one")
+    return doc
 
 
 def send_changes(ip, host: str, changes: list[dict]) -> tuple[list[dict], str | None]:
@@ -106,11 +128,10 @@ def send_changes(ip, host: str, changes: list[dict]) -> tuple[list[dict], str | 
 def run_mirror(ctx, ip) -> int:
     """`iempc gen3-mirror` (dev time, locked; no PC call)."""
     args = ctx.args
-    card = iempc_dante.card_env(ip, ctx.env, need=True)
-    ours = ours_env(ip, ctx.env)
-    card_doc = None if args.clear else iempc_dante.ask_card(ip, card, "subscriptions")
+    card, ours = devices(ip, ctx.env)
+    card_doc = None if args.clear else read(ip, card, "the card")
     try:
-        changes = mirror_plan(card_doc, iempc_dante.ask_card(ip, ours, "subscriptions"), card.name, args.clear)
+        changes = mirror_plan(card_doc, read(ip, ours, "our device"), card.name, args.clear)
     except PlanError as e:
         raise ip.Refused(f"gen3-mirror: {e}: nothing was sent") from None
     if args.dry_run:
@@ -118,7 +139,7 @@ def run_mirror(ctx, ip) -> int:
         return 0
     done, stopped = send_changes(ip, ours.host, changes)
     try:
-        left = mirror_plan(card_doc, iempc_dante.ask_card(ip, ours, "subscriptions"), card.name, args.clear)
+        left = mirror_plan(card_doc, read(ip, ours, "our device"), card.name, args.clear)
     except (PlanError, ip.StepError) as e:
         left, stopped = None, "; ".join(x for x in (stopped, f"not read back: {e}") if x)
     ip.emit({"gen3_mirror": {"sent": len(done), "of": len(changes), "left": left, "error": stopped}})

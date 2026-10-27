@@ -1,12 +1,11 @@
 """Tests for scripts/iem-pc/iempc_gen3_switch.py, Gen 3 phase E's RX mirror
 (#72; plan docs/superpowers/plans/2026-10-27-gen3-phase-e-band-test.md Task
-4). No card and no device exist in CI: dante_card.py's subprocess is a fake
-that answers `subscriptions` from two tables, and gen3_arc.send a fake
-device that applies each 0x3010 to ours. Every value is synthetic (P6:
-documentation IPs, invented names)."""
+4). No card and no device exist in CI: gen3_arc.send reaches two
+FakeDante devices (test_gen3_arc), which answer as our device's arc.rs does
+and apply each 0x3010. Every value is synthetic (P6: documentation IPs,
+invented names)."""
 from __future__ import annotations
 
-import json
 import struct
 import sys
 import unittest
@@ -16,9 +15,9 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import gen3_arc  # noqa: E402
-import iempc_dante as dante  # noqa: E402
 import iempc_gen3_switch as switch  # noqa: E402
 from iempc_test_support import Base, ip  # noqa: E402
+from test_gen3_arc import FakeDante, Network  # noqa: E402
 
 CARD_HOST, CARD = "192.0.2.10", "Zyxqw-Iem-Card"
 OURS_HOST, OURS = "192.0.2.20", "zyxqw-gen3"
@@ -62,130 +61,114 @@ class PlanTests(unittest.TestCase):
                 switch.mirror_plan(d, doc(4, {}), CARD)
 
 
-class Device:
-    """Our device as the 0x3010s reach it: each packet applied to its table,
-    answered with a status (1, or `refuse` for the RX channels named there)."""
-
-    def __init__(self, test: "MirrorCommandTests", rows: dict[int, tuple[str, str]]) -> None:
-        self.test, self.rows, self.packets, self.refuse = test, dict(rows), [], set()
-        self.after = None
-
-    def send(self, host: str, packet: bytes, timeout: float = 2.0) -> bytes:
-        self.test.assertEqual(host, OURS_HOST)   # only our own device is ever written
-        self.packets.append(packet)
-        _, _, seq, opcode, _ = struct.unpack(">HHHHH", packet[:10])
-        rx, c_at, d_at = struct.unpack(">HHH", packet[12:18])
-        word = 0x22 if rx in self.refuse else 1
-        if word == 1:
-            if c_at == 0:
-                self.rows.pop(rx, None)
-            else:
-                self.rows[rx] = (packet[c_at:packet.index(b"\0", c_at)].decode(),
-                                 packet[d_at:packet.index(b"\0", d_at)].decode())
-        if self.after:
-            self.after()
-        return struct.pack(">HHHHH", 0x27FF, 10, seq, opcode, word)
-
-
 class MirrorCommandTests(Base):
     def setUp(self) -> None:
         super().setUp()
-        python = self.tmp / "netaudio" / "bin" / "python"
-        python.parent.mkdir(parents=True)
-        python.write_text("", encoding="utf-8")
-        python.chmod(0o755)
         self.env_text = ip.env_path().read_text(encoding="utf-8")
         ip.env_path().write_text(self.env_text + f"DANTE_IEM_HOST={CARD_HOST}\nDANTE_IEM_NAME={CARD}\n"
-                                 f"NETAUDIO_PYTHON={python}\nGEN3_DANTE_IP={OURS_HOST}\nGEN3_DANTE_NAME={OURS}\n",
-                                 encoding="utf-8")
-        self.card = {1: ("01 mic", STAGEBOX), 2: ("talk", FOH), 125: ("125", CARD)}
-        self.card_count = 128
-        self.device = Device(self, {3: ("MIX 96", OURS)})
-        self.asked: list[tuple[str, str]] = []
-        for p in (mock.patch.object(dante, "helper", self.helper), mock.patch.object(gen3_arc, "send", self.device.send)):
-            p.start()
-            self.addCleanup(p.stop)
+                                 f"GEN3_DANTE_IP={OURS_HOST}\nGEN3_DANTE_NAME={OURS}\n", encoding="utf-8")
+        self.card = FakeDante(CARD, 128, {1: ("01 mic", STAGEBOX, 9), 2: ("talk", FOH, 9), 125: ("125", CARD, 4)})
+        self.device = FakeDante(OURS, 136, {3: ("MIX 96", OURS, 9), 135: ("125", CARD, 9)})
+        self.net = Network(**{CARD_HOST.replace(".", "_"): self.card, OURS_HOST.replace(".", "_"): self.device})
+        patcher = mock.patch.object(gen3_arc, "send", self.net.send)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def writes(self) -> list[tuple[str, bytes]]:
+        """Every 0x3010 sent, by host."""
+        out = []
+        for host, device in self.net.devices.items():
+            out += [(host, p) for p in device.packets if struct.unpack(">H", p[6:8])[0] == gen3_arc.OPCODE]
+        return out
 
     def raise_flag(self) -> None:
         ip.EVENT_NOW.parent.mkdir(parents=True, exist_ok=True)
         ip.EVENT_NOW.write_text("ide event\n", encoding="utf-8")
 
-    def helper(self, ip_mod, cmd: list[str], stdin: str) -> str:
-        verb, host, name = cmd[3], cmd[4], cmd[5]
-        self.asked.append((verb, host))
-        self.assertEqual(verb, "subscriptions")
-        if host == CARD_HOST:
-            self.assertEqual(name, CARD)
-            return json.dumps(doc(self.card_count, self.card)) + "\n"
-        self.assertEqual((host, name), (OURS_HOST, OURS))
-        return json.dumps(doc(136, self.device.rows)) + "\n"
-
     def test_the_mirror_makes_our_table_the_cards_and_reads_it_back(self) -> None:
         code, docs, err = self.run_main("gen3-mirror")
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.device.rows, {1: ("01 mic", STAGEBOX), 2: ("talk", FOH)})
-        self.assertEqual(docs, [{"gen3_mirror": {"sent": 3, "of": 3, "left": [], "error": None}}])
-        self.assertEqual(self.asked, [("subscriptions", CARD_HOST), ("subscriptions", OURS_HOST),
-                                      ("subscriptions", OURS_HOST)])
+        self.assertEqual(self.device.rows, {1: ("01 mic", STAGEBOX, 9), 2: ("talk", FOH, 9)})
+        self.assertEqual(docs, [{"gen3_mirror": {"sent": 4, "of": 4, "left": [], "error": None}}])
+        self.assertEqual({h for h, _ in self.writes()}, {OURS_HOST})   # the card is only read
         self.assertEqual((self.pc.calls, self.pc.scps), ([], []))   # no PC call
         # Run again: nothing differs, nothing is sent.
-        self.device.packets.clear()
+        before = len(self.writes())
         code, docs, err = self.run_main("gen3-mirror")
-        self.assertEqual((code, docs[0]["gen3_mirror"]["of"], self.device.packets), (0, 0, []), err)
+        self.assertEqual((code, docs[0]["gen3_mirror"]["of"], len(self.writes())), (0, 0, before), err)
 
     def test_a_dry_run_lists_the_changes_and_sends_nothing(self) -> None:
         code, docs, err = self.run_main("gen3-mirror", "--dry-run")
         self.assertEqual(code, 0, err)
-        self.assertEqual(docs[0]["gen3_mirror"]["changes"][0], {"rx": 1, "tx_channel": "01 mic", "tx_device": STAGEBOX})
-        self.assertEqual(self.device.packets, [])
+        self.assertEqual(docs[0]["gen3_mirror"]["changes"], [
+            {"rx": 1, "tx_channel": "01 mic", "tx_device": STAGEBOX},
+            {"rx": 2, "tx_channel": "talk", "tx_device": FOH},
+            {"rx": 3, "tx_channel": None, "tx_device": None},
+            {"rx": 135, "tx_channel": None, "tx_device": None}])
+        self.assertEqual(self.writes(), [])
 
     def test_clear_unsubscribes_every_rx_of_ours_without_reading_the_card(self) -> None:
-        self.device.rows[1] = ("01 mic", STAGEBOX)
         code, docs, err = self.run_main("gen3-mirror", "--clear")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.device.rows, {})
-        self.assertNotIn(("subscriptions", CARD_HOST), self.asked)
+        self.assertNotIn(CARD_HOST, self.net.hosts)
 
     def test_a_refused_change_stops_the_rest_and_fails(self) -> None:
         self.device.refuse.add(2)
         code, docs, err = self.run_main("gen3-mirror")
         self.assertEqual(code, 1)
         report = docs[0]["gen3_mirror"]
-        self.assertEqual((report["sent"], report["of"], len(report["left"])), (1, 3, 2))
+        self.assertEqual((report["sent"], report["of"], len(report["left"])), (1, 4, 3))
         self.assertIn("rx 2: status 0x0022", err)
-        self.assertEqual(self.device.rows, {1: ("01 mic", STAGEBOX), 3: ("MIX 96", OURS)})   # rx 3 never sent
+        self.assertEqual(set(self.device.rows), {1, 3, 135})   # rx 3 and 135 never sent
 
     def test_the_flag_stops_the_rest(self) -> None:
-        self.device.after = lambda: self.raise_flag()
+        self.device.after = lambda: self.raise_flag() if self.writes() else None
         code, docs, err = self.run_main("gen3-mirror")
         self.assertEqual(code, 1)
-        self.assertEqual(len(self.device.packets), 1)
-        self.assertIn("the flag appeared: 1 of 3 changes sent", docs[0]["gen3_mirror"]["error"])
+        self.assertEqual(len(self.writes()), 1)
+        self.assertIn("the flag appeared: 1 of 4 changes sent", docs[0]["gen3_mirror"]["error"])
 
     def test_the_command_is_dev_time_locked_and_refused_while_event_now(self) -> None:
         spec = ip.COMMANDS["gen3-mirror"]
         self.assertEqual((spec.fn, spec.pc, spec.dev_time, spec.locked), (ip.cmd_gen3_mirror, False, True, True))
         self.raise_flag()
         code, docs, err = self.run_main("gen3-mirror")
-        self.assertEqual((code, docs, self.asked), (1, [], []))
+        self.assertEqual((code, docs, self.net.hosts), (1, [], []))
         self.assertIn("runs only in dev time", err)
 
-    def test_missing_keys_send_nothing(self) -> None:
-        for drop in ("GEN3_DANTE_IP", "GEN3_DANTE_NAME", "DANTE_IEM_HOST"):
-            text = ip.env_path().read_text(encoding="utf-8")
-            ip.env_path().write_text("".join(line + "\n" for line in text.splitlines() if not line.startswith(drop)),
-                                     encoding="utf-8")
+    def test_missing_or_bad_keys_send_nothing(self) -> None:
+        for drop in ("GEN3_DANTE_IP", "GEN3_DANTE_NAME", "DANTE_IEM_HOST", "DANTE_IEM_NAME"):
+            ip.env_path().write_text("".join(line + "\n" for line in (self.env_text + f"DANTE_IEM_HOST={CARD_HOST}\n"
+                                     f"DANTE_IEM_NAME={CARD}\nGEN3_DANTE_IP={OURS_HOST}\nGEN3_DANTE_NAME={OURS}\n")
+                                     .splitlines() if not line.startswith(drop)), encoding="utf-8")
             code, docs, err = self.run_main("gen3-mirror")
             self.assertEqual((code, docs), (1, []), drop)
             self.assertIn(drop, err)
-        self.assertEqual(self.device.packets, [])
+        ip.env_path().write_text(self.env_text + f"DANTE_IEM_HOST={CARD_HOST}\nDANTE_IEM_NAME={CARD}\n"
+                                 f"GEN3_DANTE_IP=zyxqw.example\nGEN3_DANTE_NAME={OURS}\n", encoding="utf-8")
+        code, docs, err = self.run_main("gen3-mirror")
+        self.assertIn("GEN3_DANTE_IP is not a unicast IPv4 address", err)
+        self.assertEqual(self.net.hosts, [])
+
+    def test_another_device_or_no_answer_sends_nothing(self) -> None:
+        self.device.name = "zyxqw-other"
+        code, docs, err = self.run_main("gen3-mirror")
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("the device answering as our device is not the expected one", err)
+        self.assertNotIn("zyxqw-other", err)
+        del self.net.devices[OURS_HOST]
+        code, docs, err = self.run_main("gen3-mirror")
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("our device could not be read (TimeoutError)", err)
+        self.assertEqual(self.writes(), [])
 
     def test_a_card_rx_ours_lacks_sends_nothing(self) -> None:
-        self.card_count, self.card[137] = 140, ("x", STAGEBOX)
+        self.card.rx_count, self.card.rows[137] = 140, ("x", STAGEBOX, 9)
         code, docs, err = self.run_main("gen3-mirror")
         self.assertEqual((code, docs), (1, []))
         self.assertIn("the card's rx 137 is subscribed and our device has 136 rx channels: nothing was sent", err)
-        self.assertEqual(self.device.packets, [])
+        self.assertEqual(self.writes(), [])
 
 if __name__ == "__main__":
     unittest.main()
