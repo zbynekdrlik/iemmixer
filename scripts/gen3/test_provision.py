@@ -50,9 +50,14 @@ INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
 """
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "apt", "sleep", "swap", "clock", "napi",
-         "stack", "sudoers")
+         "display", "stack", "sudoers")
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "apt", "sleep",
-          "swap", "clock", "napi")
+          "swap", "clock", "napi", "display")
+# The display drivers' output polling (the kernel's drm_kms_helper.poll, root
+# only), and the tmpfiles.d file that turns it off at every boot.
+POLL = "sys/module/drm_kms_helper/parameters/poll"
+DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
+POLL_OFF = "w /sys/module/drm_kms_helper/parameters/poll - - - - N\n"
 STACK = ("iem-engine.service", "iem-server.service", "iem-dante.service")
 # The stack's state folders (the units' StateDirectory=), and find's question
 # about them: the first path not owned by iemmixer:iemmixer.
@@ -409,6 +414,16 @@ elif name == "chrt":
         fields[37], fields[38] = priority, "1"
         with open(proc_file(pid, "stat"), "w", encoding="utf-8") as f:
             f.write(head + ") " + " ".join(fields) + "\n")
+elif name == "systemd-tmpfiles":
+    # Its `w` lines: the argument written to a file that exists.
+    assert args[:1] == ["--create"] and len(args) == 2, args
+    if not os.environ.get("FAKE_TMPFILES_IGNORED"):
+        with open(args[1], encoding="utf-8") as f:
+            for line in f:
+                words = line.split()
+                if len(words) == 7 and words[0] == "w" and os.path.exists(ROOT + words[1]):
+                    with open(ROOT + words[1], "w", encoding="utf-8") as out:
+                        out.write(words[6] + "\n")
 elif name == "taskset":
     assert args[:2] == ["-p", "-c"], args
     cores, pid = args[2], args[3]
@@ -431,6 +446,13 @@ elif name == "sudo":
         sys.exit(0)
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
+    if rest[:1] == ["cat"] and len(rest) == 2:
+        path = ROOT + rest[1]
+        if not os.path.exists(path):
+            fail(f"cat: {rest[1]}: No such file or directory")
+        with open(path, encoding="utf-8") as f:
+            sys.stdout.write(f.read())
+        sys.exit(0)
     if rest[:1] == ["find"] and rest[2:] == ["-name", "pepper.test"]:
         base = ROOT + rest[1]
         if not os.path.isdir(base):
@@ -447,7 +469,7 @@ else:
 
 FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
               "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
-              "chrt", "taskset", "sudo", "find", "chown")
+              "chrt", "taskset", "sudo", "find", "chown", "systemd-tmpfiles")
 
 
 def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
@@ -553,6 +575,8 @@ class World(unittest.TestCase):
         write(r / "proc/meminfo", "MemTotal:       16123456 kB\nMemFree:         9000000 kB\n")
         write(r / "proc/swaps", SWAPS_HEADER)
         kernel_trees(r, applied=False)
+        # The i915 driver polls a box's display outputs every 10 s by default.
+        write(r / POLL, "Y\n", 0o600)
         units = {
             **{u: {"LoadState": "loaded", "UnitFileState": "disabled", "ActiveState": "inactive", "User": ADMIN,
                    "DropInPaths": f"/etc/systemd/system/{u}.d/10-user.conf"} for u in STACK},
@@ -742,6 +766,8 @@ class ProvisionRootTests(World):
             ["systemctl", "enable", "iem-napi.service"],
             ["systemctl", "restart", "iem-napi.service"],
             *napi_calls,
+            [*tmp_install, DISPLAY_CONF],
+            ["systemd-tmpfiles", "--create", DISPLAY_CONF],
             ["systemctl", "disable", "iem-dante.service"],
             ["install", "-D", "-m", "0440", "-o", "root", "-g", "root", "--", "<tmp>",
              "/etc/sudoers.d/.iemmixer-gen3.new"],
@@ -761,6 +787,10 @@ class ProvisionRootTests(World):
         self.assertEqual((r / "usr/local/lib/iemmixer/napi-priority").read_bytes(), NAPI.read_bytes())
         self.assertEqual((r / "usr/local/lib/iemmixer/napi-priority").stat().st_mode & 0o777, 0o755)
         self.assertEqual((r / "etc/systemd/system/iem-napi.service").read_bytes(), NAPI_UNIT.read_bytes())
+        display = (r / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8")
+        self.assertTrue(display.endswith(POLL_OFF), display)
+        self.assertEqual((r / DISPLAY_CONF.lstrip("/")).stat().st_mode & 0o777, 0o644)
+        self.assertEqual((r / POLL).read_text(encoding="utf-8"), "N\n")
         self.assertEqual((r / "etc/sudoers.d/iemmixer-gen3").stat().st_mode & 0o777, 0o440)
         self.assertFalse((r / "etc/sudoers.d/.iemmixer-gen3.new").exists())
         self.assertEqual((r / "etc/credstore.encrypted/iemmixer-pepper").stat().st_mode & 0o777, 0o600)
@@ -1001,6 +1031,40 @@ class ProvisionRootTests(World):
         self.assertEqual(r.returncode, 1)
         self.assertIn("iem-napi", r.stderr)
         self.assertEqual(self.steps(r).get("napi"), None)
+
+    def test_display_polling_is_turned_off_kept_off_and_a_box_without_it_has_nothing_to_turn_off(self) -> None:
+        # Live 4 on the box (#72 phase D): with no screen attached, the i915
+        # driver's output poll (every ~10 s, waking the GPU each time) held a
+        # CPU for ~2 ms, and the engine's pump, woken onto that CPU, missed
+        # its blocks: 66 re-bootstraps in 2 h, none in 30 minutes with the
+        # poll off.
+        self.provisioned()
+        poll = self.root / POLL
+        self.assertEqual(poll.read_text(encoding="utf-8"), "N\n")
+        # Set back on (by hand, or a kernel that ignored the file at boot):
+        # the next run sets it again and changes nothing else.
+        write(poll, "Y\n")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["display"], "changed")
+        self.assertEqual(self.writes(), [["systemd-tmpfiles", "--create", DISPLAY_CONF]])
+        self.assertEqual(poll.read_text(encoding="utf-8"), "N\n")
+        # One that does not take fails the run loudly.
+        write(poll, "Y\n")
+        r = self.provision(FAKE_TMPFILES_IGNORED="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("display output polling is still on", r.stderr)
+        self.assertIsNone(self.steps(r).get("display"))
+        # A box without the parameter (no display driver): the file is
+        # written, nothing to apply or read back.
+        shutil.rmtree(self.root / "sys/module/drm_kms_helper")
+        (self.root / DISPLAY_CONF.lstrip("/")).unlink()
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["display"], "changed")
+        self.assertIn("display: no display output polling on this box", r.stdout)
+        self.assertNotIn("systemd-tmpfiles", [c[0] for c in self.writes()])
+        self.assertTrue((self.root / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8").endswith(POLL_OFF))
 
     def test_swap_is_sized_to_the_memory_and_a_box_with_swap_keeps_its_own(self) -> None:
         for mem_kb, want in ((900_000, "2G"), (3_500_000, "4G"), (16_123_456, "8G")):
@@ -1294,6 +1358,7 @@ class VerifyTests(World):
                 "chrony.service is enabled or running beside dantesync"),
             "napi": (lambda: write(self.root / "proc/irq" / IRQS[0] / "smp_affinity_list", "0-3\n"),
                      "an interrupt of the Dante interface is not on core 0 alone"),
+            "display": (lambda: write(self.root / POLL, "Y\n"), "display output polling is on"),
         }
         self.assertEqual(sorted(cases), sorted(CHECKS))
         for check, (change, reason) in cases.items():
@@ -1348,6 +1413,10 @@ class VerifyTests(World):
              "a file of the stack's state is not the service user's"),
             ("state", lambda: shutil.rmtree(self.root / "var/lib/iem-dante"),
              "the stack's state folders cannot be searched (sudo -n find)"),
+            ("display", lambda: (self.root / DISPLAY_CONF.lstrip("/")).unlink(),
+             "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
+            ("display", lambda: write(self.root / DISPLAY_CONF.lstrip("/"), POLL_OFF.replace(" N", " Y")),
+             "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
         ]
         for check, change, reason in cases:
             with self.subTest(reason=reason):
@@ -1357,6 +1426,14 @@ class VerifyTests(World):
                 self.assertEqual(r.returncode, 1, r.stdout)
                 self.assertEqual(self.verify_line(r)[check], 0)
                 self.assertIn(f"verify_box: {check}: {reason}", r.stderr)
+
+    def test_a_box_without_display_output_polling_passes_display_on_the_file_alone(self) -> None:
+        self.good_box()
+        shutil.rmtree(self.root / "sys/module/drm_kms_helper")
+        r = self.verify()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.verify_line(r)["display"], 1)
+        self.assertNotIn("sudo -n cat /" + POLL, [" ".join(c["argv"]) for c in self.calls()])
 
     def test_before_the_first_phase_d_deploy_units_fails(self) -> None:
         # Phase C's units without their drop-ins name no user: verify says so
@@ -1372,8 +1449,9 @@ class VerifyTests(World):
         self.good_box()
         self.verify()
         sent = [" ".join(c["argv"]) for c in self.calls() if c["argv"][0] == "sudo"]
-        self.assertEqual(len(sent), 4)
+        self.assertEqual(len(sent), 5)
         self.assertIn(" ".join(["sudo", "-n", *FIND_STATE]), sent)
+        self.assertIn("sudo -n cat /" + POLL, sent)
         allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
         for runas, command, _listed in sudo_lines(sent):
             self.assertIn((runas, command), allowed, command)
