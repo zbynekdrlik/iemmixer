@@ -33,3 +33,5 @@ credentials.json
 .venv/
 venv/
 target/
+# The Playwright MCP's logs and snapshots of a local session (a dirty tree blocks deploy.sh)
+.playwright-mcp/
