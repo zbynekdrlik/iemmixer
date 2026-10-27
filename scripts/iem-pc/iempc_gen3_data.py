@@ -141,8 +141,9 @@ def quiet(host: str) -> bool:
     if len(states) != len(UNITS) or any(s not in ("inactive", "failed") for s in states):
         return False
     code, out, _ = box(host, TASKS, b"", BOX_S)
-    tasks = out.decode(errors="replace").split("\n")[:len(UNITS)]
-    return code == 0 and len(tasks) == len(UNITS) and all(t.strip() in ("0", "[not set]") for t in tasks)
+    # One value per unit, a blank line between units (as systemd prints them).
+    tasks = [line.strip() for line in out.decode(errors="replace").splitlines() if line.strip()]
+    return code == 0 and len(tasks) == len(UNITS) and all(t in ("0", "[not set]") for t in tasks)
 
 
 def stopped(ip, host: str) -> None:
