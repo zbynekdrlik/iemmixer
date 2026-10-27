@@ -15,6 +15,7 @@
 # tool sends is an expansion of a line here (test_deploy.py for deploy.sh;
 # test_iempc_gen3.py for iempc gen3-mix, the live guard's stop and "ide
 # event"'s stop; test_install_dantesync.py for install-dantesync.sh;
+# test_install_cloudflared.py for install-cloudflared.sh;
 # test_provision.py for verify_box.py, and that every line here is in the
 # rendered rule). provision.sh's own `sudo -n bash ... provision-root.sh` runs
 # on the admin's own passwordless rule (phase D) and never gets a line here:
@@ -85,6 +86,13 @@ root | systemctl disable --now time-sync-coordinator
 root | timedatectl set-ntp false
 root | systemctl enable dantesync
 root | systemctl restart dantesync
+
+# scripts/gen3/install-cloudflared.sh (phase E Task 6): the pinned release's
+# .deb, held, and the band's tunnel connector's unit (systemctl daemon-reload
+# is deploy's line above); never enabled or started here.
+root | dpkg -i .cache/cloudflared-install/cloudflared-linux-amd64.deb
+root | apt-mark hold cloudflared
+root | install -D -m 0644 .cache/cloudflared-install/iem-tunnel.service /etc/systemd/system/iem-tunnel.service
 
 # scripts/gen3/verify_box.py (read only): the rule itself, the pepper's
 # credential (mode, owner, size; never its bytes), no plain test pepper, the

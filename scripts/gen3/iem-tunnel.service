@@ -1,0 +1,64 @@
+# The band's tunnel connector on the Gen 3 box (#72 phase E, plan
+# docs/superpowers/plans/2026-10-27-gen3-phase-e-band-test.md Task 6, choice
+# 3): Cloudflare's cloudflared, installed with this unit by
+# scripts/gen3/install-cloudflared.sh (a pinned release, held); rules in
+# .claude/rules/gen3.md. It connects the band's remotely managed tunnel (its
+# ingress lives at Cloudflare, .claude/rules/tunnel-watchdog.md) and so
+# carries the band's public URL to the box's server on port 80
+# (iem-server.service), as the PC's connector does for the PC's server, with
+# the PC's flags: HTTP/2 (QUIC was blocked at an event) and the metrics
+# pinned on 127.0.0.1:20241 (its /ready counts the edge connections).
+#
+# Exactly one connector of the tunnel runs at a time, the PC's or this one:
+# two connectors of one tunnel share its traffic, so part of the band's
+# requests would reach the side that does not serve the band. The switch
+# tool (plan Task 6, iempc gen3-tunnel) decides: it stops the PC's connector,
+# waits until the tunnel has none, then starts this unit, and the reverse on
+# the way back. install-cloudflared.sh never enables or starts it.
+#
+# The tunnel's token is a systemd credential, never in a file in the clear,
+# on a command line or in the environment: made on the box by a later tool
+# (systemd-creds encrypt, root-only, as the PIN pepper is made), decrypted by
+# systemd into this unit's private credentials folder at each start, and
+# read by cloudflared from there (--token-file %d/tunnel; %d is that folder).
+# It runs as a dynamic user of its own: the connector needs nothing of the
+# service user's, and none of the band's data.
+
+[Unit]
+Description=iemmixer Gen 3: the band's tunnel connector (one connector runs, the PC's or the box's)
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+Wants=network-online.target
+After=network-online.target
+# It keeps trying: a venue network that is down for a while must not leave
+# the band's URL down once it is back, so no start limit stops it.
+StartLimitIntervalSec=0
+
+[Service]
+# Ready once cloudflared has registered a connection with Cloudflare's edge
+# (cloudflared's own unit's type and start bound); a start not ready within
+# 15 s fails and is tried again (below).
+Type=notify
+TimeoutStartSec=15
+DynamicUser=yes
+LoadCredentialEncrypted=tunnel:/etc/credstore.encrypted/iemmixer-tunnel
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --protocol http2 --metrics 127.0.0.1:20241 run --token-file %d/tunnel
+# Restarted after 1 s growing to 10 s in four steps, as the stack's units.
+Restart=on-failure
+RestartSec=1
+RestartSteps=4
+RestartMaxDelaySec=10
+# A stop is SIGTERM and a bounded wait (I8): cloudflared drains its
+# connections for up to 30 s (its grace period), so 45 s. One that does not
+# end within the bound is left running and the stop fails, never force-ended.
+TimeoutStopSec=45
+SendSIGKILL=no
+# No capability: an outbound connection and the metrics on a port above 1024.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
