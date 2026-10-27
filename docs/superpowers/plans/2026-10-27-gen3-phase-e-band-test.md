@@ -44,9 +44,9 @@
 
 **Files:** `scripts/iem-pc/iempc_gen3.py` (or a sibling module) and its tests; #72 for the numbers.
 
-- [ ] **Step 1:** 2.x: in a dev entry, the PC engine's loopback probe (`crates/iem-engine/src/latency.rs`, `iemmode status` → `loopback_samples`) on a spare card output looped to a spare card input (the card's own subscription, set for the test, read back and removed). Record the round trip and the card's own RX latency setting (by Dante Controller's read or the card's ARC, whichever answers).
-- [ ] **Step 2:** 3.x: gen3-mix's numbers (449 with 225 of the PC and the card: engine path D = 224) and the box's RX latency.
-- [ ] **Step 3:** The comparison on #72: both engine paths from source packet to TX packet, in samples and ms; the difference (recorded; it does not gate the band test).
+- [x] **Step 1:** 2.x: in a dev entry, the PC engine's loopback probe (`crates/iem-engine/src/latency.rs`, `iemmode status` → `loopback_samples`) on a spare card output looped to a spare card input (the card's own subscription, set for the test, read back and removed). Record the round trip and the card's own RX latency setting (by Dante Controller's read or the card's ARC, whichever answers).
+- [x] **Step 2:** 3.x: gen3-mix's numbers (449 with 225 of the PC and the card: engine path D = 224) and the box's RX latency.
+- [x] **Step 3:** The comparison on #72: both engine paths from source packet to TX packet, in samples and ms; the difference (recorded; it does not gate the band test). **Measured 2026-10-27:** 2.x 129 samples (1.344 ms, 5 bursts equal), 3.x 224 (2.333 ms); 95 samples, ~1 ms more on 3.x (#72).
 
 ### Task 2: The card's rename (`dante_card.py`)
 
