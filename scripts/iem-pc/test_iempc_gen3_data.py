@@ -145,7 +145,7 @@ class Gen3DataTests(Base):
         self.assertEqual(code, 0, err)
         self.assertEqual(docs[0]["gen3_data"]["pepper"], "replaced")
         self.assertEqual(self.commands()[-3:], [data.ENCRYPT, data.CHMOD, data.STAT])
-        self.assertEqual(self.sent[-2][1], PEPPER)
+        self.assertEqual([stdin for c, stdin in self.sent if c == data.ENCRYPT], [PEPPER])
         shown = json.dumps(docs) + err
         for form in (PEPPER.hex(), base64.b64encode(PEPPER).decode()):
             self.assertNotIn(form, shown)
