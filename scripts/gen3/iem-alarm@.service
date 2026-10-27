@@ -6,9 +6,13 @@
 # when that unit stays down: a crash loop's start-limit-hit, an exit its unit
 # does not restart (2, 3), a stop past its bound. Never per restart.
 #
-# It writes one journal line (`journalctl -t iem-alarm`) and sends the notice
-# down the guard's own path to the engineer's devices, `iem-server notify --to
-# alarm` on the box's site (exit 3 when no device took it: until the box
+# It writes one journal line (`journalctl -t iem-alarm`) and, only while the
+# box serves the band (its engine enabled at boot: `gen3-switch to-3` enables
+# it, `to-2` disables it), sends the notice down the guard's own path to the
+# engineer's devices, `iem-server notify --to alarm` on the box's site. A box
+# that serves nobody keeps a copy of the band's data, subscribers included,
+# and must not reach them (#72, the false alarm of 2026-10-27): the second
+# condition then fails and systemd skips the notice (exit 3 when no device took it: until the box
 # serves HTTPS no device can subscribe, and the unit then reads failed, which
 # raises nothing more). systemd gives it the failed unit's result and exit
 # (MONITOR_SERVICE_RESULT, MONITOR_EXIT_CODE, MONITOR_EXIT_STATUS); the line
@@ -28,7 +32,8 @@ User=iemmixer
 Group=iemmixer
 SyslogIdentifier=iem-alarm
 Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml
-ExecStart=/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} ${MONITOR_EXIT_STATUS})"
+ExecCondition=/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} ${MONITOR_EXIT_STATUS})"
+ExecCondition=/usr/bin/systemctl is-enabled --quiet iem-engine.service
 ExecStart=/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"
 TimeoutStartSec=30
 TimeoutStopSec=10
