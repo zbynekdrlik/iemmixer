@@ -72,7 +72,7 @@ set -euo pipefail
 #             the parameter. The box has no screen; the i915 driver's poll
 #             (every ~10 s, waking the GPU) held a CPU ~2 ms and the engine's
 #             pump, woken onto it, missed its blocks (Live 4).
-#   stack    none of the stack's units enabled (nothing of it starts at
+#   stack     none of the stack's units enabled (nothing of it starts at
 #             boot).
 #   sudoers   /etc/sudoers.d/iemmixer-gen3 (0440): sudo-lines.txt for the
 #             admin, NOPASSWD, each program by the absolute path sudo's
@@ -714,7 +714,8 @@ step_display() {
     return 0
   fi
   [ "$(cat -- "$R$POLL_PARAM")" != N ] || return 0
-  systemd-tmpfiles --create "$R$DISPLAY_CONF"
+  systemd-tmpfiles --create "$R$DISPLAY_CONF" ||
+    die "systemd-tmpfiles --create $DISPLAY_CONF failed (exit $?)"
   changed=1
   [ "$(cat -- "$R$POLL_PARAM")" = N ] ||
     die "display output polling is still on after systemd-tmpfiles --create $DISPLAY_CONF ($POLL_PARAM is not N)"
