@@ -16,8 +16,8 @@ only reads):
    (`RECEIVE`), whose answer must name the same sha256s.
 4. `--pepper`: a second PC session unprotects the server's DPAPI pepper and
    prints it as base64; its 32 bytes go on the box's stdin to `systemd-creds
-   encrypt` (`ENCRYPT`), replacing the box's own, then the credential is read
-   back by `stat` (600, root). Never printed, logged or written in clear on
+   encrypt` (`ENCRYPT`), replacing the box's own, made owner-only (`CHMOD`:
+   systemd-creds keeps sudo's umask) and read back by `stat` (600, root). Never printed, logged or written in clear on
    the dev box. Without it the box keeps its pepper and the band's PIN
    hashes do not verify there (the members' sessions still do: the same
    `jwt_secret`).
@@ -44,6 +44,8 @@ UNITS = ("iem-server", "iem-engine", "iem-dante")
 RECEIVE = "sudo -n -u iemmixer python3 -I /opt/iemmixer/lib/band_receive.py /var/lib/iemmixer/site /var/lib/iemmixer/engine"
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-pepper"
 ENCRYPT = f"sudo -n systemd-creds encrypt --name=pepper --with-key=auto - {CREDENTIAL}"
+# systemd-creds keeps sudo's umask (0022): the credential is made owner-only after it.
+CHMOD = f"sudo -n chmod 0600 {CREDENTIAL}"
 STAT = f"sudo -n stat -c %a.%U.%s {CREDENTIAL}"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
 PC_S = 180
@@ -135,6 +137,10 @@ def pepper(ip, env: dict[str, str], host: str, event: str) -> None:
     del value
     if code != 0:
         raise ip.StepError(f"gen3-data: systemd-creds encrypt failed on the box (exit {code}): "
+                           f"{err.decode(errors='replace').strip()[-300:]}")
+    code, _, err = box(host, CHMOD, b"", BOX_S)
+    if code != 0:
+        raise ip.StepError(f"gen3-data: the box's pepper credential could not be made owner-only (exit {code}): "
                            f"{err.decode(errors='replace').strip()[-300:]}")
     code, out_b, _ = box(host, STAT, b"", BOX_S)
     mode, _, rest = out_b.decode(errors="replace").strip().partition(".")

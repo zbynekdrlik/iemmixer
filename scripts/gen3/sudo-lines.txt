@@ -105,3 +105,4 @@ root | systemctl reboot
 # user with the stack stopped, and the PC's pepper into the credential.
 iemmixer | python3 -I /opt/iemmixer/lib/band_receive.py /var/lib/iemmixer/site /var/lib/iemmixer/engine
 root | systemd-creds encrypt --name=pepper --with-key=auto - /etc/credstore.encrypted/iemmixer-pepper
+root | chmod 0600 /etc/credstore.encrypted/iemmixer-pepper
