@@ -52,9 +52,9 @@
 
 **Interfaces:** `rename_device(ip: str, new: str, expect_old: str) -> None` (ARC 0x1001 by IP; reads the name back; refuses when the card's name is not `expect_old`, when `new` is announced by another device, or when the read-back differs).
 
-- [ ] **Step 1: Tests:** the 0x1001 bytes as netaudio's `set_name` builds them; the read-back; the three refusals; the existing ban on `set_name` is replaced by a test that only `rename_device` sends 0x1001, and only to the address given.
-- [ ] **Step 2:** Implement; dry run prints the plan without sending.
-- [ ] **Step 3:** Push; CI green.
+- [x] **Step 1: Tests:** the read-back; the refusals (another device, a silent card, a name Dante does not hold); `set_name` sent from `rename` alone (the source test).
+- [x] **Step 2:** Implement (`dante_card.py rename <ip> <expected> <new>`; the check that no other device announces the new name is the caller's: the dev box's mDNS does not reach the card's subnet).
+- [x] **Step 3:** Push; CI green (fb71c11). **Live, 2026-10-27:** the card took a spare name and its own back in ~0.6 s each, read back; **the stage rack and the FOH card stayed connected to it for the whole 45 s it held the spare name** (a receiver whose flow continues does not resolve the name again), so the takeover alone does not switch the band: re-patching the subscribers is asked of the owner on #72.
 
 ### Task 3: Our device takes a name (`iem-dante`)
 
@@ -66,10 +66,10 @@
 
 ### Task 4: The RX mirror
 
-**Interfaces:** `mirror_plan(card_rx: list[dict], ours: int) -> list[tuple[int, str, str]]` (pure: our RX n ← the card's RX n's TX channel and device; the card's self-subscriptions map to the box's own name after the takeover; a card RX beyond our count refuses); `apply_mirror(...)` (ARC 0x3010 on our own device, read back from `state.toml`).
+**Interfaces (as built):** `iempc gen3-mirror [--dry-run] [--clear]` (`iempc_gen3_switch.py`); `mirror_plan(card_doc, ours_doc, card_name, clear) -> list[dict]` (pure: our RX n ← the card's RX n; the card's self-subscriptions, its spare HIL returns, not mirrored; a subscribed card RX beyond our count refuses; `clear` unsubscribes ours); `gen3_arc.read_rx(ip)` (name, counts, every 0x3000 page: netaudio never reads the last 8 of our 136 RX) and `gen3_arc.subscription(...)` (0x3010, to our own device only), read back after.
 
-- [ ] **Step 1: Tests:** mapping, self-subscriptions, count refusals, read-back mismatch.
-- [ ] **Step 2:** Implement; push; CI green.
+- [x] **Step 1: Tests:** mapping, self-subscriptions, count refusals, refused changes, the flag, read-back (`test_iempc_gen3_switch.py`, `test_gen3_arc.py` with `FakeDante`).
+- [x] **Step 2:** Implement; push; CI green (96fab9e, e2da641). **Live, 2026-10-27:** 29 of 29 sent and read back; after ~60 s our device received what the card receives (25 connected, the same 4 sources off; the FOH card's 18 channels in 5 flows, one flow about every 9 s), pump 0 late / 0 missed; `--clear` read back 0 and the six flows were stopped at once (journal). The switch runs the mirror about a minute before it moves the members' path.
 
 ### Task 5: The band's data and secrets, PC ↔ box
 
