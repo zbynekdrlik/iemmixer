@@ -21,6 +21,25 @@ CARD, SPARE, OURS = "Zyxqw-Iem-Card", "Zyxqw-Iem-Card-2x", "zyxqw-gen3"
 DEVICE = (HERE.parent.parent / "config" / "test-dante-device.toml").read_text(encoding="utf-8")
 
 
+class HelperBusyTests(Base):
+    """The fourth review: a rename helper started but not yet recorded (a
+    signal in that window) must still be seen."""
+
+    def test_any_running_card_helper_is_seen_recorded_or_not(self) -> None:
+        import subprocess
+        folder = self.tmp / "helper"
+        folder.mkdir()
+        script = folder / "dante_card.py"
+        script.write_text("import time\ntime.sleep(1.5)\n", encoding="utf-8")
+        self.assertFalse(sw.helper_busy(ip))
+        proc = subprocess.Popen([sys.executable, str(script)])
+        try:
+            self.assertTrue(sw.helper_busy(ip))   # no record names it
+        finally:
+            proc.wait(timeout=10)                 # it ends by itself
+        self.assertFalse(sw.helper_busy(ip))
+
+
 class TemplateTests(unittest.TestCase):
     def test_every_sudo_command_is_a_line_of_the_template(self) -> None:
         lines = template()
@@ -49,6 +68,7 @@ class SwitchTests(Base):
         self.count = len(tomllib.loads(DEVICE)["tx"])
         self.card_name, self.serves_url, self.box_running = CARD, "pc", False
         self.events: list[str] = []
+        self.order: list[str] = []        # every box command, reads included, as sent
         self.installed: list[str] = []
         self.fail_at: str | None = None
         self.stops = True                 # STOP stops the stack
@@ -90,6 +110,7 @@ class SwitchTests(Base):
 
     def box(self, host, command, stdin, timeout):
         self.assertEqual(host, "admin@192.0.2.40")
+        self.order.append(command)
         if command == sw.STATUS:
             return 0, b'{"tx": [{"flow": 1, "live": 1}]}', b""
         if command == sw.HEALTH:
@@ -228,6 +249,14 @@ class SwitchTests(Base):
         code, docs, err = self.run_main("gen3-switch", "to-2")
         self.assertEqual(code, 0, err)
         self.assertEqual((self.side(), self.card_name), (2, CARD))
+
+    def test_reset_failed_comes_only_after_the_stack_reads_stopped(self) -> None:
+        # The fourth review: reset-failed would turn a unit whose stop outlived its bound `inactive`.
+        self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 0)
+        self.order.clear()
+        self.assertEqual(self.run_main("gen3-switch", "to-2")[0], 0)
+        after = self.order[self.order.index(sw.STOP):]
+        self.assertEqual(after[:4], [sw.STOP, sw.data.STATES, sw.data.TASKS, sw.RESET_FAILED])
 
     def test_failed_units_that_reset_failed_does_not_clear_still_count_as_stopped(self) -> None:
         self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 0)
