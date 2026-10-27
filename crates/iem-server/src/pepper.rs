@@ -362,7 +362,14 @@ mod tests {
                     c.path().display()
                 )
             );
-            assert!(len == 0 || !msg.contains("qq"), "never the bytes: {msg}");
+            // The temporary folder's random name may hold "qq" itself (CI,
+            // 2026-10-27: `/tmp/.tmpJTqqVo`): the bytes are looked for in
+            // the message without its path.
+            let without_path = msg.replace(&c.path().display().to_string(), "");
+            assert!(
+                len == 0 || !without_path.contains("qq"),
+                "never the bytes: {msg}"
+            );
             assert!(!dir.path().join(PEPPER_FILE).exists(), "no test pepper");
             assert_eq!(std::fs::read(c.path().join(CREDENTIAL)).unwrap(), bytes);
         }
