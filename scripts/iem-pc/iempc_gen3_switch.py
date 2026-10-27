@@ -94,7 +94,7 @@ def table(doc, what: str) -> tuple[int, dict[int, tuple[str, str]]]:
     return count, out
 
 
-def mirror_plan(card_doc, ours_doc, card_name: str, clear: bool = False) -> list[dict]:
+def mirror_plan(card_doc, ours_doc, card_name: str, clear: bool = False, also: tuple[str, ...] = ()) -> list[dict]:
     """The changes that make our RX table equal to the card's (each card RX n
     subscribed to another device: ours n the same; every other RX of ours
     unsubscribed), or, with `clear`, every RX of ours unsubscribed. Only the
@@ -104,7 +104,8 @@ def mirror_plan(card_doc, ours_doc, card_name: str, clear: bool = False) -> list
     want: dict[int, tuple[str, str]] = {}
     if not clear:
         _, card = table(card_doc, "the card")
-        want = {n: sub for n, sub in card.items() if sub[1] != card_name}
+        own = {card_name, *also}   # the card keeps its own returns under the name it had (live, 2026-10-27)
+        want = {n: sub for n, sub in card.items() if sub[1] not in own}
         beyond = [n for n in want if n > our_count]
         if beyond:
             raise PlanError(f"the card's rx {min(beyond)} is subscribed and our device has {our_count} rx channels")
@@ -171,27 +172,28 @@ def send_changes(ip, host: str, changes: list[dict]) -> tuple[list[dict], str | 
     return done, None
 
 
-def apply(ip, card_doc, card_name: str, ours: Device, changes: list[dict],
-          clear: bool = False) -> tuple[list[dict], list[dict] | None, str | None]:
+def apply(ip, card_doc, card_name: str, ours: Device, changes: list[dict], clear: bool = False,
+          also: tuple[str, ...] = ()) -> tuple[list[dict], list[dict] | None, str | None]:
     """`changes` sent to our device, then its table read again: what was sent,
     what still differs (None: not read back) and what stopped (None: nothing)."""
     done, stopped = send_changes(ip, ours.host, changes)
     try:
-        left = mirror_plan(card_doc, read(ip, ours, "our device"), card_name, clear)
+        left = mirror_plan(card_doc, read(ip, ours, "our device"), card_name, clear, also)
     except (PlanError, ip.StepError) as e:
         left, stopped = None, "; ".join(x for x in (stopped, f"not read back: {e}") if x)
     return done, left, stopped
 
 
-def mirror(ip, card: Device, ours: Device) -> tuple[int, str | None]:
+def mirror(ip, card: Device, ours: Device, also: tuple[str, ...] = ()) -> tuple[int, str | None]:
     """Our RX table made the card's (the switch's step): how many changes were
-    sent, and what went wrong (None: all read back)."""
+    sent, and what went wrong (None: all read back). `also`: the card's other
+    names (its usual one while it holds the spare)."""
     card_doc = read(ip, card, "the card")
     try:
-        changes = mirror_plan(card_doc, read(ip, ours, "our device"), card.name)
+        changes = mirror_plan(card_doc, read(ip, ours, "our device"), card.name, also=also)
     except PlanError as e:
         return 0, str(e)
-    done, left, stopped = apply(ip, card_doc, card.name, ours, changes)
+    done, left, stopped = apply(ip, card_doc, card.name, ours, changes, also=also)
     return len(done), stopped or (f"{len(left)} rx channels did not read back as wanted" if left else None)
 
 

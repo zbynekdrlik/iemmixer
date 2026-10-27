@@ -99,7 +99,8 @@ class SwitchTests(Base):
         self.step("band")
         return {"members": 8, "bytes": 1, "written": 8}
 
-    def mirror(self, ip_mod, card, ours):
+    def mirror(self, ip_mod, card, ours, also=()):
+        self.assertEqual(also, (CARD,))
         self.assertEqual((card.name, ours.name, ours.host), (SPARE, CARD, "192.0.2.41"))
         self.step("mirror")
         return 29, None

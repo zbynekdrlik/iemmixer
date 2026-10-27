@@ -180,7 +180,7 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
             raise Failed(f"the box is not healthy under the card's name within {HEALTH_S} s")
         done.append("start")
         sent, why = switch.mirror(ip, switch.Device(s["DANTE_IEM_HOST"], spare),
-                                  switch.Device(s["GEN3_DANTE_IP"], name))
+                                  switch.Device(s["GEN3_DANTE_IP"], name), also=(name,))
         if why:
             raise Failed(f"the mirror: {why}")
         if not wait(lambda: live_tx_flows(s) > 0, TX_S):
