@@ -115,7 +115,7 @@ state (healthy, degraded, failed, stopped), its reasons, the systemd states
 of iem-engine, iem-server and iem-dante, the device's clock and the
 engine's pump from two reads of the control socket (default
 /run/iem-dante/control.sock) a second apart, and whether the server
-answers /api/version on 127.0.0.1 (default port 8080) with this build.
+answers /api/version on 127.0.0.1 (default port 80) with this build.
 Exit 0 healthy, 1 degraded or failed, 3 stopped (all three inactive).";
 
 /// What `--version` prints: the name, the version and the build.

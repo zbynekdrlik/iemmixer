@@ -136,10 +136,10 @@ fn health_takes_a_socket_and_a_server_port() {
     };
     let default = "/run/iem-dante/control.sock";
     for (a, want) in [
-        (&["health"][..], health(default, 8080)),
+        (&["health"][..], health(default, 80)),
         (
             &["health", "--socket", "/tmp/c.sock"],
-            health("/tmp/c.sock", 8080),
+            health("/tmp/c.sock", 80),
         ),
         (
             &[

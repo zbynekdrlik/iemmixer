@@ -88,7 +88,7 @@ rules as `gen3-loop`; in this order:
    dev entry may still run (`iempc_live.refuse_while_running`).
 1. Before any call: the arguments; R and T from the test site, `--member` a
    person of the test roster (an id either file lacks refuses); GEN3_HOST and
-   GEN3_UI_URL (the box's UI, `http://<box>:8080/`) in the private env; no
+   GEN3_UI_URL (the box's UI, `http://<box>/`) in the private env; no
    open S1a/S1c window.
 2. The Gen 3 device's status (`iem-dante-dev ctl status` reads the
    engine-hosted device's control socket): its media clock ready, the
@@ -671,7 +671,7 @@ def ui_url(ip, env: dict[str, str]) -> str:
     """GEN3_UI_URL of the private env (never printed): the browser's origin."""
     url = env.get("GEN3_UI_URL", "")
     if not url:
-        raise ip.Refused("gen3-mix: no GEN3_UI_URL in the private env (the box's UI, http://<box>:8080/)")
+        raise ip.Refused("gen3-mix: no GEN3_UI_URL in the private env (the box's UI, http://<box>/)")
     if not url.startswith(("http://", "https://")):
         raise ip.Refused("gen3-mix: GEN3_UI_URL must be an http:// or https:// URL")
     return url

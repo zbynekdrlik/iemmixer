@@ -90,7 +90,7 @@ executable file; `dante-labels --apply` refuses without all three, the
 sheet reads the card with them), GEN3_HOST (optional: the Gen 3 box's ssh
 destination, whose stack `event` stops and whose device `gen3-loop` and
 `gen3-mix` drive; #72), GEN3_UI_URL (optional: the box's UI,
-`http://<box>:8080/`, the browser's origin in `gen3-mix`), and GEN3_DANTE_IP
+`http://<box>/`, the browser's origin in `gen3-mix`), and GEN3_DANTE_IP
 and GEN3_DANTE_NAME (optional: our Gen 3 device's unicast IPv4 address on
 the Dante network and its device name; `gen3-mirror` refuses without them
 and the card's keys: iempc_gen3_switch.py, #72 phase E); `gen3-data` reads

@@ -39,8 +39,9 @@ pub const UNITS: [&str; 3] = [
 ];
 /// The properties [`parse_units`] reads (`systemctl show --property=`).
 pub const PROPERTIES: &str = "Id,ActiveState,Result,NRestarts,ActiveEnterTimestampMonotonic";
-/// The server's port on loopback (`iem-server.service`'s `PORT`).
-pub const SERVER_PORT: u16 = 8080;
+/// The server's port on loopback (`iem-server.service`'s `PORT`; 80 since
+/// phase E, the band's tunnel's origin).
+pub const SERVER_PORT: u16 = 80;
 /// How long the host unit may be active with a clock that is not ready
 /// before that fails the box, µs: dantesync's first usable reply comes
 /// within seconds of a start.

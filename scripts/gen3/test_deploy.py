@@ -1518,14 +1518,16 @@ class UnitTests(unittest.TestCase):
                 for key in ("StartLimitIntervalSec", "StartLimitBurst", "StartLimitInterval"):
                     self.assertNotIn(key, unit["Service"])
 
-    def test_no_unit_holds_a_capability(self) -> None:
+    def test_only_the_server_holds_a_capability_and_only_to_bind_port_80(self) -> None:
         # dantesync is the box's one PTP owner (owner, 2026-10-26): our
-        # device never opens UDP 319/320 and every port of the stack is above
-        # 1024, so no unit needs a capability.
+        # device never opens UDP 319/320 and its ports are above 1024. The
+        # server listens on port 80, the band's tunnel's origin (phase E, #72),
+        # and holds that one capability, nothing else.
         for name, unit in self.all_four().items():
+            want = "CAP_NET_BIND_SERVICE" if name == "iem-server" else ""
             with self.subTest(unit=name):
-                self.assertEqual(one(unit, "Service", "CapabilityBoundingSet"), "")
-                self.assertEqual(one(unit, "Service", "AmbientCapabilities"), "")
+                self.assertEqual(one(unit, "Service", "CapabilityBoundingSet"), want)
+                self.assertEqual(one(unit, "Service", "AmbientCapabilities"), want)
 
     def test_the_pepper_credential_only_on_the_server(self) -> None:
         # Choice 5: systemd decrypts the box's credential into the server's
@@ -1583,7 +1585,7 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(one(server, "Service", "ExecStart"), "/opt/iemmixer/bin/iem-server")
         env = dict(item.split("=", 1) for item in shlex.split(one(server, "Service", "Environment")))
         self.assertEqual(env, {"IEMMIXER_CONFIG": opts["--site"], "IEMMIXER_ENGINE_PIPE": opts["--pipe"],
-                               "PORT": "8080", "RUST_LOG": "info"})
+                               "PORT": "80", "RUST_LOG": "info"})
         # The site is where deploy.sh copies it, in the folders the units own.
         deploy = DEPLOY.read_text(encoding="utf-8")
         self.assertIn("SITE=$SITEDIR/iemmixer.toml", deploy)
