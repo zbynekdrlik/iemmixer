@@ -39,6 +39,12 @@ class HelperBusyTests(Base):
             proc.wait(timeout=10)                 # it ends by itself
         self.assertFalse(sw.helper_busy(ip))
 
+    def test_a_process_that_cannot_be_read_is_skipped(self) -> None:
+        def running(pid: int) -> bool:
+            raise PermissionError(13, "zyxqw denied")
+        with mock.patch.object(sw.iempc_dante, "running", running):
+            self.assertFalse(sw.helper_busy(ip))
+
 
 class TemplateTests(unittest.TestCase):
     def test_every_sudo_command_is_a_line_of_the_template(self) -> None:
