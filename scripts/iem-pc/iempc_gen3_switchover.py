@@ -201,7 +201,7 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         raise ip.StepError(f"gen3-switch to-3 stopped after {done or 'nothing'}: {e}; "
                            + (f"undo failed: {'; '.join(left)}" if left else "2.x serves again")) from None
     record(ip, 3)
-    return {"serves": "3.x", "steps": done, "members": report["members"], "mirrored": sent}
+    return {"serves": "3.x", "steps": done, "files": report["members"], "mirrored": sent}
 
 
 def to_2(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:

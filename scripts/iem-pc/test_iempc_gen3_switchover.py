@@ -125,7 +125,7 @@ class SwitchTests(Base):
                                        "mirror", "url to box", sw.ENABLE])
         self.assertEqual(docs, [{"gen3_switch": {"serves": "3.x", "steps": ["band", "config", "card", "start",
                                                                             "mirror", "url", "boot"],
-                                                 "members": 8, "mirrored": 29}}])
+                                                 "files": 8, "mirrored": 29}}])
         taken = tomllib.loads(self.installed[0])
         self.assertEqual((taken["name"], taken["tx"][0]), (CARD, "ZYXQW out 01"))
         self.assertEqual((self.side(), self.card_name, self.serves_url), (3, SPARE, "box"))
