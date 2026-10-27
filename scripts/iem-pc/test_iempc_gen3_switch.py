@@ -39,6 +39,15 @@ class PlanTests(unittest.TestCase):
             {"rx": 2, "tx_channel": "talk", "tx_device": FOH},
             {"rx": 9, "tx_channel": None, "tx_device": None}])
 
+    def test_the_cards_own_returns_are_not_mirrored_under_its_usual_name_either(self) -> None:
+        # Live, 2026-10-27: the card keeps its self-subscriptions under the
+        # name it had (not "."), so with the card renamed to its spare name
+        # they read as subscriptions to the card's usual name, which our
+        # device then holds.
+        card = doc(128, {1: ("01 mic", STAGEBOX), 125: ("125", CARD)})
+        self.assertEqual(switch.mirror_plan(card, doc(136, {}), "Zyxqw-Spare", also=(CARD,)),
+                         [{"rx": 1, "tx_channel": "01 mic", "tx_device": STAGEBOX}])
+
     def test_an_equal_table_needs_no_change_and_clear_unsubscribes_ours(self) -> None:
         card = doc(8, {1: ("01 mic", STAGEBOX)})
         self.assertEqual(switch.mirror_plan(card, doc(10, {1: ("01 mic", STAGEBOX)}), CARD), [])
