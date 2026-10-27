@@ -17,7 +17,7 @@
 3. **The public URL moves with a connector on the box** *(my call)*. The PC's tunnel is remotely managed (`tunnel-watchdog.md`); a second connector on the same tunnel would share its traffic, so exactly one runs: the switch stops the PC's cloudflared service, then starts the box's (token as a systemd credential from the secret provider, never in a file in the clear or on a command line). The box serves the origin the ingress names, with the band's certificate (HTTPS on 443, the server's TLS build).
 4. **The box receives the card's inputs** *(design §5.5)*. Our device's RX n subscribes to what the card's RX n subscribes to, read from the card by IP (ARC 0x3010 on our own device only), with the box's site config equal to the PC's. Both receive in parallel during 3.x; the sources' flow capacity is checked before the band test.
 5. **The owner's signals** *(my call, the `iemmode` analogue of design §5.5)*. "prepni na 3.x" runs the switch to 3.x, "prepni na 2.x" the switch back. "ide event" while 3.x serves the band never stops the box: the flag is written and the PC's event switch runs as today (its engine on the renamed card reaches nobody); while 2.x serves, "ide event" stops the box as today. While 3.x serves, the box's units are enabled at boot (it comes back serving after a power loss); while 2.x serves, nothing of the stack is enabled (phase D's rule). The active side is recorded on the box and on the dev box, and every tool reads it.
-6. **The order of the band test** *(the owner's answer pending on #72, 2026-10-27)*. Task 1 measures mic-to-ear of both; the estimate is 2.x ~129 samples (1.3 ms) against 3.x 224 (2.3 ms) on the engine path. Recommended: phase F first, the band test once 3.x is as fast as 2.x. Tasks 2–8 are built either way.
+6. **The band test does not wait for phase F** *(the owner's decision of 2026-10-27 on #72: the band has played with much worse latencies; latency improves as an ongoing process)*. Task 1 measures mic-to-ear of both and records it before the test; the estimate is 2.x ~129 samples (1.3 ms) against 3.x 224 (2.3 ms) on the engine path.
 
 ## Global Constraints
 
@@ -46,7 +46,7 @@
 
 - [ ] **Step 1:** 2.x: in a dev entry, the PC engine's loopback probe (`crates/iem-engine/src/latency.rs`, `iemmode status` → `loopback_samples`) on a spare card output looped to a spare card input (the card's own subscription, set for the test, read back and removed). Record the round trip and the card's own RX latency setting (by Dante Controller's read or the card's ARC, whichever answers).
 - [ ] **Step 2:** 3.x: gen3-mix's numbers (449 with 225 of the PC and the card: engine path D = 224) and the box's RX latency.
-- [ ] **Step 3:** The comparison on #72: both engine paths from source packet to TX packet, in samples and ms; the difference; the decision per the owner's answer.
+- [ ] **Step 3:** The comparison on #72: both engine paths from source packet to TX packet, in samples and ms; the difference (recorded; it does not gate the band test).
 
 ### Task 2: The card's rename (`dante_card.py`)
 
