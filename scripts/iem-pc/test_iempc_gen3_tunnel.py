@@ -76,6 +76,7 @@ class Gen3TunnelTests(Base):
         self.scripts: list[str] = []
         self.order: list[str] = []        # the PC's scripts and the box's commands, as sent
         self.pc_reachable, self.box_build = True, BOX
+        self.pc_connects = True           # the PC's connector registers with the edge
         self.patch(ssh_ps=self.ssh_ps)
         for name, fake in (("box", self.box), ("public_hash", self.public), ("POLL_S", 0.0), ("PUBLIC_S", 0.0)):
             patcher = mock.patch.object(tunnel, name, fake)
@@ -93,8 +94,11 @@ class Gen3TunnelTests(Base):
             self.running, self.pc_mode = ("box" if self.running == "box" else None), "Disabled"
             return "Stopped Disabled\n"
         if script == tunnel.PC_START:
-            self.running, self.pc_mode = "pc", "Auto"
+            self.running = "both" if self.running == "box" else "pc"
+            self.pc_mode = "Auto"
             return "Running Auto\n"
+        if script == tunnel.PC_READY:
+            return ("1\n" if self.running in ("pc", "both") and self.pc_connects else "0\n")
         if script == tunnel.PC_VERSION:
             return '{"git_hash": "%s"}\n' % PC
         self.fail(f"an unexpected PC script: {script}")
@@ -115,18 +119,17 @@ class Gen3TunnelTests(Base):
                 self.running = "box"
             return 0, b"", b""
         if command == tunnel.BOX_STOP:
-            if self.running == "box":
-                self.running = None
+            self.running = {"box": None, "both": "pc"}.get(self.running, self.running)
             return 0, b"", b""
         if command == tunnel.BOX_STATE:
-            return 0, (b"active\n" if self.running == "box" else b"inactive\n"), b""
+            return 0, (b"active\n" if self.running in ("box", "both") else b"inactive\n"), b""
         if command == tunnel.BOX_VERSION:
             return 0, ('{"git_hash": "%s"}' % self.box_build).encode(), b""
         self.fail(f"an unexpected box command: {command}")
 
     def public(self, url: str) -> str | None:
         self.assertEqual(url, "https://mixer.example.org/")
-        return {"pc": PC, "box": BOX}.get(self.running)
+        return {"pc": PC, "box": BOX, "both": PC}.get(self.running)
 
     def commands(self) -> list[str]:
         return [c for c, _ in self.sent]
@@ -147,7 +150,7 @@ class Gen3TunnelTests(Base):
         self.assertEqual((code, docs, self.sent), (1, [], []))
         self.assertIn("names no token", err)
 
-    def test_to_box_stops_and_disables_the_pcs_connector_first_and_reads_the_public_url(self) -> None:
+    def test_to_box_starts_the_boxs_connector_before_the_pcs_goes_and_reads_the_public_url(self) -> None:
         self.mode = "600"
         code, docs, err = self.run_main("gen3-tunnel", "to-box")
         self.assertEqual(code, 0, err)
@@ -179,7 +182,16 @@ class Gen3TunnelTests(Base):
         self.assertIn("does not read back as 600 root", err)
         self.assertNotIn(tunnel.PC_STOP, self.scripts)
 
-    def test_to_pc_stops_the_boxs_connector_first(self) -> None:
+    def test_a_pc_connector_that_does_not_connect_leaves_the_boxs_running(self) -> None:
+        # The review of PR #83: "Running" is not connected; the box's goes only once the PC's is ready.
+        self.running, self.pc_mode, self.pc_connects = "box", "Disabled", False
+        code, docs, err = self.run_main("gen3-tunnel", "to-pc")
+        self.assertEqual((code, docs), (1, []))
+        self.assertIn("not ready", err)
+        self.assertNotIn(tunnel.BOX_STOP, self.order)
+        self.assertIn(self.running, ("box", "both"))
+
+    def test_to_pc_starts_the_pcs_connector_before_the_boxs_goes(self) -> None:
         self.running, self.pc_mode = "box", "Disabled"
         code, docs, err = self.run_main("gen3-tunnel", "to-pc")
         self.assertEqual(code, 0, err)
