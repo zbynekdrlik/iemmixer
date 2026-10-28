@@ -101,4 +101,5 @@ Besides the gates, on new hardware or after a timing change:
 - The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot.
 - systemd gives `MONITOR_*` only to ExecStartPre=/ExecStart=, never to ExecCondition=.
 - `iem-dante-dev health` stays degraded (`restarted`) after any automatic restart of a unit until its next deliberate start (`reset-failed` and `restart`, or a deploy): a check right after a crash or a panic reads degraded, not failed.
+- A timing key changed on the box by hand is checked against `device.rs`'s bounds first: a device config the engine cannot load keeps it down (exit 2, no restart) and the alarm notifies people (2026-10-28 22:26: `work_margin = 24` with the block at 32, 3 min 41 s down). Keep the previous config and put it back at once when the engine is not healthy within seconds.
 - `tcpdump` on the Dante NIC only with `-p`: entering promiscuous mode on the r8169 stalled RX once for ~2.7 ms, every flow late at the same moment (2026-10-28: 63 packets at fpp 4, 17 at fpp 16; the kernel's "entered promiscuous mode" line); with `-p` the capture added no late packet.
