@@ -14,7 +14,8 @@
 # secure_path finds, NOPASSWD); the tests check that every `sudo -n` line a
 # tool sends is an expansion of a line here (test_deploy.py for deploy.sh;
 # test_iempc_gen3.py for iempc gen3-mix, the live guard's stop and "ide
-# event"'s stop; test_install_dantesync.py for install-dantesync.sh;
+# event"'s stop; test_iempc_gen3_gate.py for iempc gen3-gate;
+# test_install_dantesync.py for install-dantesync.sh;
 # test_install_cloudflared.py for install-cloudflared.sh;
 # test_provision.py for verify_box.py, and that every line here is in the
 # rendered rule). provision.sh's own `sudo -n bash ... provision-root.sh` runs
@@ -130,3 +131,26 @@ root | systemctl stop iem-tunnel
 root | systemctl enable iem-engine iem-server iem-tunnel
 root | systemctl disable iem-tunnel
 iemmixer | rm -f /var/lib/iem-dante/takeover.toml
+
+# iempc gen3-gate (phase H, #72; scripts/iem-pc/iempc_gen3_gate.py): the box's
+# HIL job is a runtime drop-in giving the engine's ExecStart its HIL test flag
+# for one run (in /run: a reboot removes it too), installed from the stage and
+# removed at the job's end; deploy.sh removes one a dead run left before its
+# own start. systemctl daemon-reload, reset-failed {units} and restart
+# iem-engine are the lines above.
+root | install -D -m 0644 .cache/iem-gen3-gate/iem-hil.conf /run/systemd/system/iem-engine.service.d/iem-hil.conf
+root | rm -f /run/systemd/system/iem-engine.service.d/iem-hil.conf
+# The preflight's reads as the service user, the site's owner: the site (its
+# [guard] hil_tx is kept, nothing of it printed) and the engine's own check
+# of it (hil_tx against the topology, without a restart).
+iemmixer | cat /var/lib/iemmixer/site/iemmixer.toml
+iemmixer | /opt/iemmixer/bin/iem-engine check-site --site /var/lib/iemmixer/site/iemmixer.toml
+# The engine's supervisor client (the engine's socket is the service user's):
+# its status, and the gate's one fixed burst, HIL v1's input, level and
+# length (mic1, -30 dBFS, 10 s), and its early end.
+iemmixer | /opt/iemmixer/bin/iem-engine supervise status
+iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -30 10
+iemmixer | /opt/iemmixer/bin/iem-engine supervise stop-test-signal
+# The alarm path's reach: how many devices an alarm would go to, never a
+# notice (the alarm unit's site, as iem-alarm@.service names it).
+iemmixer | env IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server notify --count alarm

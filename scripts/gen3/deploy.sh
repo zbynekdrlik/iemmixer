@@ -65,6 +65,10 @@ set -euo pipefail
 #   `systemd-run` as the service user with the PIN pepper's systemd credential,
 #   each PIN (GEN3_ENGINEER_PIN, GEN3_MEMBER_PIN of the private env, 4 digits
 #   each) only on that ssh's stdin: never on a command line, never printed.
+# - A HIL job a dead `iempc gen3-gate` run left (#72 phase H: the runtime
+#   drop-in /run/systemd/system/iem-engine.service.d/iem-hil.conf, which
+#   starts the engine with its HIL test flag) is ended before the start: the
+#   drop-in removed (`sudo -n rm -f`) right before the daemon-reload.
 # - `sudo -n systemctl daemon-reload`, `disable iem-dante iem-engine
 #   iem-server` (none starts at boot; an earlier deploy's enable is undone),
 #   `reset-failed` of the units systemd holds (the start limit counts manual
@@ -104,6 +108,8 @@ BINARIES=(iem-engine iem-server iem-dante-dev iem-soakclient)
 UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service)
 RECEIVER=band_receive.py
 LIBDIR=/opt/iemmixer/lib
+# iempc gen3-gate's HIL job (phase H): the engine's ExecStart with its test flag.
+HIL_DROPIN=/run/systemd/system/iem-engine.service.d/iem-hil.conf
 # The stack's stop, exactly as "ide event" and the live guard run it (plan
 # Task 7) and as the box's sudoers rule allows it.
 STOP="systemctl stop iem-server iem-engine iem-dante"
@@ -518,6 +524,20 @@ fi
 engineer_pin="" member_pin=""
 
 refuse_event "installed, nothing started"
+# A HIL job a dead gen3-gate run left: its drop-in would start the engine with
+# the HIL test flag. It goes right before the start's daemon-reload.
+left_exit=0
+left_job="$(on_box "test -e $HIL_DROPIN && echo left || echo none")" || left_exit=$?
+[ "$left_exit" -eq 0 ] || die "the box's HIL job drop-in could not be looked for (exit $left_exit): nothing started"
+end_job=""
+case "$left_job" in
+  none) ;;
+  left)
+    end_job="sudo -n rm -f $HIL_DROPIN"
+    echo "deploy.sh: a HIL job a dead iempc gen3-gate run left ($HIL_DROPIN): it is ended before the start"
+    ;;
+  *) die "the look for the box's HIL job drop-in answered neither left nor none: nothing started" ;;
+esac
 if [ "$start" = engine ]; then
   started=(iem-engine iem-server)
 else
@@ -541,7 +561,8 @@ reset=""
 if [ "${#held[@]}" -gt 0 ]; then
   reset="sudo -n systemctl reset-failed ${held[*]}"
 fi
-on_box "set -e
+on_box "set -e${end_job:+
+$end_job}
 sudo -n systemctl daemon-reload
 sudo -n systemctl disable iem-dante iem-engine iem-server${reset:+
 $reset}

@@ -41,6 +41,8 @@ STAGE = ".cache/iem-gen3-deploy"
 STOP = "sudo -n systemctl stop iem-server iem-engine iem-dante"
 CHECK = "sha256sum --check --strict --quiet SHA256SUMS"
 STAT = "stat -c '%n %F' /opt/iemmixer/bin /opt/iemmixer/bin.phase-c 2> /dev/null"
+HIL_DROPIN = "/run/systemd/system/iem-engine.service.d/iem-hil.conf"
+LEFT_JOB = f"test -e {HIL_DROPIN} && echo left || echo none"
 LIST_UNITS = ("systemctl list-units --all --plain --no-legend --full iem-dante.service iem-engine.service "
               "iem-server.service")
 PIN_RUN = ("sudo -n systemd-run --quiet --pipe --wait --collect --uid=iemmixer --gid=iemmixer "
@@ -214,6 +216,12 @@ def sudo(words):
             os.remove(link)
         os.symlink(words[2], link)
         return 0
+    if words[:2] == ["rm", "-f"] and len(words) == 3:
+        # gen3-gate's HIL job drop-in (phase H), the one file deploy removes.
+        if os.path.lexists(at(words[2])):
+            os.remove(at(words[2]))
+        log("removed.log", words[2])
+        return 0
     if words[0] == "systemctl":
         return systemctl(words[1:])
     if line.startswith(PIN):
@@ -263,6 +271,12 @@ def run(line):
     m = re.fullmatch(r"cd (/opt/iemmixer/slot-[ab]/bin)" + re.escape(CHECK), line)
     if m:
         return check_sums(at(m.group(1)))
+    m = re.fullmatch(r"test -e (\S+) && echo left \|\| echo none", line)
+    if m:
+        if failing("FAKE_LEFT_FAILS"):
+            return err("sh: /run: Input/output error", 7)
+        print("left" if os.path.lexists(at(m.group(1))) else "none")
+        return 0
     if line == "mkdir -p .cache/iem-gen3-deploy":
         os.makedirs(os.path.join(home, ".cache/iem-gen3-deploy"), exist_ok=True)
         flag_on("mkdir")
@@ -567,7 +581,7 @@ class DeployTests(unittest.TestCase):
 
     def clear_logs(self) -> None:
         for name in ("calls.log", "stdin.log", "env.log", "modes.log", "health.count", "gh.log", "pins.log",
-                     "reset.log"):
+                     "reset.log", "removed.log"):
             (self.box / name).unlink(missing_ok=True)
 
     def calls(self) -> list[list[str]]:
@@ -671,7 +685,7 @@ class DeployTests(unittest.TestCase):
 
     def expected(self, target: str, *, link: str | None = None, back: bool = False, phase_c: bool = False,
                  start: str = "engine", held: tuple[str, ...] = (), people: tuple[str, ...] | None = None,
-                 health: int = 1) -> list[str]:
+                 health: int = 1, left: bool = False) -> list[str]:
         slot = f"/opt/iemmixer/slot-{target}/bin"
         out = ["sudo -n -l systemctl stop iem-server iem-engine iem-dante", "readlink /opt/iemmixer/bin"]
         if link is None:
@@ -686,8 +700,9 @@ class DeployTests(unittest.TestCase):
         if people is not None:
             out += [f"{PIN_RUN} set-engineer", *(f"{PIN_RUN} set-member {p}" for p in people)]
         started = "iem-engine iem-server" if start == "engine" else "iem-dante"
-        out += [LIST_UNITS,
-                "\n".join(["set -e", "sudo -n systemctl daemon-reload",
+        out += [LEFT_JOB, LIST_UNITS,
+                "\n".join(["set -e", *([f"sudo -n rm -f {HIL_DROPIN}"] if left else []),
+                           "sudo -n systemctl daemon-reload",
                            "sudo -n systemctl disable iem-dante iem-engine iem-server",
                            *([f"sudo -n systemctl reset-failed {' '.join(held)}"] if held else []),
                            f"sudo -n systemctl start {started}"]),
@@ -968,10 +983,14 @@ class DeployTests(unittest.TestCase):
 
     def test_every_sudo_line_deploy_sends_is_in_the_template(self) -> None:
         # Every mode and slot: over phase C's folder with a failed engine
-        # (reset), with --pins; then into b with the standalone device; into
-        # a again; back to b; and a late flag's stop.
+        # (reset), with --pins and a HIL job a dead gen3-gate run left; then
+        # into b with the standalone device; into a again; back to b; and a
+        # late flag's stop.
         self.write_pins()
         self.phase_c_folder()
+        dropin = self.box / "root" / HIL_DROPIN.lstrip("/")
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text("[Service]\n", encoding="utf-8")
         self.set_states({"iem-dante": "active", "iem-engine": "failed", "iem-server": "inactive"})
         sent: list[str] = []
         runs = []
@@ -1010,7 +1029,8 @@ class DeployTests(unittest.TestCase):
                      PIN_RUN[len("sudo -n "):] + " set-engineer",
                      *(PIN_RUN[len("sudo -n "):] + f" set-member {p}" for p in roster_people()),
                      "systemctl reset-failed iem-engine", "systemctl start iem-dante",
-                     "systemctl start iem-engine iem-server", "systemctl stop iem-server iem-engine iem-dante"):
+                     "systemctl start iem-engine iem-server", "systemctl stop iem-server iem-engine iem-dante",
+                     f"rm -f {HIL_DROPIN}"):
             self.assertIn(want, seen)
         self.assertIn(("root", "systemctl stop iem-server iem-engine iem-dante", True), lines)
 
@@ -1053,6 +1073,40 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn("not loaded", r.stderr)
         self.assertEqual(self.states()["iem-engine"], "active")
         self.assertFalse((self.box / "reset.log").exists())
+
+    def test_a_hil_job_a_dead_gen3_gate_run_left_is_ended_before_the_start(self) -> None:
+        # Phase H (#72): a dev box that died during `iempc gen3-gate` leaves
+        # its runtime drop-in, which would start the engine with the HIL test
+        # flag. The deploy removes it right before its daemon-reload, so the
+        # engine it starts has the unit's own ExecStart.
+        self.deployed()
+        sha2, second = self.next_build("the second build")
+        dropin = self.box / "root" / HIL_DROPIN.lstrip("/")
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text("[Service]\nExecStart=\nExecStart=/opt/iemmixer/bin/iem-engine run --test-signal\n",
+                          encoding="utf-8")
+        self.set_states({"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
+        r = self.deploy(args=self.full_args(sha2, second))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.sequence(), self.expected("b", link="slot-a/bin", left=True))
+        self.assertFalse(self.exists(HIL_DROPIN))
+        self.assertTrue(dropin.parent.is_dir())   # only the file: the folder is systemd's
+        self.assertIn("a HIL job a dead iempc gen3-gate run left", r.stdout)
+        # Without one, nothing is removed and nothing is said.
+        self.clear_logs()
+        sha3, third = self.next_build("the third build")
+        r = self.deploy(args=self.full_args(sha3, third))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.box / "removed.log").exists())
+        self.assertNotIn("HIL job", r.stdout)
+
+    def test_a_look_for_a_left_hil_job_that_fails_starts_nothing(self) -> None:
+        self.set_states({"iem-dante": "inactive", "iem-engine": "inactive", "iem-server": "inactive"})
+        r = self.deploy(FAKE_LEFT_FAILS="1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("the box's HIL job drop-in could not be looked for (exit 7): nothing started", r.stderr)
+        self.assertNotIn("systemctl start", "\n".join(self.remote()))
+        self.assertEqual(self.states()["iem-engine"], "inactive")
 
     def test_the_units_systemd_holds_are_reset_in_one_order(self) -> None:
         # systemd lists them in an order of its own; the sudoers rule lists
