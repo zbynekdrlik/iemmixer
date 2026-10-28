@@ -23,7 +23,10 @@ member's mix in the box's engine with the browser in it (`gen3-mix`:
 iempc_gen3.py, GEN3_HOST and GEN3_UI_URL below; #72), the Gen 3 box's own
 HIL gate while 3.x serves the band, its verdict the commit status hil/gen3
 (`gen3-gate hil`: iempc_gen3_gate.py, GEN3_HOST and GEN3_DANTE_IP below; #72
-phase H), and the hand-over of an open S1a window.
+phase H), the Gen 3 box deployed in place on either side of the switch,
+with the takeover config while 3.x serves (`gen3-deploy`:
+iempc_gen3_deploy.py and scripts/gen3/deploy.sh, GEN3_SITE_FILE and
+GEN3_ROSTER_FILE below; #72), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -102,7 +105,12 @@ the PC's band files (PC_ROOT) and writes them onto GEN3_HOST
 URL, read by `gen3-tunnel` to see which connector serves it,
 iempc_gen3_tunnel.py), GEN3_CARD_SPARE and GEN3_DEVICE_CONFIG (optional:
 the IEM card's spare Dante name while 3.x serves, and the ops device config
-file; `gen3-switch` refuses without them, iempc_gen3_switchover.py).
+file; `gen3-switch` refuses without them, iempc_gen3_switchover.py), and
+GEN3_SITE_FILE and GEN3_ROSTER_FILE (optional: the band's site.toml and
+roster.toml of the ops repo, which `gen3-deploy` gives deploy.sh on either
+side; it refuses without them, GEN3_HOST and GEN3_DEVICE_CONFIG, and while
+3.x serves also without GEN3_CARD_SPARE and the card's keys,
+iempc_gen3_deploy.py).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -128,6 +136,7 @@ import iempc_dante
 import iempc_event
 import iempc_gen3
 import iempc_gen3_data
+import iempc_gen3_deploy
 import iempc_gen3_gate
 import iempc_gen3_switch
 import iempc_gen3_switchover
@@ -290,6 +299,12 @@ def cmd_gen3_gate(ctx: Ctx) -> int:
     return iempc_gen3_gate.run(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_deploy(ctx: Ctx) -> int:
+    """The Gen 3 box deployed in place on either side of the switch (with the takeover config while 3.x serves);
+    the code lives in iempc_gen3_deploy.py (#72)."""
+    return iempc_gen3_deploy.run(ctx, sys.modules[__name__])
+
+
 def cmd_gen3_mirror(ctx: Ctx) -> int:
     """Our Gen 3 device's RX table made equal to the IEM card's (or cleared); the code lives in iempc_gen3_switch.py
     (#72 phase E)."""
@@ -381,6 +396,9 @@ COMMANDS: dict[str, Spec] = {
     "gen3-mix": Spec(cmd_gen3_mix, pc=True, dev_time=True, locked=True),
     # No PC call: the Gen 3 box over ssh and our own device over ARC (#72 phase H).
     "gen3-gate": Spec(cmd_gen3_gate, pc=False, dev_time=True, locked=True),
+    # No PC call: the box through deploy.sh, and the card read while 3.x serves (#72). On either side: in neither
+    # WHILE_2X_SERVES nor WHILE_3X_SERVES.
+    "gen3-deploy": Spec(cmd_gen3_deploy, pc=False, dev_time=True, locked=True),
     # No PC call: reads the card, writes only our own Gen 3 device (#72 phase E).
     "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
     # Reads the PC, writes only the Gen 3 box (#72 phase E).
@@ -470,6 +488,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help=f"the test signal's level, at most {iempc_gen3.DBFS_MAX:g}")
     loop.add_argument("--ttl", type=float, default=iempc_gen3.TTL_DEFAULT,
                       help=f"each burst's length in seconds, at most {iempc_gen3.TTL_MAX:g}")
+    deploy = sub.add_parser("gen3-deploy")
+    deploy.add_argument("--bundle", required=True, help="the downloaded CI bundle gen3-bundle-<sha> (a folder)")
+    deploy.add_argument("--sha", required=True,
+                        help="its commit, 40 hex: this checkout must be at it with a clean tree (deploy.sh's check)")
+    deploy.add_argument("--dry-run", action="store_true",
+                        help="the plan: the side, the config's kind, deploy.sh's options; no call")
     gate = sub.add_parser("gen3-gate")
     gate.add_argument("gate", choices=("hil",),
                       help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "
