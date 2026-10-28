@@ -44,11 +44,14 @@
 //!
 //! **What an ARC-resolved channel offers** ([`offer`]): flow control at the
 //! `_netaudio-dbc` record's address and port; the id, rate and bits its
-//! 0x2000 page gives; [`NCHAN`] channel slots; [`FPP`] frames per packet
-//! (`fpp_min = fpp_max`); `dbcp1` 0x1102 (our client's start code
-//! whatever); `latency_ns` 0, so the manager plays out at our own latency
-//! (`max(its, ours)`): ARC names neither frames per packet nor latency (the
-//! card's captured pages; netaudio reads neither from them).
+//! 0x2000 page gives; [`NCHAN`] channel slots; [`Timing::fpp`] frames per
+//! packet (`fpp_min = fpp_max`: the device config's `arc_rx_fpp`, [`FPP`]
+//! when it is left out; a packet leaves the transmitter only after its last
+//! frame, so fewer frames cut our RX lateness, #72 phase F); `dbcp1` 0x1102
+//! (our client's start code whatever); `latency_ns` 0, so the manager plays
+//! out at our own latency (`max(its, ours)`): ARC names neither frames per
+//! packet nor latency (the card's captured pages; netaudio reads neither
+//! from them).
 //!
 //! Logs name peer ids (the status's), counts and opcodes, never a name or
 //! an address: one info line per directory read, and once a minute at most
@@ -69,15 +72,17 @@ use super::retry_after;
 use crate::announce::ARC_SERVICE;
 use crate::arc::client::{Directory, REPLY_TIMEOUT, ReadError, TxChannel, Udp, read_directory};
 use crate::ctl::Requests;
+use crate::device::DeviceConfig;
 use crate::flows::control::START as DBCP1;
 
 pub use crate::arc::client::MAX_PAGES;
 
 /// A Dante device's flow-control record (UDP 4455).
 pub const DBC_SERVICE: &str = "_netaudio-dbc._udp.local.";
-/// The frames per packet an ARC-resolved transmitter is asked for: the IEM
-/// card's performance property 0x0210 reads 16, most likely its transmit
-/// frames per packet (evidence, not proof); ARC names none.
+/// The frames per packet an ARC-resolved transmitter is asked for when the
+/// device config leaves `arc_rx_fpp` out ([`Timing::fpp`]): the IEM card's
+/// performance property 0x0210 reads 16, most likely its transmit frames per
+/// packet (evidence, not proof); ARC names none.
 pub const FPP: u16 = 16;
 /// The channel slots of a flow from an ARC-resolved transmitter: the IEM
 /// card's own flows to a rack carry 4; a transmitter that takes 8 takes 4.
@@ -97,7 +102,8 @@ pub const IDLE: Duration = Duration::from_secs(1);
 /// The counts are logged at most once this often.
 pub const REPORT_NS: u64 = 60_000_000_000;
 
-/// The directory's times (tests shorten them).
+/// The directory's times (tests shorten them) and the frames per packet it
+/// offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
     pub settle_ns: u64,
@@ -106,6 +112,9 @@ pub struct Timing {
     pub reply: Duration,
     /// The reader's longest wait ([`IDLE`]).
     pub idle: Duration,
+    /// The frames per packet asked of an ARC-resolved transmitter, the
+    /// device config's `arc_rx_fpp` ([`FPP`] by default).
+    pub fpp: u16,
 }
 
 impl Default for Timing {
@@ -115,12 +124,25 @@ impl Default for Timing {
             max_age_ns: MAX_AGE_NS,
             reply: REPLY_TIMEOUT,
             idle: IDLE,
+            fpp: FPP,
         }
     }
 }
 
-/// What a channel of `ch` offers the manager, with flow control at `dbc`.
-pub fn offer(ch: &TxChannel, dbc: SocketAddrV4) -> Advertised {
+impl Timing {
+    /// The default times with the frames per packet `cfg` asks of an
+    /// ARC-resolved transmitter (its `arc_rx_fpp`).
+    pub fn of(cfg: &DeviceConfig) -> Self {
+        Timing {
+            fpp: cfg.arc_rx_fpp,
+            ..Timing::default()
+        }
+    }
+}
+
+/// What a channel of `ch` offers the manager, with flow control at `dbc`
+/// and `fpp` frames per packet.
+pub fn offer(ch: &TxChannel, dbc: SocketAddrV4, fpp: u16) -> Advertised {
     Advertised {
         control: dbc,
         tx_channel_id: ch.id,
@@ -128,8 +150,8 @@ pub fn offer(ch: &TxChannel, dbc: SocketAddrV4) -> Advertised {
         bits: ch.bits,
         rate: ch.rate,
         dbcp1: DBCP1,
-        fpp_min: FPP,
-        fpp_max: FPP,
+        fpp_min: fpp,
+        fpp_max: fpp,
         latency_ns: 0,
     }
 }
@@ -367,7 +389,7 @@ impl Book {
         let want = match &reads.directory {
             Some((dir, at)) if now.saturating_sub(*at) < self.timing.max_age_ns => {
                 match dir.find(channel) {
-                    Some(ch) => return Some(offer(ch, dbc)),
+                    Some(ch) => return Some(offer(ch, dbc, self.timing.fpp)),
                     None => {
                         self.counts.not_listed += 1;
                         Want::NotListed

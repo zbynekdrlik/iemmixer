@@ -77,6 +77,10 @@ fn a_config_reads_the_test_device() {
     );
     assert_eq!(cfg.tx_margin_ns, 250_000);
     assert_eq!(cfg.tx_fpp_max, 32);
+    assert_eq!(
+        cfg.arc_rx_fpp, 16,
+        "an ARC-resolved transmitter is asked for 16"
+    );
     assert_eq!((cfg.pump_cpu, cfg.io_cpu), (None, None), "no CPU pinned");
     assert_eq!(
         cfg.state_file,
@@ -367,6 +371,15 @@ fn the_tx_side_settings_are_read() {
 }
 
 #[test]
+fn the_fpp_asked_of_an_arc_resolved_transmitter_is_read() {
+    // #72 phase F: fewer frames a packet than the card's guessed 16.
+    let text = config_with("latency_ns =", "latency_ns = 1000000\narc_rx_fpp = 4");
+    let cfg = DeviceConfig::from_toml(&text).unwrap();
+    assert_eq!(cfg.arc_rx_fpp, 4);
+    assert_eq!(cfg.tx_fpp_max, 32, "the TX side's own");
+}
+
+#[test]
 fn the_advertised_latency_covers_a_packet_its_margin_and_the_send_slack() {
     // The review of PR #84 (#72 phase F): a receiver plays our audio the
     // advertised latency after its stamp, and our packet leaves tx_fpp_max
@@ -497,6 +510,14 @@ fn the_config_is_checked_field_by_field() {
             "tx_fpp_max: 2 to 32",
         ),
         (
+            config_with("latency_ns =", "latency_ns = 1000000\narc_rx_fpp = 1"),
+            "arc_rx_fpp: 2 to 32",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\narc_rx_fpp = 33"),
+            "arc_rx_fpp: 2 to 32",
+        ),
+        (
             config_with("latency_ns =", "latency_ns = 250000"),
             "tx_latency_ns (latency_ns when it is left out): below tx_fpp_max frames",
         ),
@@ -531,6 +552,8 @@ fn the_config_is_checked_field_by_field() {
             "latency_ns = 1000000\ntx_latency_ns = 2000000\ntx_margin_ns = 1000000",
         ),
         ("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 2"),
+        ("latency_ns =", "latency_ns = 1000000\narc_rx_fpp = 2"),
+        ("latency_ns =", "latency_ns = 1000000\narc_rx_fpp = 32"),
         ("latency_ns =", "latency_ns = 1000000\nwork_margin = 4096"),
         ("sample_rate =", "sample_rate = 48000"),
         ("encoding =", "encoding = 32"),

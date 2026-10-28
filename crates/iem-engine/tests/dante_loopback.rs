@@ -43,6 +43,7 @@ use iem_dante::media::source::Source;
 use iem_dante::media::tx::{LaneCounts, TX_MARGIN_NS, Transmitter, ns_of};
 use iem_dante::stream::{Blocks, Map, Pump, PumpStats, PumpView, Timing, WORK_MARGIN};
 use iem_dante::subscribe::Answer;
+use iem_dante::subscribe::directory;
 use iem_dante::subscribe::resolve::{Advertised, Own, Resolver};
 use iem_engine::cmd::push_group;
 use iem_engine::core::{Core, Flags};
@@ -130,6 +131,7 @@ fn device(dir: &Path) -> Device {
         tx_latency_ns: None,
         tx_margin_ns: TX_MARGIN_NS,
         tx_fpp_max: FPP_MAX,
+        arc_rx_fpp: directory::FPP,
         pump_cpu: None,
         io_cpu: None,
         state_file: dir.join("state.toml"),
