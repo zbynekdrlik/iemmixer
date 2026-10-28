@@ -52,7 +52,7 @@
 ### Task 1: The real gap, end to end
 
 - [x] **Step 1:** With the stage on, read every receiver flow from the card (the rack, FOH) and, in a dev-time takeover window or through the HIL loop, from our device: latency and fpp per flow. Record on #72. **Done 2026-10-27:** the IEM card and the stage rack play every flow at 0.25 ms; the card played ours at our advertised 1 ms (fpp 32), then at 0.25 ms (fpp 8) with `tx_latency_ns` (#72).
-- [ ] **Step 2:** The loop through the card for 2.x and 3.x (phase E Task 1's method), now with the receiver's latency inside the number. Record the real gap on #72.
+- [x] **Step 2:** The loop through the card for 2.x and 3.x (phase E Task 1's method), now with the receiver's latency inside the number. Record the real gap on #72. **Done 2026-10-28:** base 153 against 225 (the card plays our flow at 0.25 ms), 5 bursts equal (#72).
 
 ### Task 2: What the rack adds (settings and TX timing)
 
@@ -84,4 +84,4 @@
 
 - [x] **Step 1:** The chosen settings into the ops device config (the takeover config inherits them). **Done:** iemmixer-ops PR #19.
 - [x] **Step 2:** Two hours, Live 4's way, stage on: `live_guard.py --seconds 7200`, health every 10 minutes, 0 late, 0 missed, 0 holes, no alarm. **Done 2026-10-28:** 21.6 M blocks, 0/0/0/0, RX 0 late, TX 0 restarts, no holdover (#72).
-- [ ] **Step 3:** Task 1's end-to-end loop again: 3.x against 2.x. Record on #72 and tick phase F. If 3.x is still later, the remaining gap and its cause go on #72 (the NIC first suspect; buying a part is the owner's decision).
+- [x] **Step 3:** Task 1's end-to-end loop again: 3.x against 2.x. Record on #72 and tick phase F. If 3.x is still later, the remaining gap and its cause go on #72 (the NIC first suspect; buying a part is the owner's decision). **Done 2026-10-28:** 269 at F = D against 449 before; 3.x 140 against 2.x 153 on phase E's footing (#72).
