@@ -34,9 +34,16 @@ class FakeDante:
         self.packets: list[bytes] = []
         self.after = None
         self.wrong_page = False
+        # Phase H: its TX channels' current names (0x2010, arc.rs `tx_names`),
+        # `tx_names` for those renamed.
+        self.tx_count = 96
+        self.tx_names: dict[int, str] = {}
 
     def rx_name(self, n: int) -> str:
         return f"{n:03d} zyxqw in"
+
+    def tx_name(self, n: int) -> str:
+        return self.tx_names.get(n, f"{n:03d} zyxqw out")
 
     def handle(self, packet: bytes) -> bytes:
         self.packets.append(packet)
@@ -67,6 +74,21 @@ class FakeDante:
             table[0], table[1] = 16, last - first + 1
             body = bytes(table) + bytes(names)
             word = gen3_arc.MORE if last < self.rx_count else gen3_arc.DONE
+        elif opcode == gen3_arc.TX_NAMES:
+            # arc.rs `page`: up to 32 slots of `id, id, name` from the first
+            # item asked, the first item's u32 0 before the names.
+            first = struct.unpack(">H", packet[12:14])[0]
+            last = min(first + 31, self.tx_count)
+            slots = min(32, self.tx_count)
+            table, names = bytearray(2 + 6 * slots), bytearray(4)
+            base = 10 + len(table)
+            for i, n in enumerate(range(first, last + 1)):
+                at = base + len(names)
+                names.extend(self.tx_name(n).encode() + b"\0")
+                table[2 + 6 * i:8 + 6 * i] = struct.pack(">3H", n, n, at)
+            table[0], table[1] = slots, max(0, last - first + 1)
+            body = bytes(table) + bytes(names)
+            word = gen3_arc.MORE if last < self.tx_count else gen3_arc.DONE
         elif opcode == gen3_arc.OPCODE:
             rx, c_at, d_at = struct.unpack(">HHH", packet[12:18])
             if rx in self.refuse:
@@ -141,6 +163,47 @@ class ReadTests(unittest.TestCase):
                 gen3_arc.label(b"0123456789ab\0", offset)
         with self.assertRaises(ValueError):
             gen3_arc.label(b"0123456789ab", 10)
+
+
+class TxNameTests(unittest.TestCase):
+    """Phase H: a TX channel's current name, the name the box's HIL gate
+    self-subscribes our spare return to (0x2010, arc.rs `tx_names`)."""
+
+    def name(self, device: FakeDante, tx: int) -> str:
+        with mock.patch.object(gen3_arc, "send", Network(**{"192_0_2_30": device}).send):
+            return gen3_arc.tx_name("192.0.2.30", tx)
+
+    def test_the_page_from_the_channel_names_it_also_renamed_and_the_last(self) -> None:
+        device = FakeDante("zyxqw-gen3", 136, {})
+        device.tx_names = {94: "Zyxqw Spare 1"}
+        self.assertEqual(self.name(device, 94), "Zyxqw Spare 1")
+        self.assertEqual(self.name(device, 95), "095 zyxqw out")
+        self.assertEqual(self.name(device, 96), "096 zyxqw out")
+        asked = [struct.unpack(">HH", p[6:8] + p[12:14]) for p in device.packets]
+        self.assertEqual(asked, [(gen3_arc.TX_NAMES, 94), (gen3_arc.TX_NAMES, 95), (gen3_arc.TX_NAMES, 96)])
+
+    def test_a_channel_the_page_does_not_list_or_a_refusal_is_an_error(self) -> None:
+        device = FakeDante("zyxqw-gen3", 136, {})
+        with self.assertRaises(ValueError):
+            self.name(device, 97)   # past its 96 TX channels: an empty page
+        for bad in (0, 1025, True):
+            with self.assertRaises(ValueError):
+                self.name(device, bad)
+        original = device.handle
+        device.handle = lambda packet: original(packet)[:8] + struct.pack(">H", 0x22) + original(packet)[10:]
+        with self.assertRaises(ValueError):
+            self.name(device, 94)
+
+    def test_a_card_s_index_id_name_page_is_read_by_its_id(self) -> None:
+        # A card lists `index, id, name` of its named channels only: the id is the second word.
+        names = b"zyxqw b\0"
+        table = struct.pack(">BB", 2, 2) + struct.pack(">3H", 1, 7, 0) + struct.pack(">3H", 2, 9, 10 + 14)
+        reply = struct.pack(">HHHHH", 0x27FF, 10 + len(table) + len(names), 1, gen3_arc.TX_NAMES, 1) + table + names
+        self.assertEqual(gen3_arc.tx_name_of(reply, 9), "zyxqw b")
+        with self.assertRaises(ValueError):
+            gen3_arc.tx_name_of(reply, 7)   # its name offset is 0: no name
+        with self.assertRaises(ValueError):
+            gen3_arc.tx_name_of(reply[:20], 9)
 
 
 class PacketTests(unittest.TestCase):
