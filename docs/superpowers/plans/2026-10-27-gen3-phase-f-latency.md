@@ -67,7 +67,7 @@
 
 ### Task 4: The kernel receive path (packet priority)
 
-- [ ] **Step 1:** EEE off on the Dante NIC (`ethtool --set-eee … eee off`), in provision and verify.
+- [x] **Step 1:** EEE off on the Dante NIC (`ethtool --set-eee … eee off`), in provision and verify. **Done 2026-10-28:** `napi-priority` turns it off at every boot (d6cc727); the box reads `EEE status: disabled`, verify passes.
 - [x] **Step 2:** Busy polling on our RX sockets (`SO_BUSY_POLL`, `SO_PREFER_BUSY_POLL`, `napi_defer_hard_irqs` and `gro_flush_timeout` set for it) against today's threaded NAPI; measure the RX lateness and its spread (the judge) each way. **Measured, rejected for now:** on shared cores it trimmed the FOH flows a little and made 3 blocks late (#72).
 - [x] **Step 3:** The NIC's interrupt and NAPI thread on a core of their own (with Task 5's isolation), above our audio threads and dantesync. **Done:** core 0 with the housekeeping, the engine's cores 2–3 isolated; `napi-priority` waits for the interrupt at boot (65a56d2).
 - [x] **Step 4 (only if Steps 2–3 leave the receive path the limit):** early capture with AF_XDP for the audio flows (the Linux analogue of dantesync's pcap and of SoundGrid's RX in the interrupt). **Not needed:** the receive path is not the limit at P 0.375 ms.
