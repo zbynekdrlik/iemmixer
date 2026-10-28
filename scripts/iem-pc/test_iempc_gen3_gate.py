@@ -295,10 +295,19 @@ if words[:4] == SVC:
                 os.remove(at(path))
         done()
     fail("unexpected command as the service user: " + " ".join(rest), 97)
-if line == f"{DANTE} health":
+if line in (f"{DANTE} health", f"{DANTE} health || true"):
+    # As health.rs judges: any restart of a unit since its start is the
+    # reason `restarted` (degraded), beside whatever else is wrong; exit 1
+    # unless healthy (the `|| true` form always 0, its line the same).
+    keep = 0 if line.endswith("|| true") else 1
+    reasons = []
     if os.environ.get("FAKE_UNHEALTHY") or (os.environ.get("FAKE_UNHEALTHY_IN_JOB") and st["hil"]):
-        print(json.dumps({"health": {"state": "degraded", "reasons": ["holdover"]}}))
-        done(1)
+        reasons.append("holdover")
+    if st["nrestarts"] > 0:
+        reasons.append("restarted")
+    if reasons:
+        print(json.dumps({"health": {"state": "degraded", "reasons": reasons}}))
+        done(keep)
     print(json.dumps({"health": {"state": "healthy", "reasons": []}}))
     done()
 if line == f"{DANTE} ctl status":
@@ -383,6 +392,10 @@ class GateBase(Base):
         text = ip.env_path().read_text(encoding="utf-8")
         ip.env_path().write_text(text + f"GEN3_HOST={GEN3}\nGEN3_DANTE_IP={DANTE_IP}\n", encoding="utf-8")
         self.patch(POLL_S=0.01)
+        # A health that never comes fails in a second, not in the box's 90.
+        bound = mock.patch.object(gate, "HEALTH_WAIT_S", 1.0)
+        bound.start()
+        self.addCleanup(bound.stop)
         ip.STATE_DIR.mkdir(parents=True, exist_ok=True)
         (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 3, "at": "2026-10-28T09:00:00+00:00"}),
                                                     encoding="utf-8")
