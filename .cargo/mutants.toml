@@ -229,6 +229,11 @@ exclude_re = [
   # `TxTable`) stay mutated: the loopback and thread tests in media/tx run
   # them.
   "iem-dante/src/media/tx\\.rs.*\\bask_realtime\\b",
+  # The CPU pinning's twin for other systems (#72 phase F): compiled out on
+  # the Linux runners, so no test can run it; the Linux `pin_to_cpu` and
+  # `place` stay mutated (media/tx's pinning tests).
+  # anchor 1058: false
+  "iem-dante/src/media/tx\\.rs:1058:.*replace pin_to_cpu -> bool with true$",
   # The daemon's wait for its TX and RX threads at the stop (#72 phase B,
   # plan Task 7): it sets both stop flags (tested: `stopping()` after it)
   # and then only waits, a 1 ms nap a pass, for threads that end within one

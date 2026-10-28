@@ -68,6 +68,16 @@ fn a_config_reads_the_test_device() {
     assert_eq!(cfg.sample_rate, 96_000);
     assert_eq!(cfg.encoding, 24);
     assert_eq!(cfg.latency_ns, 1_000_000);
+    assert_eq!(cfg.work_margin, 96, "W defaults to 1 ms");
+    assert_eq!(cfg.tx_latency_ns, None);
+    assert_eq!(
+        cfg.advertised_latency_ns(),
+        1_000_000,
+        "TX advertises the RX latency"
+    );
+    assert_eq!(cfg.tx_margin_ns, 250_000);
+    assert_eq!(cfg.tx_fpp_max, 32);
+    assert_eq!((cfg.pump_cpu, cfg.io_cpu), (None, None), "no CPU pinned");
     assert_eq!(
         cfg.state_file,
         PathBuf::from("/var/lib/iem-dante/state.toml")
@@ -345,6 +355,89 @@ fn a_state_folder_that_cannot_be_written_fails_the_check_naming_the_file() {
 }
 
 #[test]
+fn the_tx_side_settings_are_read() {
+    let text = config_with(
+        "latency_ns =",
+        "latency_ns = 1000000\ntx_latency_ns = 250000\ntx_margin_ns = 30000\ntx_fpp_max = 16",
+    );
+    let cfg = DeviceConfig::from_toml(&text).unwrap();
+    assert_eq!(cfg.latency_ns, 1_000_000, "the RX playout stays");
+    assert_eq!(cfg.advertised_latency_ns(), 250_000);
+    assert_eq!((cfg.tx_margin_ns, cfg.tx_fpp_max), (30_000, 16));
+}
+
+#[test]
+fn the_advertised_latency_covers_a_packet_its_margin_and_the_send_slack() {
+    // The review of PR #84 (#72 phase F): a receiver plays our audio the
+    // advertised latency after its stamp, and our packet leaves tx_fpp_max
+    // frames + tx_margin_ns after its first sample, give or take the send
+    // time's spread on the realtime box (p99.9 50 us). A config whose sum
+    // passes the latency is refused, naming fields and numbers only.
+    let tx = |lines: &str| config_with("latency_ns =", &format!("latency_ns = 1000000\n{lines}"));
+    let refusal = vec![
+        "tx_latency_ns (latency_ns when it is left out): \
+         below tx_fpp_max frames + tx_margin_ns + 50000 ns"
+            .to_string(),
+    ];
+    // The box's settings: 8 frames at 96 kHz (83 334 ns) + 30 000 + 50 000
+    // ns = 163 334 ns within 0.25 ms; at that edge too, not 1 ns below it.
+    let cfg = DeviceConfig::from_toml(&tx(
+        "tx_latency_ns = 250000\ntx_margin_ns = 30000\ntx_fpp_max = 8",
+    ))
+    .unwrap();
+    assert_eq!(cfg.advertised_latency_ns(), 250_000);
+    DeviceConfig::from_toml(&tx(
+        "tx_latency_ns = 163334\ntx_margin_ns = 30000\ntx_fpp_max = 8",
+    ))
+    .unwrap();
+    assert_eq!(
+        problems(&tx(
+            "tx_latency_ns = 163333\ntx_margin_ns = 30000\ntx_fpp_max = 8"
+        )),
+        refusal
+    );
+    // The defaults: 32 frames (333 334 ns) + 250 000 + 50 000 ns within the
+    // test device's 1 ms; 0.25 ms with them is refused.
+    assert_eq!(config().advertised_latency_ns(), 1_000_000);
+    assert_eq!(problems(&tx("tx_latency_ns = 250000")), refusal);
+    // Without tx_latency_ns our channels advertise latency_ns.
+    DeviceConfig::from_toml(&config_with("latency_ns =", "latency_ns = 633334")).unwrap();
+    assert_eq!(
+        problems(&config_with("latency_ns =", "latency_ns = 633333")),
+        refusal
+    );
+    // At 48 kHz 32 frames are 666 667 ns: 966 667 ns within 1 ms.
+    let at_48k = config_with("sample_rate =", "sample_rate = 48000");
+    DeviceConfig::from_toml(&at_48k).unwrap();
+    assert_eq!(
+        problems(&format!("{at_48k}\ntx_latency_ns = 966666")),
+        refusal
+    );
+}
+
+#[test]
+fn the_threads_cpus_are_read_and_bounded() {
+    let text = config_with(
+        "latency_ns =",
+        "latency_ns = 1000000\npump_cpu = 3\nio_cpu = 2",
+    );
+    let cfg = DeviceConfig::from_toml(&text).unwrap();
+    assert_eq!((cfg.pump_cpu, cfg.io_cpu), (Some(3), Some(2)));
+    for (line, field) in [("pump_cpu = 1024", "pump_cpu"), ("io_cpu = 1024", "io_cpu")] {
+        let found = problems(&config_with(
+            "latency_ns =",
+            &format!("latency_ns = 1000000\n{line}"),
+        ));
+        assert_eq!(found, vec![format!("{field}: 0 to 1023")]);
+    }
+    DeviceConfig::from_toml(&config_with(
+        "latency_ns =",
+        "latency_ns = 1000000\nio_cpu = 1023",
+    ))
+    .unwrap();
+}
+
+#[test]
 fn the_config_is_checked_field_by_field() {
     let cases = [
         (
@@ -379,16 +472,66 @@ fn the_config_is_checked_field_by_field() {
             config_with("state_file =", "state_file = \"\""),
             "state_file: empty",
         ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_latency_ns = 0"),
+            "tx_latency_ns: 1 to 4294967295",
+        ),
+        (
+            config_with(
+                "latency_ns =",
+                "latency_ns = 1000000\ntx_margin_ns = 1000001",
+            ),
+            "tx_margin_ns: 0 to 1000000",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 1"),
+            "tx_fpp_max: 2 to 32",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 33"),
+            "tx_fpp_max: 2 to 32",
+        ),
+        // 300 frames would also pass 1 ms: one problem, the field's own.
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 300"),
+            "tx_fpp_max: 2 to 32",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 250000"),
+            "tx_latency_ns (latency_ns when it is left out): below tx_fpp_max frames",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\nwork_margin = 31"),
+            "work_margin: 32 to 4096 samples",
+        ),
+        (
+            config_with("latency_ns =", "latency_ns = 1000000\nwork_margin = 4097"),
+            "work_margin: 32 to 4096 samples",
+        ),
     ];
     for (text, want) in cases {
         let found = problems(&text);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].starts_with(want), "{found:?} lacks {want:?}");
     }
-    // The edges that are allowed.
+    // The edges that are allowed (the advertised latency covers a packet,
+    // its margin and the send slack: the RX playout's 1 ns and the margin's
+    // 1 ms beside a TX latency of their own).
     for (line, ok) in [
         ("latency_ns =", "latency_ns = 4294967295"),
-        ("latency_ns =", "latency_ns = 1"),
+        ("latency_ns =", "latency_ns = 1\ntx_latency_ns = 1000000"),
+        ("latency_ns =", "latency_ns = 1000000\nwork_margin = 32"),
+        (
+            "latency_ns =",
+            "latency_ns = 1000000\ntx_latency_ns = 4294967295",
+        ),
+        ("latency_ns =", "latency_ns = 1000000\ntx_margin_ns = 0"),
+        (
+            "latency_ns =",
+            "latency_ns = 1000000\ntx_latency_ns = 2000000\ntx_margin_ns = 1000000",
+        ),
+        ("latency_ns =", "latency_ns = 1000000\ntx_fpp_max = 2"),
+        ("latency_ns =", "latency_ns = 1000000\nwork_margin = 4096"),
         ("sample_rate =", "sample_rate = 48000"),
         ("encoding =", "encoding = 32"),
         (

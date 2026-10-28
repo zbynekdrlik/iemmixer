@@ -1631,13 +1631,29 @@ class UnitTests(unittest.TestCase):
         server_env = dict(item.split("=", 1)
                           for item in shlex.split(one(self.units["iem-server"], "Service", "Environment")))
         self.assertEqual(service.get("Environment"), [f"IEMMIXER_CONFIG={server_env['IEMMIXER_CONFIG']}"])
-        self.assertEqual(service.get("ExecStart"), [
+        # The journal line always; the notice only while the box serves the
+        # band, i.e. while its engine is enabled at boot (gen3-switch to-3
+        # enables it, to-2 disables it). A box that serves nobody, with a
+        # copy of the band's data, must not reach the band's devices (#72,
+        # the false alarm of 2026-10-27). systemd hands MONITOR_* to
+        # ExecStartPre= and ExecStart= only, never to ExecCondition= (the
+        # review of PR #84: the line read "(result , exit  )"), so both are
+        # ExecStartPre=: an engine not enabled ends the alarm failed at the
+        # second, before the notice, which raises nothing more (no OnFailure=).
+        self.assertNotIn("ExecCondition", service)
+        self.assertEqual(service.get("ExecStartPre"), [
             '/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} '
             '${MONITOR_EXIT_STATUS})"',
+            "/usr/bin/systemctl is-enabled --quiet iem-engine.service",
+        ])
+        for key, lines in service.items():
+            if any("${MONITOR_" in line for line in lines):
+                self.assertIn(key, ("ExecStartPre", "ExecStart"), "systemd gives MONITOR_* to no other key")
+        self.assertEqual(service.get("ExecStart"), [
             '/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"',
         ])
         # The notice is the server unit's own binary: the guard's alarm path.
-        notify = shlex.split(service["ExecStart"][1])
+        notify = shlex.split(service["ExecStart"][0])
         self.assertEqual(notify[0], one(self.units["iem-server"], "Service", "ExecStart"))
         self.assertEqual(notify[1:], ["notify", "--to", "alarm", "Gen 3 box",
                                       "%i stays down: ${MONITOR_SERVICE_RESULT}"])
@@ -1653,7 +1669,7 @@ class UnitTests(unittest.TestCase):
         service = alarm["Service"]
         lines = [line for key in ("ExecStartPre", "ExecStart", "ExecStartPost", "ExecCondition", "ExecReload",
                                   "ExecStop", "ExecStopPost") for line in service.get(key, [])]
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(lines), 3)
         for line in lines:
             argv = shlex.split(line)
             self.assertTrue(argv[0].startswith("/"), line)

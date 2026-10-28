@@ -408,9 +408,15 @@ fn wake_ns_is_the_first_ns_the_next_packet_is_due() {
                 max_lag: 96,
                 rebootstraps: 0,
             };
-            let w = s.wake_ns(rate);
-            assert!(send_clock(w, rate) >= next + 32, "{rate} {next}");
-            assert!(send_clock(w - 1, rate) < next + 32, "{rate} {next}");
+            let w = s.wake_ns(rate, TX_MARGIN_NS);
+            assert!(
+                send_clock(w, rate, TX_MARGIN_NS) >= next + 32,
+                "{rate} {next}"
+            );
+            assert!(
+                send_clock(w - 1, rate, TX_MARGIN_NS) < next + 32,
+                "{rate} {next}"
+            );
         }
     }
 }
@@ -422,9 +428,9 @@ fn ns_of_and_send_clock_round_the_safe_way() {
     assert_eq!(ns_of(1, RATE), 10_417, "10 416.67 rounded up");
     assert_eq!(ns_of(2, 0), 2_000_000_000, "a rate of 0 reads as 1");
     assert_eq!(ns_of(u64::MAX, 1), u64::MAX, "saturates");
-    assert_eq!(send_clock(0, RATE), 0);
-    assert_eq!(send_clock(TX_MARGIN_NS + 10_416, RATE), 0);
-    assert_eq!(send_clock(TX_MARGIN_NS + 10_417, RATE), 1);
+    assert_eq!(send_clock(0, RATE, TX_MARGIN_NS), 0);
+    assert_eq!(send_clock(TX_MARGIN_NS + 10_416, RATE, TX_MARGIN_NS), 0);
+    assert_eq!(send_clock(TX_MARGIN_NS + 10_417, RATE, TX_MARGIN_NS), 1);
 }
 
 #[test]
@@ -439,17 +445,17 @@ fn packets_a_second_are_rate_over_fpp() {
         // The packets sent in one second, from 0.1 s after the start.
         let start = T;
         let window = start + 100 * MS..start + 1_100 * MS;
-        let mut s = Schedule::bootstrap(send_clock(start, rate), fpp, 96);
+        let mut s = Schedule::bootstrap(send_clock(start, rate, TX_MARGIN_NS), fpp, 96);
         let mut now_ns = start;
         let mut sent = 0;
         let mut wakes = 0;
         while now_ns < window.end {
-            while s.due(send_clock(now_ns, rate)).is_some() {
+            while s.due(send_clock(now_ns, rate, TX_MARGIN_NS)).is_some() {
                 if window.contains(&now_ns) {
                     sent += 1;
                 }
             }
-            now_ns = s.wake_ns(rate);
+            now_ns = s.wake_ns(rate, TX_MARGIN_NS);
             wakes += 1;
             assert!(wakes < 400_000, "the loop advances");
         }
@@ -811,7 +817,7 @@ fn nothing_is_sent_before_the_clock_is_ready_but_keepalives_are_read() {
 #[test]
 fn echo_sends_the_rx_sample_offset_earlier_and_counts_its_holes() {
     let ring = Ring::new();
-    let n0 = send_clock(T, RATE);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
     // RX 1 holds positions up to n0 + 600: the echo of later ones are holes.
     let base = n0 - 1_000;
     let values: Vec<i32> = (base..n0 + 600)
@@ -849,7 +855,7 @@ fn engine_value(p: u64) -> i32 {
 #[test]
 fn an_engine_source_sends_its_engine_ring_at_the_stamp() {
     let mut rig = Rig::with_engine(&[1]);
-    let n0 = send_clock(T, RATE);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
     let base = n0 - 1_000;
     let values: Vec<i32> = (base..n0 + 3_000).map(engine_value).collect();
     rig.shared.engine_ring(1).unwrap().put_at(base, &values);
@@ -881,7 +887,7 @@ fn an_engine_source_sends_its_engine_ring_at_the_stamp() {
 #[test]
 fn an_engine_hole_is_silence_counted_in_the_lane() {
     let mut rig = Rig::with_engine(&[0, 2]);
-    let n0 = send_clock(T, RATE);
+    let n0 = send_clock(T, RATE, TX_MARGIN_NS);
     // TX 1's ring holds positions up to n0 + 600; TX 3's nothing at all.
     let base = n0 - 1_000;
     let values: Vec<i32> = (base..n0 + 600).map(engine_value).collect();
@@ -955,7 +961,7 @@ fn a_lag_past_the_latency_restarts_once_and_sends_no_burst() {
     assert_eq!(rig.shared.lane(slot).rebootstraps, 1);
     let after = run(&mut rig, 52_500, 60_000);
     assert!(!after.is_empty());
-    assert!(stamp_of(&after[0]) >= send_clock(T + 52_000_000, RATE));
+    assert!(stamp_of(&after[0]) >= send_clock(T + 52_000_000, RATE, TX_MARGIN_NS));
     assert_eq!(rig.shared.lane(slot).rebootstraps, 1);
 }
 
@@ -1087,6 +1093,31 @@ fn wake_ns_is_the_next_packet_or_the_next_read() {
     rig.tx.step(Some(w), 0);
     assert_eq!(drain(&rig.rx).len(), 1);
     assert_eq!(rig.tx.wake_ns(None), 0);
+}
+
+#[test]
+fn the_devices_tx_margin_sets_when_a_packet_leaves_and_its_latency_the_lag() {
+    // #72 phase F: a margin of 30 µs instead of 250 µs, a latency of 0.25 ms.
+    let cfg = DeviceConfig {
+        tx_margin_ns: 30_000,
+        tx_latency_ns: Some(250_000),
+        ..cfg()
+    };
+    let shared =
+        Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, Vec::new().into(), 1, &[]).unwrap());
+    let mut rig = Rig::with(shared);
+    assert_eq!(rig.tx.max_lag, 24, "0.25 ms at 96 kHz");
+    rig.tx.step(Some(T), 0);
+    rig.flow(vec![Some(1)]);
+    rig.tx.step(Some(T + EVENTS_EVERY_NS), 0);
+    let w = rig.tx.wake_ns(Some(T + EVENTS_EVERY_NS));
+    // 1 ns early: nothing; at it: one packet, 30 µs after its last sample.
+    rig.tx.step(Some(w - 1), 0);
+    assert!(drain(&rig.rx).is_empty());
+    rig.tx.step(Some(w), 0);
+    let sent = drain(&rig.rx);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(w, ns_of(stamp_of(&sent[0]) + FPP, RATE) + 30_000);
 }
 
 #[test]
@@ -1233,4 +1264,63 @@ fn the_tx_thread_sends_nothing_before_the_clock_is_ready() {
     assert!(!drain(&rx).is_empty());
     shared.stop();
     join_within(thread, Duration::from_secs(2));
+}
+
+/// The CPUs the calling thread may run on.
+#[cfg(target_os = "linux")]
+fn affinity() -> Vec<usize> {
+    // SAFETY: an all-zero cpu_set_t is valid; the call fills it; pid 0 is
+    // the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        assert_eq!(
+            libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set),
+            0
+        );
+        (0..crate::device::MAX_CPU)
+            .filter(|&c| libc::CPU_ISSET(c, &set))
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_thread_pins_itself_to_one_cpu_and_a_missing_cpu_is_refused() {
+    std::thread::spawn(|| {
+        assert!(pin_to_cpu(0), "CPU 0 exists on every runner");
+        assert_eq!(affinity(), vec![0]);
+        assert!(!pin_to_cpu(1023), "no runner has 1024 CPUs");
+        assert!(!pin_to_cpu(crate::device::MAX_CPU), "past CPU_SETSIZE");
+        assert_eq!(
+            affinity(),
+            vec![0],
+            "a refused CPU leaves the thread where it was"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn place_pins_a_thread_to_the_configured_cpu_and_leaves_it_without_one() {
+    std::thread::spawn(|| {
+        let before = affinity();
+        place("test thread", None);
+        assert_eq!(
+            affinity(),
+            before,
+            "no CPU in the config: the thread stays where it was"
+        );
+        place("test thread", Some(0));
+        assert_eq!(affinity(), vec![0], "pinned to the configured CPU");
+        place("test thread", Some(1023));
+        assert_eq!(
+            affinity(),
+            vec![0],
+            "a CPU the kernel refuses leaves it where it was"
+        );
+    })
+    .join()
+    .unwrap();
 }

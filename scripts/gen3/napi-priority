@@ -22,8 +22,12 @@ set -euo pipefail
 # Run as root by iem-napi.service at boot (before dantesync and the stack),
 # installed and enabled by provision-root.sh at
 # /usr/local/lib/iemmixer/napi-priority. It waits for the interface (udev
-# names it; at most IEM_NAPI_IFACE_WAIT tenths of a second, 300) and, after
-# threaded is set, for its NAPI threads (IEM_NAPI_THREAD_WAIT, 50). Any value
+# names it; at most IEM_NAPI_IFACE_WAIT tenths of a second, 300), after
+# threaded is set for its NAPI threads (IEM_NAPI_THREAD_WAIT, 50), and for an
+# interrupt named after it (IEM_NAPI_IRQ_WAIT, 200: the kernel names it when
+# systemd-networkd opens the interface, which can come after this starts;
+# #72 phase F, the realtime boot of 2026-10-28): 55 s at most, inside
+# iem-napi.service's TimeoutStartSec=90 with the forks of each try. Any value
 # that does not read back as set fails it: exit 1; 2 for its command line.
 # IEM_NAPI_SYS and IEM_NAPI_PROC (default /sys, /proc) are the tests' seams.
 # It names no interface, address or name in its output (P6): the interface
@@ -37,6 +41,7 @@ CORE=0
 FIFO=1
 IFACE_WAIT="${IEM_NAPI_IFACE_WAIT:-300}"
 THREAD_WAIT="${IEM_NAPI_THREAD_WAIT:-50}"
+IRQ_WAIT="${IEM_NAPI_IRQ_WAIT:-200}"
 
 die() {
   echo "napi-priority: $*" >&2
@@ -61,8 +66,8 @@ fi
 [ $# -eq 1 ] || usage "one interface name, nothing else"
 IF="$1"
 [[ "$IF" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || usage "the interface is not an interface name"
-for wait in "$IFACE_WAIT" "$THREAD_WAIT"; do
-  [[ "$wait" =~ ^[0-9]{1,4}$ ]] || usage "IEM_NAPI_IFACE_WAIT and IEM_NAPI_THREAD_WAIT are tenths of a second"
+for wait in "$IFACE_WAIT" "$THREAD_WAIT" "$IRQ_WAIT"; do
+  [[ "$wait" =~ ^[0-9]{1,4}$ ]] || usage "IEM_NAPI_IFACE_WAIT, IEM_NAPI_THREAD_WAIT and IEM_NAPI_IRQ_WAIT are tenths of a second"
 done
 
 # The pids of the interface's NAPI threads (`napi/<interface>-<id>`, read from
@@ -189,8 +194,14 @@ for pid in "${pids[@]}"; do
   taskset -p -c "$CORE" "$pid" > /dev/null
 done
 
-irqs_text="$(interface_irqs)"
-[ -n "$irqs_text" ] || die "no interrupt of /proc/interrupts names the Dante interface"
+# Its interrupts, once the kernel names them (when the interface is opened).
+irqs_text=""
+for ((n = 0; ; n++)); do
+  irqs_text="$(interface_irqs)"
+  [ -z "$irqs_text" ] || break
+  [ "$n" -lt "$IRQ_WAIT" ] || die "no interrupt of /proc/interrupts names the Dante interface within $IRQ_WAIT tenths of a second"
+  sleep 0.1
+done
 mapfile -t irqs <<< "$irqs_text"
 for irq in "${irqs[@]}"; do
   echo "$CORE" > "$PROC/irq/$irq/smp_affinity_list"

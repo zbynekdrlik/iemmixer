@@ -50,11 +50,25 @@ struct Answer {
 
 impl Dev {
     fn new() -> Self {
+        Dev::with(cfg())
+    }
+
+    fn with(cfg: DeviceConfig) -> Self {
         Dev {
             table: TxTable::new(0x5eed),
-            cfg: cfg(),
+            cfg,
             seq: 0,
         }
+    }
+
+    /// A device whose channels offered 256 frames a packet (a config sets
+    /// at most 32): inferno's bound and one datagram's are reached only
+    /// past `tx_fpp_max`, so their tests ask such a device.
+    fn offering_256() -> Self {
+        Dev::with(DeviceConfig {
+            tx_fpp_max: 256,
+            ..cfg()
+        })
     }
 
     fn send(&mut self, bytes: &[u8], now: u64) -> FlowOutcome {
@@ -204,7 +218,7 @@ fn another_sample_rate_is_0x0301_before_the_frames_are_checked() {
 
 #[test]
 fn more_than_256_frames_is_0x0302_and_256_are_taken() {
-    let mut dev = Dev::new();
+    let mut dev = Dev::offering_256();
     refused_with(
         &mut dev,
         &FlowRequest { fpp: 257, ..req() },
@@ -220,8 +234,37 @@ fn more_than_256_frames_is_0x0302_and_256_are_taken() {
 }
 
 #[test]
-fn our_safety_refusals_are_0x0302_and_change_nothing() {
+fn more_frames_than_our_channels_offer_is_0x0302_and_tx_fpp_max_is_taken() {
+    // The review of PR #84 (#72 phase F): the config's advertised latency
+    // covers tx_fpp_max frames a packet; a receiver asking more would get
+    // our packets after it plays them.
+    let mut dev = Dev::with(DeviceConfig {
+        tx_fpp_max: 8,
+        ..cfg()
+    });
+    for fpp in [9, 16, 32, 256] {
+        refused_with(&mut dev, &FlowRequest { fpp, ..req() }, status::BAD_REQUEST);
+    }
+    dev.flow(&FlowRequest { fpp: 8, ..req() });
+    // The test device offers the default, 32.
     let mut dev = Dev::new();
+    refused_with(
+        &mut dev,
+        &FlowRequest { fpp: 33, ..req() },
+        status::BAD_REQUEST,
+    );
+    dev.flow(&FlowRequest { fpp: 32, ..req() });
+    // A refusal the gap guard counts.
+    assert_eq!(
+        dev.send(&build_request(1, &FlowRequest { fpp: 33, ..req() }), 0)
+            .gap(),
+        Some((op::REQUEST, Gap::Refused))
+    );
+}
+
+#[test]
+fn our_safety_refusals_are_0x0302_and_change_nothing() {
+    let mut dev = Dev::offering_256();
     let other_ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 12), 4321);
     let cases = [
         FlowRequest { fpp: 0, ..req() },
@@ -368,7 +411,7 @@ fn update_sets_the_channels_and_revives_an_expired_flow() {
 
 #[test]
 fn an_update_that_cannot_be_sent_is_0x0302_and_changes_nothing() {
-    let mut dev = Dev::new();
+    let mut dev = Dev::offering_256();
     // 8 slots of 24 bits at 32 frames: 9 + 768 bytes; 61 frames would not
     // fit, so a flow at 61 frames takes 7 slots only.
     let h = dev.flow(&FlowRequest {
@@ -761,6 +804,7 @@ fn random_datagrams_never_panic_and_every_answer_is_one_of_inferno_s() {
         for (_, f) in dev.table.flows() {
             assert_eq!(*f.dest.ip(), PEER_IP, "audio only to the requester");
             assert!(f.channels.len() <= 8);
+            assert!(f.fpp <= dev.cfg.tx_fpp_max, "{}", f.fpp);
             assert!(
                 f.channels
                     .iter()

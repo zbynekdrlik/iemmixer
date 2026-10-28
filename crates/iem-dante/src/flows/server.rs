@@ -24,6 +24,7 @@
 //! | 0x0100 | a channel id past our TX channels | 0x0302 (inferno: 0x0302, then goes on to a second answer) |
 //! | 0x0100 | another sample rate | 0x0301 |
 //! | 0x0100 | more than 256 frames a packet | 0x0302 |
+//! | 0x0100 | ours: more frames a packet than our channels offer (the config's `tx_fpp_max`, which its advertised latency covers) | 0x0302 (inferno would accept) |
 //! | 0x0100 | ours: fpp 0, bits / 8 not 2–4, more than 8 slots, a packet past one datagram, audio to another address than the requester's, port 0 | 0x0302 (inferno would accept: then divide by zero, send malformed packets, index past its buffer or send to anyone) |
 //! | 0x0100 | no free slot once expired flows are freed | 0x0315 |
 //! | 0x0100 | otherwise | OK, the 6-byte handle (a destination already served keeps its handle) |
@@ -198,6 +199,11 @@ fn request(
         (status::SAMPLE_RATE_MISMATCH, "another sample rate")
     } else if r.fpp > FPP_MAX {
         (status::BAD_REQUEST, "more than 256 frames a packet")
+    } else if r.fpp > cfg.tx_fpp_max {
+        (
+            status::BAD_REQUEST,
+            "more frames a packet than our channels offer",
+        )
     } else if !sendable(r.channels.len(), (r.bits / 8) as usize, r.fpp) {
         (status::BAD_REQUEST, "a flow that cannot be sent")
     } else if r.rx.ip() != from.ip() || r.rx.port() == 0 {

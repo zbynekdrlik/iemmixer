@@ -115,6 +115,24 @@ fn the_timing_is_32_samples_the_devices_latency_and_1_ms() {
 }
 
 #[test]
+fn the_work_margin_comes_from_the_device_config() {
+    // 0.25 ms with the box's TX settings: the device refuses an advertised
+    // latency shorter than tx_fpp_max frames + tx_margin_ns + its send slack.
+    let text = TEST_DEVICE.replace(
+        "latency_ns = 1000000",
+        "latency_ns = 250000\nwork_margin = 48\ntx_fpp_max = 8\ntx_margin_ns = 30000",
+    );
+    assert_ne!(
+        text, TEST_DEVICE,
+        "the test config states latency_ns = 1000000"
+    );
+    let cfg = DeviceConfig::from_toml(&text).unwrap();
+    let t = timing(&cfg);
+    assert_eq!((t.block, t.playout, t.margin), (32, 24, 48));
+    assert_eq!(t.offset(), 104, "D = 32 + 24 + 48, below 2.x's 129");
+}
+
+#[test]
 fn the_dante_flags_become_the_devices_options() {
     let iface = DanteArgs {
         config: PathBuf::from("dev.toml"),

@@ -857,7 +857,7 @@ fn the_rx_thread_receives_until_stopped() {
         &[(0, plan(LOOPBACK, 1, true, 1))],
         &[(0, RxRoute { flow: 0, slot: 0 })],
     );
-    let thread = spawn(clock, Arc::clone(&s)).unwrap();
+    let thread = spawn(clock, Arc::clone(&s), None).unwrap();
     let t = transmitter(LOOPBACK);
     let p0 = clock::to_samples(start, RATE) - 64;
     t.send_to(&packet_at(p0, 1, 32), slot_addr(&s, 0)).unwrap();
