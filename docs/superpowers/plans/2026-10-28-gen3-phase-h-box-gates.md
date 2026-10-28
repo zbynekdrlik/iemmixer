@@ -45,8 +45,8 @@
 
 ### Task 3: A supervisor client on Linux
 
-- [ ] **Step 1:** `iem-engine supervise test-signal <input> <dbfs> <seconds> [--listen]`, `supervise stop-test-signal`, `supervise status`: a client of the engine's control channel with the supervisor role (the guard's framing reused), the guard's caps (at most −20 dBFS, at most 60 s), refused when the engine runs without `--test-signal`. Tests against the control loop in-process (`crates/iem-engine/src/control/tests`).
-- [ ] **Step 2:** The sudo lines to run it as the service user.
+- [x] **Step 1:** `iem-engine supervise test-signal <input> <dbfs> <seconds> [--listen]`, `supervise stop-test-signal`, `supervise status`: a client of the engine's control channel with the supervisor role (the guard's framing reused), the guard's caps (at most −20 dBFS, at most 60 s), refused when the engine runs without `--test-signal`. Tests against the control loop in-process (`crates/iem-engine/src/control/tests`). Done 5e36a39: `crates/iem-engine/src/supervise.rs` (`[--pipe <socket>]`, default the box unit's `/run/iemmixer/engine.sock`; the engine's own `iem_engine_proto` frames through `pipe::Framer`; the burst on every spare output of the engine's first `Status.hil`; 1 to 60 whole seconds; exit 0/1/2, 2 also off Unix), tests in `supervise/tests.rs`, `control/tests/supervise.rs`, `tests/pipes/binary.rs`; `.claude/rules/gen3.md`.
+- [ ] **Step 2:** The sudo lines to run it as the service user. Open: each line is an exact command (`sudo-lines.txt` has no placeholder for an input, a level or a length), so it needs the gate's fixed burst values, which Tasks 5 and 6 choose.
 
 ### Task 4: The box HIL job
 
