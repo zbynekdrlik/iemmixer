@@ -576,6 +576,16 @@ pub struct Sockets {
     pub flows: UdpSocket,
 }
 
+/// The network's channels: one browse of the channel records, and a device
+/// that publishes none read through its ARC, asked for the config's
+/// `arc_rx_fpp` frames a packet.
+fn network_of(cfg: &DeviceConfig) -> Network {
+    Network {
+        chan: Mdns::new(),
+        arc: ArcDirectory::new(directory::Timing::of(cfg)),
+    }
+}
+
 /// Serves the device at `net.ip` until `stop` ends: announces its records
 /// first, then answers ARC, CMC, the info requests and flow control on
 /// `sockets` (every datagram counted in `media`'s requests), sends the
@@ -598,16 +608,6 @@ pub struct Sockets {
 /// (waited for [`THREADS_WAIT`]). The caller withdraws the records after
 /// it returns.
 #[allow(clippy::too_many_arguments)]
-/// The network's channels: one browse of the channel records, and a device
-/// that publishes none read through its ARC, asked for the config's
-/// `arc_rx_fpp` frames a packet.
-fn network_of(cfg: &DeviceConfig) -> Network {
-    Network {
-        chan: Mdns::new(),
-        arc: ArcDirectory::new(directory::Timing::of(cfg)),
-    }
-}
-
 pub async fn serve<R: Registry + Browse>(
     sockets: Sockets,
     shared: Arc<Mutex<Device>>,
