@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -1407,7 +1409,7 @@ class NapiTests(unittest.TestCase):
         self.env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                     "FAKE_WORLD": str(self.world), "FAKE_ROOT": str(self.root),
                     "IEM_NAPI_SYS": str(self.root / "sys"), "IEM_NAPI_PROC": str(self.root / "proc"),
-                    "IEM_NAPI_IFACE_WAIT": "3", "IEM_NAPI_THREAD_WAIT": "3"}
+                    "IEM_NAPI_IFACE_WAIT": "3", "IEM_NAPI_THREAD_WAIT": "3", "IEM_NAPI_IRQ_WAIT": "3"}
 
     def napi(self, *args: str, **env: str) -> subprocess.CompletedProcess:
         return subprocess.run(["bash", str(NAPI), *(args or (IFACE,))], env={**self.env, **env},
@@ -1481,6 +1483,25 @@ class NapiTests(unittest.TestCase):
         r = self.napi()
         self.assertEqual(r.returncode, 1)
         self.assertIn("no interrupt of /proc/interrupts names the Dante interface", r.stderr)
+
+    def test_an_interrupt_named_after_the_start_is_waited_for(self) -> None:
+        # The box's realtime boot (#72 phase F, 2026-10-28): iem-napi ran
+        # 1.5 s before systemd-networkd opened the interface, so no line of
+        # /proc/interrupts named it yet, and the unit failed.
+        write(self.root / "proc/interrupts", INTERRUPTS.replace(f"{IFACE}-TxRx", "other-TxRx"))
+
+        def open_the_interface() -> None:
+            time.sleep(0.3)
+            write(self.root / "proc/interrupts", INTERRUPTS)
+
+        opener = threading.Thread(target=open_the_interface)
+        opener.start()
+        r = self.napi(IEM_NAPI_IRQ_WAIT="50")
+        opener.join()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("2 interrupts on core 0", r.stdout)
+        for irq in IRQS:
+            self.assertEqual(self.read(f"proc/irq/{irq}/smp_affinity_list"), "0")
 
     def test_a_bad_command_line_is_exit_2(self) -> None:
         for args in (["--check"], [IFACE, IFACE], ["bad name"], ["a" * 16]):
