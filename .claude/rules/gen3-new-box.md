@@ -54,6 +54,7 @@ work_margin = 48         # W in samples (0.5 ms)
 tx_latency_ns = 250000   # what our TX advertises: receivers play us at it (the IEM card's 0.25 ms)
 tx_margin_ns = 30000     # a packet leaves 30 us after its last sample
 tx_fpp_max = 8           # the most frames a receiver may ask per packet
+arc_rx_fpp = 16          # frames per packet asked of the stage devices (ARC-resolved); lower cuts RX lateness, prove it first
 pump_cpu = <N-1>         # N = nproc --all: the two CPUs provisioning isolated
 io_cpu = <N-2>
 ```
