@@ -530,6 +530,11 @@ impl ArcDirectory {
         }
     }
 
+    /// The timing it was made with.
+    pub fn timing(&self) -> Timing {
+        self.shared.timing
+    }
+
     /// Whether a lookup has reached it (the daemon starts it then).
     pub fn asked(&self) -> bool {
         self.asked.load(Ordering::Relaxed)

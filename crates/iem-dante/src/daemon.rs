@@ -49,7 +49,7 @@ use tracing::{info, warn};
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
-use crate::device::Device;
+use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
 use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo};
 use crate::subscribe::TICK;
@@ -598,6 +598,16 @@ pub struct Sockets {
 /// (waited for [`THREADS_WAIT`]). The caller withdraws the records after
 /// it returns.
 #[allow(clippy::too_many_arguments)]
+/// The network's channels: one browse of the channel records, and a device
+/// that publishes none read through its ARC, asked for the config's
+/// `arc_rx_fpp` frames a packet.
+fn network_of(cfg: &DeviceConfig) -> Network {
+    Network {
+        chan: Mdns::new(),
+        arc: ArcDirectory::new(directory::Timing::of(cfg)),
+    }
+}
+
 pub async fn serve<R: Registry + Browse>(
     sockets: Sockets,
     shared: Arc<Mutex<Device>>,
@@ -612,12 +622,9 @@ pub async fn serve<R: Registry + Browse>(
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(records = n, "mDNS records announced");
-    let (identity, arc_timing) = {
+    let (identity, network) = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        (
-            Identity::new(&device.cfg, net),
-            directory::Timing::of(&device.cfg),
-        )
+        (Identity::new(&device.cfg, net), network_of(&device.cfg))
     };
     let threads = media.spawn_threads().map_err(ServeError::Threads)?;
     let rx_changes = Arc::new(Changes::default());
@@ -646,16 +653,8 @@ pub async fn serve<R: Registry + Browse>(
     );
     let flows = flows::server::serve(sockets.flows, Arc::clone(&media.tx), requests);
     // Our own channels resolve from our records (built again after a
-    // rename), the network's from one browse of the channel records, and a
-    // device that publishes none through its ARC (asked for the config's
-    // `arc_rx_fpp` frames a packet).
-    let mut resolver = (
-        Own::default(),
-        Network {
-            chan: Mdns::new(),
-            arc: ArcDirectory::new(arc_timing),
-        },
-    );
+    // rename), the network's as `network_of` builds it.
+    let mut resolver = (Own::default(), network);
     let mut own_stale = true;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
