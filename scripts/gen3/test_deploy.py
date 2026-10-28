@@ -15,6 +15,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -49,6 +50,14 @@ GH_VERIFY = ["attestation", "verify", "<bundle>/SHA256SUMS", "-R", "zbynekdrlik/
              "zbynekdrlik/iemmixer/.github/workflows/ci.yml"]
 ENGINEER_PIN = "3917"
 MEMBER_PIN = "6284"
+
+
+def holds_pin(text: str | bytes, pin: str) -> bool:
+    """Whether `pin` stands in `text` as itself, not inside a run of hex
+    digits: a commit SHA or a sha256 digest holds any four digits by chance
+    (CI, 2026-10-28: the member PIN inside a staged SHA256SUMS)."""
+    data = text.encode() if isinstance(text, str) else text
+    return re.search(rb"(?<![0-9a-fA-F])" + pin.encode() + rb"(?![0-9a-fA-F])", data) is not None
 
 # The box: `ssh` answers the deploy's commands from FAKE_BOX (home/, root/ and
 # states.json, the units' states), `scp` copies into its home; both log every
@@ -449,7 +458,9 @@ class DeployTests(unittest.TestCase):
                             GIT_AUTHOR_EMAIL="tester@example.org", GIT_COMMITTER_NAME="tester",
                             GIT_COMMITTER_EMAIL="tester@example.org")
         self.env = {**self.git_env, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BOX": str(self.box),
-                    "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SERVER_WAIT_S": "3", "PC_ENV": str(self.pc_env)}
+                    "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SERVER_WAIT_S": "3", "PC_ENV": str(self.pc_env),
+                    # iempc's state of this test only: the dev box's own side record never reaches a test.
+                    "IEMPC_STATE": str(self.tmp / "iempc-state")}
         # The checkout deploy.sh runs from: this one's script, units and test
         # site, committed in a repository of its own.
         self.repo = self.tmp / "checkout"
@@ -1097,20 +1108,23 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(data, "", command)
         for call in [*self.calls(), *(c["args"] for c in self.gh_calls())]:
             for word in call:
-                self.assertNotIn(ENGINEER_PIN, word)
-                self.assertNotIn(MEMBER_PIN, word)
+                for pin in (ENGINEER_PIN, MEMBER_PIN):
+                    self.assertFalse(holds_pin(word, pin), word)
         # Not in ssh's environment either (never exported), never printed.
         for line in (self.box / "env.log").read_text(encoding="utf-8").splitlines():
             values = set(json.loads(line).values())
             self.assertNotIn(ENGINEER_PIN, values)
             self.assertNotIn(MEMBER_PIN, values)
         for text in (r.stdout, r.stderr):
-            self.assertNotIn(ENGINEER_PIN, text)
-            self.assertNotIn(MEMBER_PIN, text)
+            for pin in (ENGINEER_PIN, MEMBER_PIN):
+                self.assertFalse(holds_pin(text, pin))
         for name in os.listdir(self.box / "home" / STAGE):
             staged = (self.box / "home" / STAGE / name).read_bytes()
-            self.assertNotIn(ENGINEER_PIN.encode(), staged, name)
-            self.assertNotIn(MEMBER_PIN.encode(), staged, name)
+            for pin in (ENGINEER_PIN, MEMBER_PIN):
+                self.assertFalse(holds_pin(staged, pin), name)
+        # The helper finds a PIN written as itself, never one inside a digest.
+        self.assertTrue(holds_pin(f"pin={MEMBER_PIN}\n", MEMBER_PIN))
+        self.assertFalse(holds_pin(f"ab{MEMBER_PIN}cd  iem-engine\n", MEMBER_PIN))
         self.assertIn(f"the engineer and {len(people)} roster people", r.stdout)
 
     def test_pins_need_both_pins_of_four_digits_in_the_private_env(self) -> None:
