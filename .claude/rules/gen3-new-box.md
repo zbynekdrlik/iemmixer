@@ -68,6 +68,8 @@ io_cpu = <N-2>
 
 Once the box has been deployed (and while 3.x serves, always): `iempc gen3-deploy --bundle <gen3-bundle-<sha>> --sha <sha>` (deploy.sh alone refuses while 3.x serves; `.claude/rules/gen3.md`, "Deploy while 3.x serves").
 
+While 3.x serves, a provision is followed at once by `iempc gen3-deploy`: provision's `stack` step disables `iem-engine` and `iem-server`, so a reboot in between would not serve the band (first box, 2026-10-28: stop, provision, deploy took 25 s of silence).
+
 ## 6. The band's data and URL
 
 - `iempc gen3-data --pepper` (from the PC side): the band's files and the pepper onto the box, read back by sha256.
@@ -78,7 +80,7 @@ Once the box has been deployed (and while 3.x serves, always): `iempc gen3-deplo
 - `scripts/gen3/live_guard.py --rate 96000 --seconds <n>` as a background task for the whole session.
 - 30 minutes with the stage on and the RX mirrored (`iempc gen3-mirror`), reading `ctl status` each second: expect late / missed / overruns 0, the longest block well under 333 µs (175–235 µs on the N100), every RX flow's worst `lateness` under P (14–27 against 36).
 - The loop through the IEM card (`iempc gen3-loop --offsets 116,153 --bursts 5 --slot <spare HIL output>`, the PC in maintenance): round trips equal within a burst set, base 153 at `tx_latency_ns` 0.25 ms.
-- How to measure each part (RX lateness, block time, a receiver's flow latency through its ARC 0x3200, our TX send spread with `tcpdump --time-stamp-precision=nano`): `.claude/rules/gen3.md`, "Measuring latency on the box".
+- How to measure each part (RX lateness, block time, a receiver's flow latency through its ARC 0x3200, our TX send spread with `tcpdump -p --time-stamp-precision=nano`, never without `-p`): `.claude/rules/gen3.md`, "Measuring latency on the box".
 
 ## Gotchas that cost time once
 
@@ -87,3 +89,4 @@ Once the box has been deployed (and while 3.x serves, always): `iempc gen3-deplo
 - Dante receivers play our flows at our advertised latency, never their own lower setting: a 1 ms `latency_ns` used for TX cost 0.75 ms at the rack.
 - The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot.
 - systemd gives `MONITOR_*` only to ExecStartPre=/ExecStart=, never to ExecCondition=.
+- `tcpdump` on the Dante NIC only with `-p`: entering promiscuous mode on the r8169 stalled RX once for ~2.7 ms, every flow late at the same moment (2026-10-28: 63 packets at fpp 4, 17 at fpp 16; the kernel's "entered promiscuous mode" line); with `-p` the capture added no late packet.
