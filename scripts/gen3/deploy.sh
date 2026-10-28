@@ -647,7 +647,9 @@ fi
 # cannot be written is a warning (an uncounted start only lets a gate run
 # sooner; each gate resets systemd's count before its own start), and one
 # iempc already took away (it stopped waiting for this deploy) is not made
-# again.
+# again, unless iempc takes it away in the instant between the look and the
+# write: then an empty-of-meaning mark stays in iempc's state (nothing is
+# counted twice; accepted).
 if [ "$start" = engine ] && [ -n "${IEMPC_START_MARK:-}" ]; then
   if [ ! -e "$IEMPC_START_MARK" ]; then
     echo "deploy.sh: the file IEMPC_START_MARK names is gone (iempc stopped waiting for this deploy): this engine start is not marked" >&2
