@@ -40,18 +40,18 @@
 
 ### Task 2: The box's spare HIL outputs
 
-- [ ] **Step 1:** The box device config's TX list covers the site's `[guard] hil_tx` (the takeover gives each the card's label). A `gen3-gate` preflight refuses when any `hil_tx` is above the device's TX count. Tests in `test_iempc_gen3.py`.
+- [ ] **Step 1:** The box device config's TX list covers the site's `[guard] hil_tx` (the takeover gives each the card's label). A `gen3-gate` preflight refuses when any `hil_tx` is above the device's TX count. Tests in `test_iempc_gen3.py`. The preflight is done with Task 6 (`iempc_gen3_gate.counts_refusal`: also each spare output's D5(b) return within the RX count, and `iem-engine check-site` of the installed site; tests in `test_iempc_gen3_gate.py`); open: the ops device config's coverage, read on the box by the first run (Task 6 Step 2).
 - [ ] **Step 2:** A read-only survey that no receiver but our own device subscribes to those TX channels (the rack, FOH), recorded on #72.
 
 ### Task 3: A supervisor client on Linux
 
 - [x] **Step 1:** `iem-engine supervise test-signal <input> <dbfs> <seconds> [--listen]`, `supervise stop-test-signal`, `supervise status`: a client of the engine's control channel with the supervisor role (the guard's framing reused), the guard's caps (at most −20 dBFS, at most 60 s), refused when the engine runs without `--test-signal`. Tests against the control loop in-process (`crates/iem-engine/src/control/tests`). Done 5e36a39: `crates/iem-engine/src/supervise.rs` (`[--pipe <socket>]`, default the box unit's `/run/iemmixer/engine.sock`; the engine's own `iem_engine_proto` frames through `pipe::Framer`; the burst on every spare output of the engine's first `Status.hil`; 1 to 60 whole seconds; exit 0/1/2, 2 also off Unix), tests in `supervise/tests.rs`, `control/tests/supervise.rs`, `tests/pipes/binary.rs`; `.claude/rules/gen3.md`.
-- [ ] **Step 2:** The sudo lines to run it as the service user. Open: each line is an exact command (`sudo-lines.txt` has no placeholder for an input, a level or a length), so it needs the gate's fixed burst values, which Tasks 5 and 6 choose.
+- [x] **Step 2:** The sudo lines to run it as the service user. Open: each line is an exact command (`sudo-lines.txt` has no placeholder for an input, a level or a length), so it needs the gate's fixed burst values, which Tasks 5 and 6 choose. Done with Task 6: `supervise status`, `supervise test-signal mic1 -30 10` (HIL v1's input, level and length) and `supervise stop-test-signal` as `iemmixer`; Task 5's live burst (30 s every 60 s) needs its own line.
 
 ### Task 4: The box HIL job
 
-- [ ] **Step 1:** `gen3-gate` begin: refuses with `EVENT-NOW`, while 2.x serves, or with a job left over; writes `/run/systemd/system/iem-engine.service.d/iem-hil.conf` (the test flags), `daemon-reload`, `reset-failed`, restart, waits healthy and the RX flows back. End: removes it, restarts, waits healthy. A left job is ended first by the next `gen3-gate` and by `deploy.sh`.
-- [ ] **Step 2:** Tests with the box's commands as stand-ins (as `test_iempc_gen3.py` does).
+- [x] **Step 1:** `gen3-gate` begin: refuses with `EVENT-NOW`, while 2.x serves, or with a job left over; writes `/run/systemd/system/iem-engine.service.d/iem-hil.conf` (the test flags), `daemon-reload`, `reset-failed`, restart, waits healthy and the RX flows back. End: removes it, restarts, waits healthy. A left job is ended first by the next `gen3-gate` and by `deploy.sh`. Done: `iempc_gen3_gate.begin_job`/`end_job`/`end_left` (`--test-signal` only: the panic is not covered, below), the restart budget (`gen3-gate.json`), deploy.sh's `rm -f` of a left drop-in; `.claude/rules/gen3.md`, the box's HIL gate.
+- [x] **Step 2:** Tests with the box's commands as stand-ins (as `test_iempc_gen3.py` does). Done: `scripts/iem-pc/test_iempc_gen3_gate.py`, `test_deploy.py`'s left-job tests.
 
 ### Task 5: `gen3-gate live`
 
@@ -60,7 +60,7 @@
 
 ### Task 6: `gen3-gate hil`
 
-- [ ] **Step 1:** In a HIL job: versions and health, the D5(b) loop (a spare TX into our own spare RX by self-subscription, `Status.loopback_samples` and the spare outputs' peaks), the test signal at its level then silent, a panic (`InjectFault`, systemd starts it again), the alarm path's count; the status `hil/gen3`.
+- [x] **Step 1:** In a HIL job: versions and health, the D5(b) loop (a spare TX into our own spare RX by self-subscription, `Status.loopback_samples` and the spare outputs' peaks), the test signal at its level then silent, a panic (`InjectFault`, systemd starts it again), the alarm path's count; the status `hil/gen3`. Done: `iempc gen3-gate hil` (`iempc_gen3_gate.py`), every check but the panic, reported `panic: "not_covered"`: `iem-engine supervise` has no fault injection (a Rust change: an `inject-fault` command and its sudo line, then `--fault-injection` in the drop-in and a third start in the budget).
 - [ ] **Step 2:** A run on the box, recorded on #72.
 
 ### Task 7: `gen3-gate soak`
