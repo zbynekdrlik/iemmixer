@@ -431,6 +431,7 @@ class Checks:
     # back, its spare outputs not open or it restarted by itself (each its own
     # failure word, so the verdict is never green).
     panic_skipped: bool = False
+    restarts_unread: bool = False   # NRestarts not read after the job's checks: the job's state not known
     panic_restarts: int | None = None   # NRestarts' rise after the fault; None when not read
     starts: int = 0
     end_ok: bool = False
@@ -468,6 +469,8 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
         failed.append("alarm_not_armed")
     if c.unit_restarts:
         failed.append("restarted")
+    if c.restarts_unread:
+        failed.append("restarts_unread")
     if not c.panic and not (c.panic_skipped and failed):   # skipped: another word fails it already
         failed.append("panic")
     if not (c.end_ok and c.hil_off):
@@ -480,7 +483,8 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
         "lowest_dbfs": signal["lowest_dbfs"], "highest_dbfs": signal["highest_dbfs"], "still": signal["still"],
         "loop": c.loop, "loopback_samples": loopback, "loop_restored": int(c.loop_restored),
         "alarm_devices": c.alarm_devices, "alarm_armed": int(c.alarm_armed), "unit_restarts": c.unit_restarts,
-        "panic": "skipped" if c.panic_skipped else int(c.panic), "panic_restarts": c.panic_restarts, "starts": c.starts, "left_job": int(left),
+        "panic": "skipped" if c.panic_skipped else int(c.panic), "panic_restarts": c.panic_restarts,
+        "starts": c.starts, "left_job": int(left),
         "job_end": int(c.end_ok), "hil_off": int(c.hil_off),
         "failed": failed,
     }
@@ -490,7 +494,7 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
 
 # ssh's own failure (exit 255: no connection, a refused key, a lost session):
 # its stderr names the box's address, so the gates say these words instead (P6).
-SSH_FAILED = "ssh to GEN3_HOST failed (exit 255)"
+SSH_FAILED = g3.SSH_FAILED
 
 
 def box_error(ip, e: Exception) -> Exception:
@@ -970,9 +974,14 @@ def read_restarts(box: Box, c: Checks) -> None:
         out = box.call(["systemctl", "show", "--property=NRestarts", UNIT]).strip()
     except box.ip.StepError as e:
         warn(f"the engine's restarts could not be read ({e})")
+        c.restarts_unread = True
         return
     value = out.removeprefix("NRestarts=")
-    c.unit_restarts = int(value) if value.isdigit() else 0
+    if not value.isdigit():
+        warn("the engine's restarts could not be read (no NRestarts number)")
+        c.restarts_unread = True
+        return
+    c.unit_restarts = int(value)
     if c.unit_restarts:
         note_starts(box.ip, c.unit_restarts)
 
@@ -1065,12 +1074,13 @@ def in_job(job: Job, c: Checks) -> None:
     # window (systemd's counter was reset at the begin), so one more crash
     # before the end's reset-failed would leave the engine down while 3.x
     # serves.
-    if c.hil_on and c.health and c.rx_back and c.unit_restarts == 0:
+    if c.hil_on and c.health and c.rx_back and c.unit_restarts == 0 and not c.restarts_unread:
         panic(job, c)
     else:
         c.panic_skipped = True
         warn("the panic check was skipped: the job's engine was not healthy, its RX flows were not back, its spare "
-             "outputs were not open or it restarted by itself (no fault on top of that; the gate fails on that word)")
+             "outputs were not open, it restarted by itself or its restarts could not be read (no fault on top of "
+             "that; the gate fails on that word)")
 
 
 # ---- the status ----

@@ -790,6 +790,17 @@ def keep_token(ip, path: Path, token: str, name: str, cmd: str = "gen3-mix") -> 
                            f"({e.strerror or type(e).__name__})") from None
 
 
+# ssh's own failure (exit 255: no connection, a refused key, a lost session):
+# its stderr names the box's address, so a warning says these words instead (P6).
+SSH_FAILED = "ssh to GEN3_HOST failed (exit 255)"
+
+
+def ssh_words(e: Exception) -> str:
+    """A failed box call as a warning may quote it: ssh's own failure as
+    SSH_FAILED, any other as it is (the box's command's own words)."""
+    return SSH_FAILED if str(e).startswith(f"{SSH[0]} failed (exit 255)") else str(e)
+
+
 def remove_box_tokens(ip, host: str) -> None:
     """`rm -f` of the minted tokens on the box as the service user, after any
     outcome (a flag too: a credential is never left there). A failure is a
@@ -798,7 +809,8 @@ def remove_box_tokens(ip, host: str) -> None:
     try:
         ip.guarded([*SSH, host, *words], "", CTL_S, "ignore")
     except ip.StepError as e:
-        print(f"iempc: WARNING: the tokens minted on the Gen 3 box were not removed ({e}): remove them by hand "
+        print(f"iempc: WARNING: the tokens minted on the Gen 3 box were not removed ({ssh_words(e)}): "
+              "remove them by hand "
               f"(ssh <GEN3_HOST> {' '.join(words)})", file=sys.stderr, flush=True)
 
 
