@@ -12,11 +12,14 @@
 # engineer's devices, `iem-server notify --to alarm` on the box's site. A box
 # that serves nobody keeps a copy of the band's data, subscribers included,
 # and must not reach them (#72, the false alarm of 2026-10-27): the second
-# condition then fails and systemd skips the notice (exit 3 when no device took it: until the box
-# serves HTTPS no device can subscribe, and the unit then reads failed, which
-# raises nothing more). systemd gives it the failed unit's result and exit
-# (MONITOR_SERVICE_RESULT, MONITOR_EXIT_CODE, MONITOR_EXIT_STATUS); the line
-# and the notice name the unit and those words and numbers only (P6).
+# ExecStartPre= then fails and the unit ends failed before the notice. The
+# notice exits 3 when no device took it (until the box serves HTTPS no device
+# can subscribe), and the unit reads failed then too; neither raises anything
+# more. systemd gives the failed unit's result and exit
+# (MONITOR_SERVICE_RESULT, MONITOR_EXIT_CODE, MONITOR_EXIT_STATUS) to
+# ExecStartPre= and ExecStart= only, never to ExecCondition= (the review of
+# PR #84: the line read "(result , exit  )"); the line and the notice name the
+# unit and those words and numbers only (P6).
 #
 # An alarm never raises an alarm (no OnFailure=), never restarts and is never
 # enabled (no [Install]); no shell: each command is a program and its
@@ -32,8 +35,8 @@ User=iemmixer
 Group=iemmixer
 SyslogIdentifier=iem-alarm
 Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml
-ExecCondition=/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} ${MONITOR_EXIT_STATUS})"
-ExecCondition=/usr/bin/systemctl is-enabled --quiet iem-engine.service
+ExecStartPre=/usr/bin/echo "alarm: %i stays down (result ${MONITOR_SERVICE_RESULT}, exit ${MONITOR_EXIT_CODE} ${MONITOR_EXIT_STATUS})"
+ExecStartPre=/usr/bin/systemctl is-enabled --quiet iem-engine.service
 ExecStart=/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"
 TimeoutStartSec=30
 TimeoutStopSec=10

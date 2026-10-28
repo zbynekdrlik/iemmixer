@@ -12,7 +12,8 @@
 # cannot name the interface's device unit; the helper waits for the interface
 # instead (at most 30 s: udev names it). A box no deploy has written that file
 # on yet skips the unit (a condition, never a failure); provision applies it
-# once the file is there.
+# once the file is there. Its interrupts are waited for too (at most 20 s:
+# systemd-networkd opens the interface, which names them).
 #
 # Never part of the stack: "ide event" stops nothing here, and a failure here
 # holds back neither dantesync nor the stack (ordering only, no Requires=).
@@ -29,10 +30,11 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/iemmixer/iem-dante.env
 ExecStart=/usr/local/lib/iemmixer/napi-priority ${IEM_DANTE_IFACE}
-# The helper's own waits (30 s for the interface, 5 s for its threads) fit;
-# a stop runs nothing (the values stay until the next boot) and is never a
-# kill (I8).
-TimeoutStartSec=60
+# The helper's own waits (30 s for the interface, 5 s for its threads, 20 s
+# for its interrupts: 55 s) fit with the forks of each try (the review of PR
+# #84); a stop runs nothing (the values stay until the next boot) and is
+# never a kill (I8).
+TimeoutStartSec=90
 TimeoutStopSec=10
 SendSIGKILL=no
 

@@ -15,7 +15,8 @@ set -euo pipefail
 # Idempotent: write and enable only, each step a line `<step> changed` or
 # `<step> unchanged`; a second run changes nothing. It never starts, stops or
 # restarts the stack and never reboots the box; it restarts journald when its
-# configuration changed, runs update-grub when grub's settings changed, starts
+# configuration changed, runs update-grub when grub's settings changed or its
+# menu does not hold them, starts
 # the box's time owner (dantesync) when it is not running, runs iem-napi (the
 # Dante interface's packet priority) when it does not hold, and turns the
 # display output polling off when it is on.
@@ -59,7 +60,9 @@ set -euo pipefail
 #             GRUB_CMDLINE_LINUX_DEFAULT with the last two CPUs isolated
 #             (isolcpus=domain,managed_irq, nohz_full, rcu_nocbs; every
 #             interrupt on the others), its other lines kept byte for byte,
-#             update-grub when it changed; grub's saved entry the newest
+#             update-grub when it changed or grub's menu (grub.cfg) lacks
+#             that command line or the kernel's entry, the menu read back;
+#             grub's saved entry the newest
 #             /boot/vmlinuz-*-realtime; /etc/tmpfiles.d/iemmixer-workqueue.conf
 #             keeping unbound kernel work on the other CPUs at every boot.
 #             Never a reboot: the box runs it from its next one.
@@ -108,6 +111,7 @@ SLEEP_UNITS=(sleep.target suspend.target hibernate.target hybrid-sleep.target)
 KERNEL_PACKAGES=('linux-generic*' 'linux-image-generic*' 'linux-headers-generic*' 'linux-image-realtime*')
 REALTIME_PACKAGE=linux-image-realtime
 GRUB_SETTINGS=/etc/default/grub
+GRUB_MENU=/boot/grub/grub.cfg
 WORKQUEUE_CONF=/etc/tmpfiles.d/iemmixer-workqueue.conf
 CREDENTIAL=/etc/credstore.encrypted/iemmixer-pepper
 # The stack's state folders (the units' StateDirectory=), and their paths
@@ -610,6 +614,15 @@ saved_entry() {
   printf '%s' "$saved"
 }
 
+# Whether grub's menu (update-grub's /boot/grub/grub.cfg) boots what grub's
+# settings say: the isolated cores' command line, and an entry titled for
+# the kernel version $1 (the saved entry names that title).
+grub_menu_holds() {
+  [ -f "$R$GRUB_MENU" ] &&
+    grep -q -F -e "$RT_CMDLINE" -- "$R$GRUB_MENU" &&
+    grep -q -F -e "menuentry 'Ubuntu, with Linux $1'" -- "$R$GRUB_MENU"
+}
+
 step_realtime() {
   local state kernel version entry saved running
   local -a versions=()
@@ -645,9 +658,15 @@ step_realtime() {
     END { if (!dd) print d; if (!cc) print c }
   ' "$R$GRUB_SETTINGS" > "$work/grub"
   put_file 0644 root root "$GRUB_SETTINGS" "$work/grub"
-  if [ "$wrote" = 1 ]; then
+  # grub's menu, made from those settings: again when they changed, and when
+  # it lacks their command line or the kernel's entry (an update-grub that
+  # failed in an earlier run, or a kernel that came since), then read back.
+  if [ "$wrote" = 1 ] || ! grub_menu_holds "$version"; then
     update-grub ||
-      die "update-grub failed (exit $?): $GRUB_SETTINGS is written and a later run does not run it again; run sudo update-grub on the box before any reboot"
+      die "update-grub failed (exit $?): the next run runs it again; run it (or sudo update-grub on the box) before any reboot"
+    changed=1
+    grub_menu_holds "$version" ||
+      die "update-grub ran, yet $GRUB_MENU lacks the isolated cores' command line or the realtime kernel's entry: does an /etc/default/grub.d/*.cfg set GRUB_CMDLINE_LINUX_DEFAULT? look at it before any reboot"
   fi
 
   entry="Advanced options for Ubuntu>Ubuntu, with Linux $version"

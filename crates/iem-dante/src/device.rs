@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::announce::{FPP_MAX, FPP_MIN};
-use crate::media::tx::TX_MARGIN_NS;
+use crate::media::tx::{TX_MARGIN_NS, ns_of};
 use crate::stream::{BLOCK, MAX_WORK_MARGIN, WORK_MARGIN};
 
 /// The longest device or channel name, in bytes: Dante Controller ignores a
@@ -86,7 +86,9 @@ pub struct DeviceConfig {
     /// and our TX drops a flow's packets that lag more. 1 to `u32::MAX`;
     /// `latency_ns` when the config leaves it out
     /// ([`DeviceConfig::advertised_latency_ns`]). #72 phase F sets it apart
-    /// from the RX playout, as the IEM card's 0.25 ms.
+    /// from the RX playout, as the IEM card's 0.25 ms. The advertised
+    /// latency must cover `tx_fpp_max` frames + `tx_margin_ns` +
+    /// [`TX_SEND_SLACK_NS`]: a packet that leaves later is played late.
     #[serde(default)]
     pub tx_latency_ns: Option<u64>,
     /// How long after a packet's last sample our TX sends it at the
@@ -95,8 +97,9 @@ pub struct DeviceConfig {
     #[serde(default = "default_tx_margin_ns")]
     pub tx_margin_ns: u64,
     /// The most frames per packet our TX channels offer (mDNS `fpp`, a
-    /// receiver asks for at most this): [`FPP_MIN`] to [`FPP_MAX`],
-    /// [`FPP_MAX`] when left out. The IEM card sends 16.
+    /// receiver asks for at most this, a request for more is refused):
+    /// [`FPP_MIN`] to [`FPP_MAX`], [`FPP_MAX`] when left out. The IEM card
+    /// sends 16.
     #[serde(default = "default_tx_fpp_max")]
     pub tx_fpp_max: u16,
     /// The CPU the engine pump runs on (#72 phase F: an isolated core of
@@ -187,6 +190,25 @@ impl DeviceConfig {
         if !(FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max) {
             out.push(format!("tx_fpp_max: {FPP_MIN} to {FPP_MAX}"));
         }
+        // A receiver plays our audio the advertised latency after its stamp;
+        // our packet leaves tx_fpp_max frames + tx_margin_ns after its first
+        // sample, give or take the send slack. Checked once each field is
+        // valid on its own (one problem a field).
+        let advertised = self.advertised_latency_ns();
+        if SAMPLE_RATES.contains(&self.sample_rate)
+            && (FPP_MIN..=FPP_MAX).contains(&self.tx_fpp_max)
+            && self.tx_margin_ns <= MAX_TX_MARGIN_NS
+            && (1..=u64::from(u32::MAX)).contains(&advertised)
+            && ns_of(u64::from(self.tx_fpp_max), self.sample_rate)
+                + self.tx_margin_ns
+                + TX_SEND_SLACK_NS
+                > advertised
+        {
+            out.push(format!(
+                "tx_latency_ns (latency_ns when it is left out): \
+                 below tx_fpp_max frames + tx_margin_ns + {TX_SEND_SLACK_NS} ns"
+            ));
+        }
         for (field, cpu) in [("pump_cpu", self.pump_cpu), ("io_cpu", self.io_cpu)] {
             if cpu.is_some_and(|c| c >= MAX_CPU) {
                 out.push(format!("{field}: 0 to {}", MAX_CPU - 1));
@@ -216,6 +238,10 @@ fn default_tx_fpp_max() -> u16 {
 
 /// The largest `tx_margin_ns` a config may set (1 ms).
 pub const MAX_TX_MARGIN_NS: u64 = 1_000_000;
+/// The spread of our TX send times past their due time, measured on the
+/// realtime box (p99.9 50 µs, #72 phase F): the advertised latency must
+/// cover `tx_fpp_max` frames + `tx_margin_ns` + this.
+pub const TX_SEND_SLACK_NS: u64 = 50_000;
 /// The CPUs a `pump_cpu` or `io_cpu` may name: Linux's `CPU_SETSIZE`.
 pub const MAX_CPU: usize = 1024;
 

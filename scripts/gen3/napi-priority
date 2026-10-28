@@ -26,7 +26,8 @@ set -euo pipefail
 # threaded is set for its NAPI threads (IEM_NAPI_THREAD_WAIT, 50), and for an
 # interrupt named after it (IEM_NAPI_IRQ_WAIT, 200: the kernel names it when
 # systemd-networkd opens the interface, which can come after this starts;
-# #72 phase F, the realtime boot of 2026-10-28). Any value
+# #72 phase F, the realtime boot of 2026-10-28): 55 s at most, inside
+# iem-napi.service's TimeoutStartSec=90 with the forks of each try. Any value
 # that does not read back as set fails it: exit 1; 2 for its command line.
 # IEM_NAPI_SYS and IEM_NAPI_PROC (default /sys, /proc) are the tests' seams.
 # It names no interface, address or name in its output (P6): the interface

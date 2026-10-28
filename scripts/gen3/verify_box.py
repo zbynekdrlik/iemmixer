@@ -34,7 +34,10 @@ with a fixed reason
   GRUB_CMDLINE_LINUX_DEFAULT lines exactly the box's `nproc --all` last two
   CPUs isolated (`isolcpus=domain,managed_irq,a-b nohz_full=a-b rcu_nocbs=a-b
   irqaffinity=0-h`); `grub-editenv list`'s saved_entry the newest
-  /boot/vmlinuz-*-realtime's title; /etc/tmpfiles.d/iemmixer-workqueue.conf
+  /boot/vmlinuz-*-realtime's title; grub's menu (`sudo -n cat
+  /boot/grub/grub.cfg`, root only) holding that command line and the entry
+  `menuentry 'Ubuntu, with Linux <version>'` (update-grub made it from the
+  settings); /etc/tmpfiles.d/iemmixer-workqueue.conf
   holding exactly the `w` line of the other CPUs' workqueue mask.
 - apt: no unattended upgrades (20auto-upgrades, the apt timers and the
   service masked); every installed kernel meta package held (the realtime
@@ -81,6 +84,7 @@ UNITS = (*STACK, *TIME_UNITS, *APT_UNITS, *SLEEP_UNITS, *OTHER_UNITS)
 KERNEL_PACKAGES = ("linux-generic*", "linux-image-generic*", "linux-headers-generic*", "linux-image-realtime*")
 REALTIME_PACKAGE = "linux-image-realtime"
 GRUB_SETTINGS = "/etc/default/grub"
+GRUB_MENU = "/boot/grub/grub.cfg"
 WORKQUEUE_CONF = "/etc/tmpfiles.d/iemmixer-workqueue.conf"
 WORKQUEUE_MASK = "/sys/devices/virtual/workqueue/cpumask"
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-pepper"
@@ -317,6 +321,15 @@ def check_realtime(box: Box) -> None:
     saved = [line[len("saved_entry="):] for line in r.stdout.splitlines() if line.startswith("saved_entry=")]
     if saved != [f"Advanced options for Ubuntu>Ubuntu, with Linux {version}"]:
         raise Failed("grub's saved entry is not the newest realtime kernel")
+    # What grub boots is its menu, which update-grub makes from the settings
+    # (root only: grub-mkconfig writes it under umask 077).
+    r = run("sudo", "-n", "cat", GRUB_MENU)
+    if r.returncode != 0:
+        raise Failed("grub's menu cannot be read (sudo -n cat)")
+    if realtime_cmdline(n) not in r.stdout:
+        raise Failed("grub's menu does not boot with the engine's CPUs isolated: run sudo update-grub")
+    if f"menuentry 'Ubuntu, with Linux {version}'" not in r.stdout:
+        raise Failed("grub's menu has no entry for the newest realtime kernel: run sudo update-grub")
     try:
         lines = [line.strip() for line in read(WORKQUEUE_CONF).splitlines()]
     except FileNotFoundError:
