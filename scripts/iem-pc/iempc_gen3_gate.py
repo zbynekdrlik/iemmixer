@@ -183,7 +183,8 @@ DESC_PASS = "the Gen 3 box's HIL passed (iempc gen3-gate hil)"
 DESC_FAIL = "the Gen 3 box's HIL failed: "
 # The failures a verdict names, in its order.
 FAILURES = ("health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard", "level", "not_silent",
-            "no_loopback", "loop_not_restored", "alarm_count", "alarm_not_armed", "restarted", "panic", "job_end")
+            "no_loopback", "loop_not_restored", "alarm_count", "alarm_not_armed", "restarted", "restarts_unread", "panic",
+            "job_end")
 # The server's build, read on the box (python3 -I on ssh's stdin, no file left
 # there): its `git_hash` only.
 VERSION_SCRIPT = """import json, sys, urllib.request
@@ -1022,6 +1023,17 @@ def panic(job: Job, c: Checks) -> None:
     if before is None or not before.active or before.pid == 0 or alarm_before is None:
         warn("the panic check failed: the engine's unit or the alarm unit could not be read before the fault "
              "(no fault was injected)")
+        return
+    if before.restarts:
+        # An automatic restart since the count was read: the begin, it and the
+        # panic's would be three starts in the unit's window (see in_job).
+        new = before.restarts - c.unit_restarts
+        if new > 0:
+            note_starts(box.ip, new)
+        c.unit_restarts = before.restarts
+        c.panic_skipped = True
+        warn("the panic check was skipped: the engine restarted by itself right before the fault (no fault on top "
+             "of that; the gate fails on 'restarted')")
         return
     box.ip.pause(box.ctx, 0)
     note_starts(box.ip)
