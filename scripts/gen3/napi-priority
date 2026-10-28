@@ -17,7 +17,10 @@ set -euo pipefail
 # - each such thread SCHED_FIFO 60 (above dantesync's 50 and every audio
 #   thread) and pinned to core 0 (chrt, taskset);
 # - each interrupt a line of /proc/interrupts names the interface (<interface>
-#   or <interface>-<queue>) on core 0 (/proc/irq/<n>/smp_affinity_list).
+#   or <interface>-<queue>) on core 0 (/proc/irq/<n>/smp_affinity_list);
+# - Energy-Efficient Ethernet off on the interface (`ethtool --set-eee
+#   <interface> eee off`; a NIC without EEE is fine as it is): its low-power
+#   idle wakes the link late (Waves SoundGrid's network rules; #72 phase F).
 #
 # Run as root by iem-napi.service at boot (before dantesync and the stack),
 # installed and enabled by provision-root.sh at
@@ -86,6 +89,20 @@ napi_pids() {
   done
 }
 
+# The interface's EEE status as `ethtool --show-eee` states it (disabled,
+# not supported, enabled - inactive, enabled - active, ...); empty when it
+# states none.
+eee_status() {
+  local out
+  out="$(ethtool --show-eee "$IF")" || die "ethtool --show-eee of the Dante interface failed"
+  awk -F': ' '$1 ~ /EEE status$/ { print $2; exit }' <<< "$out"
+}
+
+eee_off() {
+  case "$1" in disabled | "not supported") return 0 ;; esac
+  return 1
+}
+
 # The interrupts a line of /proc/interrupts names the interface on (a word
 # that is the interface or starts with it and a dash, a trailing comma of a
 # shared line dropped), one number a line.
@@ -124,7 +141,7 @@ thread_cpus() {
 
 # Every value as it should be (0) or not (1, each one that is not said).
 check() {
-  local ok=0 threaded text pid sched cpus irq affinity
+  local ok=0 threaded text pid sched cpus irq affinity eee
   local -a pids=() irqs=()
   threaded="$(cat -- "$SYS/class/net/$IF/threaded")"
   if [ "$threaded" != 1 ]; then
@@ -162,6 +179,11 @@ check() {
       ok=1
     fi
   done
+  eee="$(eee_status)"
+  if ! eee_off "$eee"; then
+    say "EEE is '$eee' on the Dante interface, not disabled"
+    ok=1
+  fi
   return "$ok"
 }
 
@@ -207,5 +229,10 @@ for irq in "${irqs[@]}"; do
   echo "$CORE" > "$PROC/irq/$irq/smp_affinity_list"
 done
 
+eee="$(eee_status)"
+if ! eee_off "$eee"; then
+  ethtool --set-eee "$IF" eee off || die "ethtool --set-eee of the Dante interface failed"
+fi
+
 check || die "a value did not read back as set (above)"
-echo "napi-priority: threaded NAPI on; ${#pids[@]} NAPI threads SCHED_FIFO $PRIORITY on core $CORE; ${#irqs[@]} interrupts on core $CORE"
+echo "napi-priority: threaded NAPI on; ${#pids[@]} NAPI threads SCHED_FIFO $PRIORITY on core $CORE; ${#irqs[@]} interrupts on core $CORE; EEE $(eee_status)"
