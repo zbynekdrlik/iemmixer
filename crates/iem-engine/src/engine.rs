@@ -327,7 +327,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             if chosen != Backend::NullRt && (size.is_some() || signal.is_some()) {
                 return Err(
                     "--block and --sine are for the nullrt backend: the card runs at its [card] \
-                     frames, the Dante device at 32"
+                     frames, the Dante device at its config's block"
                         .to_owned(),
                 );
             }

@@ -6,7 +6,8 @@
 //! 1; design §5.2): the engine's `Process` driven by the media clock
 //! instead of a sound card's callback. It knows nothing about mixing.
 //!
-//! - Every [`BLOCK`] (32) frames, block k covers the input stamps
+//! - Every B frames (the device's `block`: [`BLOCK`], 32, unless the
+//!   config sets 16, one of [`BLOCKS`]), block k covers the input stamps
 //!   [kB, kB + B) and runs once its last sample's playout time has passed:
 //!   media now ≥ kB + B + P, P the device's latency in samples (the playout
 //!   point the RX checks already read at). Its inputs are the RX rings at
@@ -14,8 +15,8 @@
 //!   and reads nothing, so it counts no hole), its outputs go into the
 //!   engine's TX rings ([`crate::media::tx::TxShared::engine_ring`]) at
 //!   kB + D, **D = B + P + W** ([`Timing::offset`]), W the device's
-//!   `work_margin` ([`WORK_MARGIN`], 1 ms, unless the config sets it): RX
-//!   media time plus a fixed processing offset.
+//!   `work_margin` ([`WORK_MARGIN`], 1 ms, unless the config sets it; at
+//!   least B): RX media time plus a fixed processing offset.
 //!   The TX thread sends them as [`crate::media::source::Source::Engine`]:
 //!   the packet stamped kB + D leaves at kB + D + fpp + the TX margin
 //!   (the device's `tx_margin_ns`, 250 µs by default), so a block
@@ -65,11 +66,16 @@ use crate::media::ring::Ring;
 use crate::media::rx::RxShared;
 use crate::media::tx::{DISCONTINUITY, TxShared, ask_realtime, ns_of, place};
 
-/// The engine's block, frames: the B = 32 of the RT contract.
+/// The engine's default block, frames: the B = 32 of the RT contract, what
+/// the device's `block` is when the config leaves it out.
 pub const BLOCK: u64 = 32;
+/// The blocks a device config may set, frames: 16 halves B (and lets W go
+/// down to 16; #72, mic to in-ear under 1 ms), 32 is [`BLOCK`].
+pub const BLOCKS: [u64; 2] = [16, BLOCK];
 /// W: how late a block may run and still be sent in time, samples (1 ms
 /// at 96 kHz). A pump later than this re-bootstraps. The default of the
-/// device's `work_margin` (#72 phase F sweeps it without a build).
+/// device's `work_margin` (#72 phase F sweeps it without a build), which
+/// is never below the device's block.
 pub const WORK_MARGIN: u64 = 96;
 /// The largest `work_margin` a config may set, samples (about 43 ms at
 /// 96 kHz): far beyond any useful margin, well inside the rings.
@@ -112,7 +118,7 @@ pub struct Map {
 /// The pump's timing, samples. `block` is above 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
-    /// B: frames per block ([`BLOCK`]).
+    /// B: frames per block (the device's `block`, one of [`BLOCKS`]).
     pub block: u64,
     /// P: the playout point behind media now (the device's latency).
     pub playout: u64,

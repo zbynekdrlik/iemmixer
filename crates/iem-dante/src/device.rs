@@ -42,7 +42,7 @@ use tracing::info;
 
 use crate::announce::{FPP_MAX, FPP_MIN};
 use crate::media::tx::{TX_MARGIN_NS, ns_of};
-use crate::stream::{BLOCK, MAX_WORK_MARGIN, WORK_MARGIN};
+use crate::stream::{BLOCK, BLOCKS, MAX_WORK_MARGIN, WORK_MARGIN};
 use crate::subscribe::directory;
 
 /// The longest device or channel name, in bytes: Dante Controller ignores a
@@ -78,7 +78,13 @@ pub struct DeviceConfig {
     /// The latency the channels advertise, in ns (1 to `u32::MAX`, the
     /// width Dante's flow descriptors give it).
     pub latency_ns: u64,
-    /// W, the engine pump's work margin in samples: [`BLOCK`] to
+    /// B, the engine pump's block in frames: one of [`BLOCKS`] (16 or 32),
+    /// [`BLOCK`] when the config leaves it out. 16 halves B and lets W go
+    /// down to 16 (#72: mic to in-ear under 1 ms); a config change, no
+    /// build, takes it back.
+    #[serde(default = "default_block")]
+    pub block: u64,
+    /// W, the engine pump's work margin in samples: the block to
     /// [`MAX_WORK_MARGIN`], [`WORK_MARGIN`] when the config leaves it out.
     #[serde(default = "default_work_margin")]
     pub work_margin: u64,
@@ -226,14 +232,28 @@ impl DeviceConfig {
                 out.push(format!("{field}: 0 to {}", MAX_CPU - 1));
             }
         }
-        if !(BLOCK..=MAX_WORK_MARGIN).contains(&self.work_margin) {
-            out.push(format!("work_margin: {BLOCK} to {MAX_WORK_MARGIN} samples"));
+        if !BLOCKS.contains(&self.block) {
+            out.push("block: 16 or 32 frames".to_string());
+        }
+        // W is at least one block: the config's when it is valid, else the
+        // default's (one problem a field).
+        let least = if BLOCKS.contains(&self.block) {
+            self.block
+        } else {
+            BLOCK
+        };
+        if !(least..=MAX_WORK_MARGIN).contains(&self.work_margin) {
+            out.push(format!("work_margin: {least} to {MAX_WORK_MARGIN} samples"));
         }
         if self.state_file.as_os_str().is_empty() {
             out.push("state_file: empty".to_string());
         }
         out
     }
+}
+
+fn default_block() -> u64 {
+    BLOCK
 }
 
 fn default_work_margin() -> u64 {
