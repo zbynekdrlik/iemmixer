@@ -40,6 +40,20 @@ fn run(config: &str, place: Place) -> Command {
 }
 
 #[test]
+fn the_network_asks_arc_resolved_transmitters_for_the_config_s_fpp() {
+    let cfg = DeviceConfig {
+        arc_rx_fpp: 4,
+        ..DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-dante-device.toml")
+    };
+    assert_eq!(network_of(&cfg).arc.timing().fpp, 4);
+    let default = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-dante-device.toml");
+    assert_eq!(
+        network_of(&default).arc.timing(),
+        directory::Timing::default()
+    );
+}
+
+#[test]
 fn a_run_takes_another_control_socket() {
     let want = Command::Run(Options {
         config: PathBuf::from("c"),

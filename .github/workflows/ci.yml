@@ -34,7 +34,6 @@ jobs:
           python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/pc-tuning -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
-          python3 -m unittest discover -s scripts/gen3 -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
       - name: Golden tooling self-tests (numpy venv)
         run: |
@@ -57,6 +56,20 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pillow==11.3.0
           cd crates/iem-tray/icons
           "$RUNNER_TEMP/venv/bin/python" verify_icons.py
+
+  gen3-scripts:
+    # The Gen 3 box's scripts (provision, deploy, the installers, the live
+    # guard) run their bash and Python fakes beside integrity's self-tests:
+    # together they outgrew integrity's 10 minutes (#72, 2026-10-28).
+    name: gen3-scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gen 3 script self-tests
+        run: python3 -m unittest discover -s scripts/gen3 -p 'test_*.py' -v
 
   lint:
     name: lint

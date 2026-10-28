@@ -43,9 +43,23 @@ fn gone(service: &str, device: &str) -> ServiceEvent {
 
 /// A book that knows peer-device's records since 0.
 fn peer_book() -> Book {
-    let mut book = Book::new(Timing::default());
+    peer_book_with(Timing::default())
+}
+
+/// [`peer_book`] on `timing`.
+fn peer_book_with(timing: Timing) -> Book {
+    let mut book = Book::new(timing);
     book.apply(&record(ARC_SERVICE, "peer-device", "10.0.0.11", 4440), 0);
     book.apply(&record(DBC_SERVICE, "peer-device", "10.0.0.11", 4455), 0);
+    book
+}
+
+/// [`peer_book_with`] `timing`, the card's directory read at [`SETTLE_NS`].
+fn read_peer_book(timing: Timing) -> Book {
+    let mut book = peer_book_with(timing);
+    assert_eq!(book.lookup("peer-device", "Spare", SETTLE_NS), None);
+    let job = book.next(SETTLE_NS).unwrap();
+    book.finished(&job, done(card(), 6), SETTLE_NS);
     book
 }
 
@@ -83,18 +97,50 @@ const DBC: SocketAddrV4 = SocketAddrV4::new(PEER_IP, 4455);
 #[test]
 fn an_arc_resolved_channel_offers_the_dbc_port_4_slots_fpp_16_and_our_latency() {
     let dir = card();
+    let want = Advertised {
+        control: DBC,
+        tx_channel_id: 3,
+        nchan: 4,
+        bits: 24,
+        rate: 96_000,
+        dbcp1: 0x1102,
+        fpp_min: 16,
+        fpp_max: 16,
+        latency_ns: 0,
+    };
+    assert_eq!(offer(dir.find("spare").unwrap(), DBC, 16), want);
+    // A book on the default timing (a config without arc_rx_fpp) offers it.
+    let mut book = read_peer_book(Timing::default());
+    assert_eq!(book.lookup("peer-device", "Spare", SETTLE_NS), Some(want));
+}
+
+#[test]
+fn an_arc_resolved_channel_offers_the_fpp_its_timing_asks() {
+    // #72 phase F: the device config's arc_rx_fpp, both ends of it.
+    for fpp in [4, 2, 32] {
+        let mut book = read_peer_book(Timing {
+            fpp,
+            ..Timing::default()
+        });
+        let a = book.lookup("peer-device", "Spare", SETTLE_NS).unwrap();
+        assert_eq!((a.fpp_min, a.fpp_max), (fpp, fpp));
+        assert_eq!(a, offer(card().find("Spare").unwrap(), DBC, fpp));
+    }
+}
+
+#[test]
+fn a_device_config_s_timing_asks_its_arc_rx_fpp() {
+    assert_eq!(Timing::default().fpp, FPP);
+    assert_eq!(Timing::of(&cfg()), Timing::default(), "16 when left out");
+    let cfg = DeviceConfig {
+        arc_rx_fpp: 4,
+        ..cfg()
+    };
     assert_eq!(
-        offer(dir.find("spare").unwrap(), DBC),
-        Advertised {
-            control: DBC,
-            tx_channel_id: 3,
-            nchan: 4,
-            bits: 24,
-            rate: 96_000,
-            dbcp1: 0x1102,
-            fpp_min: 16,
-            fpp_max: 16,
-            latency_ns: 0,
+        Timing::of(&cfg),
+        Timing {
+            fpp: 4,
+            ..Timing::default()
         }
     );
 }
@@ -578,38 +624,61 @@ fn sub(channel: &str, device: &str) -> Subscription {
     }
 }
 
-#[test]
-fn the_manager_asks_an_arc_resolved_transmitter_for_4_slots_at_fpp_16() {
-    let cfg = cfg();
+/// The manager of the device `cfg`, RX 1 and 2 subscribed to the card's
+/// Spare and 05, ticked once on a book on `timing` that read the card: its
+/// one request, and the manager.
+fn manager_asks_the_card(
+    cfg: &DeviceConfig,
+    timing: Timing,
+) -> (SocketAddrV4, FlowRequest, Manager) {
     let ports: [u16; MAX_FLOWS] = std::array::from_fn(|s| 50_000 + s as u16);
-    let mut m = Manager::new(&cfg, "test-device", OUR_IP, ports);
+    let mut m = Manager::new(cfg, "test-device", OUR_IP, ports);
     m.set(0, Some(sub("Spare", "peer-device")));
     m.set(1, Some(sub("05", "peer-device")));
-    let mut book = peer_book();
-    book.lookup("peer-device", "Spare", SETTLE_NS);
-    let job = book.next(SETTLE_NS).unwrap();
-    book.finished(&job, done(card(), 6), SETTLE_NS);
-    let at = At(RefCell::new(book), SETTLE_NS);
+    let at = At(RefCell::new(read_peer_book(timing)), SETTLE_NS);
     let actions = m.tick(SETTLE_NS, &[0; MAX_FLOWS], &at);
     let [Action::Request { to, req, .. }] = actions.as_slice() else {
         panic!("one request: {actions:?}");
     };
-    assert_eq!(*to, DBC);
-    assert_eq!(
-        *req,
-        FlowRequest {
-            rx_host: "test-device".into(),
-            rx_flow_name: "1_0".into(),
-            sample_rate: 96_000,
-            bits: 24,
-            channels: vec![Some(3), Some(5), None, None],
-            fpp: 16,
-            rx: SocketAddrV4::new(OUR_IP, 50_000),
-        }
-    );
+    (*to, req.clone(), m)
+}
+
+/// The flow request RX 1 and 2 make of the card at `fpp`.
+fn card_request(fpp: u16) -> FlowRequest {
+    FlowRequest {
+        rx_host: "test-device".into(),
+        rx_flow_name: "1_0".into(),
+        sample_rate: 96_000,
+        bits: 24,
+        channels: vec![Some(3), Some(5), None, None],
+        fpp,
+        rx: SocketAddrV4::new(OUR_IP, 50_000),
+    }
+}
+
+#[test]
+fn the_manager_asks_an_arc_resolved_transmitter_for_4_slots_at_fpp_16() {
+    let cfg = cfg();
+    let (to, req, m) = manager_asks_the_card(&cfg, Timing::default());
+    assert_eq!(to, DBC);
+    assert_eq!(req, card_request(16));
     let flow = m.flow(0).unwrap();
     // Played out at our own latency.
     assert_eq!(flow.latency_ns, cfg.latency_ns);
+}
+
+#[test]
+fn the_manager_asks_an_arc_resolved_transmitter_for_the_config_s_arc_rx_fpp() {
+    // #72 phase F: fewer frames a packet than the card's guessed 16, so its
+    // packets leave it sooner.
+    let cfg = DeviceConfig {
+        arc_rx_fpp: 4,
+        ..cfg()
+    };
+    let (to, req, m) = manager_asks_the_card(&cfg, Timing::of(&cfg));
+    assert_eq!(to, DBC);
+    assert_eq!(req, card_request(4));
+    assert_eq!(m.flow(0).unwrap().fpp, 4);
 }
 
 /// The mDNS daemon's browses, as a test sees them: each service's events
@@ -702,6 +771,7 @@ fn the_network_resolves_channel_records_first_and_reads_a_device_without_them() 
             max_age_ns: MAX_AGE_NS,
             reply: Duration::from_secs(1),
             idle: Duration::from_secs(30),
+            fpp: FPP,
         }),
     };
     assert!(network.chan.start(&daemon).unwrap());
@@ -784,7 +854,8 @@ fn the_network_resolves_channel_records_first_and_reads_a_device_without_them() 
                 default: "TX 3".into(),
                 name: None,
             },
-            SocketAddrV4::new(LOOPBACK, 4455)
+            SocketAddrV4::new(LOOPBACK, 4455),
+            FPP
         )
     );
     assert_eq!(network.lookup("card", "TX 16").unwrap().tx_channel_id, 16);
@@ -851,6 +922,7 @@ fn a_dead_device_read_by_the_reader_stays_unresolved_and_is_counted() {
         max_age_ns: MAX_AGE_NS,
         reply: Duration::from_millis(100),
         idle: Duration::from_secs(30),
+        fpp: FPP,
     });
     let requests = Arc::new(Requests::default());
     assert!(arc.start(&daemon, LOOPBACK, Arc::clone(&requests)).unwrap());

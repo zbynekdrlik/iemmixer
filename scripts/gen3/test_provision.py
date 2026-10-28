@@ -2083,6 +2083,33 @@ class ProvisionShTests(unittest.TestCase):
             self.assertEqual(r.returncode, int(rc))
             self.assertIn("verify_box: units", r.stderr)
 
+    def test_the_band_roster_adds_its_ids_to_the_sudo_rule_s_members(self) -> None:
+        # While 3.x serves, the box mints tokens for the band's own people (the
+        # live gate's member), so the rule's {member} covers the band roster's
+        # ids beside the test roster's, each once, never printed.
+        band = self.tmp / "band-roster.toml"
+        band.write_text('[[people]]\nid = "zyxband1"\n\n[[people]]\nid = "member1"\n', encoding="utf-8")
+        self.assertIn("member1", roster_people())
+        r = self.provision("--host", HOST, "--ntp-from", str(self.ops), "--band-roster", str(band))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        stage = self.box / "home" / STAGE
+        self.assertEqual((stage / "roster-ids").read_text().split(), [*roster_people(), "zyxband1"])
+        self.assertNotIn("zyxband1", r.stdout + r.stderr)
+        # A missing file or one without plain ids refuses before any call.
+        for content, want in ((None, "--band-roster is not a file"),
+                              ('[[people]]\nid = "not an id"\n', "ids could not be read"),
+                              ("title = 1\n", "ids could not be read")):
+            with self.subTest(want=want):
+                (self.box / "calls.log").unlink(missing_ok=True)
+                path = self.tmp / "missing.toml"
+                if content is not None:
+                    path = self.tmp / "bad-roster.toml"
+                    path.write_text(content, encoding="utf-8")
+                r = self.provision("--host", HOST, "--ntp-from", str(self.ops), "--band-roster", str(path))
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(want, r.stderr)
+                self.assertEqual(self.calls(), [])
+
     def test_the_flag_refuses_before_any_call_and_right_before_the_root_script(self) -> None:
         self.flag.write_text("now\n")
         r = self.provision()

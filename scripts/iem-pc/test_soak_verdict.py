@@ -382,6 +382,20 @@ class Harness(unittest.TestCase):
                              [f"harness incomplete ({code})"])
         self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
 
+    def test_the_gen3_box_gate_judges_the_summary_at_the_pc_s_bounds_with_a_meter_frame(self):
+        # iempc gen3-gate soak (#72 phase H Task 7): the checks 9 to 12 at the PC's bounds (no gap), then a meter
+        # frame (the box's real server sends them), and the numbers for the gate's line.
+        box = harness(seconds=7200.4, frames=360_000, expected_frames=360_000, meter_frames=72_000)
+        self.assertEqual(sv.box_check(box, 7200), ([], {"frames": 360_000, "expected_frames": 360_000, "gaps": 0,
+                                                         "reconnects": 0, "decode_errors": 0, "meter_frames": 72_000,
+                                                         "seconds": 7200.4}))
+        self.assertEqual(sv.box_check({**box, "gaps": 1}, 7200)[0], ["gaps 1"])
+        self.assertEqual(sv.box_check({**box, "meter_frames": 0}, 7200)[0], ["no meter frames"])
+        self.assertEqual(sv.box_check({**box, "seconds": 7199.9}, 7200)[0], ["harness ran 7199.9 s of 7200 s"])
+        self.assertEqual(sv.box_check({**box, "complete": False, "error": "connection-lost"}, 7200)[0],
+                         ["harness incomplete (connection-lost)"])
+        self.assertEqual(sv.box_check(None, 7200), (["no harness summary"], {}))
+
     def test_the_ci_step_needs_a_meter_frame_the_pc_verdict_does_not(self):
         # CI's run against the real server is the one place that proves the client reads its Meters (plan Task 9).
         ci = harness(seconds=600.2, frames=30_000, expected_frames=30_010)

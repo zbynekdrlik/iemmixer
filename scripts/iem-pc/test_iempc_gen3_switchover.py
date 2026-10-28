@@ -13,12 +13,18 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import iempc_gen3_gate as gate  # noqa: E402
 import iempc_gen3_switchover as sw  # noqa: E402
 from iempc_test_support import Base, ip  # noqa: E402
 from test_iempc_gen3_data import template  # noqa: E402
 
 CARD, SPARE, OURS = "Zyxqw-Iem-Card", "Zyxqw-Iem-Card-2x", "zyxqw-gen3"
 DEVICE = (HERE.parent.parent / "config" / "test-dante-device.toml").read_text(encoding="utf-8")
+# A HIL job a dead `iempc gen3-gate` run left (its runtime drop-in) ends before to-3's start, with deploy.sh's
+# own two sudo lines (the review of PR #87).
+END_HIL = "sudo -n rm -f /run/systemd/system/iem-engine.service.d/iem-hil.conf"
+RELOAD = "sudo -n systemctl daemon-reload"
+NOW = 1_900_000_000.0
 
 
 class HelperBusyTests(Base):
@@ -55,6 +61,8 @@ class TemplateTests(unittest.TestCase):
         self.assertIn(("root", "systemctl reset-failed {units}"), lines)
         self.assertEqual(sw.RESET_FAILED, "sudo -n systemctl reset-failed iem-dante iem-engine iem-server")
         self.assertIn(("iemmixer", sw.RESET_STATE.removeprefix("sudo -n -u iemmixer ")), lines)
+        for command in (END_HIL, RELOAD):   # deploy.sh's lines: none added for the switch
+            self.assertIn(("root", command.removeprefix("sudo -n ")), lines, command)
 
 
 class SwitchTests(Base):
@@ -173,12 +181,18 @@ class SwitchTests(Base):
     def side(self) -> int:
         return ip.read_json(ip.state_dir() / sw.SIDE, {}).get("side", 2)
 
+    def ledger(self) -> list[float]:
+        """The engine starts the box gates' restart budget counts (gen3-gate.json)."""
+        return ip.read_json(ip.state_dir() / gate.LEDGER, {}).get("restarts", [])
+
     def test_to_3_runs_its_steps_in_order_and_records_the_side(self) -> None:
+        # Corrected by the review of PR #87: the steps before held no end of a HIL job a dead gen3-gate run left,
+        # so a to-3 after a to-2 (no reboot) started the band's engine with its test flags.
         code, docs, err = self.run_main("gen3-switch", "to-3")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.events, [sw.STOP, sw.RESET_FAILED, "band", "pepper", sw.INSTALL_CONFIG,
-                                       sw.RESET_STATE, f"rename {SPARE}", sw.RESET_FAILED, sw.START, "mirror",
-                                       "url to box", sw.ENABLE])
+                                       sw.RESET_STATE, f"rename {SPARE}", END_HIL, RELOAD, sw.RESET_FAILED,
+                                       sw.START, "mirror", "url to box", sw.ENABLE])
         self.assertEqual(docs, [{"gen3_switch": {"serves": "3.x", "steps": ["band", "config", "card", "start",
                                                                             "mirror", "url", "boot"],
                                                  "files": 8, "mirrored": 29, "changed_during_switch": 0}}])
@@ -189,6 +203,20 @@ class SwitchTests(Base):
         code, docs, err = self.run_main("gen3-switch", "to-3")
         self.assertEqual((code, docs), (1, []))
         self.assertIn("3.x serves already", err)
+
+    def test_to_3_s_engine_start_counts_in_the_box_gates_restart_budget(self) -> None:
+        # The review of PR #87: the gates' budget sees every engine start in the unit's window, the switch's
+        # too, once its start was sent; never on a dry run or a switch that stopped before its start.
+        self.assertEqual(self.run_main("gen3-switch", "to-3", "--dry-run")[0], 0)
+        self.renames_take = False
+        self.assertEqual(self.run_main("gen3-switch", "to-3")[0], 1)
+        self.assertNotIn(sw.START, self.events)
+        self.assertEqual(self.ledger(), [])
+        self.renames_take = True
+        with mock.patch.object(gate, "wall", lambda: NOW):
+            code, docs, err = self.run_main("gen3-switch", "to-3")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ledger(), [NOW])
 
     def test_a_failure_after_the_rename_undoes_every_step_newest_first(self) -> None:
         self.fail_at = "url to box"

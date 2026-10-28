@@ -15,7 +15,10 @@
 //!   on Windows the private `asio` module starts the ASIO backend (S6); on
 //!   Linux `dante` hosts our own Dante device and drives the processor on
 //!   its media clock (Gen 3 phase C, #72). Nothing in the engine measures
-//!   the stage to gate a switch (#38: only the owner's signal decides).
+//!   the stage to gate a switch (#38: only the owner's signal decides);
+//! - [`supervise`]: `iem-engine supervise`, a supervisor client of the
+//!   control pipe for the Gen 3 box, where no guard runs (the HIL test
+//!   signal, its stop, the engine's `Status`; Gen 3 phase H, #72).
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1) and, on
 //! Linux, the GPL `iem-dante` device (Gen 3 design §3).
@@ -51,6 +54,7 @@ pub mod probe;
 pub mod resample;
 pub mod rt;
 pub mod site;
+pub mod supervise;
 pub mod topology;
 
 /// The only rate the engine runs at (I2).

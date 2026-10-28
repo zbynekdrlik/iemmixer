@@ -15,7 +15,8 @@
 //! - [`start`] (glue): the device set up with an engine ring on each mapped
 //!   TX channel, those channels' sources set to the engine, the pump
 //!   attached to the device's control socket and spawned on the media
-//!   clock with D = B + P + W ([`timing`]), the device served with SIGTERM
+//!   clock with D = B + P + W ([`timing`], B the device's `block`: 32 unless
+//!   the config sets 16), the device served with SIGTERM
 //!   and SIGINT reported to the engine, never acted on by the device.
 //! - [`DanteDriver`]: the control loop's [`Driver`]: the pump's counts and
 //!   histograms, the endings ([`Ending::Stop`] once a signal was reported,
@@ -46,7 +47,7 @@ use iem_dante::daemon::{Options, Place};
 use iem_dante::device::DeviceConfig;
 use iem_dante::host::{self, Host, HostError, Signals, Stopped};
 use iem_dante::media::source::Source;
-use iem_dante::stream::{self, BLOCK, Map, Pump, PumpStats, Timing};
+use iem_dante::stream::{self, Map, Pump, PumpStats, Timing};
 use tracing::{info, warn};
 
 use crate::SAMPLE_RATE;
@@ -91,12 +92,13 @@ pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, En
     })
 }
 
-/// The pump's timing on the device `cfg`: B = 32, P = the device's latency
-/// in samples (the playout point its RX checks read at), W = the device's
-/// `work_margin` (1 ms unless the config sets it).
+/// The pump's timing on the device `cfg`: B = the device's `block` (32
+/// unless the config sets 16), P = the device's latency in samples (the
+/// playout point its RX checks read at), W = the device's `work_margin` (1
+/// ms unless the config sets it; at least B).
 pub fn timing(cfg: &DeviceConfig) -> Timing {
     Timing {
-        block: BLOCK,
+        block: cfg.block,
         playout: to_samples(cfg.latency_ns, cfg.sample_rate),
         margin: cfg.work_margin,
     }
@@ -196,8 +198,9 @@ impl DanteDriver {
 }
 
 impl Driver for DanteDriver {
-    /// The pump as a stream: B = 32, its blocks, late and skipped blocks,
-    /// overruns and re-bootstraps, its fault.
+    /// The pump as a stream: B (the device's `block`), its blocks, late and
+    /// skipped blocks, overruns (a block longer than B's period) and
+    /// re-bootstraps, its fault.
     fn stats(&self) -> StreamStats {
         self.stats.stream_stats()
     }
@@ -255,9 +258,9 @@ impl Driver for DanteDriver {
 /// with an engine ring on each mapped TX channel and those channels' sources
 /// set to the engine, the pump attached and spawned on the media clock with
 /// `processor` (outputs quantized at the device's encoding), the device
-/// served with SIGTERM and SIGINT reported. The driver and the block (B =
-/// 32). Called outside any tokio runtime (the device's own runtime runs on
-/// this thread while it is set up).
+/// served with SIGTERM and SIGINT reported. The driver and the block (B,
+/// the device's `block`). Called outside any tokio runtime (the device's
+/// own runtime runs on this thread while it is set up).
 pub fn start(
     args: &DanteArgs,
     topo: &Topology,
@@ -316,13 +319,14 @@ pub fn start(
         topology = %topo.hash,
         inputs,
         outputs,
+        block = timing.block,
         offset = timing.offset(),
         playout = timing.playout,
-        "Dante backend running: the engine on the device's media clock, 32 samples a block, \
+        "Dante backend running: the engine on the device's media clock, block samples a block, \
          outputs at RX time + offset"
     );
     let driver = DanteDriver::new(stats, thread, pump_stop, reported, Box::new(device));
-    Ok((Box::new(driver), BLOCK as usize))
+    Ok((Box::new(driver), timing.block as usize))
 }
 
 #[cfg(test)]

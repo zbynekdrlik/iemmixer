@@ -7,6 +7,7 @@ set -euo pipefail
 # .claude/rules/gen3.md):
 #
 #   provision.sh --host <user@host> --ntp-from <iemmixer-ops/site/gen3-dantesync.json>
+#                [--band-roster <iemmixer-ops/site/roster.toml>]
 #
 # - Dev time only: refused while the "ide event" flag exists
 #   ($IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW), at the start and
@@ -14,7 +15,9 @@ set -euo pipefail
 # - Reads ntp_server from the ops dantesync config (the box's dantesync must
 #   be installed from it: install-dantesync.sh, run first) and the [[people]]
 #   ids of this checkout's config/test-roster.toml (the sudo rule's
-#   {member}); neither value is ever printed.
+#   {member}), and with --band-roster the band roster's ids too, each once
+#   (while 3.x serves the live gate mints a band member's token); no value is
+#   ever printed.
 # - On the box: `id -un` (the admin user, the sudo rule's; never root) and
 #   `systemctl is-active iem-server iem-engine iem-dante`: a unit of the stack
 #   that is not inactive or failed refuses the run before anything is copied
@@ -49,7 +52,7 @@ die() {
 
 usage() {
   echo "provision.sh: $*" >&2
-  echo "usage: provision.sh --host <user@host> --ntp-from <the ops dantesync config>" >&2
+  echo "usage: provision.sh --host <user@host> --ntp-from <the ops dantesync config> [--band-roster <the ops roster>]" >&2
   exit 2
 }
 
@@ -57,14 +60,15 @@ on_box() {
   ssh "${SSH_OPTS[@]}" "$host" "$@"
 }
 
-host="" ntp_from=""
+host="" ntp_from="" band_roster=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --host | --ntp-from)
+    --host | --ntp-from | --band-roster)
       [ $# -ge 2 ] || usage "$1 needs a value"
       case "$1" in
         --host) host="$2" ;;
         --ntp-from) ntp_from="$2" ;;
+        --band-roster) band_roster="$2" ;;
       esac
       shift 2
       ;;
@@ -75,6 +79,7 @@ done
 [ -n "$ntp_from" ] || usage "--ntp-from is missing"
 case "$host" in -*) usage "--host must be an ssh destination, not an option" ;; esac
 [ -f "$ntp_from" ] || usage "--ntp-from is not a file"
+[ -z "$band_roster" ] || [ -f "$band_roster" ] || usage "--band-roster is not a file"
 
 flag="${IEMMIXER_EVENT_NOW:-$HOME/.config/iemmixer/EVENT-NOW}"
 refuse_event() {
@@ -115,18 +120,23 @@ PY
 )" || die "--ntp-from could not be read (python3 above)"
 [ -z "$why" ] || usage "--ntp-from $why"
 
-# The roster's [[people]] ids, each a plain member id (the sudo rule's
-# {member}, as deploy.sh --pins reads them).
-python3 -I - "$roster" "$work/roster-ids" << 'PY' || die "$roster: its [[people]] ids could not be read"
+# The rosters' [[people]] ids, each a plain member id (the sudo rule's
+# {member}, as deploy.sh --pins reads them), the test roster's first, each
+# id once.
+python3 -I - "$work/roster-ids" "$roster" ${band_roster:+"$band_roster"} << 'PY' ||
 import re, sys, tomllib
-with open(sys.argv[1], "rb") as f:
-    roster = tomllib.load(f)
-ids = [person["id"] for person in roster.get("people", [])]
-if not ids or not all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", i) for i in ids):
-    sys.exit(1)
-with open(sys.argv[2], "w", encoding="utf-8") as f:
+ids = []
+for path in sys.argv[2:]:
+    with open(path, "rb") as f:
+        roster = tomllib.load(f)
+    people = [person.get("id") for person in roster.get("people", [])]
+    if not people or not all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", i) for i in people):
+        sys.exit(1)
+    ids += [i for i in people if i not in ids]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("".join(i + "\n" for i in ids))
 PY
+  die "the test roster or --band-roster: its [[people]] ids could not be read"
 
 # The admin user (never printed) and the stack's state.
 admin="$(on_box id -un)" || die "ssh to the box failed (id -un): nothing was sent"

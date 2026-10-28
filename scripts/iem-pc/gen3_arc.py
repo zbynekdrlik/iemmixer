@@ -15,7 +15,11 @@ start; a page may end early (its size), so the next asks from the channel
 after its last. A TX device "." is the device itself; a TX channel offset 0
 with a TX device names the RX channel's own name. 0x3010's body is `02 01`,
 the RX channel, the offsets of the TX channel's and the TX device's names
-(both 0: unsubscribe), then the two names.
+(both 0: unsubscribe), then the two names. 0x2010 (phase H, the box's HIL
+gate: the name a self-subscription of our own device names) takes the same
+page request from a TX channel; our device's page starts at that channel
+and lists 6-byte descriptors `id, id, name offset` (arc.rs `tx_names`; a
+card lists `index, id, name`, so the id is the second word).
 
 Pure building and reading, plus `send`, the one socket call (tests replace
 it). Names and addresses are never printed by this module."""
@@ -26,7 +30,7 @@ import struct
 
 ARC_PORT = 4440
 OPCODE = 0x3010
-NAME, COUNTS, RX_PAGE = 0x1002, 0x1000, 0x3000
+NAME, COUNTS, RX_PAGE, TX_NAMES = 0x1002, 0x1000, 0x3000, 0x2010
 HEADER = 10
 DONE = 1
 MORE = 0x8112
@@ -131,6 +135,35 @@ def read_rx(ip: str, seq: int = 0x4600) -> dict:
                 rx[str(ch["rx"])] = {k: ch[k] for k in ("tx_channel", "tx_device", "status")}
         first = page[-1]["rx"] + 1
     return {"name": own, "rx_count": rx_count, "rx": rx}
+
+
+def tx_name_of(reply: bytes, tx: int) -> str:
+    """TX channel `tx`'s current name from a 0x2010 reply page (pure)."""
+    if len(reply) < HEADER + 2:
+        raise ValueError("a page shorter than its count")
+    for i in range(reply[HEADER + 1]):
+        at = HEADER + 2 + 6 * i
+        if at + 6 > len(reply):
+            raise ValueError("a page shorter than its descriptors")
+        _, ident, name_at = struct.unpack(">3H", reply[at:at + 6])
+        if ident == tx:
+            name = label(reply, name_at)
+            if not name:
+                raise ValueError("a TX channel without a name")
+            return name
+    raise ValueError(f"the page from tx {tx} does not list it")
+
+
+def tx_name(ip: str, tx: int, seq: int = 0x4700) -> str:
+    """Our device's TX channel `tx`'s current name, by `ip` (0x2010 from
+    that channel)."""
+    if type(tx) is not int or not 1 <= tx <= MAX_RX:
+        raise ValueError(f"tx channel not 1 to {MAX_RX}")
+    seq = (seq + 1) & 0xFFFF
+    reply = send(ip, request(TX_NAMES, struct.pack(">HHH", 1, tx, 0), seq))
+    if status(reply, seq, TX_NAMES) not in (DONE, MORE):
+        raise ValueError(f"opcode {TX_NAMES:#06x} refused")
+    return tx_name_of(reply, tx)
 
 
 def send(ip: str, packet: bytes, timeout: float = 2.0) -> bytes:

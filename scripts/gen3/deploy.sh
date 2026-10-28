@@ -11,8 +11,9 @@ set -euo pipefail
 #   deploy.sh --host <user@host> --bundle <the downloaded gen3-bundle-<sha>>
 #             --sha <its commit, 40 hex> --config <the private device config>
 #             --iface <the box's Dante interface> [--start engine|device] [--pins]
+#             [--site-file <path> --roster-file <path> [--serving]]
 #   deploy.sh --host <user@host> --back --sha <the build in the other slot>
-#             --config <...> --iface <...> [--start engine|device]
+#             --config <...> --iface <...> [--start engine|device] [--site-file ...]
 #
 # - One commit: this checkout must be exactly --sha with a clean tree (`git
 #   rev-parse HEAD`, `git status --porcelain`): the units, the test site and
@@ -22,7 +23,20 @@ set -euo pipefail
 #   checked again before the new slot is filled, before the stack is stopped,
 #   right before the start and once more right after it: a flag that came
 #   meanwhile ("ide event"'s stop may have run before the start) stops all
-#   three units again and fails the deploy.
+#   three units again and fails the deploy (not with --serving, below).
+# - While 3.x serves the band (iempc's side record, gen3-side.json in
+#   $IEMPC_STATE, else ~/.local/share/iemmixer/iem-pc, not saying side 2) a
+#   deploy is refused, but with --serving (#72, 2026-10-28: the box serves the
+#   band by default; `iempc gen3-deploy` runs it then), which is refused while
+#   2.x serves. --serving needs the band's --site-file and --roster-file and
+#   --start engine, and a --config whose `name` is the IEM card's usual name
+#   (DANTE_IEM_NAME of iempc's private env, compared on the dev box, neither
+#   printed): the takeover config. The units are never disabled: after the
+#   start `systemctl enable iem-engine iem-server` (a reboot serves the band;
+#   the tunnel unit is left as it is), read back by `systemctl is-enabled`.
+#   "ide event" keeps the box running while 3.x serves, so the flag never
+#   holds down a stack this deploy stopped: once the stack is stopped the
+#   start runs whatever the flag says, and a flag after it stops nothing.
 # - The bundle (CI's gen3-bin job uploads gen3-bundle-<sha>, its gen3-attest
 #   job attests the bundle's SHA256SUMS by digest): BUILD is --sha and a
 #   newline, SHA256SUMS lists exactly the four binaries and BUILD and holds for
@@ -65,12 +79,21 @@ set -euo pipefail
 #   `systemd-run` as the service user with the PIN pepper's systemd credential,
 #   each PIN (GEN3_ENGINEER_PIN, GEN3_MEMBER_PIN of the private env, 4 digits
 #   each) only on that ssh's stdin: never on a command line, never printed.
+# - A HIL job a dead `iempc gen3-gate` run left (#72 phase H: the runtime
+#   drop-in /run/systemd/system/iem-engine.service.d/iem-hil.conf, which
+#   starts the engine with its HIL test flag) is ended before the start: the
+#   drop-in removed (`sudo -n rm -f`) right before the daemon-reload.
 # - `sudo -n systemctl daemon-reload`, `disable iem-dante iem-engine
-#   iem-server` (none starts at boot; an earlier deploy's enable is undone),
+#   iem-server` (none starts at boot; an earlier deploy's enable is undone;
+#   not with --serving),
 #   `reset-failed` of the units systemd holds (the start limit counts manual
 #   starts too: a deploy is a deliberate new start), then `start iem-engine
 #   iem-server` (--start engine, the default) or `start iem-dante` (--start
-#   device; the units' Conflicts= keep it and the engine apart).
+#   device; the units' Conflicts= keep it and the engine apart). Right before
+#   an engine start is sent, a line `start` is appended to the file
+#   IEMPC_START_MARK names, when it is set (`iempc gen3-deploy`'s count of
+#   the start in the box gates' restart budget; one that cannot be written
+#   starts nothing).
 # - Read back: the binaries and BUILD through /opt/iemmixer/bin against the
 #   slot's SHA256SUMS, `iem-engine --version` and `iem-dante-dev --version`
 #   naming --sha, then `/opt/iemmixer/bin/iem-dante-dev health` once a second
@@ -104,6 +127,8 @@ BINARIES=(iem-engine iem-server iem-dante-dev iem-soakclient)
 UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service)
 RECEIVER=band_receive.py
 LIBDIR=/opt/iemmixer/lib
+# iempc gen3-gate's HIL job (phase H): the engine's ExecStart with its test flag.
+HIL_DROPIN=/run/systemd/system/iem-engine.service.d/iem-hil.conf
 # The stack's stop, exactly as "ide event" and the live guard run it (plan
 # Task 7) and as the box's sudoers rule allows it.
 STOP="systemctl stop iem-server iem-engine iem-dante"
@@ -152,8 +177,8 @@ env_value_of() {
 
 usage() {
   echo "deploy.sh: $*" >&2
-  echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins | --site-file <path> --roster-file <path>]" >&2
-  echo "       deploy.sh --host <user@host> --back --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--site-file <path> --roster-file <path>]" >&2
+  echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins | --site-file <path> --roster-file <path> [--serving]]" >&2
+  echo "       deploy.sh --host <user@host> --back --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--site-file <path> --roster-file <path> [--serving]]" >&2
   exit 2
 }
 
@@ -162,7 +187,7 @@ on_box() {
   ssh "${SSH_OPTS[@]}" "$host" "$@"
 }
 
-host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0 site_file="" roster_file=""
+host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0 site_file="" roster_file="" serving=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --host | --bundle | --sha | --config | --iface | --start | --site-file | --roster-file)
@@ -187,6 +212,10 @@ while [ $# -gt 0 ]; do
       back=1
       shift
       ;;
+    --serving)
+      serving=1
+      shift
+      ;;
     *) usage "unknown argument '$1'" ;;
   esac
 done
@@ -208,6 +237,10 @@ if [ -n "$site_file$roster_file" ]; then
   [ -f "$roster_file" ] || usage "--roster-file is not a file"
   [ "$pins" = 0 ] || usage "--site-file takes no --pins: the band's PINs come with iempc gen3-data"
 fi
+if [ "$serving" = 1 ]; then
+  [ -n "$site_file" ] || usage "--serving needs the band's --site-file and --roster-file: the box serves the band"
+  [ "$start" = engine ] || usage "--serving needs --start engine: the standalone device serves no band"
+fi
 case "$host" in -*) usage "--host must be an ssh destination, not an option" ;; esac
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || usage "--sha is not 40 lowercase hex digits"
 [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || usage "--iface is not an interface name"
@@ -227,12 +260,21 @@ refuse_event() {
   [ ! -e "$flag" ] || die "$flag exists: an event is on; the Gen 3 stack is deployed only in dev time ($1)"
 }
 refuse_event "nothing was copied"
-# While 3.x serves the band (iempc gen3-switch to-3, phase E #72) a deploy
-# would stop the box that plays it and give back the usual device config: the
-# way back first. A record that does not say side 2 counts as 3.x.
+# While 3.x serves the band (iempc gen3-switch to-3, phase E #72) a plain
+# deploy would give back the usual device config (the band's receivers lose
+# our device) and disable the units (a reboot would not serve the band):
+# only --serving deploys then, and only then. A record that does not say
+# side 2 counts as 3.x.
 side_file="${IEMPC_STATE:-$HOME/.local/share/iemmixer/iem-pc}/gen3-side.json"
+serves_3=0
 if [ -e "$side_file" ] && ! grep -Eq '"side": *2([^0-9]|$)' -- "$side_file"; then
-  die "3.x serves the band ($side_file): run \`iempc gen3-switch to-2\` first: nothing was copied"
+  serves_3=1
+fi
+if [ "$serving" = 1 ]; then
+  [ "$serves_3" = 1 ] ||
+    die "--serving deploys the box while 3.x serves the band, and $side_file says 2.x serves it (or is not there): deploy without --serving: nothing was copied"
+elif [ "$serves_3" = 1 ]; then
+  die "3.x serves the band ($side_file): \`iempc gen3-deploy\` deploys the box in place (deploy.sh --serving with the takeover config); \`iempc gen3-switch to-2\` is the way back: nothing was copied"
 fi
 
 # iempc's private env: the host "ide event" stops and, with --pins, the PINs
@@ -245,6 +287,33 @@ if [ -f "$pc_env" ]; then
   elif [ "$env_value" != "$host" ]; then
     warn "--host is not the GEN3_HOST of iempc's private env: \"ide event\" stops the stack on GEN3_HOST, not on this host; make them the same"
   fi
+fi
+
+# --serving: our device must come up under the IEM card's usual name (the
+# takeover config), or the band's receivers lose it. The name goes to python
+# on its stdin, never onto a command line; neither name is printed.
+if [ "$serving" = 1 ]; then
+  [ -f "$pc_env" ] || usage "--serving reads DANTE_IEM_NAME (the IEM card's usual name) from iempc's private env, which is not there"
+  env_value=""
+  env_value_of "$pc_env" DANTE_IEM_NAME || usage "--serving: iempc's private env has no DANTE_IEM_NAME (the IEM card's usual name)"
+  card_name="$env_value"
+  env_value=""
+  name_exit=0
+  printf '%s' "$card_name" | python3 -I -c '
+import sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as f:
+        name = tomllib.load(f).get("name")
+except (OSError, tomllib.TOMLDecodeError):
+    sys.exit(2)
+sys.exit(0 if isinstance(name, str) and name == sys.stdin.read() else 1)
+' "$config" 2> /dev/null || name_exit=$?
+  card_name=""
+  case "$name_exit" in
+    0) ;;
+    1) die "--serving: the config's name is not the IEM card's usual name (DANTE_IEM_NAME of iempc's private env): only the takeover config (iempc gen3-deploy builds it) keeps the band's receivers on our device: nothing was copied" ;;
+    *) die "--serving: the config could not be read as TOML: nothing was copied" ;;
+  esac
 fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -517,7 +586,29 @@ if [ "$pins" = 1 ]; then
 fi
 engineer_pin="" member_pin=""
 
-refuse_event "installed, nothing started"
+# With --serving the stack this deploy stopped is the band's: "ide event"
+# keeps the box running while 3.x serves, so a flag here starts it all the same.
+flag_said=0
+if [ "$serving" = 1 ] && [ -e "$flag" ]; then
+  echo "deploy.sh: $flag exists: an event is on; 3.x serves the band and \"ide event\" keeps the box running, so the stack this deploy stopped starts again at once" >&2
+  flag_said=1
+else
+  refuse_event "installed, nothing started"
+fi
+# A HIL job a dead gen3-gate run left: its drop-in would start the engine with
+# the HIL test flag. It goes right before the start's daemon-reload.
+left_exit=0
+left_job="$(on_box "test -e $HIL_DROPIN && echo left || echo none")" || left_exit=$?
+[ "$left_exit" -eq 0 ] || die "the box's HIL job drop-in could not be looked for (exit $left_exit): nothing started"
+end_job=""
+case "$left_job" in
+  none) ;;
+  left)
+    end_job="sudo -n rm -f $HIL_DROPIN"
+    echo "deploy.sh: a HIL job a dead iempc gen3-gate run left ($HIL_DROPIN): it is ended before the start"
+    ;;
+  *) die "the look for the box's HIL job drop-in answered neither left nor none: nothing started" ;;
+esac
 if [ "$start" = engine ]; then
   started=(iem-engine iem-server)
 else
@@ -541,20 +632,66 @@ reset=""
 if [ "${#held[@]}" -gt 0 ]; then
   reset="sudo -n systemctl reset-failed ${held[*]}"
 fi
-on_box "set -e
-sudo -n systemctl daemon-reload
-sudo -n systemctl disable iem-dante iem-engine iem-server${reset:+
+# Without --serving none of the stack starts at boot; with it the engine and
+# the server stay enabled (gen3-switch to-3 enabled them), so nothing is
+# disabled.
+disable=""
+if [ "$serving" = 0 ]; then
+  disable="sudo -n systemctl disable iem-dante iem-engine iem-server"
+fi
+# `iempc gen3-deploy` counts this engine start in the box gates' restart
+# budget (its gen3-gate.json): the file IEMPC_START_MARK names (iempc makes
+# it, empty) gets a line right before the start is sent, so a deploy that
+# fails after it counts it too and one refused before it never does. The
+# stack is stopped by now, so a mark never holds the start back: one that
+# cannot be written is a warning (an uncounted start only lets a gate run
+# sooner; each gate resets systemd's count before its own start), and one
+# iempc already took away (it stopped waiting for this deploy) is not made
+# again, unless iempc takes it away in the instant between the look and the
+# write: then an empty-of-meaning mark stays in iempc's state (nothing is
+# counted twice; accepted).
+if [ "$start" = engine ] && [ -n "${IEMPC_START_MARK:-}" ]; then
+  if [ ! -e "$IEMPC_START_MARK" ]; then
+    echo "deploy.sh: the file IEMPC_START_MARK names is gone (iempc stopped waiting for this deploy): this engine start is not marked" >&2
+  elif ! { printf 'start\n' >> "$IEMPC_START_MARK"; } 2> /dev/null; then
+    echo "deploy.sh: WARNING: the file IEMPC_START_MARK names could not be written: this engine start goes uncounted in iempc's restart budget; the start goes on" >&2
+  fi
+fi
+on_box "set -e${end_job:+
+$end_job}
+sudo -n systemctl daemon-reload${disable:+
+$disable}${reset:+
 $reset}
 sudo -n systemctl start ${started[*]}" ||
   die "the start on the box failed (journalctl -u iem-engine -u iem-server -u iem-dante there): the stack may be partly up; deploy again, or stop it (sudo $STOP)"
-echo "deploy.sh: started ${started[*]} (none enabled at boot)"
+if [ "$serving" = 1 ]; then
+  echo "deploy.sh: started ${started[*]}"
+  # Enabled again (a unit's [Install] may have changed): a reboot serves the
+  # band. The tunnel unit is left as it is.
+  on_box "sudo -n systemctl enable iem-engine iem-server" ||
+    die "the stack runs, but systemctl enable iem-engine iem-server failed on the box: a reboot would not serve the band; enable them there (sudo systemctl enable iem-engine iem-server)"
+  enabled_exit=0
+  enabled="$(on_box "systemctl is-enabled iem-engine iem-server")" || enabled_exit=$?
+  if [ "$enabled_exit" -ne 0 ] || [ "$enabled" != $'enabled\nenabled' ]; then
+    die "the stack runs, but iem-engine and iem-server do not read back enabled at boot (systemctl is-enabled exit $enabled_exit): a reboot would not serve the band; enable them there (sudo systemctl enable iem-engine iem-server)"
+  fi
+  echo "deploy.sh: iem-engine and iem-server enabled at boot (3.x serves the band; the tunnel unit left as it is)"
+else
+  echo "deploy.sh: started ${started[*]} (none enabled at boot)"
+fi
 
 # "ide event" may have come between the check above and the start: its stop
-# then ran first and the start brought the stack up again.
+# then ran first and the start brought the stack up again. While 3.x serves
+# (--serving) "ide event" keeps the box running: nothing is stopped.
 if [ -e "$flag" ]; then
-  on_box "sudo -n $STOP" ||
-    die "$flag appeared during the deploy: an event is on, and the stop of the stack after the start failed: it may still run; stop it on the box (sudo $STOP)"
-  die "$flag appeared during the deploy: an event is on; the stack stopped again, nothing read back; deploy again in dev time"
+  if [ "$serving" = 1 ]; then
+    [ "$flag_said" = 1 ] ||
+      echo "deploy.sh: $flag appeared during the deploy: an event is on; 3.x serves the band and \"ide event\" keeps the box running, so the stack keeps running" >&2
+  else
+    on_box "sudo -n $STOP" ||
+      die "$flag appeared during the deploy: an event is on, and the stop of the stack after the start failed: it may still run; stop it on the box (sudo $STOP)"
+    die "$flag appeared during the deploy: an event is on; the stack stopped again, nothing read back; deploy again in dev time"
+  fi
 fi
 
 # Read back through the link: the binaries and BUILD are the slot's sums.
@@ -597,3 +734,13 @@ done
 [ "$health_exit" -eq 0 ] ||
   die "the stack is not healthy after $tries tries a second apart (iem-dante-dev health exit $health_exit; journalctl -u iem-engine -u iem-server -u iem-dante on the box): ${health:-no line}"
 echo "deploy.sh: slot-$target: $engine_version; $device_version; sums as SHA256SUMS; ${started[*]} started; health $health"
+# The box's three gates on the build the engine now runs (phase H Task 8,
+# #72; .claude/rules/gen3-new-box.md section 7): the soak first (no engine
+# restart), then the HIL gate at least ten minutes after the deploy's
+# start and the live gate at least ten minutes after the HIL gate ended
+# (its three starts span its run, its end's the last), since the unit starts the engine at most
+# three times in ten minutes and the HIL gate's job takes three (its begin,
+# its panic's restart, its end). Fixed words: no host, no value.
+if [ "$start" = engine ]; then
+  echo "deploy.sh: next, the box's three gates on this build, in this order: iempc gen3-gate soak (no engine restart), then iempc gen3-gate hil at least ten minutes after this deploy's start, then iempc gen3-gate live at least ten minutes after the hil gate ended (the engine's restart budget: the unit starts it at most three times in ten minutes, the hil gate's job takes three)"
+fi

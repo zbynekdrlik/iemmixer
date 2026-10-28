@@ -14,7 +14,9 @@
 # secure_path finds, NOPASSWD); the tests check that every `sudo -n` line a
 # tool sends is an expansion of a line here (test_deploy.py for deploy.sh;
 # test_iempc_gen3.py for iempc gen3-mix, the live guard's stop and "ide
-# event"'s stop; test_install_dantesync.py for install-dantesync.sh;
+# event"'s stop; test_iempc_gen3_gate.py for iempc gen3-gate hil;
+# test_iempc_gen3_live.py for iempc gen3-gate live; test_iempc_gen3_soak.py
+# for iempc gen3-gate soak; test_install_dantesync.py for install-dantesync.sh;
 # test_install_cloudflared.py for install-cloudflared.sh;
 # test_provision.py for verify_box.py, and that every line here is in the
 # rendered rule). provision.sh's own `sudo -n bash ... provision-root.sh` runs
@@ -61,6 +63,9 @@ root | systemctl disable iem-dante iem-engine iem-server
 root | systemctl reset-failed {units}
 root | systemctl start iem-engine iem-server
 root | systemctl start iem-dante
+# deploy.sh --serving (iempc gen3-deploy while 3.x serves the band): nothing
+# disabled, the engine and the server enabled again after the start.
+root | systemctl enable iem-engine iem-server
 
 # scripts/iem-pc/iempc_gen3.py (iempc gen3-mix): the browser's tokens, as the
 # service user (the JWT secret's owner) in its mint folder: any left from an
@@ -130,3 +135,65 @@ root | systemctl stop iem-tunnel
 root | systemctl enable iem-engine iem-server iem-tunnel
 root | systemctl disable iem-tunnel
 iemmixer | rm -f /var/lib/iem-dante/takeover.toml
+
+# iempc gen3-gate (phase H, #72; scripts/iem-pc/iempc_gen3_gate.py): the box's
+# HIL job is a runtime drop-in giving the engine's ExecStart its HIL test flags
+# for one run (in /run: a reboot removes it too), installed from the stage and
+# removed at the job's end; deploy.sh removes one a dead run left before its
+# own start. systemctl daemon-reload, reset-failed {units} and restart
+# iem-engine are the lines above.
+root | install -D -m 0644 .cache/iem-gen3-gate/iem-hil.conf /run/systemd/system/iem-engine.service.d/iem-hil.conf
+root | rm -f /run/systemd/system/iem-engine.service.d/iem-hil.conf
+# The preflight's reads as the service user, the site's owner: the site (its
+# [guard] hil_tx is kept, nothing of it printed) and the engine's own check
+# of it (hil_tx against the topology, without a restart).
+iemmixer | cat /var/lib/iemmixer/site/iemmixer.toml
+iemmixer | /opt/iemmixer/bin/iem-engine check-site --site /var/lib/iemmixer/site/iemmixer.toml
+# The engine's supervisor client (the engine's socket is the service user's):
+# its status, and the gate's one fixed burst, HIL v1's input, level and
+# length (mic1, -30 dBFS, 10 s), and its early end.
+iemmixer | /opt/iemmixer/bin/iem-engine supervise status
+iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -30 10
+iemmixer | /opt/iemmixer/bin/iem-engine supervise stop-test-signal
+# The panic check (phase H Task 6 Step 3): the engine's own injected RT fault
+# (refused unless the HIL gate's job started it with --fault-injection; the
+# engine ends itself and systemd starts it again), then the engine's journal
+# as root, each entry's process and message, for the faulted process's panic.
+iemmixer | /opt/iemmixer/bin/iem-engine supervise inject-fault
+root | journalctl -u iem-engine.service -o json --output-fields=_PID,MESSAGE -n 2000 --no-pager -q
+# The alarm path's reach: how many devices an alarm would go to, never a
+# notice (the alarm unit's site, as iem-alarm@.service names it). The live
+# gate reads it too, as the engineer's push subscriptions before and after.
+iemmixer | env IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server notify --count alarm
+
+# iempc gen3-gate live (phase H Task 5, #72; scripts/iem-pc/iempc_gen3_live.py):
+# the browser's tokens for the run's length (the HIL job's begin, then the
+# live specs' 40 minutes; the mint folder's rm -f and cat are gen3-mix's lines
+# above), the run's burst while the browser runs (30 s every 60 s at the HIL
+# ceiling, the listen probe on: the PC's live run's), and the server's
+# journal, where the client-error marker lands (the last 20000 lines, as the
+# PC's pc-end reads its server log).
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub engineer --engineer --seconds 3600 --out /var/lib/iemmixer/mint/engineer.token
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub {member} --seconds 3600 --out /var/lib/iemmixer/mint/member.token
+iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -20 30 --listen
+root | journalctl -u iem-server.service -o cat -n 20000 --no-pager -q
+
+# iempc gen3-gate soak (phase H Task 7, #72; scripts/iem-pc/iempc_gen3_soak.py):
+# iem-soakclient as the service user in the transient unit iem-soak beside
+# the engine as it serves the band (no HIL job, no restart), one line per run
+# length (10, 30, 60 and 120 minutes, nothing else). The build it checks the
+# server against is the one value a line cannot fix: the gate installs it
+# into the unit's env file in /run and systemd expands $IEM_SOAK_BUILD into
+# --expect-build. The unit's stop (a flag, a run past its bound, a unit a
+# dead run left) and reset-failed of a failed one; the summary in the
+# service user's mint folder, removed before the start and after its read.
+root | install -D -m 0644 .cache/iem-gen3-gate/iem-soak.env /run/iem-soak.env
+root | rm -f /run/iem-soak.env
+root | systemd-run --quiet --unit=iem-soak --remain-after-exit --uid=iemmixer --gid=iemmixer --property=EnvironmentFile=/run/iem-soak.env --property=RuntimeMaxSec=900 --property=TimeoutStopSec=10 --property=SendSIGKILL=no /opt/iemmixer/bin/iem-soakclient --direct --member {member} --seconds 600 --out /var/lib/iemmixer/mint/soakclient.json --expect-build $IEM_SOAK_BUILD --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret
+root | systemd-run --quiet --unit=iem-soak --remain-after-exit --uid=iemmixer --gid=iemmixer --property=EnvironmentFile=/run/iem-soak.env --property=RuntimeMaxSec=2100 --property=TimeoutStopSec=10 --property=SendSIGKILL=no /opt/iemmixer/bin/iem-soakclient --direct --member {member} --seconds 1800 --out /var/lib/iemmixer/mint/soakclient.json --expect-build $IEM_SOAK_BUILD --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret
+root | systemd-run --quiet --unit=iem-soak --remain-after-exit --uid=iemmixer --gid=iemmixer --property=EnvironmentFile=/run/iem-soak.env --property=RuntimeMaxSec=3900 --property=TimeoutStopSec=10 --property=SendSIGKILL=no /opt/iemmixer/bin/iem-soakclient --direct --member {member} --seconds 3600 --out /var/lib/iemmixer/mint/soakclient.json --expect-build $IEM_SOAK_BUILD --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret
+root | systemd-run --quiet --unit=iem-soak --remain-after-exit --uid=iemmixer --gid=iemmixer --property=EnvironmentFile=/run/iem-soak.env --property=RuntimeMaxSec=7500 --property=TimeoutStopSec=10 --property=SendSIGKILL=no /opt/iemmixer/bin/iem-soakclient --direct --member {member} --seconds 7200 --out /var/lib/iemmixer/mint/soakclient.json --expect-build $IEM_SOAK_BUILD --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret
+root | systemctl stop iem-soak
+root | systemctl reset-failed iem-soak
+iemmixer | rm -f /var/lib/iemmixer/mint/soakclient.json
+iemmixer | cat /var/lib/iemmixer/mint/soakclient.json

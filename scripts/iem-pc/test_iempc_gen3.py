@@ -107,6 +107,10 @@ elif words[:4] == ["sudo", "-n", "-u", "iemmixer"]:
         if held and os.environ.get("FAKE_RM_FAILS"):
             sys.stderr.write("rm: Read-only file system\n")
             sys.exit(1)
+        if held and os.environ.get("FAKE_RM_SSH_FAILS"):
+            # ssh's own failure: its stderr names the box (P6: never quoted).
+            sys.stderr.write("ssh: connect to host gen3.test port 22: Connection timed out\n")
+            sys.exit(255)
         for path in held:
             os.remove(root + path)
     else:
@@ -828,6 +832,14 @@ class MixTests(MixBase):
         self.assertEqual({tuple(sorted(s["tokens"].items())) for s in self.steps()}, {tuple(sorted(TOKENS.items()))})
         self.assert_no_token_left(err, docs)
 
+    def test_an_ssh_failure_in_the_removal_names_no_host(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_RM_SSH_FAILS": "1"}):
+            code, docs, err = self.loop()
+        self.assertEqual((code, docs[-1]["gen3_mix"]["pass"]), (0, 1), err)
+        self.assertIn("iempc: WARNING: the tokens minted on the Gen 3 box were not removed "
+                      "(ssh to GEN3_HOST failed (exit 255))", err)
+        self.assertNotIn("gen3.test", err + json.dumps(docs))
+
     def test_a_removal_that_fails_on_the_box_is_a_warning_naming_the_command(self) -> None:
         with mock.patch.dict(os.environ, {"FAKE_RM_FAILS": "1"}):
             code, docs, err = self.loop()
@@ -869,9 +881,10 @@ class MixTests(MixBase):
         for want in (REMOVE, *MINT, *COPY):
             self.assertIn(("iemmixer", want[len(AS_SERVICE) + 1:]), seen)
         self.assertIn(("root", stop[len("sudo -n "):]), seen)
-        # One mint line for every person of the test roster.
-        member = [c for _r, c in template_lines() if "--sub {member}" in c]
+        # One 900 s mint line for every person of the test roster (gen3-gate live has its own 3600 s one).
+        member = [c for _r, c in template_lines() if "--sub {member} --seconds 900 " in c]
         self.assertEqual(len(member), 1)
+        self.assertEqual(len([c for _r, c in template_lines() if "--sub {member}" in c]), 2)
         self.assertIn(MINT[1][len(AS_SERVICE) + 1:], expand(member[0]))
 
     def test_a_job_begin_refusal_leaves_no_token_and_no_source(self) -> None:

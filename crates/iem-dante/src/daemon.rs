@@ -49,12 +49,12 @@ use tracing::{info, warn};
 
 use crate::announce::{AnnounceError, Announcer, Registry, records};
 use crate::clock::{Event, Polled, Sample};
-use crate::device::Device;
+use crate::device::{Device, DeviceConfig};
 use crate::flows::client::Client;
 use crate::info::{Changes, Identity, Multicast, Multicaster, NetInfo};
 use crate::subscribe::TICK;
-use crate::subscribe::directory::Network;
-use crate::subscribe::resolve::{Browse, BrowseError, Own};
+use crate::subscribe::directory::{self, ArcDirectory, Network};
+use crate::subscribe::resolve::{Browse, BrowseError, Mdns, Own};
 use crate::{arc, cmc, flows, info};
 use media::{Driver, Media, THREADS_WAIT};
 
@@ -576,6 +576,16 @@ pub struct Sockets {
     pub flows: UdpSocket,
 }
 
+/// The network's channels: one browse of the channel records, and a device
+/// that publishes none read through its ARC, asked for the config's
+/// `arc_rx_fpp` frames a packet.
+fn network_of(cfg: &DeviceConfig) -> Network {
+    Network {
+        chan: Mdns::new(),
+        arc: ArcDirectory::new(directory::Timing::of(cfg)),
+    }
+}
+
 /// Serves the device at `net.ip` until `stop` ends: announces its records
 /// first, then answers ARC, CMC, the info requests and flow control on
 /// `sockets` (every datagram counted in `media`'s requests), sends the
@@ -612,9 +622,9 @@ pub async fn serve<R: Registry + Browse>(
     let changed = Arc::new(Notify::new());
     let n = announce_device(&shared, announcer, ip)?;
     info!(records = n, "mDNS records announced");
-    let identity = {
+    let (identity, network) = {
         let device = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        Identity::new(&device.cfg, net)
+        (Identity::new(&device.cfg, net), network_of(&device.cfg))
     };
     let threads = media.spawn_threads().map_err(ServeError::Threads)?;
     let rx_changes = Arc::new(Changes::default());
@@ -643,9 +653,8 @@ pub async fn serve<R: Registry + Browse>(
     );
     let flows = flows::server::serve(sockets.flows, Arc::clone(&media.tx), requests);
     // Our own channels resolve from our records (built again after a
-    // rename), the network's from one browse of the channel records, and a
-    // device that publishes none through its ARC.
-    let mut resolver = (Own::default(), Network::default());
+    // rename), the network's as `network_of` builds it.
+    let mut resolver = (Own::default(), network);
     let mut own_stale = true;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);

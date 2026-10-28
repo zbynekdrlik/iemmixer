@@ -5,6 +5,8 @@ paths:
   - "scripts/iem-pc/test_soak_verdict.py"
   - "scripts/iem-pc/iempc_soak.py"
   - "scripts/iem-pc/test_iempc_soak.py"
+  - "scripts/iem-pc/iempc_gen3_soak.py"
+  - "scripts/iem-pc/test_iempc_gen3_soak.py"
 ---
 
 # Soak harness and verdict (S7, #10)
@@ -108,6 +110,7 @@ Design note `docs/superpowers/specs/2026-10-07-s7-hil-live-soak-design.md` §4 a
   5. `gh workflow run soak.yml`, then the record: a failed dispatch records nothing. A failed ops soak run of the same SHA and entry is repeated with `gh run rerun <id> -R <ops repo>` (the same verified inputs), never a second dispatch.
   - A soak of this dev entry that may still run (its hours plus `RUN_MARGIN_S`, an unreadable record counts) also refuses `dispatch-live`, `activate`, `dispatch-hil` and `trace` before any call (`iempc_live.refuse_overlap` and `refuse_while_running`, `.claude/rules/live.md`; one whose time, hours or dev entry cannot be read names `soak.json` to check by hand) and `switch-test` after its status read (`iempc_switch`); `iempc dev` and `iempc event` never wait for it.
   - Tests: `test_iempc_soak.py` on `iempc_test_support.Base` (`FakePc`, `FakeGh`). Every guard is tested on both sides; no Python mutation gate runs in CI, so a new guard needs its own refusal case.
+- **The Gen 3 box's soak gate reuses the client and the verdict** (#72 phase H Task 7; `iempc gen3-gate soak`, `iempc_gen3_soak.py`, `.claude/rules/gen3.md` "The box's soak gate"): the same `iem-soakclient` as the service user in a transient unit on the box (`--direct` at its own server, `--jwt-secret-file` the box server's key, `--expect-build` the box's build), 10 to 120 minutes, and `soak_verdict.box_check` on its summary: the checks 9 to 12 at the PC's bounds (no gap) and a meter frame (`_ci_check` with 0 gaps), beside the dev box's reads of the box's own counters, which replace the checks 1 to 8 (the PC's `iemmode status` polls). A change to the client's summary or to the checks 9 to 12 reaches that gate too.
 
 ## The 72 h NullRt soak: dropped (owner, 2026-10-10)
 

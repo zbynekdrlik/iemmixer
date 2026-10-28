@@ -20,8 +20,18 @@ iempc_dante.py and dante_card.py, no PC call; DANTE_IEM_HOST below), the
 loop through the IEM card that proves the Gen 3 device's TX sample-exact
 (`gen3-loop`: iempc_gen3.py, GEN3_HOST below; #72), the same loop through a
 member's mix in the box's engine with the browser in it (`gen3-mix`:
-iempc_gen3.py, GEN3_HOST and GEN3_UI_URL below; #72), and the hand-over of an
-open S1a window.
+iempc_gen3.py, GEN3_HOST and GEN3_UI_URL below; #72), the Gen 3 box's own
+HIL gate while 3.x serves the band, its verdict the commit status hil/gen3
+(`gen3-gate hil`: iempc_gen3_gate.py, GEN3_HOST and GEN3_DANTE_IP below; #72
+phase H) and its live E2E in a browser through the band's public URL, its
+verdict the commit status live/gen3 (`gen3-gate live`: iempc_gen3_live.py,
+GEN3_HOST, GEN3_PUBLIC_URL and the LIVE_* keys below) and its soak, the
+verdict soak/gen3 (`gen3-gate soak [--minutes N]`: iempc_gen3_soak.py,
+GEN3_HOST and SOAK_MEMBER below), the Gen 3 box
+deployed in place on either side of the switch,
+with the takeover config while 3.x serves (`gen3-deploy`:
+iempc_gen3_deploy.py and scripts/gen3/deploy.sh, GEN3_SITE_FILE and
+GEN3_ROSTER_FILE below; #72), and the hand-over of an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -93,13 +103,24 @@ destination, whose stack `event` stops and whose device `gen3-loop` and
 `http://<box>/`, the browser's origin in `gen3-mix`), and GEN3_DANTE_IP
 and GEN3_DANTE_NAME (optional: our Gen 3 device's unicast IPv4 address on
 the Dante network and its device name; `gen3-mirror` refuses without them
-and the card's keys: iempc_gen3_switch.py, #72 phase E); `gen3-data` reads
+and the card's keys: iempc_gen3_switch.py, #72 phase E; `gen3-gate`
+without GEN3_DANTE_IP and GEN3_HOST, iempc_gen3_gate.py); `gen3-data` reads
 the PC's band files (PC_ROOT) and writes them onto GEN3_HOST
 (iempc_gen3_data.py); GEN3_PUBLIC_URL (optional: the band's public https://
 URL, read by `gen3-tunnel` to see which connector serves it,
-iempc_gen3_tunnel.py), GEN3_CARD_SPARE and GEN3_DEVICE_CONFIG (optional:
+iempc_gen3_tunnel.py, and the live specs' origin in `gen3-gate live`),
+LIVE_MEMBER, LIVE_TEST_INPUT and LIVE_TALKBACK_INPUT (optional: the live
+specs' member, burst input, `mic1`, and talkback input; `gen3-gate live`
+refuses without them, iempc_gen3_live.py), SOAK_MEMBER (optional: the
+member whose mix `gen3-gate soak`'s client listens to, one not active; it
+refuses without it, iempc_gen3_soak.py), GEN3_CARD_SPARE and GEN3_DEVICE_CONFIG (optional:
 the IEM card's spare Dante name while 3.x serves, and the ops device config
-file; `gen3-switch` refuses without them, iempc_gen3_switchover.py).
+file; `gen3-switch` refuses without them, iempc_gen3_switchover.py), and
+GEN3_SITE_FILE and GEN3_ROSTER_FILE (optional: the band's site.toml and
+roster.toml of the ops repo, which `gen3-deploy` gives deploy.sh on either
+side; it refuses without them, GEN3_HOST and GEN3_DEVICE_CONFIG, and while
+3.x serves also without GEN3_CARD_SPARE and the card's keys,
+iempc_gen3_deploy.py).
 Nothing is ever ended by force.
 
 Known limits (S6 Task 16): `iemmode event --direct` runs the switch inside
@@ -125,6 +146,8 @@ import iempc_dante
 import iempc_event
 import iempc_gen3
 import iempc_gen3_data
+import iempc_gen3_deploy
+import iempc_gen3_gate
 import iempc_gen3_switch
 import iempc_gen3_switchover
 import iempc_gen3_tunnel
@@ -281,6 +304,18 @@ def cmd_gen3_mix(ctx: Ctx) -> int:
     return iempc_gen3.run_mix(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_gate(ctx: Ctx) -> int:
+    """The Gen 3 box's own gates while 3.x serves (phase H: hil, live, soak); the code lives in iempc_gen3_gate.py,
+    iempc_gen3_live.py and iempc_gen3_soak.py (#72)."""
+    return iempc_gen3_gate.run(ctx, sys.modules[__name__])
+
+
+def cmd_gen3_deploy(ctx: Ctx) -> int:
+    """The Gen 3 box deployed in place on either side of the switch (with the takeover config while 3.x serves);
+    the code lives in iempc_gen3_deploy.py (#72)."""
+    return iempc_gen3_deploy.run(ctx, sys.modules[__name__])
+
+
 def cmd_gen3_mirror(ctx: Ctx) -> int:
     """Our Gen 3 device's RX table made equal to the IEM card's (or cleared); the code lives in iempc_gen3_switch.py
     (#72 phase E)."""
@@ -337,6 +372,14 @@ class Spec:
     locked: bool    # one at a time on this box
 
 
+# Commands that test 2.x on the PC (through the band's public URL) or drive
+# the box's TX channels for a test: refused while 3.x serves the band (#72,
+# 2026-10-28), when that URL is the box's and those channels are in-ears.
+WHILE_2X_SERVES = ("dispatch-live", "dispatch-hil", "dispatch-soak", "gen3-loop", "gen3-mix")
+# The inverse (#72 phase H): the box's own gates test the build that serves
+# the band, so they run only while 3.x serves it.
+WHILE_3X_SERVES = ("gen3-gate",)
+
 COMMANDS: dict[str, Spec] = {
     "status": Spec(cmd_status, pc=True, dev_time=False, locked=False),
     "event": Spec(cmd_event, pc=True, dev_time=False, locked=False),
@@ -362,6 +405,11 @@ COMMANDS: dict[str, Spec] = {
     "dante-labels": Spec(cmd_dante_labels, pc=False, dev_time=True, locked=True),
     "gen3-loop": Spec(cmd_gen3_loop, pc=True, dev_time=True, locked=True),
     "gen3-mix": Spec(cmd_gen3_mix, pc=True, dev_time=True, locked=True),
+    # No PC call: the Gen 3 box over ssh and our own device over ARC (#72 phase H).
+    "gen3-gate": Spec(cmd_gen3_gate, pc=False, dev_time=True, locked=True),
+    # No PC call: the box through deploy.sh, and the card read while 3.x serves (#72). On either side: in neither
+    # WHILE_2X_SERVES nor WHILE_3X_SERVES.
+    "gen3-deploy": Spec(cmd_gen3_deploy, pc=False, dev_time=True, locked=True),
     # No PC call: reads the card, writes only our own Gen 3 device (#72 phase E).
     "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
     # Reads the PC, writes only the Gen 3 box (#72 phase E).
@@ -451,6 +499,20 @@ def build_parser() -> argparse.ArgumentParser:
                       help=f"the test signal's level, at most {iempc_gen3.DBFS_MAX:g}")
     loop.add_argument("--ttl", type=float, default=iempc_gen3.TTL_DEFAULT,
                       help=f"each burst's length in seconds, at most {iempc_gen3.TTL_MAX:g}")
+    deploy = sub.add_parser("gen3-deploy")
+    deploy.add_argument("--bundle", required=True, help="the downloaded CI bundle gen3-bundle-<sha> (a folder)")
+    deploy.add_argument("--sha", required=True,
+                        help="its commit, 40 hex: this checkout must be at it with a clean tree (deploy.sh's check)")
+    deploy.add_argument("--dry-run", action="store_true",
+                        help="the plan: the side, the config's kind, deploy.sh's options; no call")
+    gate = sub.add_parser("gen3-gate")
+    gate.add_argument("gate", choices=("hil", "live", "soak"),
+                      help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "
+                           "alarm path's count), posted as hil/gen3 on the box's build; live: the live specs in a "
+                           "browser through the band's public URL with a burst every minute, posted as live/gen3; "
+                           "soak: iem-soakclient on the box beside reads of its counters, posted as soak/gen3")
+    gate.add_argument("--minutes", type=int,
+                      help="soak only: the run's length, 10, 30, 60 or 120 (default 120)")
     mix = sub.add_parser("gen3-mix")
     mix.add_argument("--slot", type=int, required=True,
                      help="the card's spare HIL output our RX R receives (never printed)")
@@ -496,6 +558,12 @@ def main(argv: list[str]) -> int:
     try:
         if spec.dev_time and flag_at_start:
             raise Refused(f"{core.EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")
+        if args.cmd in WHILE_2X_SERVES and iempc_event.gen3_serves():
+            raise Refused(f"3.x serves the band (gen3-side.json): '{args.cmd}' runs only while 2.x serves; "
+                          "nothing was called")
+        if args.cmd in WHILE_3X_SERVES and not iempc_event.gen3_serves():
+            raise Refused(f"2.x serves the band (gen3-side.json): '{args.cmd}' runs only while 3.x serves; "
+                          "nothing was called")
         with state_lock(spec.locked):
             return spec.fn(Ctx(env, args, flag_at_start))
     except Refused as e:

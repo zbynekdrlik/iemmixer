@@ -520,6 +520,11 @@ fn a_save_that_moves_a_save_tmp_aside_raises_an_alarm_naming_it() {
 #[cfg(unix)]
 mod peers;
 
+/// `iem-engine supervise` (Gen 3 phase H, #72) against the running loop on
+/// a socket: Unix only, as the client is.
+#[cfg(unix)]
+mod supervise;
+
 /// S7 HIL v2 (#10, plan Task 28): the reopen's time and the faulting
 /// callback's time in `Status`.
 mod s7;
