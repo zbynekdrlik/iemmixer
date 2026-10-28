@@ -426,6 +426,21 @@ class RefusalTests(LiveBase):
                 self.assertEqual(self.steps(), [])
                 self.assert_no_token_left()
 
+    def test_an_unreachable_box_is_named_by_fixed_words_never_by_its_address(self) -> None:
+        # The review of PR #87: ssh's own failure (exit 255) names the host in its stderr: never quoted (P6),
+        # at the box's build read and at the tokens' mint too (both ssh calls of iempc_gen3).
+        for down, words in (("/opt/iemmixer/bin/iem-engine --version",
+                             "no live gate: ssh to GEN3_HOST failed (exit 255) (nothing was changed)"),
+                            (REMOVE, "no live gate: the browser's tokens were not minted (ssh to GEN3_HOST failed "
+                                     "(exit 255))")):
+            with self.subTest(down=down):
+                self.again()
+                err = self.refused(words, FAKE_SSH_DOWN=down)
+                line = next(line for line in err.splitlines() if words in line)
+                self.assertNotIn("gen3.test", line)
+                self.assertNotIn("connect to host", line)
+                self.assertEqual(self.steps(), [])
+
     def test_the_restart_budget_refuses_before_anything_changes(self) -> None:
         (ip.STATE_DIR / gate.LEDGER).write_text(json.dumps({"restarts": [gt.NOW - 100] * 2}), encoding="utf-8")
         self.refused("no live gate: the engine's restart budget: 2 engine starts in the last 600 s and 2 more would "

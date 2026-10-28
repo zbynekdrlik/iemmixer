@@ -67,6 +67,8 @@ UNIT_LINE = ("/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/i
 # live burst (each one a line of bursts.log), the server's journal
 # (journal.log), a push subscription left behind (the file push-left) and
 # an engine that is not healthy in the HIL job (FAKE_UNHEALTHY_IN_JOB).
+# FAKE_SSH_DOWN plays ssh's own failure (exit 255, its stderr naming the
+# host as ssh does): `*` for every call, else the one command line it names.
 FAKE_SSH = r'''
 import json, os, sys, time
 box = os.environ["FAKE_GEN3"]
@@ -78,6 +80,9 @@ while args and args[0] == "-o":
     args = args[2:]
 words = args[1:]
 line = " ".join(words)
+if os.environ.get("FAKE_SSH_DOWN") in ("*", line):
+    sys.stderr.write(f"ssh: connect to host {args[0].rpartition('@')[2]} port 22: No route to host\n")
+    sys.exit(255)
 root, home = os.path.join(box, "root"), os.path.join(box, "home")
 state_path = os.path.join(box, "state.json")
 st = json.load(open(state_path))
@@ -227,6 +232,8 @@ if words[:4] == SVC:
         print(json.dumps({"topology": "ab12", "inputs": 32, "groups": 2, "mixes": 11, "card": False}))
         done()
     if rest == [ENGINE, "supervise", "status"]:
+        if os.environ.get("FAKE_STATUS_FAILS"):
+            fail("iem-engine supervise: cannot connect (ConnectionRefused)")
         print(json.dumps({"status": engine_status()}))
         done()
     if rest == [ENGINE, "supervise", "test-signal", "mic1", "-30", "10"]:
@@ -394,7 +401,8 @@ class GateBase(Base):
     def setUp(self) -> None:
         super().setUp()
         text = ip.env_path().read_text(encoding="utf-8")
-        ip.env_path().write_text(text + f"GEN3_HOST={GEN3}\nGEN3_DANTE_IP={DANTE_IP}\n", encoding="utf-8")
+        ip.env_path().write_text(text + f"GEN3_HOST={GEN3}\nGEN3_DANTE_IP={DANTE_IP}\n"
+                                 f"DANTE_IEM_NAME={OURS.upper()}\n", encoding="utf-8")
         self.patch(POLL_S=0.01)
         # A health that never comes fails in a second, not in the box's 90.
         bound = mock.patch.object(gate, "HEALTH_WAIT_S", 1.0)
@@ -583,13 +591,20 @@ class GateTests(GateBase):
         self.assertIn(STOP, calls)
         self.assertLess(calls.index(STOP), calls.index(RM))
 
-    def test_an_engine_that_restarts_by_itself_in_the_job_fails_and_counts_in_the_budget(self) -> None:
+    def test_an_engine_that_restarts_by_itself_in_the_job_fails_injects_no_fault_and_counts_in_the_budget(
+            self) -> None:
+        # The review of PR #87: the begin, a crash and the panic's restart would be three starts in the unit's
+        # window (systemd's counter reset at the begin), so one more crash before the end's reset-failed would
+        # leave the engine down while 3.x serves. No fault then: `panic` reads skipped, the gate fails all the same.
         code, docs, err = self.gate_run(FAKE_CRASHES="1")
         self.assertEqual(code, 1, err)
         doc = docs[0]["gen3_gate"]["hil"]
         # The box's health names the restart too (degraded: restarted).
-        self.assertEqual((doc["unit_restarts"], doc["failed"], doc["panic"]), (1, ["health", "restarted"], 1))
-        self.assertEqual(self.ledger(), [NOW] * 4)   # the begin, the crash, the panic's restart, the end
+        self.assertEqual((doc["unit_restarts"], doc["failed"], doc["panic"], doc["panic_restarts"], doc["starts"]),
+                         (1, ["health", "restarted"], "skipped", None, 2))
+        self.assertNotIn(INJECT, self.calls())
+        self.assertIn("the panic check was skipped", err)
+        self.assertEqual(self.ledger(), [NOW] * 3)   # the begin, the crash, the end
 
     def test_a_box_whose_engine_names_no_ci_build_fails_and_posts_nothing(self) -> None:
         code, docs, err = self.gate_run(FAKE_ENGINE_VERSION="iem-engine 2.0.0-dev.50+local")
@@ -732,6 +747,70 @@ class JobTests(GateBase):
                       f"-f {DROPIN}", err)
 
 
+class ReviewTests(GateBase):
+    """The review of PR #87."""
+
+    def test_no_fault_is_injected_into_an_engine_not_healthy_or_without_its_rx_flows(self) -> None:
+        # The panic's restart on top of an engine already in trouble: never; the gate fails on that word.
+        cases = (({"FAKE_UNHEALTHY_IN_JOB": "1"}, {}, ["health"]),
+                 ({"FAKE_RX_LAG": "100000"}, {"since": 1_000_000}, ["rx_not_back", "job_end"]))
+        for env, state, failed in cases:
+            with self.subTest(failed=failed), mock.patch.object(gate, "RX_WAIT_S", 0.3):
+                self.again()
+                self.now += 601   # the next run's budget
+                self.set_state(**state)
+                code, docs, err = self.gate_run(**env)
+                self.assertEqual(code, 1, err)
+                doc = docs[0]["gen3_gate"]["hil"]
+                self.assertEqual((doc["failed"], doc["panic"], doc["unit_restarts"]), (failed, "skipped", 0))
+                self.assertNotIn(INJECT, self.calls())
+                self.assertFalse(self.dropin_there())
+
+    def test_a_left_job_whose_engine_status_cannot_be_read_is_refused_with_nothing_changed(self) -> None:
+        # An unreadable status is no "not in HIL": the drop-in removed without a restart would leave the engine
+        # with its test flags and take the evidence away. The drop-in stays for the next gate or deploy.
+        self.left_job()
+        err = self.refused("no HIL gate: a HIL job a dead run left is still there, and the engine's status could not "
+                           "be read", FAKE_STATUS_FAILS="1")
+        self.assertIn("supervise status", err)
+        self.assertEqual(self.calls(), [*PREFLIGHT, STATUS])
+        self.assertTrue(self.dropin_there())
+        self.assertEqual((self.state()["starts"], self.ledger()), (0, []))
+
+    def test_a_device_at_gen3_dante_ip_that_is_not_ours_gets_no_subscription(self) -> None:
+        # A wrong GEN3_DANTE_IP, or an address that moved, would have the D5(b) loop change another Dante
+        # device's RX subscription. Our device answers with DANTE_IEM_NAME while 3.x serves (any case).
+        text = ip.env_path().read_text(encoding="utf-8")
+        ip.env_path().write_text(text + "DANTE_IEM_NAME=Zyxqw-Card\n", encoding="utf-8")
+        err = self.refused("no HIL gate: the device answering at GEN3_DANTE_IP is not our own")
+        self.assertNotIn("Zyxqw-Card", err)
+        self.assertEqual(self.device.rows, {})
+        self.assertEqual(self.calls(), PREFLIGHT)
+
+    def test_an_unreachable_box_is_named_by_fixed_words_never_by_its_address(self) -> None:
+        # ssh's own failure (exit 255) names the host in its stderr: never quoted (P6).
+        err = self.refused("no HIL gate: the HIL job's drop-in could not be read (ssh to GEN3_HOST failed (exit 255))",
+                           FAKE_SSH_DOWN="*")
+        self.assertNotIn("gen3.test", err)
+        self.assertNotIn("connect to host", err)
+
+    def test_a_box_call_that_fails_mid_run_warns_in_fixed_words(self) -> None:
+        code, docs, err = self.gate_run(FAKE_SSH_DOWN=ALARM)
+        self.assertEqual(code, 1, err)
+        self.assertEqual(docs[0]["gen3_gate"]["hil"]["failed"], ["alarm_count"])
+        self.assertIn("WARNING: gen3-gate: the alarm path's count could not be read (ssh to GEN3_HOST failed (exit "
+                      "255))", err)
+        self.assertNotIn("gen3.test", err)
+        self.assert_private(err + json.dumps(docs))
+        # The box's command's own failure (any other exit) is still quoted: it names no address.
+        self.again()
+        self.now += 601
+        code, docs, err = self.gate_run(FAKE_ALARMS_FAIL="1")
+        self.assertEqual(code, 1, err)
+        self.assertIn("the alarm path's count could not be read (ssh failed (exit 1): iem-server notify: the push "
+                      "store cannot be read)", err)
+
+
 class PanicTests(GateBase):
     """The panic check (Task 6 Step 3): the engine's own injected fault, systemd's own restart."""
 
@@ -854,6 +933,7 @@ class PreflightTests(GateBase):
     def test_missing_keys_refuse_before_any_call(self) -> None:
         text = ip.env_path().read_text(encoding="utf-8")
         for drop, words in ((f"GEN3_DANTE_IP={DANTE_IP}\n", "no GEN3_DANTE_IP in the private env"),
+                            (f"DANTE_IEM_NAME={OURS.upper()}\n", "no DANTE_IEM_NAME in the private env"),
                             (f"GEN3_HOST={GEN3}\n", "no GEN3_HOST in the private env")):
             with self.subTest(words=words):
                 ip.env_path().write_text(text.replace(drop, ""), encoding="utf-8")

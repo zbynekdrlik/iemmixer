@@ -575,6 +575,15 @@ class RefusalTests(SoakBase):
                 self.assertNotIn(MEMBER, err)
 
 
+class SshTests(SoakBase):
+    def test_an_unreachable_box_at_the_build_read_is_named_by_fixed_words(self) -> None:
+        # The review of PR #87: ssh's own failure (exit 255) names the host in its stderr: never quoted (P6).
+        err = self.refused("no soak gate: ssh to GEN3_HOST failed (exit 255) (nothing was changed)",
+                           FAKE_SSH_DOWN="/opt/iemmixer/bin/iem-engine --version")
+        self.assertNotIn("gen3.test", err)
+        self.assertNotIn("connect to host", err)
+
+
 class SudoTests(SoakBase):
     def test_every_sudo_line_the_soak_sends_is_in_the_template(self) -> None:
         sent: list[str] = []
