@@ -14,15 +14,17 @@ set -euo pipefail
 #
 # Idempotent: write and enable only, each step a line `<step> changed` or
 # `<step> unchanged`; a second run changes nothing. It never starts, stops or
-# restarts the stack; it restarts journald when its configuration changed,
-# starts the box's time owner (dantesync) when it is not running, runs
-# iem-napi (the Dante interface's packet priority) when it does not hold, and
-# turns the display output polling off when it is on.
+# restarts the stack and never reboots the box; it restarts journald when its
+# configuration changed, runs update-grub when grub's settings changed, starts
+# the box's time owner (dantesync) when it is not running, runs iem-napi (the
+# Dante interface's packet priority) when it does not hold, and turns the
+# display output polling off when it is on.
 # Refused with nothing changed: not root, dantesync not installed (the box's
 # one time owner comes from install-dantesync.sh, never from here) or its
 # config not the ops follower config --ntp-file's NTP server names, a PTP
-# daemon besides it, a unit of the stack running, a sudoers rule
-# sudo-lines.txt renders that visudo refuses.
+# daemon besides it, a unit of the stack running, fewer than 4 or more than
+# 32 CPUs (nproc --all), a sudoers rule sudo-lines.txt renders that visudo
+# refuses.
 #
 # Steps, in order:
 #   user      the system group and user iemmixer (no login, no home), the
@@ -50,6 +52,17 @@ set -euo pipefail
 #             (deploy.sh --pins gives every PIN again).
 #   journal   journald persistent on the SSD (1 GiB, 30 days), restarted
 #             when that changed; rsyslog purged.
+#   realtime  the PREEMPT_RT kernel and the engine's isolated cores as the
+#             box's boot state (#72 phase F: measured on the box, it removed
+#             every engine overrun): linux-image-realtime installed;
+#             /etc/default/grub's GRUB_DEFAULT=saved and
+#             GRUB_CMDLINE_LINUX_DEFAULT with the last two CPUs isolated
+#             (isolcpus=domain,managed_irq, nohz_full, rcu_nocbs; every
+#             interrupt on the others), its other lines kept byte for byte,
+#             update-grub when it changed; grub's saved entry the newest
+#             /boot/vmlinuz-*-realtime; /etc/tmpfiles.d/iemmixer-workqueue.conf
+#             keeping unbound kernel work on the other CPUs at every boot.
+#             Never a reboot: the box runs it from its next one.
 #   apt       the installed kernel meta packages held, no unattended
 #             upgrades (20auto-upgrades, the apt timers and the
 #             unattended-upgrades service masked): an appliance never gains a
@@ -92,7 +105,10 @@ TIME_UNITS=(systemd-timesyncd.service chrony.service ntp.service time-sync-coord
 PTP_UNITS=(ptp4l.service phc2sys.service statime.service)
 APT_UNITS=(unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer)
 SLEEP_UNITS=(sleep.target suspend.target hibernate.target hybrid-sleep.target)
-KERNEL_PACKAGES=('linux-generic*' 'linux-image-generic*' 'linux-headers-generic*')
+KERNEL_PACKAGES=('linux-generic*' 'linux-image-generic*' 'linux-headers-generic*' 'linux-image-realtime*')
+REALTIME_PACKAGE=linux-image-realtime
+GRUB_SETTINGS=/etc/default/grub
+WORKQUEUE_CONF=/etc/tmpfiles.d/iemmixer-workqueue.conf
 CREDENTIAL=/etc/credstore.encrypted/iemmixer-pepper
 # The stack's state folders (the units' StateDirectory=), and their paths
 # under this run's root.
@@ -402,6 +418,19 @@ for unit in "${STACK_UNITS[@]}"; do
     die "$unit is $active_state: provision never touches a running stack; stop it first (sudo systemctl stop iem-server iem-engine iem-dante): nothing changed"
   fi
 done
+# The realtime step's CPUs: the last two isolated for the engine (its pump and
+# the Dante threads), the others (at least two) the kernel's; the workqueue
+# mask below is one hex word, so at most 32.
+cpus="$(nproc --all)" || die "the box's CPUs could not be counted (nproc --all): nothing changed"
+[[ "$cpus" =~ ^[1-9][0-9]*$ ]] || die "the box's CPUs could not be counted (nproc --all): nothing changed"
+[ "$cpus" -ge 4 ] ||
+  die "the box has fewer than 4 CPUs: the realtime step isolates two for the engine and keeps two for the rest: nothing changed"
+[ "$cpus" -le 32 ] ||
+  die "the box has more than 32 CPUs: the realtime step's workqueue mask is written for at most 32: nothing changed"
+isolated="$((cpus - 2))-$((cpus - 1))"
+RT_CMDLINE="isolcpus=domain,managed_irq,$isolated nohz_full=$isolated rcu_nocbs=$isolated irqaffinity=0-$((cpus - 3))"
+# The CPUs unbound kernel work may run on: all but the isolated two.
+WORKQUEUE_MASK="$(printf '%x' $(((1 << (cpus - 2)) - 1)))"
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
@@ -430,6 +459,13 @@ cat > "$work/iemmixer-display.conf" << 'EOF'
 # Applied at every boot by systemd-tmpfiles. Written by
 # scripts/gen3/provision-root.sh.
 w /sys/module/drm_kms_helper/parameters/poll - - - - N
+EOF
+cat > "$work/iemmixer-workqueue.conf" << EOF
+# The Gen 3 box (#72 phase F): unbound kernel work off the CPUs the kernel
+# command line isolates for the engine (isolcpus, nohz_full, rcu_nocbs), on
+# the others only. Applied at every boot by systemd-tmpfiles. Written by
+# scripts/gen3/provision-root.sh.
+w /sys/devices/virtual/workqueue/cpumask - - - - $WORKQUEUE_MASK
 EOF
 
 # --- The steps. ---
@@ -562,6 +598,72 @@ step_journal() {
       case "$state" in absent | not-installed) ;; *) die "rsyslog is '$state' after its purge" ;; esac
       ;;
   esac
+}
+
+# grub's saved entry (saved_entry= of `grub-editenv list`), empty when none.
+saved_entry() {
+  local out line saved=""
+  out="$(grub-editenv list)" || die "grub-editenv list failed (exit $?)"
+  while IFS= read -r line; do
+    case "$line" in saved_entry=*) saved="${line#saved_entry=}" ;; esac
+  done <<< "$out"
+  printf '%s' "$saved"
+}
+
+step_realtime() {
+  local state kernel version entry saved running
+  local -a versions=()
+  state="$(package_status "$REALTIME_PACKAGE")"
+  if [ "$state" != installed ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$REALTIME_PACKAGE" ||
+      die "apt-get install of $REALTIME_PACKAGE failed (exit $?)"
+    changed=1
+    state="$(package_status "$REALTIME_PACKAGE")"
+    [ "$state" = installed ] || die "$REALTIME_PACKAGE is '$state' after its install"
+  fi
+  # The newest realtime kernel in /boot, as sort -V orders their versions.
+  for kernel in "$R"/boot/vmlinuz-*-realtime; do
+    if [ -f "$kernel" ]; then
+      kernel="${kernel##*/}"
+      versions+=("${kernel#vmlinuz-}")
+    fi
+  done
+  [ "${#versions[@]}" -gt 0 ] || die "no realtime kernel in /boot (/boot/vmlinuz-*-realtime) with $REALTIME_PACKAGE installed: look at it"
+  version="$(printf '%s\n' "${versions[@]}" | sort -V | tail -n 1)"
+  [[ "$version" =~ ^[A-Za-z0-9.+~_-]+$ ]] || die "the newest /boot/vmlinuz-*-realtime has a name grub's entry cannot take: look at it"
+
+  # grub's settings: the saved entry, and the isolated CPUs on the kernel's
+  # command line; the existing lines of those keys replaced (a later one of
+  # the same key dropped: the last would win), every other line kept.
+  if [ ! -f "$R$GRUB_SETTINGS" ] || [ -L "$R$GRUB_SETTINGS" ]; then
+    die "$GRUB_SETTINGS is no file: grub's settings are never made here; look at it"
+  fi
+  awk -v d='GRUB_DEFAULT=saved' -v c="GRUB_CMDLINE_LINUX_DEFAULT=\"$RT_CMDLINE\"" '
+    /^[[:space:]]*GRUB_DEFAULT=/ { if (!dd) print d; dd = 1; next }
+    /^[[:space:]]*GRUB_CMDLINE_LINUX_DEFAULT=/ { if (!cc) print c; cc = 1; next }
+    { print }
+    END { if (!dd) print d; if (!cc) print c }
+  ' "$R$GRUB_SETTINGS" > "$work/grub"
+  put_file 0644 root root "$GRUB_SETTINGS" "$work/grub"
+  if [ "$wrote" = 1 ]; then
+    update-grub ||
+      die "update-grub failed (exit $?): $GRUB_SETTINGS is written and a later run does not run it again; run sudo update-grub on the box before any reboot"
+  fi
+
+  entry="Advanced options for Ubuntu>Ubuntu, with Linux $version"
+  saved="$(saved_entry)"
+  if [ "$saved" != "$entry" ]; then
+    grub-set-default "$entry" || die "grub-set-default failed (exit $?)"
+    changed=1
+    saved="$(saved_entry)"
+    [ "$saved" = "$entry" ] || die "grub's saved entry is not the realtime kernel after grub-set-default"
+  fi
+
+  put_file 0644 root root "$WORKQUEUE_CONF" "$work/iemmixer-workqueue.conf"
+  running="$(uname -r)"
+  if [ "$running" != "$version" ]; then
+    echo "realtime: the box runs it after its next reboot"
+  fi
 }
 
 step_apt() {
@@ -753,7 +855,7 @@ step_sudoers() {
   changed=1
 }
 
-for step in user folders state pepper phase-c journal apt sleep swap clock napi display stack sudoers; do
+for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display stack sudoers; do
   changed=0
   "step_${step//-/_}"
   if [ "$changed" = 1 ]; then

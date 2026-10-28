@@ -6,7 +6,8 @@ root script; by hand: `ssh <host> python3 - < scripts/gen3/verify_box.py`
 (nothing is left on the box). It changes nothing.
 
 Prints one JSON line of numbers, `{"verify": {"pass": 0|1, "<check>": 0|1, ...,
-"tpm2": 0|1}}`, names each failing check on stderr with a fixed reason
+"tpm2": 0|1, "realtime_running": 0|1}}`, names each failing check on stderr
+with a fixed reason
 (`verify_box: <check>: <reason>`), and exits 0 only when every check passes,
 1 otherwise. The checks:
 
@@ -28,8 +29,16 @@ Prints one JSON line of numbers, `{"verify": {"pass": 0|1, "<check>": 0|1, ...,
   the stack as the admin; deploy.sh --pins writes site/secrets as iemmixer
   before any unit starts).
 - journal: journald persistent, 1 GiB, 30 days; /var/log/journal; no rsyslog.
+- realtime: linux-image-realtime installed (the apt check holds it);
+  /etc/default/grub's GRUB_DEFAULT lines exactly `GRUB_DEFAULT=saved` and its
+  GRUB_CMDLINE_LINUX_DEFAULT lines exactly the box's `nproc --all` last two
+  CPUs isolated (`isolcpus=domain,managed_irq,a-b nohz_full=a-b rcu_nocbs=a-b
+  irqaffinity=0-h`); `grub-editenv list`'s saved_entry the newest
+  /boot/vmlinuz-*-realtime's title; /etc/tmpfiles.d/iemmixer-workqueue.conf
+  holding exactly the `w` line of the other CPUs' workqueue mask.
 - apt: no unattended upgrades (20auto-upgrades, the apt timers and the
-  service masked); every installed kernel meta package held.
+  service masked); every installed kernel meta package held (the realtime
+  one too).
 - sleep: sleep, suspend, hibernate and hybrid-sleep masked.
 - swap: an active swap area (the owner's rule for every Linux box).
 - clock: dantesync enabled and running; systemd-timesyncd, chrony, ntp,
@@ -44,7 +53,10 @@ Prints one JSON line of numbers, `{"verify": {"pass": 0|1, "<check>": 0|1, ...,
   held a CPU ~2 ms and made the engine's pump miss blocks, Live 4).
 
 `tpm2` is 1 when `systemd-creds has-tpm2` says the box has a usable TPM2: the
-key `--with-key=auto` sealed the pepper with besides the host key. Its output
+key `--with-key=auto` sealed the pepper with besides the host key.
+`realtime_running` is 1 when /sys/kernel/realtime reads 1 and /proc/cmdline
+holds the realtime check's command line: the box booted what provision set
+(it does after its next reboot). Both are information, never checks. Its output
 names no host, user, address, interface or value of a file (P6).
 IEM_VERIFY_ROOT prefixes every path it reads, and every command is called by
 name: the tests' seams.
@@ -66,7 +78,11 @@ APT_UNITS = ("unattended-upgrades.service", "apt-daily.timer", "apt-daily-upgrad
 SLEEP_UNITS = ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")
 OTHER_UNITS = ("dantesync.service", "iem-napi.service", "irqbalance.service")
 UNITS = (*STACK, *TIME_UNITS, *APT_UNITS, *SLEEP_UNITS, *OTHER_UNITS)
-KERNEL_PACKAGES = ("linux-generic*", "linux-image-generic*", "linux-headers-generic*")
+KERNEL_PACKAGES = ("linux-generic*", "linux-image-generic*", "linux-headers-generic*", "linux-image-realtime*")
+REALTIME_PACKAGE = "linux-image-realtime"
+GRUB_SETTINGS = "/etc/default/grub"
+WORKQUEUE_CONF = "/etc/tmpfiles.d/iemmixer-workqueue.conf"
+WORKQUEUE_MASK = "/sys/devices/virtual/workqueue/cpumask"
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-pepper"
 SUDOERS = "/etc/sudoers.d/iemmixer-gen3"
 ALARM = "/etc/systemd/system/iem-alarm@.service"
@@ -88,8 +104,8 @@ IFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
 POLL_PARAM = "/sys/module/drm_kms_helper/parameters/poll"
 POLL_OFF = f"w {POLL_PARAM} - - - - N"
-CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "apt", "sleep",
-          "swap", "clock", "napi", "display")
+CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
+          "sleep", "swap", "clock", "napi", "display")
 
 
 class Failed(Exception):
@@ -247,6 +263,69 @@ def check_journal(box: Box) -> None:
         raise Failed("rsyslog is installed")
 
 
+def cpus() -> int:
+    """`nproc --all`, the count provision-root.sh's realtime step takes: 4 to 32."""
+    r = run("nproc", "--all")
+    text = r.stdout.strip()
+    if r.returncode != 0 or not re.fullmatch(r"[1-9][0-9]*", text):
+        raise Failed("the box's CPUs cannot be counted (nproc --all)")
+    if not 4 <= int(text) <= 32:
+        raise Failed("the box has fewer than 4 or more than 32 CPUs")
+    return int(text)
+
+
+def realtime_cmdline(n: int) -> str:
+    """The kernel command line of provision's realtime step: the last two of n
+    CPUs isolated for the engine, every interrupt on the others."""
+    isolated = f"{n - 2}-{n - 1}"
+    return f"isolcpus=domain,managed_irq,{isolated} nohz_full={isolated} rcu_nocbs={isolated} irqaffinity=0-{n - 3}"
+
+
+def version_key(version: str) -> list[tuple[int, int, str]]:
+    """sort -V's order of kernel versions: runs of digits as numbers."""
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in re.findall(r"[0-9]+|[^0-9]+", version)]
+
+
+def newest_realtime() -> str | None:
+    """The newest /boot/vmlinuz-<version>-realtime's version, None without one."""
+    boot = at("/boot")
+    versions = [entry[len("vmlinuz-"):] for entry in os.listdir(boot)
+                if entry.startswith("vmlinuz-") and entry.endswith("-realtime")
+                and os.path.isfile(os.path.join(boot, entry))]
+    return max(versions, key=version_key) if versions else None
+
+
+def check_realtime(box: Box) -> None:
+    n = cpus()
+    if package_status(REALTIME_PACKAGE) != "installed":
+        raise Failed("linux-image-realtime is not installed")
+    want = {"GRUB_DEFAULT": "GRUB_DEFAULT=saved",
+            "GRUB_CMDLINE_LINUX_DEFAULT": f'GRUB_CMDLINE_LINUX_DEFAULT="{realtime_cmdline(n)}"'}
+    found: dict[str, list[str]] = {key: [] for key in want}
+    for line in read(GRUB_SETTINGS).splitlines():
+        for key in want:
+            if re.match(rf"\s*{key}=", line):
+                found[key].append(line)
+    if any(found[key] != [line] for key, line in want.items()):
+        raise Failed("/etc/default/grub does not boot the saved entry with the engine's CPUs isolated")
+    version = newest_realtime()
+    if version is None:
+        raise Failed("no realtime kernel in /boot")
+    r = run("grub-editenv", "list")
+    if r.returncode != 0:
+        raise Failed("grub-editenv list fails")
+    saved = [line[len("saved_entry="):] for line in r.stdout.splitlines() if line.startswith("saved_entry=")]
+    if saved != [f"Advanced options for Ubuntu>Ubuntu, with Linux {version}"]:
+        raise Failed("grub's saved entry is not the newest realtime kernel")
+    try:
+        lines = [line.strip() for line in read(WORKQUEUE_CONF).splitlines()]
+    except FileNotFoundError:
+        lines = []
+    if [line for line in lines if line and not line.startswith("#")] != [
+            f"w {WORKQUEUE_MASK} - - - - {(1 << (n - 2)) - 1:x}"]:
+        raise Failed(f"no {WORKQUEUE_CONF} keeping kernel work off the isolated CPUs")
+
+
 def check_apt(box: Box) -> None:
     lines = {line.strip() for line in read(AUTO_UPGRADES).splitlines()}
     if any(want not in lines for want in NO_UPGRADES):
@@ -377,6 +456,18 @@ def tpm2() -> int:
         return 0
 
 
+def realtime_running() -> int:
+    """1 when the box runs a PREEMPT_RT kernel booted with the realtime
+    check's command line (the words in that order)."""
+    try:
+        if read("/sys/kernel/realtime").strip() != "1":
+            return 0
+        words, want = read("/proc/cmdline").split(), realtime_cmdline(cpus()).split()
+        return int(any(words[i:i + len(want)] == want for i in range(len(words))))
+    except (Failed, OSError, ValueError):
+        return 0
+
+
 def main() -> int:
     box = Box()
     results: dict[str, int] = {}
@@ -391,7 +482,8 @@ def main() -> int:
             results[name] = 0
             print(f"verify_box: {name}: could not be read ({type(e).__name__})", file=sys.stderr)
     passed = int(all(results.values()))
-    print(json.dumps({"verify": {"pass": passed, **results, "tpm2": tpm2()}}, separators=(",", ":")))
+    print(json.dumps({"verify": {"pass": passed, **results, "tpm2": tpm2(), "realtime_running": realtime_running()}},
+                     separators=(",", ":")))
     return 0 if passed else 1
 
 
