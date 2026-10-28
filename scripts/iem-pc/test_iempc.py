@@ -446,6 +446,25 @@ class LockTests(Base):
         self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["event", "--signal"], ["probe-task"]])
 
 
+class Gen3ServesTests(Base):
+    """#72, 2026-10-28: while 3.x serves the band, the PC's gates would test the
+    box through the band's public URL, and the Gen 3 loop and mix tests would
+    drive the band's own TX channels on the box: all refused before any call."""
+
+    def test_the_pc_gates_and_the_box_loops_are_refused_while_3x_serves(self) -> None:
+        (ip.STATE_DIR).mkdir(parents=True, exist_ok=True)
+        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 3, "at": "2026-10-28T09:00:00+00:00"}),
+                                                    encoding="utf-8")
+        for argv in (["dispatch-live", "--sha", SHA], ["dispatch-hil", "--sha", SHA],
+                     ["dispatch-soak", "--sha", SHA],
+                     ["gen3-loop", "--offsets", "116,153", "--bursts", "5", "--slot", "125"],
+                     ["gen3-mix", "--slot", "125", "--member", "member2", "--box-input", "mic2", "--bursts", "5"]):
+            code, _, err = self.run_main(*argv)
+            self.assertEqual((code, self.pc.calls), (1, []), argv)
+            self.assertIn("3.x serves the band", err, argv)
+            self.assertIn("runs only while 2.x serves", err, argv)
+
+
 class PatchTests(Base):
     """#36: iempc is split into modules, and a patch reaches the code only in
     the one module that holds the name (iempc_test_support.Base.patch)."""
