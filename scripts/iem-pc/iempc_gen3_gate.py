@@ -514,6 +514,21 @@ class Box:
             return False
         return True
 
+    def healthy_but_restarted(self) -> bool:
+        """Health after the panic's own restart: degraded for the one reason
+        `restarted` (health.rs counts any unit restart since its start,
+        Reason::Restarted), nothing else; healthy is as good. `|| true`
+        keeps health's answer when it exits 1 for degraded."""
+        try:
+            doc = self.last_json(self.call([g3.DANTE_BIN, "health", "||", "true"]))
+        except self.ip.StepError:
+            return False
+        health = doc.get("health") if isinstance(doc, dict) else None
+        if not isinstance(health, dict):
+            return False
+        state, reasons = health.get("state"), health.get("reasons")
+        return (state, reasons) in (("healthy", []), ("degraded", ["restarted"]))
+
     def device_status(self) -> dict | None:
         try:
             return g3.device_status(self.ip, self.ctx, self.host, WORDS)
@@ -923,7 +938,8 @@ def panic(job: Job, c: Checks) -> None:
     engine under --fault-injection; the flag checked right before it), then
     systemd's own restart (Restart=on-failure; the fault's exit 70): within
     PANIC_WAIT_S the engine active again as a new process with NRestarts
-    exactly one higher, healthy, the RX flows back, the alarm unit not
+    exactly one higher, healthy but for that restart (health degraded for
+    the one reason `restarted`: health.rs counts it), the RX flows back, the alarm unit not
     started, and the faulted process's panic in the engine's journal. The
     restart is counted in the budget before the fault (a sent one counts,
     answered or not), any more it made after. Nothing is ever force-ended:
@@ -946,8 +962,8 @@ def panic(job: Job, c: Checks) -> None:
     running = box.wait(lambda: back(read_engine_unit(box), before), PANIC_WAIT_S)
     if not running:
         problems.append(f"the engine was not running again as a new process within {PANIC_WAIT_S:.0f} s")
-    elif not box.wait(box.healthy, HEALTH_WAIT_S):
-        problems.append("the engine is not healthy after its restart")
+    elif not box.wait(box.healthy_but_restarted, HEALTH_WAIT_S):
+        problems.append("the engine is not healthy after its restart (degraded for more than its restart)")
     elif not box.wait_receiving(job.facts.receiving, RX_WAIT_S):
         problems.append("the RX flows are not back after its restart")
     after = read_engine_unit(box)
