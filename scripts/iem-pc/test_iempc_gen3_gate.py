@@ -272,6 +272,8 @@ if words[:4] == SVC:
         if not st["hil"] or os.environ.get("FAKE_BURST_FAILS"):
             fail("iem-engine supervise: the engine refused it: forbidden")
         st["signals"] += 1
+        if os.environ.get("FAKE_CRASH_IN_RUN") and st["signals"] == 1:
+            st["nrestarts"] += 1   # the engine restarted by itself during the run, after the begin's checks
         print(json.dumps({"test_signal": {"rev": 3, "outputs": 2, "dbfs": -20.0, "seconds": 30, "listen": True}}))
         done()
     if rest[:2] == ["/opt/iemmixer/bin/iem-soakclient", "token"]:
@@ -344,6 +346,8 @@ CAT_SITE = "sudo -n -u iemmixer cat /var/lib/iemmixer/site/iemmixer.toml"
 CHECK_SITE = ("sudo -n -u iemmixer /opt/iemmixer/bin/iem-engine check-site --site "
               "/var/lib/iemmixer/site/iemmixer.toml")
 HEALTH = "/opt/iemmixer/bin/iem-dante-dev health"
+# Health read for its answer also when it exits 1 (degraded): the panic check's.
+HEALTH_KEPT = "/opt/iemmixer/bin/iem-dante-dev health || true"
 CTL = "/opt/iemmixer/bin/iem-dante-dev ctl status"
 STAGE = "mkdir -p .cache/iem-gen3-gate && cat > .cache/iem-gen3-gate/iem-hil.conf"
 INSTALL = f"sudo -n install -D -m 0644 .cache/iem-gen3-gate/iem-hil.conf {DROPIN}"
@@ -370,7 +374,7 @@ BEGIN = [STAGE, INSTALL, CAT_DROPIN, RELOAD, RESET, RESTART, HEALTH, CTL, CTL, S
 # The panic: the engine's unit and the alarm unit read, the fault, the engine
 # back as a new process, healthy, the RX flows back, then both units again and
 # the faulted process's line in the engine's journal.
-PANIC = [ENGINE_UNIT, ALARM_UNIT, INJECT, ENGINE_UNIT, HEALTH, CTL, CTL, ENGINE_UNIT, ALARM_UNIT, JOURNAL]
+PANIC = [ENGINE_UNIT, ALARM_UNIT, INJECT, ENGINE_UNIT, HEALTH_KEPT, CTL, CTL, ENGINE_UNIT, ALARM_UNIT, JOURNAL]
 END = [RM, RELOAD, RESET, RESTART, HEALTH, CTL, CTL, STATUS]
 CHANGES = (STAGE, INSTALL, RELOAD, RESET, RESTART, RM, SIGNAL, INJECT)
 # An earlier run's injected panic, another engine process's: never this run's.
@@ -583,7 +587,8 @@ class GateTests(GateBase):
         code, docs, err = self.gate_run(FAKE_CRASHES="1")
         self.assertEqual(code, 1, err)
         doc = docs[0]["gen3_gate"]["hil"]
-        self.assertEqual((doc["unit_restarts"], doc["failed"], doc["panic"]), (1, ["restarted"], 1))
+        # The box's health names the restart too (degraded: restarted).
+        self.assertEqual((doc["unit_restarts"], doc["failed"], doc["panic"]), (1, ["health", "restarted"], 1))
         self.assertEqual(self.ledger(), [NOW] * 4)   # the begin, the crash, the panic's restart, the end
 
     def test_a_box_whose_engine_names_no_ci_build_fails_and_posts_nothing(self) -> None:

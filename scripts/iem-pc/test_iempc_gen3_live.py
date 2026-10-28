@@ -284,7 +284,9 @@ class LiveTests(LiveBase):
         self.assert_no_token_left()
 
     def test_an_engine_that_restarts_by_itself_in_the_job_fails_although_the_specs_pass(self) -> None:
-        code, docs, err = self.gate_run(FAKE_CRASHES="1")
+        # During the run, after the begin's checks: a restart at the begin
+        # leaves health degraded (restarted) and the begin is not ready.
+        code, docs, err = self.gate_run(FAKE_CRASH_IN_RUN="1")
         self.assertEqual(code, 1, err)
         doc = self.doc(docs)
         self.assertEqual((doc["conclusion"], doc["pass"], doc["unit_restarts"], doc["failed"]),
