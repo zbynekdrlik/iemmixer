@@ -66,6 +66,8 @@ io_cpu = <N-2>
 
 `scripts/gen3/deploy.sh --host <user@host> --bundle <CI's gen3-bundle-<sha>> --sha <sha> --config <ops device config> --iface <Dante NIC> --start engine`, plus `--site-file <ops site.toml> --roster-file <ops roster.toml>` for the band, or `--pins` for the synthetic test band. The checkout must be exactly `<sha>`, clean. Two slots; `--back` returns to the other.
 
+Once the box has been deployed (and while 3.x serves, always): `iempc gen3-deploy --bundle <gen3-bundle-<sha>> --sha <sha>` (deploy.sh alone refuses while 3.x serves; `.claude/rules/gen3.md`, "Deploy while 3.x serves").
+
 ## 6. The band's data and URL
 
 - `iempc gen3-data --pepper` (from the PC side): the band's files and the pepper onto the box, read back by sha256.

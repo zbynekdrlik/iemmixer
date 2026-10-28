@@ -71,3 +71,12 @@
 ### Task 8: Wired in
 
 - [ ] **Step 1:** `deploy.sh` names the three gates to run after a box deploy; `.claude/rules/gen3-new-box.md` section 7 uses them; phase G's confirmation needs the three statuses green on the box's build.
+
+### Task 9: deploy while 3.x serves
+
+Since 2026-10-28 the box serves the band by default and goes back to 2.x only on the owner's word; `deploy.sh` refused while 3.x serves (it would install the usual device config and disable the units), and `to-2` then `to-3` loses what people changed on 3.x. The box is deployed in place, as the PC is: in dev time the deploy's own restart is the only interruption.
+
+- [x] **Step 1:** `deploy.sh --serving`: accepted only while the side record says 3.x (refused while 2.x serves; without it a deploy while 3.x serves is still refused, naming `iempc gen3-deploy`), needs the band's `--site-file`/`--roster-file` and `--start engine`, refuses a config whose `name` is not `DANTE_IEM_NAME` of iempc's private env (neither printed), disables nothing and enables `iem-engine iem-server` after the start (read back; the tunnel unit left as it is; a new `sudo-lines.txt` line); once the stack is stopped the flag never holds it down ("ide event" keeps the box while 3.x serves). Tests in `test_deploy.py`.
+- [x] **Step 2:** `iempc gen3-deploy --bundle <dir> --sha <40 hex> [--dry-run]` (`iempc_gen3_deploy.py`; dev time, locked, a box command, on either side): while 3.x serves the takeover config as `to-3` builds it (the card's labels read under its spare name) in a private 0600 file, removed after, and deploy.sh `--serving`; while 2.x serves the ops device config; both with the box's own interface (its `iem-dante.env`) and the band's site and roster (new env keys `GEN3_SITE_FILE`, `GEN3_ROSTER_FILE`); `--dry-run` the plan with every host and path as its kind, no call. Tests in `test_iempc_gen3_deploy.py`.
+- [x] **Step 3:** `.claude/rules/gen3.md` ("Deploy while 3.x serves"), `.claude/rules/gen3-new-box.md` section 5.
+- [ ] **Step 4:** The env keys `GEN3_SITE_FILE` and `GEN3_ROSTER_FILE` in the private env; a first `iempc gen3-deploy --dry-run`, then a run on the box while 3.x serves (health healthy, the receivers back on our device, the engine and the server enabled), recorded on #72.
