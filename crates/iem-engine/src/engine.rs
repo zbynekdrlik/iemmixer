@@ -169,7 +169,8 @@ usage:
 run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
 with --backend asio (Windows) on the card of the site's [card] table at its
 32 samples, or with --backend dante (Linux) on our own Dante device, hosted
-in this process, at 32 samples on its media clock (the site's RX and TX
+in this process, at its device config's block (32 unless it sets 16) on its
+media clock (the site's RX and TX
 channel numbers are the device's; --dante-control defaults to
 /run/iem-dante/control.sock); --hold keeps every output silent until the
 supervisor's Arm. SIGTERM or SIGINT under --backend dante saves, fades and
