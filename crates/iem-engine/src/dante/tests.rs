@@ -116,9 +116,11 @@ fn the_timing_is_32_samples_the_devices_latency_and_1_ms() {
 
 #[test]
 fn the_work_margin_comes_from_the_device_config() {
+    // 0.25 ms with the box's TX settings: the device refuses an advertised
+    // latency shorter than tx_fpp_max frames + tx_margin_ns + its send slack.
     let text = TEST_DEVICE.replace(
         "latency_ns = 1000000",
-        "latency_ns = 250000\nwork_margin = 48",
+        "latency_ns = 250000\nwork_margin = 48\ntx_fpp_max = 8\ntx_margin_ns = 30000",
     );
     assert_ne!(
         text, TEST_DEVICE,
