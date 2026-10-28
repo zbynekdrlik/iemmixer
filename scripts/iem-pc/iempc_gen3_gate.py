@@ -83,6 +83,10 @@ event path runs (EventNow: iempc main). No verdict and no status then.
 P6: GEN3_HOST, GEN3_DANTE_IP, the device's and its channels' names, the
 spare outputs' numbers and the site never reach stdout or stderr.
 
+`iempc gen3-gate live` (Task 5) is iempc_gen3_live.py: it builds on this
+module (the preflight without the ARC reads, the job, the budget, the status
+post) and `run` passes the call on to it.
+
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
 
@@ -383,10 +387,11 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
 class Box:
     """One ssh call per command on the Gen 3 box, the flag watched as
     iempc_core.guarded watches it: reads `abandon`, changes `finish` unless
-    a caller says otherwise."""
+    a caller says otherwise. `name` heads its refusals ("no HIL gate", "no
+    live gate")."""
 
-    def __init__(self, ip, ctx, host: str) -> None:
-        self.ip, self.ctx, self.host = ip, ctx, host
+    def __init__(self, ip, ctx, host: str, name: str = "HIL") -> None:
+        self.ip, self.ctx, self.host, self.name = ip, ctx, host, name
 
     def call(self, words: list[str], *, change: bool = False, event: str | None = None, stdin: str = "",
              timeout: float = CALL_S) -> str:
@@ -441,15 +446,15 @@ class Box:
 
 # ---- the restart budget ----
 
-def ledger_times(ip) -> list[float]:
+def ledger_times(ip, name: str = "HIL") -> list[float]:
     try:
         doc = ip.read_json(ip.state_dir() / LEDGER, {})
     except ip.StepError:
-        raise ip.Refused(f"no HIL gate: {LEDGER} in iempc's state cannot be read: check it by hand (the engine "
+        raise ip.Refused(f"no {name} gate: {LEDGER} in iempc's state cannot be read: check it by hand (the engine "
                          "starts this command asked for)") from None
     times = doc.get("restarts", [])
     if not isinstance(times, list) or not all(type(t) in (int, float) for t in times):
-        raise ip.Refused(f"no HIL gate: {LEDGER} in iempc's state is not a list of times: check it by hand")
+        raise ip.Refused(f"no {name} gate: {LEDGER} in iempc's state is not a list of times: check it by hand")
     return [float(t) for t in times]
 
 
@@ -465,10 +470,10 @@ def note_starts(ip, n: int = 1) -> None:
              "engine start")
 
 
-def refuse_over_budget(ip, facts: "Facts", planned: int, what: str) -> None:
-    why = budget_refusal(ledger_times(ip), wall(), facts.interval, facts.burst, planned)
+def refuse_over_budget(ip, facts: "Facts", planned: int, what: str, name: str = "HIL") -> None:
+    why = budget_refusal(ledger_times(ip, name), wall(), facts.interval, facts.burst, planned)
     if why:
-        raise ip.Refused(f"no HIL gate: the engine's restart budget: {why} ({what})")
+        raise ip.Refused(f"no {name} gate: the engine's restart budget: {why} ({what})")
 
 
 # ---- before any change ----
@@ -485,6 +490,7 @@ class Facts:
     ret_before: dict | None   # the return's subscription before the run (gen3_arc.read_rx's row)
     ret_tx_name: str
     receiving: set[int]
+    # own, ret_before and ret_tx_name are the HIL gate's ARC reads: "", None and "" for the live gate.
 
 
 def dante_ip(ip, env: dict[str, str]) -> str:
@@ -499,20 +505,22 @@ def read_box(box: Box, what: str, words: list[str]) -> str:
     try:
         return box.call(words)
     except box.ip.StepError as e:
-        raise box.ip.Refused(f"no HIL gate: {what} could not be read ({e}) (nothing was changed)") from None
+        raise box.ip.Refused(f"no {box.name} gate: {what} could not be read ({e}) (nothing was changed)") from None
 
 
-def preflight(box: Box, dante: str) -> Facts:
-    ip = box.ip
+def preflight(box: Box, dante: str | None) -> Facts:
+    """Every check before any change; `dante` None reads nothing over ARC
+    (the live gate drives no D5(b) loop)."""
+    ip, no = box.ip, f"no {box.name} gate"
     left = read_box(box, "the HIL job's drop-in", ["test", "-e", DROPIN, "&&", "echo", "left", "||", "echo",
                                                     "none"]).strip()
     if left not in ("left", "none"):
-        raise ip.Refused("no HIL gate: the look for a left HIL job answered neither left nor none (nothing was "
+        raise ip.Refused(f"{no}: the look for a left HIL job answered neither left nor none (nothing was "
                          "changed)")
     shown = read_box(box, "the engine unit's drop-ins", ["systemctl", "show", "--property=DropInPaths", UNIT])
     paths = shown.strip().removeprefix("DropInPaths=").split()
     if any(p != DROPIN for p in paths):
-        raise ip.Refused("no HIL gate: another drop-in changes the engine's unit (systemctl show "
+        raise ip.Refused(f"{no}: another drop-in changes the engine's unit (systemctl show "
                          f"--property=DropInPaths {UNIT} on the box): the job's ExecStart would not be the one "
                          "it runs (nothing was changed)")
     unit = read_box(box, "the installed engine unit", ["cat", UNIT_FILE])
@@ -523,33 +531,36 @@ def preflight(box: Box, dante: str) -> Facts:
         hil_tx = site_hil_tx(read_box(box, "the installed site", [*AS_SERVICE, "cat", SITE]))
     except (ValueError, tomllib.TOMLDecodeError) as e:
         why = str(e) if not isinstance(e, tomllib.TOMLDecodeError) else "a file is not TOML"
-        raise ip.Refused(f"no HIL gate: {why} (nothing was changed)") from None
+        raise ip.Refused(f"{no}: {why} (nothing was changed)") from None
     why = counts_refusal(hil_tx, rx_count, tx_count)
     if why:
-        raise ip.Refused(f"no HIL gate: {why} (nothing was changed)")
+        raise ip.Refused(f"{no}: {why} (nothing was changed)")
     try:
         box.call([*AS_SERVICE, ENGINE_BIN, "check-site", "--site", SITE])
     except ip.StepError:   # its words may name the site's ids and channels: never quoted
-        raise ip.Refused("no HIL gate: iem-engine check-site refuses the installed site (its [guard] hil_tx "
+        raise ip.Refused(f"{no}: iem-engine check-site refuses the installed site (its [guard] hil_tx "
                          "against the topology: an engine started with --test-signal would exit 2 and stay down) "
                          "(nothing was changed)") from None
     if not box.healthy():
-        raise ip.Refused("no HIL gate: the box is not healthy (iem-dante-dev health on the box says why) (nothing "
+        raise ip.Refused(f"{no}: the box is not healthy (iem-dante-dev health on the box says why) (nothing "
                          "was changed" + ("; a HIL job a dead run left is still there" if left == "left" else "")
                          + ")")
     before = box.device_status()
     if before is None:
-        raise ip.Refused("no HIL gate: the Gen 3 device's status could not be read (nothing was changed)")
+        raise ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
+    facts = Facts(left=left == "left", line=line, burst=burst, interval=interval, hil_tx=hil_tx, dante=dante or "",
+                  own="", ret_before=None, ret_tx_name="", receiving=receiving(before))
+    if dante is None:
+        return facts
     ret = hil_tx[0]
     try:
         table = gen3_arc.read_rx(dante)
         name = gen3_arc.tx_name(dante, ret)
     except (OSError, ValueError, struct.error) as e:
-        raise ip.Refused(f"no HIL gate: our device did not answer its ARC reads ({type(e).__name__}) (nothing "
+        raise ip.Refused(f"{no}: our device did not answer its ARC reads ({type(e).__name__}) (nothing "
                          "was changed)") from None
-    return Facts(left=left == "left", line=line, burst=burst, interval=interval, hil_tx=hil_tx, dante=dante,
-                 own=table["name"], ret_before=table["rx"].get(str(ret)), ret_tx_name=name,
-                 receiving=receiving(before))
+    facts.own, facts.ret_before, facts.ret_tx_name = table["name"], table["rx"].get(str(ret)), name
+    return facts
 
 
 # ---- the job ----
@@ -606,24 +617,25 @@ def end_job(job: Job, c: Checks | None, wait: bool) -> bool:
     its spare outputs gone. Every change "ignore" (an end always completes);
     a flag cuts only the waits. Never raises a StepError: False and a
     warning instead."""
-    box = job.box
+    box, restarted = job.box, job.restarted
     if not (job.installed or job.restarted):
-        return True   # nothing of the job reached the box
+        return True   # nothing of the job reached the box, or it ended already
     try:
         box.call([*SUDO, "rm", "-f", DROPIN], event="ignore")
         box.call([*SUDO, "systemctl", "daemon-reload"], event="ignore")
-        if job.restarted:
+        if restarted:
             if c is not None:
                 c.starts += 1
             restart_engine(job, "ignore")
     except box.ip.StepError as e:
         warn(f"the HIL job did not end ({e}): the engine may still run with its HIL test flag; {BY_HAND}")
         return False
+    job.installed = job.restarted = False   # ended: another end (a flag in these waits) changes nothing
     if not wait:
         return True
     healthy = box.wait(box.healthy, HEALTH_WAIT_S)
     back = box.wait_receiving(job.facts.receiving, RX_WAIT_S)
-    peaks = hil_peaks(box.engine_status()) if job.restarted else {}
+    peaks = hil_peaks(box.engine_status()) if restarted else {}
     if c is not None:
         c.hil_off = peaks == {}
     if not healthy:
@@ -637,11 +649,13 @@ def end_left(box: Box, facts: Facts) -> None:
     status = box.engine_status()
     in_hil = bool(hil_peaks(status))
     if in_hil:
-        refuse_over_budget(box.ip, facts, 1, "a HIL job a dead run left is still there: nothing was changed")
+        refuse_over_budget(box.ip, facts, 1, "a HIL job a dead run left is still there: nothing was changed",
+                           box.name)
     job = Job(box, facts, installed=True, restarted=in_hil)
     print("iempc: gen3-gate: a HIL job a dead run left is ended first", file=sys.stderr, flush=True)
     if not end_job(job, None, wait=True):
-        raise box.ip.StepError("gen3-gate: the HIL job a dead run left did not end cleanly: no HIL gate this time")
+        raise box.ip.StepError(f"gen3-gate: the HIL job a dead run left did not end cleanly: no {box.name} gate "
+                               "this time")
 
 
 # ---- the D5(b) loop over ARC (our own device only) ----
@@ -733,15 +747,16 @@ def burst(job: Job) -> Burst:
         box.ip.pause(box.ctx, box.ip.POLL_S)
 
 
-def stop_burst(job: Job) -> None:
-    """`supervise stop-test-signal` of a burst that may still sound; never raises."""
+def stop_burst(job: Job, seconds: int = BURST_SECONDS) -> None:
+    """`supervise stop-test-signal` of a burst (one of `seconds`) that may
+    still sound; never raises."""
     if not job.burst_sent:
         return
     try:
         job.box.call([*SUPERVISE, "stop-test-signal"], event="ignore")
         job.burst_sent = False
     except job.box.ip.StepError as e:
-        warn(f"the burst's stop was not answered ({e}): it ends by itself within {BURST_SECONDS} s")
+        warn(f"the burst's stop was not answered ({e}): it ends by itself within {seconds} s")
 
 
 # ---- the other checks ----
@@ -759,12 +774,20 @@ def read_versions(box: Box, c: Checks) -> None:
     c.sha, c.versions = versions_judged(*answers)
 
 
-def read_alarm(box: Box, c: Checks) -> None:
+def alarm_count(box: Box) -> int | None:
+    """How many devices an alarm would reach, the engineer's push
+    subscriptions (`iem-server notify --count alarm` as the service user,
+    never a notice); None (a warning) when it cannot be read."""
     try:
         out = box.call([*AS_SERVICE, "env", f"IEMMIXER_CONFIG={SITE}", SERVER_BIN, "notify", "--count", "alarm"])
-        c.alarm_devices = int(out.strip()) if COUNT.fullmatch(out.strip()) else None
     except box.ip.StepError as e:
         warn(f"the alarm path's count could not be read ({e})")
+        return None
+    return int(out.strip()) if COUNT.fullmatch(out.strip()) else None
+
+
+def read_alarm(box: Box, c: Checks) -> None:
+    c.alarm_devices = alarm_count(box)
     try:
         c.alarm_armed = box.call(["systemctl", "is-enabled", UNIT, "||", "true"]).strip() == "enabled"
     except box.ip.StepError:
@@ -798,26 +821,35 @@ def in_job(job: Job, c: Checks) -> None:
 
 # ---- the status ----
 
+def post(ip, sha: str, passed: bool, description: str, context: str) -> bool:
+    """The commit status `context` on the box's build, success or failure,
+    its description cut to 140 characters (a user token posts a status);
+    False (a warning) when gh refused it."""
+    state = "success" if passed else "failure"
+    try:
+        ip.gh(["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{sha}", "-f", f"state={state}",
+               "-f", f"context={context}", "-f", f"description={description[:140]}"])
+    except ip.StepError as e:
+        warn(f"the status {context} was not posted ({e})")
+        return False
+    return True
+
+
 def post_status(ip, sha: str, doc: dict) -> bool:
     """`hil/gen3` on the box's build; False (a warning) when gh refused it."""
     passed = doc["pass"] == 1
-    state = "success" if passed else "failure"
-    description = DESC_PASS if passed else (DESC_FAIL + ", ".join(doc["failed"]))[:140]
-    try:
-        ip.gh(["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{sha}", "-f", f"state={state}",
-               "-f", f"context={CONTEXT}", "-f", f"description={description}"])
-    except ip.StepError as e:
-        warn(f"the status {CONTEXT} was not posted ({e})")
-        return False
-    return True
+    return post(ip, sha, passed, DESC_PASS if passed else DESC_FAIL + ", ".join(doc["failed"]), CONTEXT)
 
 
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate hil` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate hil|live` (dev time, locked, while 3.x serves)."""
+    if ctx.args.gate == "live":
+        import iempc_gen3_live   # it imports this module: imported here, never at the top
+        return iempc_gen3_live.run(ctx, ip)
     if ctx.args.gate != "hil":
-        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil)")
+        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live)")
     host = g3.gen3_host(ip, ctx.env, WORDS)
     dante = dante_ip(ip, ctx.env)
     box = Box(ip, ctx, host)

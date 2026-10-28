@@ -23,7 +23,10 @@ member's mix in the box's engine with the browser in it (`gen3-mix`:
 iempc_gen3.py, GEN3_HOST and GEN3_UI_URL below; #72), the Gen 3 box's own
 HIL gate while 3.x serves the band, its verdict the commit status hil/gen3
 (`gen3-gate hil`: iempc_gen3_gate.py, GEN3_HOST and GEN3_DANTE_IP below; #72
-phase H), the Gen 3 box deployed in place on either side of the switch,
+phase H) and its live E2E in a browser through the band's public URL, its
+verdict the commit status live/gen3 (`gen3-gate live`: iempc_gen3_live.py,
+GEN3_HOST, GEN3_PUBLIC_URL and the LIVE_* keys below), the Gen 3 box
+deployed in place on either side of the switch,
 with the takeover config while 3.x serves (`gen3-deploy`:
 iempc_gen3_deploy.py and scripts/gen3/deploy.sh, GEN3_SITE_FILE and
 GEN3_ROSTER_FILE below; #72), and the hand-over of an open S1a window.
@@ -103,7 +106,10 @@ without GEN3_DANTE_IP and GEN3_HOST, iempc_gen3_gate.py); `gen3-data` reads
 the PC's band files (PC_ROOT) and writes them onto GEN3_HOST
 (iempc_gen3_data.py); GEN3_PUBLIC_URL (optional: the band's public https://
 URL, read by `gen3-tunnel` to see which connector serves it,
-iempc_gen3_tunnel.py), GEN3_CARD_SPARE and GEN3_DEVICE_CONFIG (optional:
+iempc_gen3_tunnel.py, and the live specs' origin in `gen3-gate live`),
+LIVE_MEMBER, LIVE_TEST_INPUT and LIVE_TALKBACK_INPUT (optional: the live
+specs' member, burst input, `mic1`, and talkback input; `gen3-gate live`
+refuses without them, iempc_gen3_live.py), GEN3_CARD_SPARE and GEN3_DEVICE_CONFIG (optional:
 the IEM card's spare Dante name while 3.x serves, and the ops device config
 file; `gen3-switch` refuses without them, iempc_gen3_switchover.py), and
 GEN3_SITE_FILE and GEN3_ROSTER_FILE (optional: the band's site.toml and
@@ -295,7 +301,8 @@ def cmd_gen3_mix(ctx: Ctx) -> int:
 
 
 def cmd_gen3_gate(ctx: Ctx) -> int:
-    """The Gen 3 box's own gates while 3.x serves (phase H: hil); the code lives in iempc_gen3_gate.py (#72)."""
+    """The Gen 3 box's own gates while 3.x serves (phase H: hil, live); the code lives in iempc_gen3_gate.py and
+    iempc_gen3_live.py (#72)."""
     return iempc_gen3_gate.run(ctx, sys.modules[__name__])
 
 
@@ -495,9 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--dry-run", action="store_true",
                         help="the plan: the side, the config's kind, deploy.sh's options; no call")
     gate = sub.add_parser("gen3-gate")
-    gate.add_argument("gate", choices=("hil",),
+    gate.add_argument("gate", choices=("hil", "live"),
                       help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "
-                           "alarm path's count), posted as hil/gen3 on the box's build")
+                           "alarm path's count), posted as hil/gen3 on the box's build; live: the live specs in a "
+                           "browser through the band's public URL with a burst every minute, posted as live/gen3")
     mix = sub.add_parser("gen3-mix")
     mix.add_argument("--slot", type=int, required=True,
                      help="the card's spare HIL output our RX R receives (never printed)")

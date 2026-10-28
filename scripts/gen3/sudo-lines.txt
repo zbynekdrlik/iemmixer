@@ -14,8 +14,8 @@
 # secure_path finds, NOPASSWD); the tests check that every `sudo -n` line a
 # tool sends is an expansion of a line here (test_deploy.py for deploy.sh;
 # test_iempc_gen3.py for iempc gen3-mix, the live guard's stop and "ide
-# event"'s stop; test_iempc_gen3_gate.py for iempc gen3-gate;
-# test_install_dantesync.py for install-dantesync.sh;
+# event"'s stop; test_iempc_gen3_gate.py for iempc gen3-gate hil;
+# test_iempc_gen3_live.py for iempc gen3-gate live; test_install_dantesync.py for install-dantesync.sh;
 # test_install_cloudflared.py for install-cloudflared.sh;
 # test_provision.py for verify_box.py, and that every line here is in the
 # rendered rule). provision.sh's own `sudo -n bash ... provision-root.sh` runs
@@ -155,5 +155,18 @@ iemmixer | /opt/iemmixer/bin/iem-engine supervise status
 iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -30 10
 iemmixer | /opt/iemmixer/bin/iem-engine supervise stop-test-signal
 # The alarm path's reach: how many devices an alarm would go to, never a
-# notice (the alarm unit's site, as iem-alarm@.service names it).
+# notice (the alarm unit's site, as iem-alarm@.service names it). The live
+# gate reads it too, as the engineer's push subscriptions before and after.
 iemmixer | env IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server notify --count alarm
+
+# iempc gen3-gate live (phase H Task 5, #72; scripts/iem-pc/iempc_gen3_live.py):
+# the browser's tokens for the run's length (the HIL job's begin, then the
+# live specs' 40 minutes; the mint folder's rm -f and cat are gen3-mix's lines
+# above), the run's burst while the browser runs (30 s every 60 s at the HIL
+# ceiling, the listen probe on: the PC's live run's), and the server's
+# journal, where the client-error marker lands (the last 20000 lines, as the
+# PC's pc-end reads its server log).
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub engineer --engineer --seconds 3600 --out /var/lib/iemmixer/mint/engineer.token
+iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iemmixer/site/secrets/jwt_secret --sub {member} --seconds 3600 --out /var/lib/iemmixer/mint/member.token
+iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -20 30 --listen
+root | journalctl -u iem-server.service -o cat -n 20000 --no-pager -q

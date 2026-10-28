@@ -749,33 +749,36 @@ def box_token(name: str) -> str:
     return f"{BOX_TOKENS}/{name}.token"
 
 
-def mint_tokens(ip, ctx, host: str, member: str, folder: Path) -> Path:
+def mint_tokens(ip, ctx, host: str, member: str, folder: Path, seconds: int = TOKEN_SECONDS,
+                cmd: str = "gen3-mix") -> Path:
     """An engineer and a member token minted on the box as the service user
-    with its server's own JWT secret, each read back over ssh's stdout into a
-    new owner-only file of `folder` (this box's, owner-only) and removed on
+    with its server's own JWT secret, valid `seconds` (gen3-mix's 900; the
+    live gate's own, iempc_gen3_live), each read back over ssh's stdout into
+    a new owner-only file of `folder` (this box's, owner-only) and removed on
     the box whatever happened; returns their `{engineer, member}` file
     (LIVE_TOKENS), owner-only. A token never travels on a command line and is
     never printed. One ssh call per command (one `sudo -n` each, as the sudo
     template lists it): the removal of any left from an earlier run (the
-    mint never writes over a file), the two mints, the two reads."""
+    mint never writes over a file), the two mints, the two reads. `cmd`
+    heads its errors."""
     remove = [*SSH, host, *AS_SERVICE, "rm", "-f", *map(box_token, TOKENS)]
     try:
         ip.guarded(remove, "", CTL_S, ctx.watch(abandon=False))
         for name in TOKENS:
             sub = ["--sub", "engineer", "--engineer"] if name == "engineer" else ["--sub", member]
             ip.guarded([*SSH, host, *AS_SERVICE, SOAKCLIENT, "token", "--jwt-secret-file", SIGNER_PATH, *sub,
-                        "--seconds", str(TOKEN_SECONDS), "--out", box_token(name)], "", CTL_S,
+                        "--seconds", str(seconds), "--out", box_token(name)], "", CTL_S,
                        ctx.watch(abandon=False))
         for name in TOKENS:
             token = ip.guarded([*SSH, host, *AS_SERVICE, "cat", box_token(name)], "", CTL_S,
                                ctx.watch(abandon=False))
-            keep_token(ip, folder / f"{name}.token", token, name)
+            keep_token(ip, folder / f"{name}.token", token, name, cmd)
     finally:
         remove_box_tokens(ip, host)
-    return tokens_file(ip, folder)
+    return tokens_file(ip, folder, cmd)
 
 
-def keep_token(ip, path: Path, token: str, name: str) -> None:
+def keep_token(ip, path: Path, token: str, name: str, cmd: str = "gen3-mix") -> None:
     """A token read from the box into a new owner-only file (never over
     one); StepError naming no token when it cannot be written."""
     try:
@@ -783,7 +786,7 @@ def keep_token(ip, path: Path, token: str, name: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(token)
     except OSError as e:
-        raise ip.StepError(f"gen3-mix: the {name} token read from the box was not kept "
+        raise ip.StepError(f"{cmd}: the {name} token read from the box was not kept "
                            f"({e.strerror or type(e).__name__})") from None
 
 
@@ -799,7 +802,7 @@ def remove_box_tokens(ip, host: str) -> None:
               f"(ssh <GEN3_HOST> {' '.join(words)})", file=sys.stderr, flush=True)
 
 
-def tokens_file(ip, folder: Path) -> Path:
+def tokens_file(ip, folder: Path, cmd: str = "gen3-mix") -> Path:
     """The copied tokens as `{engineer, member}` in `folder/tokens.json`, a
     new owner-only file; each copy is removed once read. StepError (naming no
     token) when one is not JWT-shaped."""
@@ -812,7 +815,7 @@ def tokens_file(ip, folder: Path) -> Path:
             text = ""
         copy.unlink(missing_ok=True)
         if not JWT.fullmatch(text):
-            raise ip.StepError(f"gen3-mix: the {name} token copied from the box is not a JWT (it is not shown)")
+            raise ip.StepError(f"{cmd}: the {name} token copied from the box is not a JWT (it is not shown)")
         tokens[name] = text
     path = folder / "tokens.json"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
