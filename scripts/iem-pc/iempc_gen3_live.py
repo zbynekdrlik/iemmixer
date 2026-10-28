@@ -208,7 +208,7 @@ def box_build(box: gate.Box) -> str:
     try:
         return g3.box_build(box.ip, box.ctx, box.host)
     except box.ip.StepError as e:
-        raise box.ip.Refused(f"no live gate: {e} (nothing was changed)") from None
+        raise box.ip.Refused(f"no live gate: {gate.box_error(box.ip, e)} (nothing was changed)") from None
 
 
 def refuse_other_public_build(ip, origin: str, sha: str) -> None:
@@ -397,8 +397,8 @@ def run(ctx, ip) -> int:
         try:
             tokens = g3.mint_tokens(ip, ctx, s.host, s.member, folder, TOKEN_SECONDS, "gen3-gate")
         except ip.StepError as e:
-            raise ip.Refused(f"no live gate: the browser's tokens were not minted ({e}) (nothing was changed: no HIL "
-                             f"job{ended})") from None
+            raise ip.Refused(f"no live gate: the browser's tokens were not minted ({gate.box_error(ip, e)}) (nothing "
+                             f"was changed: no HIL job{ended})") from None
         number = g3.job_run()
         r = Run(number, records_folder(ip, number), push_before)
         spec_env = {"LIVE_BASE_URL": s.origin, "LIVE_SHA": sha, "LIVE_TOKENS": str(tokens), "LIVE_MEMBER": s.member,

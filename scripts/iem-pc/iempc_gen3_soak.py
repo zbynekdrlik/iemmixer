@@ -444,7 +444,7 @@ def box_build(box: gate.Box) -> str:
     try:
         sha = g3.box_build(ip, box.ctx, box.host)
     except ip.StepError as e:
-        raise ip.Refused(f"{no}: {e} (nothing was changed)") from None
+        raise ip.Refused(f"{no}: {gate.box_error(ip, e)} (nothing was changed)") from None
     try:
         served = gate.last_line(box.call(["python3", "-I", "-"], stdin=gate.VERSION_SCRIPT))
     except ip.StepError as e:
