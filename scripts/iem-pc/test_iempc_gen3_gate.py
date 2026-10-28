@@ -50,8 +50,16 @@ UNIT_LINE = ("/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/i
 # The box. Every call is logged (calls.log: its arguments, one JSON line);
 # state.json is systemd's and the engine's view: `loaded` (the drop-in text
 # daemon-reload took, or null), `hil` (the engine runs with --test-signal),
-# `starts`, `nrestarts`, `phases` (the statuses still to come after a test
-# signal), `loopback`, `since` (device status reads since the last restart).
+# `fault` (and with --fault-injection), `starts` (the restarts asked for),
+# `nrestarts`, `pid` (the engine's MainPID, a new one at every start),
+# `phases` (the statuses still to come after a test signal), `loopback`,
+# `since` (device status reads since the last restart), `alarm_ts` (the alarm
+# unit's InactiveExitTimestampMonotonic: it moves when that unit starts) and
+# `journal` (the engine's journal as `journalctl -o json` gives it; an
+# earlier run's panic, another process's, is in it from the start).
+# FAKE_PANIC plays the injected fault: "" the engine's panic, its line in the
+# journal and systemd's one restart; `stays` no restart and no line; `twice`
+# two restarts; `alarm` the alarm unit started too; `silent` no line.
 # loop.json (written by the FakeDante beside) says whether our RX 94 hears our
 # own TX 94. FAKE_* change one answer each. For `gen3-gate live`
 # (test_iempc_gen3_live): the service user's mint folder (root/var/lib/
@@ -150,6 +158,15 @@ if line == "systemctl show --property=DropInPaths iem-engine.service":
 if line == "systemctl show --property=NRestarts iem-engine.service":
     print(f"NRestarts={st['nrestarts']}")
     done()
+if line == "systemctl show --property=ActiveState,MainPID,NRestarts iem-engine.service":
+    # systemd's own order, not the one asked for.
+    print(f"MainPID={st['pid']}\nNRestarts={st['nrestarts']}\nActiveState=active")
+    done()
+if line == "systemctl show --property=InactiveExitTimestampMonotonic iem-alarm@iem-engine.service.service":
+    if os.environ.get("FAKE_FLAG_ON") == "fault":
+        flag()
+    print(f"InactiveExitTimestampMonotonic={st['alarm_ts']}")
+    done()
 if line == "systemctl is-enabled iem-engine.service || true":
     print("disabled" if os.environ.get("FAKE_DISABLED") else "enabled")
     done()
@@ -182,9 +199,16 @@ if words[:2] == ["sudo", "-n"] and words[2:3] != ["-u"]:
     if rest == ["systemctl", "restart", "iem-engine"]:
         st["starts"] += 1
         st["hil"] = st["loaded"] is not None and "--test-signal" in st["loaded"].split()
+        st["fault"] = st["loaded"] is not None and "--fault-injection" in st["loaded"].split()
+        st["pid"] += 1
         st["phases"], st["since"], st["signals"] = [], 0, 0
         if st["hil"]:
             st["nrestarts"] += int(os.environ.get("FAKE_CRASHES", "0"))
+        done()
+    if rest == ["journalctl", "-u", "iem-engine.service", "-o", "json", "--output-fields=_PID,MESSAGE", "-n", "2000",
+                "--no-pager", "-q"]:
+        for entry in st["journal"]:
+            print(json.dumps({"__CURSOR": "s=zyxqw", "__REALTIME_TIMESTAMP": "1", **entry}))
         done()
     if rest == ["journalctl", "-u", "iem-server.service", "-o", "cat", "-n", "20000", "--no-pager", "-q"]:
         if os.environ.get("FAKE_JOURNAL_FAILS"):
@@ -211,6 +235,25 @@ if words[:4] == SVC:
         st["old_loopback"], st["loopback"] = st["loopback"], (77 if looped() else 0)
         st["phases"], st["signals"] = ["stale", "sound", "sound", "silent"], st["signals"] + 1
         print(json.dumps({"test_signal": {"rev": 3, "outputs": 2, "dbfs": -30.0, "seconds": 10, "listen": False}}))
+        done()
+    if rest == [ENGINE, "supervise", "inject-fault"]:
+        if not st["fault"]:
+            fail("iem-engine supervise: the engine refused it: forbidden")
+        panic = os.environ.get("FAKE_PANIC", "")
+        if panic not in ("stays", "silent"):
+            # The engine's own line, with tracing's colours: journald keeps it as bytes.
+            esc = chr(27)
+            text = (f"{esc}[2m2026-10-28T10:00:00Z{esc}[0m {esc}[31mERROR{esc}[0m iem_engine::control::stop: "
+                    "the RT callback faulted: fault injection: panic on the RT thread")
+            st["journal"].append({"_PID": str(st["pid"]), "MESSAGE": list(text.encode())})
+        if panic != "stays":
+            n = 2 if panic == "twice" else 1
+            st["nrestarts"] += n
+            st["pid"] += n
+            st["phases"], st["since"], st["signals"] = [], 0, 0
+        if panic == "alarm":
+            st["alarm_ts"] = 7_700_000
+        print(json.dumps({"inject_fault": {"rev": 3}}))
         done()
     if rest == [ENGINE, "supervise", "stop-test-signal"]:
         st["phases"], st["signals"] = [], 0
@@ -309,10 +352,20 @@ ALARM = ("sudo -n -u iemmixer env IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixe
          "notify --count alarm")
 ENABLED = "systemctl is-enabled iem-engine.service || true"
 NRESTARTS = "systemctl show --property=NRestarts iem-engine.service"
+ENGINE_UNIT = "systemctl show --property=ActiveState,MainPID,NRestarts iem-engine.service"
+ALARM_UNIT = "systemctl show --property=InactiveExitTimestampMonotonic iem-alarm@iem-engine.service.service"
+INJECT = f"{SUPER} inject-fault"
+JOURNAL = "sudo -n journalctl -u iem-engine.service -o json --output-fields=_PID,MESSAGE -n 2000 --no-pager -q"
 PREFLIGHT = [LEFT, DROPINS, CAT_UNIT, CAT_DEVICE, CAT_SITE, CHECK_SITE, HEALTH, CTL]
 BEGIN = [STAGE, INSTALL, CAT_DROPIN, RELOAD, RESET, RESTART, HEALTH, CTL, CTL, STATUS]
+# The panic: the engine's unit and the alarm unit read, the fault, the engine
+# back as a new process, healthy, the RX flows back, then both units again and
+# the faulted process's line in the engine's journal.
+PANIC = [ENGINE_UNIT, ALARM_UNIT, INJECT, ENGINE_UNIT, HEALTH, CTL, CTL, ENGINE_UNIT, ALARM_UNIT, JOURNAL]
 END = [RM, RELOAD, RESET, RESTART, HEALTH, CTL, CTL, STATUS]
-CHANGES = (STAGE, INSTALL, RELOAD, RESET, RESTART, RM, SIGNAL)
+CHANGES = (STAGE, INSTALL, RELOAD, RESET, RESTART, RM, SIGNAL, INJECT)
+# An earlier run's injected panic, another engine process's: never this run's.
+OLD_PANIC = {"_PID": "999", "MESSAGE": "the RT callback faulted: fault injection: panic on the RT thread"}
 
 
 def device_config(rx: int = 136, tx: int = 96) -> str:
@@ -367,8 +420,8 @@ class GateBase(Base):
     # The box.
 
     def set_state(self, **kw) -> None:
-        st = {"loaded": None, "hil": False, "starts": 0, "nrestarts": 0, "phases": [], "signals": 0, "loopback": 0,
-              "old_loopback": 0, "since": 99}
+        st = {"loaded": None, "hil": False, "fault": False, "starts": 0, "nrestarts": 0, "pid": 4100, "phases": [],
+              "signals": 0, "loopback": 0, "old_loopback": 0, "since": 99, "alarm_ts": 0, "journal": [OLD_PANIC]}
         st.update(kw)
         (self.box / "state.json").write_text(json.dumps(st), encoding="utf-8")
 
@@ -387,8 +440,8 @@ class GateBase(Base):
         """A job a dead run left: its drop-in in /run, the engine with the flag (or not yet)."""
         path = self.box / "root" / DROPIN.lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(gate.dropin_text(UNIT_LINE), encoding="utf-8")
-        self.set_state(loaded=path.read_text(encoding="utf-8") if hil else None, hil=hil)
+        path.write_text(gate.dropin_text(UNIT_LINE, gate.PANIC_FLAGS), encoding="utf-8")
+        self.set_state(loaded=path.read_text(encoding="utf-8") if hil else None, hil=hil, fault=hil)
 
     def dropin_there(self) -> bool:
         return (self.box / "root" / DROPIN.lstrip("/")).exists()
@@ -447,26 +500,29 @@ class GateTests(GateBase):
         self.assertEqual(docs, [{"gen3_gate": {"hil": {
             "pass": 1, "health": 1, "rx_back": 1, "rx_channels": 4, "hil_on": 1, "versions": 1, "outputs": 2,
             "dbfs": -30, "seconds": 10, "lowest_dbfs": -30.0, "highest_dbfs": -30.0, "still": 0, "loop": "set",
-            "loopback_samples": TRIP, "loop_restored": 1, "panic": "not_covered", "alarm_devices": 1,
-            "alarm_armed": 1, "unit_restarts": 0, "starts": 2, "left_job": 0, "job_end": 1, "hil_off": 1,
+            "loopback_samples": TRIP, "loop_restored": 1, "alarm_devices": 1, "alarm_armed": 1, "unit_restarts": 0,
+            "panic": 1, "panic_restarts": 1, "starts": 3, "left_job": 0, "job_end": 1, "hil_off": 1,
             "failed": []}}}])
         self.assertEqual(self.calls(), [*PREFLIGHT, *BEGIN, *VERSIONS, CTL, SIGNAL, *[STATUS] * 4, ALARM, ENABLED,
-                                        NRESTARTS, *END])
+                                        NRESTARTS, *PANIC, *END])
         # The status on the box's build: success, a fixed description.
         self.assertEqual(self.posts(), [["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{SHA}", "-f",
                                          "state=success", "-f", "context=hil/gen3", "-f",
                                          "description=the Gen 3 box's HIL passed (iempc gen3-gate hil)"]])
-        # The job's drop-in: ExecStart reset, then the unit's own line and the test flag; gone again.
+        # The job's drop-in: ExecStart reset, then the unit's own line and the test flags (the burst's and the
+        # panic's); gone again.
         staged = (self.box / "home/.cache/iem-gen3-gate/iem-hil.conf").read_text(encoding="utf-8")
-        self.assertEqual(staged.split("\n")[2:], ["[Service]", "ExecStart=", f"ExecStart={UNIT_LINE} --test-signal",
-                                                  ""])
+        self.assertEqual(staged.split("\n")[2:], ["[Service]", "ExecStart=",
+                                                  f"ExecStart={UNIT_LINE} --test-signal --fault-injection", ""])
         self.assertFalse(self.dropin_there())
         st = self.state()
-        self.assertEqual((st["loaded"], st["hil"], st["starts"]), (None, False, 2))
+        # Two restarts asked for (the panic's was systemd's own), the engine without its flags again.
+        self.assertEqual((st["loaded"], st["hil"], st["fault"], st["starts"]), (None, False, False, 2))
         # Our RX 94 heard our TX 94 for the run, and is unsubscribed again.
         self.assertEqual(len(self.subscriptions()), 2)
         self.assertEqual(self.device.rows, {})
-        self.assertEqual(self.ledger(), [NOW, NOW])
+        # The budget: the job's begin, the panic's restart and the job's end.
+        self.assertEqual(self.ledger(), [NOW] * 3)
         self.assert_private(err + json.dumps(docs))
         self.assertEqual(self.pc.calls, [])   # no PC call
 
@@ -514,8 +570,8 @@ class GateTests(GateBase):
         code, docs, err = self.gate_run(FAKE_CRASHES="1")
         self.assertEqual(code, 1, err)
         doc = docs[0]["gen3_gate"]["hil"]
-        self.assertEqual((doc["unit_restarts"], doc["failed"]), (1, ["restarted"]))
-        self.assertEqual(self.ledger(), [NOW] * 3)
+        self.assertEqual((doc["unit_restarts"], doc["failed"], doc["panic"]), (1, ["restarted"], 1))
+        self.assertEqual(self.ledger(), [NOW] * 4)   # the begin, the crash, the panic's restart, the end
 
     def test_a_box_whose_engine_names_no_ci_build_fails_and_posts_nothing(self) -> None:
         code, docs, err = self.gate_run(FAKE_ENGINE_VERSION="iem-engine 2.0.0-dev.50+local")
@@ -545,39 +601,55 @@ class GateTests(GateBase):
 
 
 class JobTests(GateBase):
-    def test_a_left_job_is_ended_first_then_the_run_goes_on(self) -> None:
+    def test_a_left_job_is_ended_first_and_the_run_waits_out_its_restart(self) -> None:
         self.left_job()
         code, docs, err = self.gate_run()
-        self.assertEqual(code, 0, err)
-        self.assertEqual(docs[0]["gen3_gate"]["hil"]["left_job"], 1)
-        # The engine read with its spare outputs: removed, reloaded, started again; then the run.
-        self.assertEqual(self.calls()[:len(PREFLIGHT) + 9],
-                         [*PREFLIGHT, STATUS, RM, RELOAD, RESET, RESTART, HEALTH, CTL, CTL, STATUS])
-        self.assertEqual(self.calls()[len(PREFLIGHT) + 9], STAGE)
+        self.assertEqual((code, docs), (1, []), err)
+        # The engine read with its spare outputs: removed, reloaded, started again. That start and the run's
+        # three would pass the unit's 3 in 600 s: no job begins.
+        self.assertEqual(self.calls(), [*PREFLIGHT, STATUS, RM, RELOAD, RESET, RESTART, HEALTH, CTL, CTL, STATUS])
         self.assertIn("a HIL job a dead run left is ended first", err)
-        self.assertEqual((self.state()["starts"], self.ledger()), (3, [NOW] * 3))
+        self.assertIn("no HIL gate: the engine's restart budget: 1 engine starts in the last 600 s and 3 more would "
+                      "pass the unit's 3: run it again in 600 s (the job's begin, the panic's restart and the job's "
+                      "end: nothing was changed; the HIL job a dead run left was ended)", err)
+        self.assertEqual((self.state()["starts"], self.ledger()), (1, [NOW]))
         self.assertFalse(self.dropin_there())
+        self.assertEqual(self.posts(), [])
+        # Once that start left the unit's window the run goes on, no job left.
+        self.again()
+        self.now = NOW + 600.5
+        code, docs, err = self.gate_run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs[0]["gen3_gate"]["hil"]["left_job"], 0)
+        self.assertEqual(self.ledger(), [NOW] + [NOW + 600.5] * 3)
 
     def test_a_left_job_whose_engine_never_got_the_flag_costs_no_restart(self) -> None:
         self.left_job(hil=False)
         code, docs, err = self.gate_run()
         self.assertEqual(code, 0, err)
         self.assertEqual(self.calls()[len(PREFLIGHT):len(PREFLIGHT) + 6], [STATUS, RM, RELOAD, HEALTH, CTL, STAGE])
-        self.assertEqual(self.ledger(), [NOW] * 2)
+        self.assertEqual(self.ledger(), [NOW] * 3)
 
     def test_the_restart_budget_refuses_a_plan_that_would_pass_the_unit_s_limit(self) -> None:
-        # The unit allows 3 starts in 600 s; a run needs 2 (its begin and end).
+        # The unit allows 3 starts in 600 s; a run needs 3 (its begin, the panic's restart and its end).
         code, _, err = self.gate_run()
         self.assertEqual(code, 0, err)
         self.again()
         self.now = NOW + 300
-        err = self.refused("no HIL gate: the engine's restart budget: 2 engine starts in the last 600 s and 2 more "
-                           "would pass the unit's 3: run it again in 300 s (the job's begin and end: nothing was "
-                           "changed)")
+        err = self.refused("no HIL gate: the engine's restart budget: 3 engine starts in the last 600 s and 3 more "
+                           "would pass the unit's 3: run it again in 300 s (the job's begin, the panic's restart and "
+                           "the job's end: nothing was changed)")
         self.again()
-        self.now = NOW + 600.5   # both left the unit's window
+        self.now = NOW + 600.5   # all three left the unit's window
         code, _, err = self.gate_run()
         self.assertEqual(code, 0, err)
+
+    def test_the_budget_plans_three_starts(self) -> None:
+        # One start 100 s ago: a live job's two more would fit, the HIL gate's three do not.
+        (ip.STATE_DIR / gate.LEDGER).write_text(json.dumps({"restarts": [NOW - 100]}), encoding="utf-8")
+        self.refused("no HIL gate: the engine's restart budget: 1 engine starts in the last 600 s and 3 more would "
+                     "pass the unit's 3: run it again in 500 s (the job's begin, the panic's restart and the job's "
+                     "end: nothing was changed)")
 
     def test_a_left_job_beyond_the_budget_is_refused_before_anything_changes(self) -> None:
         (ip.STATE_DIR / gate.LEDGER).write_text(json.dumps({"restarts": [NOW - 100] * 3}), encoding="utf-8")
@@ -640,6 +712,86 @@ class JobTests(GateBase):
         self.assertIn("job_end", docs[0]["gen3_gate"]["hil"]["failed"])
         self.assertIn("the engine may still run with its HIL test flag; end it by hand: ssh <GEN3_HOST> sudo -n rm "
                       f"-f {DROPIN}", err)
+
+
+class PanicTests(GateBase):
+    """The panic check (Task 6 Step 3): the engine's own injected fault, systemd's own restart."""
+
+    def panic_failed(self, **env: str) -> dict:
+        """A run whose panic check fails: exit 1, `panic` its one failure, posted as a failure, the job ended."""
+        code, docs, err = self.gate_run(**env)
+        self.assertEqual(code, 1, err)
+        doc = docs[0]["gen3_gate"]["hil"]
+        self.assertEqual((doc["pass"], doc["panic"], doc["failed"]), (0, 0, ["panic"]))
+        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+                                               "description=the Gen 3 box's HIL failed: panic"])
+        self.assertEqual(self.calls()[-len(END):], END)
+        self.assertFalse(self.dropin_there())
+        self.assertIn("WARNING: gen3-gate: the panic check failed: ", err)
+        self.assert_private(err + json.dumps(docs))
+        return doc
+
+    def test_the_panic_is_the_engine_s_own_fault_and_systemd_s_one_restart(self) -> None:
+        code, docs, err = self.gate_run()
+        self.assertEqual(code, 0, err)
+        doc = docs[0]["gen3_gate"]["hil"]
+        self.assertEqual((doc["panic"], doc["panic_restarts"], doc["unit_restarts"]), (1, 1, 0))
+        calls = self.calls()
+        # After every other check, before the job's end; the flag looked at right before the fault.
+        self.assertEqual(calls[calls.index(NRESTARTS) + 1:], [*PANIC, *END])
+        # The faulted process wrote it (the earlier run's line under another pid never counts).
+        st = self.state()
+        self.assertEqual(st["journal"][-1]["_PID"], "4101")
+        self.assertEqual(st["nrestarts"], 0)   # the end's reset-failed
+
+    def test_no_restart_within_the_bound_fails_the_panic(self) -> None:
+        with mock.patch.object(gate, "PANIC_WAIT_S", 0.2):
+            doc = self.panic_failed(FAKE_PANIC="stays")
+        self.assertEqual(doc["panic_restarts"], 0)
+        calls = self.calls()
+        after = calls[calls.index(INJECT) + 1:calls.index(RM)]
+        # Polled until the bound, no health or RX wait for an engine that never went, then the reads.
+        self.assertGreater(after.count(ENGINE_UNIT), 2)
+        self.assertNotIn(HEALTH, after)
+        self.assertEqual(after[-3:], [ENGINE_UNIT, ALARM_UNIT, JOURNAL])
+        # The fault was sent: its restart counted, answered or not.
+        self.assertEqual(self.ledger(), [NOW] * 3)
+
+    def test_two_restarts_fail_the_panic_and_count_in_the_budget(self) -> None:
+        doc = self.panic_failed(FAKE_PANIC="twice")
+        self.assertEqual(doc["panic_restarts"], 2)
+        self.assertEqual(self.ledger(), [NOW] * 4)
+
+    def test_an_alarm_unit_that_started_fails_the_panic(self) -> None:
+        doc = self.panic_failed(FAKE_PANIC="alarm")
+        self.assertEqual(doc["panic_restarts"], 1)
+
+    def test_no_panic_of_the_faulted_process_in_the_journal_fails_it(self) -> None:
+        # The engine restarted once, but the journal holds only an earlier run's panic (another process).
+        doc = self.panic_failed(FAKE_PANIC="silent")
+        self.assertEqual(doc["panic_restarts"], 1)
+        self.assertEqual(self.state()["journal"], [OLD_PANIC])
+
+    def test_an_engine_without_the_fault_injection_flag_refuses_the_fault(self) -> None:
+        with mock.patch.object(gate, "PANIC_FLAGS", gate.TEST_FLAGS):
+            doc = self.panic_failed()
+        self.assertIsNone(doc["panic_restarts"])
+        calls = self.calls()
+        self.assertEqual(calls[calls.index(INJECT) + 1], RM)   # nothing waited for or read after the refusal
+
+    def test_the_flag_before_the_fault_injects_nothing_and_ends_the_job(self) -> None:
+        code, docs, err = self.gate_run(FAKE_FLAG_ON="fault")
+        self.assertEqual(code, ip.PREEMPTED, err)
+        self.assertNotIn("gen3_gate", json.dumps(docs))
+        calls = self.calls()
+        self.assertNotIn(INJECT, calls)
+        # The job ended without its waits; nothing more.
+        self.assertEqual(calls[calls.index(ALARM_UNIT) + 1:], [RM, RELOAD, RESET, RESTART])
+        self.assertFalse(self.dropin_there())
+        self.assertFalse(self.state()["fault"])
+        self.assertEqual(self.posts(), [])
+        self.assertEqual(self.ledger(), [NOW] * 2)   # the begin and the end, no fault
+        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
 
 
 class PreflightTests(GateBase):
@@ -724,7 +876,8 @@ class SudoTests(GateBase):
         self.now += 1200
         self.left_job()
         code, _, err = self.gate_run()
-        self.assertEqual(code, 0, err)
+        self.assertEqual(code, 1, err)   # the left job ended, then the budget's wait
+        self.assertIn(RESTART, self.calls())
         sent += self.calls()
         self.again()
         self.now += 1200
@@ -739,8 +892,9 @@ class SudoTests(GateBase):
         seen = {(runas, command) for runas, command, _listed in lines}
         for want in (INSTALL, RM, RELOAD, RESET, RESTART):
             self.assertIn(("root", want[len("sudo -n "):]), seen)
-        for want in (CAT_SITE, CHECK_SITE, STATUS, SIGNAL, STOP, ALARM):
+        for want in (CAT_SITE, CHECK_SITE, STATUS, SIGNAL, STOP, ALARM, INJECT):
             self.assertIn(("iemmixer", want[len("sudo -n -u iemmixer "):]), seen)
+        self.assertIn(("root", JOURNAL[len("sudo -n "):]), seen)
 
 
 class PureTests(unittest.TestCase):
@@ -759,11 +913,55 @@ class PureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gate.start_limit(bad)
 
-    def test_the_drop_in_resets_exec_start_then_adds_the_test_flag_only(self) -> None:
+    def test_the_drop_in_resets_exec_start_then_adds_the_job_s_flags(self) -> None:
+        # A job's default, the live gate's: the test signal only.
         text = gate.dropin_text(UNIT_LINE)
         lines = [line for line in text.splitlines() if not line.startswith("#")]
         self.assertEqual(lines, ["[Service]", "ExecStart=", f"ExecStart={UNIT_LINE} --test-signal"])
         self.assertNotIn("--fault-injection", text)
+        self.assertEqual(gate.Job(None, None).flags, gate.TEST_FLAGS)
+        # The HIL gate's: the fault injection beside it, for the panic check.
+        text = gate.dropin_text(UNIT_LINE, gate.PANIC_FLAGS)
+        lines = [line for line in text.splitlines() if not line.startswith("#")]
+        self.assertEqual(lines, ["[Service]", "ExecStart=", f"ExecStart={UNIT_LINE} --test-signal --fault-injection"])
+        self.assertTrue(set(gate.PANIC_FLAGS) <= set(gate.FLAG_WORDS))
+
+    def test_the_engine_s_unit_is_read_whatever_systemd_s_order(self) -> None:
+        self.assertEqual(gate.engine_unit("NRestarts=2\nActiveState=active\nMainPID=4321\n"),
+                         gate.EngineUnit(active=True, pid=4321, restarts=2))
+        self.assertEqual(gate.engine_unit("ActiveState=activating\nMainPID=0\nNRestarts=1"),
+                         gate.EngineUnit(active=False, pid=0, restarts=1))
+        for bad in ("", "MainPID=4321\nActiveState=active", "MainPID=x\nNRestarts=1\nActiveState=active",
+                    "MainPID=4321\nNRestarts=-1\nActiveState=active"):
+            self.assertIsNone(gate.engine_unit(bad), bad)
+
+    def test_the_engine_is_back_only_as_a_new_active_process_after_a_restart(self) -> None:
+        before = gate.EngineUnit(active=True, pid=4100, restarts=0)
+        self.assertTrue(gate.back(gate.EngineUnit(active=True, pid=4101, restarts=1), before))
+        for now in (None, gate.EngineUnit(active=False, pid=4101, restarts=1),   # still coming up
+                    gate.EngineUnit(active=True, pid=4100, restarts=1),           # the same process
+                    gate.EngineUnit(active=True, pid=4101, restarts=0)):          # no restart by systemd
+            self.assertFalse(gate.back(now, before), now)
+
+    def test_the_injected_panic_is_the_faulted_process_s_own_line(self) -> None:
+        esc = chr(27)
+        coloured = f"{esc}[31mERROR{esc}[0m the RT callback faulted: {gate.PANIC_TEXT}"
+        hook = f"thread 'dante-engine' panicked at crates/iem-engine/src/rt.rs:577:9:\n{gate.PANIC_TEXT}"
+        lines = "\n".join([
+            "not json", json.dumps([1, 2]), json.dumps({"_PID": "4100", "MESSAGE": None}),
+            json.dumps({"_PID": "999", "MESSAGE": gate.PANIC_TEXT}),             # another process's
+            json.dumps({"_PID": "4100", "MESSAGE": "the RT callback faulted: unknown"}),
+            json.dumps({"_PID": "4100", "MESSAGE": [300, 1]}),                    # no bytes
+        ])
+        self.assertFalse(gate.panic_logged(lines, 4100))
+        # journald's bytes (a line with a control character) and its plain text both count.
+        for message in (list(coloured.encode()), hook, gate.PANIC_TEXT):
+            entry = json.dumps({"__CURSOR": "s=zyxqw", "_PID": "4100", "MESSAGE": message})
+            self.assertTrue(gate.panic_logged(lines + "\n" + entry, 4100), message)
+            self.assertFalse(gate.panic_logged(lines + "\n" + entry, 4101), message)
+        # The engine's panic message, rt.rs's inject_fault.
+        rt = (REPO / "crates" / "iem-engine" / "src" / "rt.rs").read_text(encoding="utf-8")
+        self.assertIn(f'panic!("{gate.PANIC_TEXT}")', rt)
 
     def test_the_budget_counts_the_unit_s_window_only(self) -> None:
         self.assertIsNone(gate.budget_refusal([], NOW, 600, 3, 2))
@@ -808,7 +1006,8 @@ class PureTests(unittest.TestCase):
         doc = gate.verdict(gate.Checks(), [94, 95], left=True)
         self.assertEqual(doc["pass"], 0)
         self.assertEqual(doc["failed"], ["health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard",
-                                         "no_loopback", "alarm_count", "alarm_not_armed", "job_end"])
+                                         "no_loopback", "alarm_count", "alarm_not_armed", "panic", "job_end"])
+        self.assertEqual((doc["panic"], doc["panic_restarts"]), (0, None))
         self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])   # in FAILURES' order
         self.assertNotIn("94", json.dumps(doc))
 

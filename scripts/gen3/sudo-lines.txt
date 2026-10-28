@@ -137,7 +137,7 @@ root | systemctl disable iem-tunnel
 iemmixer | rm -f /var/lib/iem-dante/takeover.toml
 
 # iempc gen3-gate (phase H, #72; scripts/iem-pc/iempc_gen3_gate.py): the box's
-# HIL job is a runtime drop-in giving the engine's ExecStart its HIL test flag
+# HIL job is a runtime drop-in giving the engine's ExecStart its HIL test flags
 # for one run (in /run: a reboot removes it too), installed from the stage and
 # removed at the job's end; deploy.sh removes one a dead run left before its
 # own start. systemctl daemon-reload, reset-failed {units} and restart
@@ -155,6 +155,12 @@ iemmixer | /opt/iemmixer/bin/iem-engine check-site --site /var/lib/iemmixer/site
 iemmixer | /opt/iemmixer/bin/iem-engine supervise status
 iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -30 10
 iemmixer | /opt/iemmixer/bin/iem-engine supervise stop-test-signal
+# The panic check (phase H Task 6 Step 3): the engine's own injected RT fault
+# (refused unless the HIL gate's job started it with --fault-injection; the
+# engine ends itself and systemd starts it again), then the engine's journal
+# as root, each entry's process and message, for the faulted process's panic.
+iemmixer | /opt/iemmixer/bin/iem-engine supervise inject-fault
+root | journalctl -u iem-engine.service -o json --output-fields=_PID,MESSAGE -n 2000 --no-pager -q
 # The alarm path's reach: how many devices an alarm would go to, never a
 # notice (the alarm unit's site, as iem-alarm@.service names it). The live
 # gate reads it too, as the engineer's push subscriptions before and after.

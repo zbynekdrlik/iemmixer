@@ -14,7 +14,9 @@ and "ide event" keeps 3.x running.
 (every mix TX written as zero during a burst, the sine only on the site's
 `[guard] hil_tx` spare outputs, their D5(b) returns opened). The job is a
 runtime drop-in, DROPIN in /run (gone at the next boot), whose `ExecStart=`
-is reset and set to the installed unit's own line plus HIL_FLAGS:
+is reset and set to the installed unit's own line plus the job's flags
+(`Job.flags`: TEST_FLAGS for the live gate; PANIC_FLAGS, `--fault-injection`
+beside it, for this gate's panic check):
 - begin: the drop-in written to the admin's stage over ssh's stdin, `sudo -n
   install` into place, read back byte for byte, `daemon-reload`,
   `reset-failed iem-engine`, `restart iem-engine`, then bounded waits for
@@ -35,9 +37,10 @@ reset (`reset-failed`) before each deliberate start, so a job never meets the
 unit's own limit; on top of that, every engine start this command asks for is
 kept in iempc's state (`gen3-gate.json`, wall-clock times) and a plan whose
 starts, with those of the unit's last interval, would pass the burst is
-refused before anything changes (a left job's end counts one, the run two).
-The engine's automatic restarts during a run (its `NRestarts`) are added and
-fail the verdict.
+refused before anything changes (a left job's end counts one; this run
+three: the begin, the panic's restart and the end; the live gate's two). The
+engine's automatic restarts during a run (its `NRestarts`) are added and fail
+the verdict, but for the panic's one, which is the panic check's.
 
 **Before any change** (each a refusal, nothing changed): `GEN3_HOST` and
 `GEN3_DANTE_IP` in the private env; a job left over (`test -e` of the
@@ -62,12 +65,16 @@ it already is, waited Receiving); one burst (`supervise test-signal mic1 -30
 outputs carried it and a later status shows them silent, within
 BURST_LIMIT_S): every spare output's loudest peak at -30 dBFS within 0.5 dB,
 the last status silent, `loopback_samples` above 0; the return's
-subscription put back as it was (or none) and read back; the panic is not
-covered (no supervisor fault injection on the box: `iem-engine supervise`
-has none, and the engine runs without `--fault-injection`); the alarm path's
+subscription put back as it was (or none) and read back; the alarm path's
 count (`iem-server notify --count alarm` as the service user, at least one
 device; never a notice) and the engine enabled at boot (the alarm unit's
-gate); no automatic restart during the run. Then the job's end.
+gate); no automatic restart so far; then the panic (Task 6 Step 3, `panic`:
+the engine's own injected RT fault, `supervise inject-fault` once the flag
+is checked; systemd's own restart: within PANIC_WAIT_S the engine active as
+a new process with `NRestarts` exactly one higher, healthy, the RX flows
+back, the alarm unit not started (RestartMode=direct: a restart never runs
+it), the faulted process's panic in the engine's journal). Then the job's
+end.
 
 **The verdict:** one line `{"gen3_gate": {"hil": {...}}}`, numbers and the
 fixed words of FAILURES only (no name, address, channel number or build
@@ -77,8 +84,9 @@ description naming the failed checks' words). Exit 0 only when it passes,
 the job ended and the status was posted.
 
 **A flag mid-run:** the burst is stopped (`supervise stop-test-signal`), the
-return's subscription put back, the job ended without its waits, and the
-event path runs (EventNow: iempc main). No verdict and no status then.
+return's subscription put back, no fault injected, the job ended without its
+waits, and the event path runs (EventNow: iempc main). No verdict and no
+status then.
 
 P6: GEN3_HOST, GEN3_DANTE_IP, the device's and its channels' names, the
 spare outputs' numbers and the site never reach stdout or stderr.
@@ -117,10 +125,13 @@ SITE = "/var/lib/iemmixer/site/iemmixer.toml"
 ENGINE_BIN = g3.ENGINE_BIN
 SERVER_BIN = "/opt/iemmixer/bin/iem-server"
 EXEC_HEAD = f"{ENGINE_BIN} run "
-# The engine's HIL flags for the job. Only the test signal: no step drives a
-# fault (iem-engine supervise has no injection), and an engine under
-# --fault-injection would take one from any supervisor.
-HIL_FLAGS = ("--test-signal",)
+# The engine's flags for a job. By default (the live gate's job) the test
+# signal only: no step of it drives a fault, and an engine under
+# --fault-injection takes one from any supervisor. The HIL gate's job adds the
+# fault injection for its panic check (Task 6 Step 3); the job's end restarts
+# the engine without either.
+TEST_FLAGS = ("--test-signal",)
+PANIC_FLAGS = ("--test-signal", "--fault-injection")
 FLAG_WORDS = ("--test-signal", "--fault-injection")
 AS_SERVICE = g3.AS_SERVICE
 SUDO = ("sudo", "-n")
@@ -134,6 +145,25 @@ HEALTH_WAIT_S = 90.0   # healthy after a restart: the clock's 30 s grace and mor
 RX_WAIT_S = 180.0   # the RX flows again: the FOH card grants one flow about every 9 s
 LOOP_WAIT_S = 30.0   # our own self-loop's flow, Receiving
 BURST_LIMIT_S = BURST_SECONDS + 30.0   # the burst heard and ended
+# The panic: the engine active again as a new process after its injected
+# fault. Its own end first (the fault's save, the device's stop within 7 s,
+# the goodbyes), then the unit's RestartSec=1 (RestartSteps grow it only from
+# the second restart).
+PANIC_WAIT_S = 30.0
+# The engine's injected panic, rt.rs's inject_fault: the engine logs it in
+# its fault line ("the RT callback faulted: ..."), Rust's panic hook too.
+PANIC_TEXT = "fault injection: panic on the RT thread"
+ENGINE_PROPS = "ActiveState,MainPID,NRestarts"
+# The engine unit's OnFailure=iem-alarm@%n.service; it leaves inactive (this
+# timestamp moves) whenever it starts. RestartMode=direct: a restart never
+# starts it, only a unit that stays down.
+ALARM_UNIT = "iem-alarm@iem-engine.service.service"
+ALARM_PROP = "InactiveExitTimestampMonotonic"
+# The engine's journal as root (the admin's journal access is not assumed):
+# each entry's process and message; the faulted process's lines lie within
+# the last 2000 (the new engine logs its start and the RX flows meanwhile).
+ENGINE_JOURNAL = (*SUDO, "journalctl", "-u", UNIT, "-o", "json", "--output-fields=_PID,MESSAGE", "-n", "2000",
+                  "--no-pager", "-q")
 LEDGER = "gen3-gate.json"
 LEDGER_KEEP = 64
 VERSION_LINE = re.compile(r"iem-dante-dev \S+ ([0-9a-f]{40})")
@@ -143,7 +173,7 @@ DESC_PASS = "the Gen 3 box's HIL passed (iempc gen3-gate hil)"
 DESC_FAIL = "the Gen 3 box's HIL failed: "
 # The failures a verdict names, in its order.
 FAILURES = ("health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard", "level", "not_silent",
-            "no_loopback", "loop_not_restored", "alarm_count", "alarm_not_armed", "restarted", "job_end")
+            "no_loopback", "loop_not_restored", "alarm_count", "alarm_not_armed", "restarted", "panic", "job_end")
 # The server's build, read on the box (python3 -I on ssh's stdin, no file left
 # there): its `git_hash` only.
 VERSION_SCRIPT = """import json, sys, urllib.request
@@ -203,12 +233,12 @@ def start_limit(text: str) -> tuple[int, int]:
     return int(burst), int(interval)
 
 
-def dropin_text(line: str) -> str:
+def dropin_text(line: str, flags: tuple[str, ...] = TEST_FLAGS) -> str:
     """The HIL job's drop-in: ExecStart reset, then the unit's own line and
-    the HIL flags."""
+    the job's flags."""
     return ("# iempc gen3-gate's HIL job on the Gen 3 box (#72 phase H): the engine's ExecStart with its\n"
-            "# HIL test flag for one run. The job's end removes this file; in /run a reboot does too.\n"
-            "[Service]\nExecStart=\n" f"ExecStart={line} {' '.join(HIL_FLAGS)}\n")
+            "# HIL test flags for one run. The job's end removes this file; in /run a reboot does too.\n"
+            "[Service]\nExecStart=\n" f"ExecStart={line} {' '.join(flags)}\n")
 
 
 def device_counts(text: str) -> tuple[int, int]:
@@ -292,6 +322,61 @@ def db(peak: float) -> float:
     return 20 * math.log10(peak) if peak > 0 else -150.0
 
 
+def show_keys(text: str) -> dict[str, str]:
+    """`systemctl show`'s KEY=value lines of one unit (pure; systemd prints
+    them in its own order, not the one asked for)."""
+    out = {}
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep:
+            out[key] = value
+    return out
+
+
+@dataclass(frozen=True)
+class EngineUnit:
+    """The engine's unit as systemd shows it: active, its main process, its
+    automatic restarts."""
+    active: bool
+    pid: int
+    restarts: int
+
+
+def engine_unit(text: str) -> EngineUnit | None:
+    """ENGINE_PROPS read (pure); None when MainPID or NRestarts is no number."""
+    keys = show_keys(text)
+    pid, restarts = keys.get("MainPID", ""), keys.get("NRestarts", "")
+    if not (pid.isdigit() and restarts.isdigit()):
+        return None
+    return EngineUnit(keys.get("ActiveState") == "active", int(pid), int(restarts))
+
+
+def back(now: EngineUnit | None, before: EngineUnit) -> bool:
+    """The engine runs again after the fault (pure): active, another process
+    than the faulted one, started by systemd's restart (NRestarts rose)."""
+    return now is not None and now.active and now.pid != before.pid and now.restarts > before.restarts
+
+
+def panic_logged(text: str, pid: int) -> bool:
+    """Whether the engine's journal (`journalctl -o json`, one entry a line)
+    holds PANIC_TEXT from process `pid`, the faulted engine (pure). journald
+    gives a message with a control character (tracing's colours) as its bytes,
+    a list of numbers."""
+    for raw in text.splitlines():
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("_PID") != str(pid):
+            continue
+        message = entry.get("MESSAGE")
+        if isinstance(message, list) and all(type(b) is int and 0 <= b < 256 for b in message):
+            message = bytes(message).decode("utf-8", "replace")
+        if isinstance(message, str) and PANIC_TEXT in message:
+            return True
+    return False
+
+
 @dataclass
 class Burst:
     """What one burst showed: refused (the engine took no signal), the
@@ -331,6 +416,8 @@ class Checks:
     alarm_devices: int | None = None
     alarm_armed: bool = False
     unit_restarts: int = 0
+    panic: bool = False
+    panic_restarts: int | None = None   # NRestarts' rise after the fault; None when not read
     starts: int = 0
     end_ok: bool = False
     hil_off: bool = False
@@ -367,6 +454,8 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
         failed.append("alarm_not_armed")
     if c.unit_restarts:
         failed.append("restarted")
+    if not c.panic:
+        failed.append("panic")
     if not (c.end_ok and c.hil_off):
         failed.append("job_end")
     return {
@@ -376,9 +465,8 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
         "outputs": signal["outputs"], "dbfs": BURST_DBFS, "seconds": BURST_SECONDS,
         "lowest_dbfs": signal["lowest_dbfs"], "highest_dbfs": signal["highest_dbfs"], "still": signal["still"],
         "loop": c.loop, "loopback_samples": loopback, "loop_restored": int(c.loop_restored),
-        "panic": "not_covered",
-        "alarm_devices": c.alarm_devices, "alarm_armed": int(c.alarm_armed),
-        "unit_restarts": c.unit_restarts, "starts": c.starts, "left_job": int(left),
+        "alarm_devices": c.alarm_devices, "alarm_armed": int(c.alarm_armed), "unit_restarts": c.unit_restarts,
+        "panic": int(c.panic), "panic_restarts": c.panic_restarts, "starts": c.starts, "left_job": int(left),
         "job_end": int(c.end_ok), "hil_off": int(c.hil_off),
         "failed": failed,
     }
@@ -571,6 +659,7 @@ def preflight(box: Box, dante: str | None) -> Facts:
 class Job:
     box: Box
     facts: Facts
+    flags: tuple[str, ...] = TEST_FLAGS   # the engine's flags in the job (PANIC_FLAGS: the HIL gate's)
     installed: bool = False   # the drop-in's install was sent
     restarted: bool = False   # the begin's restart was sent
     burst_sent: bool = False
@@ -596,7 +685,7 @@ def restart_engine(job: Job, event: str) -> None:
 def begin_job(job: Job, c: Checks) -> None:
     """The drop-in in place and the engine started with the HIL flags, then
     the waits. Changes run "finish": a flag ends the run after the call."""
-    box, text = job.box, dropin_text(job.facts.line)
+    box, text = job.box, dropin_text(job.facts.line, job.flags)
     box.ip.pause(box.ctx, 0)
     box.call(["mkdir", "-p", STAGE, "&&", "cat", ">", STAGED], change=True, stdin=text)
     job.installed = True
@@ -809,6 +898,78 @@ def read_restarts(box: Box, c: Checks) -> None:
         note_starts(box.ip, c.unit_restarts)
 
 
+# ---- the panic ----
+
+def read_engine_unit(box: Box) -> EngineUnit | None:
+    try:
+        return engine_unit(box.call(["systemctl", "show", f"--property={ENGINE_PROPS}", UNIT]))
+    except box.ip.StepError:
+        return None
+
+
+def alarm_started_at(box: Box) -> str | None:
+    """When the alarm unit last left inactive (systemd's monotonic µs, 0 when
+    never); None when it cannot be read."""
+    try:
+        value = show_keys(box.call(["systemctl", "show", f"--property={ALARM_PROP}", ALARM_UNIT])).get(ALARM_PROP)
+    except box.ip.StepError:
+        return None
+    return value if value is not None and value.isdigit() else None
+
+
+def panic(job: Job, c: Checks) -> None:
+    """The panic check (Task 6 Step 3; HIL v1's: an RT panic, its exit, one
+    respawn): the engine's own injected fault (`supervise inject-fault`, the
+    engine under --fault-injection; the flag checked right before it), then
+    systemd's own restart (Restart=on-failure; the fault's exit 70): within
+    PANIC_WAIT_S the engine active again as a new process with NRestarts
+    exactly one higher, healthy, the RX flows back, the alarm unit not
+    started, and the faulted process's panic in the engine's journal. The
+    restart is counted in the budget before the fault (a sent one counts,
+    answered or not), any more it made after. Nothing is ever force-ended:
+    the engine ends itself, systemd starts it."""
+    box = job.box
+    before, alarm_before = read_engine_unit(box), alarm_started_at(box)
+    if before is None or not before.active or before.pid == 0 or alarm_before is None:
+        warn("the panic check failed: the engine's unit or the alarm unit could not be read before the fault "
+             "(no fault was injected)")
+        return
+    box.ip.pause(box.ctx, 0)
+    note_starts(box.ip)
+    c.starts += 1
+    try:
+        box.call([*SUPERVISE, "inject-fault"], change=True)
+    except box.ip.StepError as e:
+        warn(f"the panic check failed: the engine took no fault ({e})")
+        return
+    problems = []
+    running = box.wait(lambda: back(read_engine_unit(box), before), PANIC_WAIT_S)
+    if not running:
+        problems.append(f"the engine was not running again as a new process within {PANIC_WAIT_S:.0f} s")
+    elif not box.wait(box.healthy, HEALTH_WAIT_S):
+        problems.append("the engine is not healthy after its restart")
+    elif not box.wait_receiving(job.facts.receiving, RX_WAIT_S):
+        problems.append("the RX flows are not back after its restart")
+    after = read_engine_unit(box)
+    c.panic_restarts = after.restarts - before.restarts if after is not None else None
+    if c.panic_restarts is not None and c.panic_restarts > 1:
+        note_starts(box.ip, c.panic_restarts - 1)
+    if c.panic_restarts != 1:
+        problems.append(f"NRestarts rose by {c.panic_restarts}, not by 1")
+    if alarm_started_at(box) != alarm_before:
+        problems.append("the alarm unit started (or could not be read)")
+    try:
+        logged = panic_logged(box.call(list(ENGINE_JOURNAL)), before.pid)
+    except box.ip.StepError as e:
+        warn(f"the engine's journal could not be read ({e})")
+        logged = False
+    if not logged:
+        problems.append("the engine's journal holds no injected panic of the faulted process")
+    c.panic = not problems
+    if problems:
+        warn("the panic check failed: " + "; ".join(problems))
+
+
 def in_job(job: Job, c: Checks) -> None:
     begin_job(job, c)
     read_versions(job.box, c)
@@ -818,7 +979,9 @@ def in_job(job: Job, c: Checks) -> None:
         stop_burst(job)   # one the limit cut short
         restore_loop(job, c)
     read_alarm(job.box, c)
-    read_restarts(job.box, c)
+    read_restarts(job.box, c)   # before the panic: its one restart is the panic check's
+    if c.hil_on:
+        panic(job, c)
 
 
 # ---- the status ----
@@ -863,9 +1026,9 @@ def run(ctx, ip) -> int:
     facts = preflight(box, dante)
     if facts.left:
         end_left(box, facts)
-    refuse_over_budget(ip, facts, 2, "the job's begin and end: nothing was changed"
+    refuse_over_budget(ip, facts, 3, "the job's begin, the panic's restart and the job's end: nothing was changed"
                        + ("; the HIL job a dead run left was ended" if facts.left else ""))
-    job, c = Job(box, facts), Checks(rx_channels=len(facts.receiving))
+    job, c = Job(box, facts, flags=PANIC_FLAGS), Checks(rx_channels=len(facts.receiving))
     try:
         in_job(job, c)
     except ip.EventNow:

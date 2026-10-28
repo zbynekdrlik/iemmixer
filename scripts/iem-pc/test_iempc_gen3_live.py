@@ -222,7 +222,11 @@ class LiveTests(LiveBase):
         self.assertEqual(self.record("evidence.json"), {"job_end": "ok", "client_log": "found", "push_after": 1})
         self.assertIn("passed", (self.records() / "playwright.log").read_text(encoding="utf-8"))
         self.assertEqual(stat.S_IMODE(self.records().stat().st_mode), 0o700)
-        # The job: the engine back without its test flag, two starts in the budget.
+        # The job: the test signal only (no step of the live gate drives a fault: never --fault-injection),
+        # the engine back without it, two starts in the budget.
+        staged = (self.box / "home/.cache/iem-gen3-gate/iem-hil.conf").read_text(encoding="utf-8")
+        self.assertEqual(staged.split("\n")[2:], ["[Service]", "ExecStart=", f"ExecStart={gt.UNIT_LINE} --test-signal",
+                                                  ""])
         self.assertFalse(self.dropin_there())
         self.assertEqual((self.state()["hil"], self.state()["starts"], self.ledger()), (False, 2, [gt.NOW] * 2))
         self.assert_no_token_left()
