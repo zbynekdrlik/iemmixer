@@ -164,6 +164,9 @@ if line == "systemctl show --property=NRestarts iem-engine.service":
     if os.environ.get("FAKE_NRESTARTS_FAILS"):
         fail("Failed to get properties: Connection timed out")
     print(f"NRestarts={st['nrestarts']}")
+    if os.environ.get("FAKE_CRASH_AFTER_COUNT") and st["hil"]:
+        st["nrestarts"] += 1   # the engine restarts by itself right after the count was read
+        st["pid"] += 1
     done()
 if line == "systemctl show --property=ActiveState,MainPID,NRestarts iem-engine.service":
     # systemd's own order, not the one asked for.
@@ -854,6 +857,16 @@ class PanicTests(GateBase):
         self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
                                                "description=the Gen 3 box's HIL failed: restarts_unread"])
 
+    def test_a_restart_right_after_the_count_still_stops_the_fault(self) -> None:
+        # The second review of PR #87: the engine's unit read right before the
+        # fault decides, not only the count read a few calls earlier.
+        code, docs, err = self.gate_run(FAKE_CRASH_AFTER_COUNT="1")
+        self.assertEqual(code, 1, err)
+        doc = docs[0]["gen3_gate"]["hil"]
+        self.assertEqual((doc["panic"], doc["unit_restarts"]), ("skipped", 1))
+        self.assertIn("restarted", doc["failed"])
+        self.assertNotIn(INJECT, self.calls())
+
     def test_no_restart_within_the_bound_fails_the_panic(self) -> None:
         with mock.patch.object(gate, "PANIC_WAIT_S", 0.2):
             doc = self.panic_failed(FAKE_PANIC="stays")
@@ -1121,6 +1134,14 @@ class PureTests(unittest.TestCase):
         self.assertEqual((doc["panic"], doc["panic_restarts"]), (0, None))
         self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])   # in FAILURES' order
         self.assertNotIn("94", json.dumps(doc))
+
+    def test_every_word_the_verdict_names_is_in_failures(self) -> None:
+        c = gate.Checks()
+        c.restarts_unread = True
+        c.unit_restarts = 1
+        doc = gate.verdict(c, [94, 95], left=True)
+        self.assertIn("restarts_unread", doc["failed"])
+        self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])
 
 
 if __name__ == "__main__":

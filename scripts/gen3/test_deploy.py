@@ -1133,31 +1133,43 @@ class DeployTests(unittest.TestCase):
         # (gen3-gate.json) when deploy.sh marks it in the file IEMPC_START_MARK names, right before the start is
         # sent: after a deploy that started it (one that fails after the start too), never after one refused
         # before it or one that starts the standalone device.
+        # iempc makes the mark (empty) before it runs deploy.sh.
         mark = self.tmp / "start.mark"
+        mark.write_text("", encoding="utf-8")
         r = self.deploy(IEMPC_START_MARK=str(mark))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(mark.read_text(encoding="utf-8"), "start\n")
-        mark.unlink()
+        mark.write_text("", encoding="utf-8")
         self.flag.parent.mkdir()
         r = self.deploy(IEMPC_START_MARK=str(mark), FAKE_FLAG_ON="start")   # stopped again after its start
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertEqual(mark.read_text(encoding="utf-8"), "start\n")
-        mark.unlink()
+        mark.write_text("", encoding="utf-8")
         self.flag.unlink()
         r = self.deploy(IEMPC_START_MARK=str(mark), FAKE_LEFT_FAILS="1")
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("nothing started", r.stderr)
-        self.assertFalse(mark.exists())
+        self.assertEqual(mark.read_text(encoding="utf-8"), "")
         r = self.deploy("--start", "device", IEMPC_START_MARK=str(mark))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(mark.exists())
-        # A mark that cannot be written starts nothing: the start would go uncounted.
+        self.assertEqual(mark.read_text(encoding="utf-8"), "")
+        # The second review of PR #87: a mark that cannot be written never
+        # keeps the band's engine down once the stack was stopped: a warning,
+        # and the start goes on (an uncounted start only lets a gate run
+        # sooner; each gate resets systemd's count before its own start).
+        (self.tmp / "unwritable").mkdir()   # a folder: appending to it fails
         self.clear_logs()
-        r = self.deploy(IEMPC_START_MARK=str(self.tmp / "no-such-folder" / "start.mark"))
-        self.assertEqual(r.returncode, 1, r.stderr)
+        r = self.deploy(IEMPC_START_MARK=str(self.tmp / "unwritable"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING", r.stderr)
         self.assertIn("IEMPC_START_MARK", r.stderr)
-        self.assertIn("nothing started", r.stderr)
-        self.assertFalse(any("systemctl start" in c for c in self.remote()))
+        self.assertTrue(any("systemctl start" in c for c in self.remote()))
+        # A mark iempc already took away (deploy.sh outlived its bound) is
+        # never made again: nothing is left in iempc's state.
+        gone = self.tmp / "gone.mark"
+        r = self.deploy(IEMPC_START_MARK=str(gone))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(gone.exists())
 
     def test_a_look_for_a_left_hil_job_that_fails_starts_nothing(self) -> None:
         self.set_states({"iem-dante": "inactive", "iem-engine": "inactive", "iem-server": "inactive"})
