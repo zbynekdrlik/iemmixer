@@ -77,6 +77,16 @@ While 3.x serves, a provision is followed at once by `iempc gen3-deploy`: provis
 
 ## 7. Prove it (before the band)
 
+A build the box serves is proven by the box's three gates, run from the dev box in dev time while 3.x serves (each refused with `EVENT-NOW` or while 2.x serves). `deploy.sh`, so `iempc gen3-deploy` too, closes with one line naming them. Each posts a commit status on the box's build (its engine's `--version` SHA). Phase G's confirmation needs `soak/gen3`, `hil/gen3` and `live/gen3` all green on the build the box runs.
+
+1. `iempc gen3-gate soak [--minutes 10|30|60|120]` (default 120), right after the deploy: `iem-soakclient` on the box beside the dev box's reads of `ctl status`, health and the stack's units. No HIL job and no engine restart. It proves the engine as it serves runs an event's length clean: the pump never late, missed, overrun or re-bootstrapped, the clock ready with no holdover or re-anchor, no late RX packet, no TX hole, the listen stream whole. Status `soak/gen3`.
+2. `iempc gen3-gate hil`, at least ten minutes after the deploy's start. A HIL job (the engine restarted with `--test-signal --fault-injection`): the builds, health, the RX flows back, the D5(b) loop through our own device, one -30 dBFS burst on the spare outputs then silence, the alarm path's reach, then the panic (the engine's own injected RT fault, systemd's one restart, healthy again, the alarm unit not started), then the job's end. Three engine starts. Status `hil/gen3`.
+3. `iempc gen3-gate live`, at least ten minutes after the HIL gate's start. The live E2E specs in a real browser through the band's public URL, a 30 s burst every 60 s, the client-error marker, the push count. Two engine starts. Status `live/gen3`.
+
+The waits are the engine's restart budget: the unit starts it at most three times in ten minutes (`StartLimitBurst=3`), and the gates keep their own starts in iempc's `gen3-gate.json` and refuse a run that would pass it, naming the seconds to wait. During a burst every in-ear is silent (every mix TX is written as zero), so the HIL and live gates are dev time only. Their rules: `.claude/rules/gen3.md`, the box's HIL, live and soak gates.
+
+Besides the gates, on new hardware or after a timing change:
+
 - `scripts/gen3/live_guard.py --rate 96000 --seconds <n>` as a background task for the whole session.
 - 30 minutes with the stage on and the RX mirrored (`iempc gen3-mirror`), reading `ctl status` each second: expect late / missed / overruns 0, the longest block well under 333 µs (175–235 µs on the N100), every RX flow's worst `lateness` under P (14–27 against 36).
 - The loop through the IEM card (`iempc gen3-loop --offsets 116,153 --bursts 5 --slot <spare HIL output>`, the PC in maintenance): round trips equal within a burst set, base 153 at `tx_latency_ns` 0.25 ms.
@@ -84,7 +94,7 @@ While 3.x serves, a provision is followed at once by `iempc gen3-deploy`: provis
 
 ## Gotchas that cost time once
 
-- At most two `iem-engine` restarts in ten minutes: a third hits the start limit and runs the alarm unit (which notifies people only while the box serves the band).
+- At most two `iem-engine` restarts in ten minutes: a third hits the start limit and runs the alarm unit (which notifies people only while the box serves the band). `reset-failed` before a deliberate start resets that count, as deploy.sh and the gates do; the gates' own budget still waits ten minutes between runs (section 7).
 - Measure with the stage devices on: otherwise the mirrored flows come from other devices and P is judged on the wrong sources.
 - Dante receivers play our flows at our advertised latency, never their own lower setting: a 1 ms `latency_ns` used for TX cost 0.75 ms at the rack.
 - The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot.
