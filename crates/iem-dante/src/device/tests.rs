@@ -68,6 +68,7 @@ fn a_config_reads_the_test_device() {
     assert_eq!(cfg.sample_rate, 96_000);
     assert_eq!(cfg.encoding, 24);
     assert_eq!(cfg.latency_ns, 1_000_000);
+    assert_eq!(cfg.block, 32, "B defaults to 32");
     assert_eq!(cfg.work_margin, 96, "W defaults to 1 ms");
     assert_eq!(cfg.tx_latency_ns, None);
     assert_eq!(
@@ -448,6 +449,58 @@ fn the_threads_cpus_are_read_and_bounded() {
         "latency_ns = 1000000\nio_cpu = 1023",
     ))
     .unwrap();
+}
+
+#[test]
+fn the_block_is_16_or_32_and_the_work_margin_at_least_one_block() {
+    // #72: B 16 halves the block and lets W go down to 16 (mic to in-ear
+    // under 1 ms); a config without `block` keeps 32.
+    let with = |lines: &str| config_with("latency_ns =", &format!("latency_ns = 1000000\n{lines}"));
+    let cfg = DeviceConfig::from_toml(&with("block = 16")).unwrap();
+    assert_eq!((cfg.block, cfg.work_margin), (16, 96));
+    let cfg = DeviceConfig::from_toml(&with("block = 32")).unwrap();
+    assert_eq!(cfg.block, 32);
+    // Any other block is refused naming the field, one problem.
+    for block in [0, 8, 24, 31, 33, 64, 4096] {
+        assert_eq!(
+            problems(&with(&format!("block = {block}"))),
+            vec!["block: 16 or 32 frames".to_string()],
+            "{block}"
+        );
+    }
+    // W 16 with block 16, never with block 32 (the default).
+    let cfg = DeviceConfig::from_toml(&with("block = 16\nwork_margin = 16")).unwrap();
+    assert_eq!((cfg.block, cfg.work_margin), (16, 16));
+    assert_eq!(
+        problems(&with("work_margin = 16")),
+        vec!["work_margin: 32 to 4096 samples".to_string()]
+    );
+    assert_eq!(
+        problems(&with("block = 32\nwork_margin = 16")),
+        vec!["work_margin: 32 to 4096 samples".to_string()]
+    );
+    // Below the block at 16; the top stays 4096.
+    assert_eq!(
+        problems(&with("block = 16\nwork_margin = 15")),
+        vec!["work_margin: 16 to 4096 samples".to_string()]
+    );
+    DeviceConfig::from_toml(&with("block = 16\nwork_margin = 4096")).unwrap();
+    assert_eq!(
+        problems(&with("block = 16\nwork_margin = 4097")),
+        vec!["work_margin: 16 to 4096 samples".to_string()]
+    );
+    // A refused block bounds W at the default's 32: one problem a field.
+    assert_eq!(
+        problems(&with("block = 64\nwork_margin = 48")),
+        vec!["block: 16 or 32 frames".to_string()]
+    );
+    assert_eq!(
+        problems(&with("block = 8\nwork_margin = 16")),
+        vec![
+            "block: 16 or 32 frames".to_string(),
+            "work_margin: 32 to 4096 samples".to_string(),
+        ]
+    );
 }
 
 #[test]

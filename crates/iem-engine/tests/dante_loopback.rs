@@ -41,7 +41,7 @@ use iem_dante::media::ring::Ring;
 use iem_dante::media::rx::{Receiver, RxCounts};
 use iem_dante::media::source::Source;
 use iem_dante::media::tx::{LaneCounts, TX_MARGIN_NS, Transmitter, ns_of};
-use iem_dante::stream::{Blocks, Map, Pump, PumpStats, PumpView, Timing, WORK_MARGIN};
+use iem_dante::stream::{BLOCK, Blocks, Map, Pump, PumpStats, PumpView, Timing, WORK_MARGIN};
 use iem_dante::subscribe::Answer;
 use iem_dante::subscribe::directory;
 use iem_dante::subscribe::resolve::{Advertised, Own, Resolver};
@@ -127,6 +127,7 @@ fn device(dir: &Path) -> Device {
         sample_rate: RATE,
         encoding: BITS,
         latency_ns: 1_000_000,
+        block: BLOCK,
         work_margin: WORK_MARGIN,
         tx_latency_ns: None,
         tx_margin_ns: TX_MARGIN_NS,

@@ -165,7 +165,10 @@ fn dante_refuses_block_and_sine() {
         )))
         .unwrap_err();
         assert!(e.contains("nullrt backend"), "{extra}: {e}");
-        assert!(e.contains("Dante device at 32"), "{extra}: {e}");
+        assert!(
+            e.contains("Dante device at its config's block"),
+            "{extra}: {e}"
+        );
     }
 }
 

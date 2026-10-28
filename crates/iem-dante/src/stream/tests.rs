@@ -19,6 +19,16 @@ const TIMING: Timing = Timing {
 };
 /// D = B + P + W.
 const D: u64 = 224;
+/// A device config's `block = 16` (#72) with W at its least, one block.
+const B16: u64 = 16;
+const W16: u64 = 16;
+const TIMING_16: Timing = Timing {
+    block: B16,
+    playout: P,
+    margin: W16,
+};
+/// D = 16 + 96 + 16.
+const D16: u64 = 128;
 /// Ten years of a grandmaster's uptime at 96 kHz, a multiple of the block.
 const T: u64 = 10 * 365 * 86_400 * 96_000;
 /// Every wait in these tests ends.
@@ -226,6 +236,90 @@ fn a_schedule_far_ahead_rebootstraps() {
 }
 
 #[test]
+fn at_block_16_a_block_is_due_at_start_plus_16_plus_playout_and_late_from_16_behind() {
+    // A device config's `block = 16` (#72): the schedule a block of 16
+    // apart, D = 16 + P + W.
+    assert_eq!(TIMING_16.offset(), D16);
+    let with_1_ms = Timing {
+        margin: WORK_MARGIN,
+        ..TIMING_16
+    };
+    assert_eq!(with_1_ms.offset(), 208);
+    // Bootstrapped on a multiple of 16, due within one block of 16.
+    for now in [T + 5, T + 16 + 5, T + 1_000_003] {
+        let b = Blocks::bootstrap(now, TIMING_16);
+        assert_eq!(b.start() % B16, 0, "{now}");
+        assert_eq!(b.due(), b.start() + B16 + P);
+        assert!(
+            b.due() >= now && b.due() < now + B16,
+            "{now}: due {}",
+            b.due()
+        );
+    }
+    // An odd multiple of 16: never rounded to a block of 32.
+    assert_eq!(Blocks::bootstrap(T + 16 + 5, TIMING_16).start(), T - 80);
+    assert_eq!(Blocks::bootstrap(T + B16 + P, TIMING_16).start(), T);
+    assert_eq!(
+        Blocks::bootstrap(T + B16 + P + 1, TIMING_16).start(),
+        T + B16
+    );
+    assert_eq!(Blocks::bootstrap(T + P + 1, TIMING_16).start(), T);
+    assert_eq!(Blocks::bootstrap(T + P, TIMING_16).start(), T - B16);
+    // Due at kB + B + P, the next one 16 later.
+    let fresh = Blocks::bootstrap(T + 5, TIMING_16);
+    let (start, due) = (fresh.start(), fresh.due());
+    assert_eq!((start, due), (T - 96, T + 16));
+    let mut b = fresh;
+    assert_eq!(b.next(due - 1), Due::Wait { until: due });
+    assert_eq!(b.next(due), Due::Run { start, late: false });
+    assert_eq!(b.next(due), Due::Wait { until: due + B16 });
+    assert_eq!(b.next(due + B16 - 1), Due::Wait { until: due + B16 });
+    assert_eq!(
+        b.next(due + B16),
+        Due::Run {
+            start: start + B16,
+            late: false
+        }
+    );
+    assert_eq!(b.start(), start + 2 * B16);
+    // Late from one block of 16 behind (W, 16, still runs).
+    let mut b = fresh;
+    assert_eq!(b.next(due + B16 - 1), Due::Run { start, late: false });
+    let mut b = fresh;
+    assert_eq!(b.next(due + B16), Due::Run { start, late: true });
+    assert_eq!(
+        b.next(due + B16),
+        Due::Run {
+            start: start + B16,
+            late: false
+        }
+    );
+    assert_eq!(
+        b.next(due + B16),
+        Due::Wait {
+            until: due + 2 * B16
+        }
+    );
+    // One sample past W: re-bootstrapped once, two blocks (17 / 16, up)
+    // skipped.
+    let mut b = fresh;
+    let now = due + W16 + 1;
+    assert_eq!(b.next(now), Due::Rebootstrap { skipped: 2 });
+    assert_eq!(b.start(), start + 2 * B16);
+    assert_eq!(
+        b.next(now),
+        Due::Wait {
+            until: due + 2 * B16
+        },
+        "once"
+    );
+    // Far behind: 10 000 samples skip 10 000 / 16 blocks.
+    let mut b = fresh;
+    assert_eq!(b.next(due + 10_000), Due::Rebootstrap { skipped: 625 });
+    assert_eq!(b.start(), start + 625 * B16);
+}
+
+#[test]
 fn free_pacing_keeps_its_grid_and_resynchronises_past_eight_blocks() {
     let t0 = Instant::now();
     let p = Duration::from_micros(333);
@@ -285,6 +379,11 @@ struct Rig {
 }
 
 fn rig(map: Map, routed: &[usize], engine: &[usize]) -> Rig {
+    rig_at(map, routed, engine, TIMING)
+}
+
+/// [`rig`] with the pump's `timing`.
+fn rig_at(map: Map, routed: &[usize], engine: &[usize], timing: Timing) -> Rig {
     let cfg = DeviceConfig::from_toml(TEST_DEVICE).expect("config/test-dante-device.toml");
     let rings: Arc<[Ring]> = (0..cfg.rx.len()).map(|_| Ring::new()).collect();
     let rx = Arc::new(RxShared::new(RATE, Ipv4Addr::LOCALHOST, Arc::clone(&rings)).unwrap());
@@ -293,11 +392,11 @@ fn rig(map: Map, routed: &[usize], engine: &[usize]) -> Rig {
         |c| routed.contains(&c).then_some(RxRoute { flow: 0, slot: 0 }),
     );
     let tx = Arc::new(TxShared::new(cfg, Ipv4Addr::LOCALHOST, rings, 1, engine).unwrap());
-    let stats = Arc::new(PumpStats::new(TIMING, RATE));
+    let stats = Arc::new(PumpStats::new(timing, RATE));
     let pump = Pump::new(
         Copy::default(),
         map,
-        TIMING,
+        timing,
         24,
         Arc::clone(&rx),
         Arc::clone(&tx),
@@ -513,6 +612,128 @@ fn a_media_step_past_the_margin_rebootstraps_once_and_the_skipped_stamps_stay_ho
     let (out, holes) = engine_at(&r, 0, next_start + 4 * B + D, B as usize);
     assert_eq!(holes, 0);
     assert_eq!(out[0], counter(next_start + 4 * B));
+}
+
+#[test]
+fn at_block_16_the_output_stamped_t_is_the_input_stamped_t_minus_16_plus_playout_plus_margin() {
+    // A device config's `block = 16` (#72): D = 16 + 96 + 16 = 128.
+    let mut r = rig_at(
+        Map {
+            rx: vec![0, 3],
+            tx: vec![1, 4],
+        },
+        &[0, 3],
+        &[1, 4],
+        TIMING_16,
+    );
+    fill(&r, 0, T - 1_000, 21_000, counter);
+    fill(&r, 3, T - 1_000, 21_000, |p| -counter(p) - 256);
+    let first = Blocks::bootstrap(T, TIMING_16).start();
+    let steps = run_to(&mut r, T, T + 19_200, 0);
+    let blocks = r.stats.view().blocks;
+    // One block of 16 a step: twice the blocks of 32 in the same time.
+    assert_eq!(blocks, steps, "one block a step");
+    assert!((1_198..=1_201).contains(&blocks), "{blocks}");
+    let n = (blocks * B16) as usize;
+    let (out, holes) = engine_at(&r, 1, first + D16, n);
+    assert_eq!(holes, 0);
+    for (i, &v) in out.iter().enumerate() {
+        let t = first + D16 + i as u64;
+        assert_eq!(v, counter(t - D16), "TX 2 at {t} is RX 1 at T − D");
+    }
+    let (out, holes) = engine_at(&r, 4, first + D16, n);
+    assert_eq!(holes, 0);
+    assert!(
+        out.iter()
+            .enumerate()
+            .all(|(i, &v)| v == -counter(first + i as u64) - 256),
+        "TX 5 is RX 4 D earlier"
+    );
+    // Nothing before the first block's outputs, nothing after the last.
+    assert_eq!(engine_at(&r, 1, first + D16 - 1, 1).1, 1);
+    assert_eq!(engine_at(&r, 1, first + D16 + n as u64, 1).1, 1);
+    assert_eq!(
+        r.tx.engine_ring(1).unwrap().counters().written,
+        blocks * B16
+    );
+    let v = r.stats.view();
+    assert_eq!(
+        (
+            v.late,
+            v.missed,
+            v.rebootstraps,
+            v.offset,
+            v.playout,
+            v.media
+        ),
+        (0, 0, 0, D16, P, true),
+        "{v:?}"
+    );
+    assert_eq!(r.stats.stream_stats().frames, 16);
+}
+
+#[test]
+fn at_block_16_late_is_16_behind_and_one_past_the_margin_skips_its_blocks() {
+    let mut r = rig_at(
+        Map {
+            rx: vec![0],
+            tx: vec![0],
+        },
+        &[0],
+        &[0],
+        TIMING_16,
+    );
+    fill(&r, 0, T - 1_000, 4_000, counter);
+    let first = Blocks::bootstrap(T, TIMING_16).start();
+    let w = r.pump.media(T, 0);
+    assert_eq!(
+        w,
+        T + B16,
+        "the block due at T ran, the next is due 16 later"
+    );
+    let before = r.stats.view().blocks;
+    // Exactly the margin (one block of 16) behind: it runs late, the next
+    // one on time.
+    assert_eq!(r.pump.media(w + W16, 0), w + 2 * B16);
+    let v = r.stats.view();
+    assert_eq!(
+        (v.blocks - before, v.late, v.rebootstraps),
+        (2, 1, 0),
+        "{v:?}"
+    );
+    // One sample past the margin: two blocks skipped, nothing runs now.
+    let w = w + 2 * B16;
+    let next_start = w - B16 - P;
+    let ran = v.blocks;
+    assert_eq!(r.pump.media(w + W16 + 1, 0), w + 2 * B16);
+    let v = r.stats.view();
+    assert_eq!(
+        (v.blocks, v.rebootstraps, v.missed, v.late),
+        (ran, 1, 2, 1),
+        "{v:?}"
+    );
+    // The next block calls discontinuity first, then runs.
+    assert_eq!(r.pump.media(w + 2 * B16, 0), w + 3 * B16);
+    assert!(
+        r.pump.processor.log.ends_with("dp"),
+        "{}",
+        r.pump.processor.log
+    );
+    assert_eq!(r.pump.processor.log.matches('d').count(), 2);
+    // Every block that ran wrote the input D earlier; the skipped blocks'
+    // stamps were never written: TX holes.
+    let (out, holes) = engine_at(&r, 0, first + D16, (next_start - first) as usize);
+    assert_eq!(holes, 0);
+    assert!(
+        out.iter()
+            .enumerate()
+            .all(|(i, &v)| v == counter(first + i as u64))
+    );
+    let (_, holes) = engine_at(&r, 0, next_start + D16, 2 * B16 as usize);
+    assert_eq!(holes, 2 * B16 as usize);
+    let (out, holes) = engine_at(&r, 0, next_start + 2 * B16 + D16, B16 as usize);
+    assert_eq!(holes, 0);
+    assert_eq!(out[0], counter(next_start + 2 * B16));
 }
 
 #[test]
@@ -753,6 +974,37 @@ fn stream_stats_map_every_count() {
     assert_eq!(h.top_us, 667);
     assert_eq!(h.process, vec![(333, 2), (667, 1)]);
     assert!(h.interval.is_empty());
+}
+
+#[test]
+fn at_block_16_a_period_is_166_667_ns_and_the_histograms_span_two_of_them() {
+    let s = PumpStats::new(TIMING_16, RATE);
+    assert_eq!(
+        s.stream_stats(),
+        StreamStats {
+            frames: 16,
+            ..StreamStats::default()
+        }
+    );
+    assert_eq!(
+        s.view(),
+        PumpView {
+            offset: D16,
+            playout: P,
+            ..PumpView::default()
+        }
+    );
+    // One period at 16 samples is 166 667 ns (rounded): longer is an
+    // overrun.
+    s.record(166_667);
+    s.record(166_668);
+    s.record(5_000_999);
+    let st = s.stream_stats();
+    assert_eq!((st.frames, st.callbacks, st.overruns), (16, 3, 2), "{st:?}");
+    // 1 µs buckets below two periods (333 334 ns), then the overflow.
+    let h = s.histograms();
+    assert_eq!(h.top_us, 334);
+    assert_eq!(h.process, vec![(166, 2), (334, 1)]);
 }
 
 #[test]

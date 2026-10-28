@@ -133,6 +133,39 @@ fn the_work_margin_comes_from_the_device_config() {
 }
 
 #[test]
+fn the_block_comes_from_the_device_config() {
+    // #72: B 16 from the config, and W down to one block of it.
+    let text = TEST_DEVICE.replace(
+        "latency_ns = 1000000",
+        "latency_ns = 1000000\nblock = 16\nwork_margin = 16",
+    );
+    assert_ne!(
+        text, TEST_DEVICE,
+        "the test config states latency_ns = 1000000"
+    );
+    let t = timing(&DeviceConfig::from_toml(&text).unwrap());
+    assert_eq!((t.block, t.playout, t.margin), (16, 96, 16));
+    assert_eq!(t.offset(), 128, "D = 16 + 96 + 16");
+    // The block alone: W stays the default's 1 ms.
+    let text = TEST_DEVICE.replace("latency_ns = 1000000", "latency_ns = 1000000\nblock = 16");
+    let t = timing(&DeviceConfig::from_toml(&text).unwrap());
+    assert_eq!(
+        (t.block, t.playout, t.margin, t.offset()),
+        (16, 96, 96, 208)
+    );
+    // With the box's TX settings at 0.25 ms: D = 16 + 24 + 16, 0.58 ms.
+    let text = TEST_DEVICE.replace(
+        "latency_ns = 1000000",
+        "latency_ns = 250000\nblock = 16\nwork_margin = 16\ntx_fpp_max = 8\ntx_margin_ns = 30000",
+    );
+    let t = timing(&DeviceConfig::from_toml(&text).unwrap());
+    assert_eq!((t.block, t.playout, t.margin, t.offset()), (16, 24, 16, 56));
+    // The engine's stream reads the block as its frames.
+    let stats = PumpStats::new(t, SAMPLE_RATE);
+    assert_eq!(stats.stream_stats().frames, 16);
+}
+
+#[test]
 fn the_dante_flags_become_the_devices_options() {
     let iface = DanteArgs {
         config: PathBuf::from("dev.toml"),

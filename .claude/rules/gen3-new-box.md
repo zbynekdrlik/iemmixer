@@ -50,6 +50,7 @@ Copy the shape of `iemmixer-ops/site/gen3-device.toml`: the device name, RX/TX c
 
 ```
 latency_ns = 375000      # P: the RX playout (0.375 ms)
+block = 32               # 16 halves B; W must be at least the block
 work_margin = 48         # W in samples (0.5 ms)
 tx_latency_ns = 250000   # what our TX advertises: receivers play us at it (the IEM card's 0.25 ms)
 tx_margin_ns = 30000     # a packet leaves 30 us after its last sample
@@ -61,6 +62,7 @@ io_cpu = <N-2>
 
 - `pump_cpu`/`io_cpu` must be exactly the isolated pair, or the engine runs on housekeeping cores and the timing breaks.
 - The config refuses `tx_latency_ns` shorter than `tx_fpp_max` frames + `tx_margin_ns` + 50 µs.
+- `block` is 16 or 32 (left out: 32); 16 halves B (167 µs a block) and lets `work_margin` go down to 16, a W below the block is refused. Back to 32 is a config change and a restart, no build; a build before `block` refuses a config that has it.
 - On different hardware, prove the timing again before the band hears it (section 7): the values are measured, not universal.
 
 ## 5. Deploy
