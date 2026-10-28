@@ -52,6 +52,9 @@ GH_VERIFY = ["attestation", "verify", "<bundle>/SHA256SUMS", "-R", "zbynekdrlik/
              "zbynekdrlik/iemmixer/.github/workflows/ci.yml"]
 ENGINEER_PIN = "3917"
 MEMBER_PIN = "6284"
+ENABLE = "sudo -n systemctl enable iem-engine iem-server"
+IS_ENABLED = "systemctl is-enabled iem-engine iem-server"
+CARD_NAME = "Zyxqw-Iem-Card"   # the IEM card's usual name (DANTE_IEM_NAME), invented
 
 
 def holds_pin(text: str | bytes, pin: str) -> bool:
@@ -161,6 +164,12 @@ def systemctl(words):
         st["not_loaded"] = []
         return 0
     if verb == "disable" and units == ["iem-dante", "iem-engine", "iem-server"]:
+        st["enabled"] = []
+        return 0
+    if verb == "enable" and units == ["iem-engine", "iem-server"]:
+        if failing("FAKE_ENABLE_FAILS"):
+            return err("Failed to enable unit: Access denied")
+        st["enabled"] = sorted(set(st.get("enabled", [])) | set(units))
         return 0
     if verb == "reset-failed":
         for unit in units:
@@ -290,6 +299,11 @@ def run(line):
             if unit not in st["not_loaded"] and state != "inactive":
                 print(f"{unit}.service loaded {state} {state} {unit}")
         return 0
+    if line == "systemctl is-enabled iem-engine iem-server":
+        enabled = [u in st.get("enabled", []) and not failing("FAKE_ENABLE_LOST") for u in words[2:]]
+        for on in enabled:
+            print("enabled" if on else "disabled")
+        return 0 if all(enabled) else 1
     if line.startswith("systemctl is-active "):
         names = line.split()[2:]
         for unit in names:
@@ -524,12 +538,17 @@ class DeployTests(unittest.TestCase):
 
     # The box.
 
-    def set_states(self, units: dict[str, str], not_loaded: tuple[str, ...] = ()) -> None:
+    def set_states(self, units: dict[str, str], not_loaded: tuple[str, ...] = (),
+                   enabled: tuple[str, ...] = ()) -> None:
         (self.box / "states.json").write_text(json.dumps({"units": units, "not_loaded": list(not_loaded),
-                                                          "started": False}), encoding="utf-8")
+                                                          "started": False, "enabled": list(enabled)}),
+                                              encoding="utf-8")
 
     def states(self) -> dict[str, str]:
         return json.loads((self.box / "states.json").read_text(encoding="utf-8"))["units"]
+
+    def enabled(self) -> list[str]:
+        return json.loads((self.box / "states.json").read_text(encoding="utf-8")).get("enabled", [])
 
     def phase_c_folder(self, names: tuple[str, ...] = BINARIES) -> dict[str, bytes]:
         """Phase C's real /opt/iemmixer/bin with its binaries."""
@@ -685,7 +704,7 @@ class DeployTests(unittest.TestCase):
 
     def expected(self, target: str, *, link: str | None = None, back: bool = False, phase_c: bool = False,
                  start: str = "engine", held: tuple[str, ...] = (), people: tuple[str, ...] | None = None,
-                 health: int = 1, left: bool = False) -> list[str]:
+                 health: int = 1, left: bool = False, serving: bool = False) -> list[str]:
         slot = f"/opt/iemmixer/slot-{target}/bin"
         out = ["sudo -n -l systemctl stop iem-server iem-engine iem-dante", "readlink /opt/iemmixer/bin"]
         if link is None:
@@ -703,9 +722,10 @@ class DeployTests(unittest.TestCase):
         out += [LEFT_JOB, LIST_UNITS,
                 "\n".join(["set -e", *([f"sudo -n rm -f {HIL_DROPIN}"] if left else []),
                            "sudo -n systemctl daemon-reload",
-                           "sudo -n systemctl disable iem-dante iem-engine iem-server",
+                           *([] if serving else ["sudo -n systemctl disable iem-dante iem-engine iem-server"]),
                            *([f"sudo -n systemctl reset-failed {' '.join(held)}"] if held else []),
                            f"sudo -n systemctl start {started}"]),
+                *([ENABLE, IS_ENABLED] if serving else []),
                 *self.READ_BACK, *["/opt/iemmixer/bin/iem-dante-dev health"] * health]
         return out
 
@@ -1514,6 +1534,202 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("the site's back_to_reaper is not one line", r.stderr)
         self.assertEqual([c for c in self.calls() if c and c[0] == "scp"], [])
+
+    # --serving (#72, 2026-10-28): the box deployed in place while 3.x serves
+    # the band (iempc gen3-deploy builds the takeover config and runs it).
+
+    def side(self, side: int | None) -> None:
+        """iempc's side record of this test: None is no record."""
+        state = self.tmp / "iempc-state"
+        state.mkdir(exist_ok=True)
+        record = state / "gen3-side.json"
+        if side is None:
+            record.unlink(missing_ok=True)
+        else:
+            record.write_text(json.dumps({"side": side, "at": "2026-10-28T12:00:00+00:00"}, indent=1),
+                              encoding="utf-8")
+
+    def serving_box(self) -> list[str]:
+        """3.x serves the band: the side record says 3, the engine and the
+        server run and start at boot, the config is the takeover's (the
+        card's usual name). Returns a serving deploy's added arguments: the
+        band's site and roster, --serving."""
+        self.side(3)
+        self.write_pc_env(f"GEN3_HOST={HOST}\nDANTE_IEM_NAME={CARD_NAME}\n")
+        self.config.write_text(f'name = "{CARD_NAME}"\nstate_file = "/var/lib/iem-dante/takeover.toml"\n',
+                               encoding="utf-8")
+        site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
+        self.set_states({"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"},
+                        enabled=("iem-engine", "iem-server"))
+        return ["--site-file", str(site), "--roster-file", str(roster), "--serving"]
+
+    def test_a_serving_deploy_disables_nothing_and_enables_the_engine_and_the_server_after_the_start(self) -> None:
+        serving = self.serving_box()
+        r = self.deploy(*serving)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # No side refusal; the start without a disable, then the engine and
+        # the server enabled at boot and read back; the read back as always.
+        self.assertEqual(self.sequence(), self.expected("a", serving=True))
+        self.assertEqual(self.states(), {"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
+        self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+        self.assertIn("iem-engine and iem-server enabled at boot (3.x serves the band; the tunnel unit left as it is)",
+                      r.stdout)
+        self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"), self.config.read_bytes())
+        # The card's name is compared on the dev box: on no ssh or scp command line, never printed.
+        self.assertNotIn(CARD_NAME, json.dumps(self.calls()))
+        self.assertNotIn(CARD_NAME, r.stdout + r.stderr)
+        # The next one goes into the other slot the same way.
+        self.clear_logs()
+        sha2, second = self.next_build("the second build")
+        r = self.deploy(args=[*self.full_args(sha2, second), *serving])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.sequence(), self.expected("b", link="slot-a/bin", serving=True))
+        self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+
+    def test_serving_only_while_3x_serves_and_while_3x_serves_only_serving(self) -> None:
+        serving = self.serving_box()
+        for side in (None, 2):
+            with self.subTest(side=side):
+                self.side(side)
+                r = self.deploy(*serving)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn("--serving deploys the box while 3.x serves the band", r.stderr)
+                self.assertIn("deploy without --serving: nothing was copied", r.stderr)
+                self.assertEqual((self.calls(), self.gh_calls()), ([], []))
+        # 3.x serves: the same deploy without --serving is the refusal it was.
+        self.side(3)
+        r = self.deploy(*serving[:-1])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("3.x serves the band", r.stderr)
+        self.assertIn("`iempc gen3-deploy` deploys the box in place", r.stderr)
+        self.assertEqual((self.calls(), self.gh_calls()), ([], []))
+        self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+
+    def test_serving_refuses_a_config_not_under_the_cards_usual_name(self) -> None:
+        serving = self.serving_box()
+        cases = [
+            ('name = "Zyxqw-Other"\n', "the config's name is not the IEM card's usual name"),
+            # Exactly as the takeover writes it: another case is another config.
+            ('name = "zyxqw-iem-card"\n', "the config's name is not the IEM card's usual name"),
+            ('state_file = "/var/lib/iem-dante/takeover.toml"\n', "the config's name is not the IEM card's usual name"),
+            ("name = [\n", "the config could not be read as TOML"),
+        ]
+        for text, want in cases:
+            with self.subTest(want=want, text=text):
+                self.config.write_text(text, encoding="utf-8")
+                r = self.deploy(*serving)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn(want, r.stderr)
+                self.assertIn("nothing was copied", r.stderr)
+                self.assertEqual((self.calls(), self.gh_calls()), ([], []))
+                for name in (CARD_NAME, "Zyxqw-Other", "zyxqw-iem-card"):
+                    self.assertNotIn(name, r.stdout + r.stderr)
+        # The card's name comes from iempc's private env: none there is the command line's fault.
+        self.config.write_text(f'name = "{CARD_NAME}"\n', encoding="utf-8")
+        for text, want in ((f"GEN3_HOST={HOST}\n", "iempc's private env has no DANTE_IEM_NAME"),
+                           (None, "which is not there")):
+            with self.subTest(want=want):
+                if text is None:
+                    self.pc_env.unlink()
+                else:
+                    self.write_pc_env(text)
+                r = self.deploy(*serving)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn(want, r.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_serving_needs_the_bands_site_and_the_engine(self) -> None:
+        serving = self.serving_box()
+        for argv, want in (([*self.full_args(), "--serving"], "--serving needs the band's --site-file"),
+                           ([*self.full_args(), *serving, "--start", "device"], "--serving needs --start engine")):
+            with self.subTest(want=want):
+                r = self.deploy(args=argv)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn(want, r.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_flag_once_the_serving_stack_is_stopped_never_holds_it_down(self) -> None:
+        # "ide event" keeps the box running while 3.x serves: the stack this
+        # deploy stopped starts all the same, and a flag after the start
+        # stops nothing; the read back goes on.
+        serving = self.serving_box()
+        self.flag.parent.mkdir(exist_ok=True)
+        for when, said in (("install", "starts again at once"), ("start", "so the stack keeps running")):
+            with self.subTest(when=when):
+                self.flag.unlink(missing_ok=True)
+                self.clear_logs()
+                r = self.deploy(*serving, FAKE_FLAG_ON=when)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("an event is on; 3.x serves the band", r.stderr)
+                self.assertIn(said, r.stderr)
+                self.assertEqual(r.stderr.count("an event is on"), 1, r.stderr)
+                remote = self.remote()
+                starts = [i for i, c in enumerate(remote) if "sudo -n systemctl start iem-engine iem-server" in c]
+                self.assertEqual(len(starts), 1, remote)
+                self.assertNotIn(STOP, remote[starts[0]:])
+                self.assertEqual(remote[starts[0] + 1:starts[0] + 3], [ENABLE, IS_ENABLED])
+                self.assertEqual(remote[-1], "/opt/iemmixer/bin/iem-dante-dev health")
+                self.assertEqual(self.states(),
+                                 {"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
+                self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+
+    def test_a_flag_before_the_serving_stack_is_stopped_still_refuses(self) -> None:
+        serving = self.serving_box()
+        self.flag.parent.mkdir(exist_ok=True)
+        for when, words in (("mkdir", "nothing installed"), ("slot", "the stack was not stopped")):
+            with self.subTest(when=when):
+                self.flag.unlink(missing_ok=True)
+                self.clear_logs()
+                r = self.deploy(*serving, FAKE_FLAG_ON=when)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn(words, r.stderr)
+                self.assertNotIn(STOP, self.remote())
+                self.assertEqual(self.states()["iem-engine"], "active")
+                self.assertIsNone(self.link())
+
+    def test_an_enable_that_fails_or_does_not_read_back_fails_the_serving_deploy(self) -> None:
+        serving = self.serving_box()
+        for env, want in (({"FAKE_ENABLE_FAILS": "1"}, "systemctl enable iem-engine iem-server failed on the box"),
+                          ({"FAKE_ENABLE_LOST": "1"}, "do not read back enabled at boot (systemctl is-enabled exit 1)")):
+            with self.subTest(want=want):
+                self.clear_logs()
+                r = self.deploy(*serving, **env)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn(want, r.stderr)
+                self.assertIn("the stack runs, but", r.stderr)
+                self.assertIn("a reboot would not serve the band", r.stderr)
+                self.assertEqual(self.states()["iem-engine"], "active")
+                remote = self.remote()
+                starts = [i for i, c in enumerate(remote) if "sudo -n systemctl start iem-engine iem-server" in c]
+                self.assertEqual(len(starts), 1, remote)
+                self.assertNotIn(STOP, remote[starts[0]:])
+
+    def test_every_sudo_line_a_serving_deploy_sends_is_in_the_template(self) -> None:
+        # Into a, into b, then --back to a: each with --serving.
+        serving = self.serving_box()
+        sent: list[str] = []
+        r = self.deploy(*serving)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent += self.remote()
+        self.clear_logs()
+        sha2, second = self.next_build("the second build")
+        r = self.deploy(args=[*self.full_args(sha2, second), *serving])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent += self.remote()
+        self.clear_logs()
+        self.git("checkout", "-q", "--detach", self.sha)
+        r = self.deploy(args=[*self.back_args(self.sha), *serving])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True, serving=True))
+        self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+        sent += self.remote()
+        allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
+        lines = sudo_lines(sent)
+        for runas, command, _listed in lines:
+            self.assertIn((runas, command), allowed, command)
+        seen = {command for _runas, command, _listed in lines}
+        self.assertIn("systemctl enable iem-engine iem-server", seen)
+        self.assertNotIn("systemctl disable iem-dante iem-engine iem-server", seen)
 
 class UnitTests(unittest.TestCase):
     """The units (phase C plan Task 6 Interfaces, choice 5; phase D plan Task 5,

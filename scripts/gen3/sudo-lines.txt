@@ -62,6 +62,9 @@ root | systemctl disable iem-dante iem-engine iem-server
 root | systemctl reset-failed {units}
 root | systemctl start iem-engine iem-server
 root | systemctl start iem-dante
+# deploy.sh --serving (iempc gen3-deploy while 3.x serves the band): nothing
+# disabled, the engine and the server enabled again after the start.
+root | systemctl enable iem-engine iem-server
 
 # scripts/iem-pc/iempc_gen3.py (iempc gen3-mix): the browser's tokens, as the
 # service user (the JWT secret's owner) in its mint folder: any left from an
