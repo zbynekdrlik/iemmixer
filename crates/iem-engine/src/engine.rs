@@ -145,6 +145,8 @@ pub enum Command {
     Run(RunConfig),
     Render(RenderArgs),
     CheckSite(PathBuf),
+    /// `supervise`: one supervisor call on the box (`crate::supervise`).
+    Supervise(crate::supervise::Supervise),
     Help,
     /// `--version`: [`version`]'s line.
     Version,
@@ -160,6 +162,8 @@ usage:
   iem-engine render --site <site.toml> [--state <state.json>] --in <in.wav> --out <out.wav>
                  [--block <frames>]
   iem-engine check-site --site <site.toml>
+  iem-engine supervise [--pipe <socket>] test-signal <input> <dbfs> <seconds> [--listen]
+                 | stop-test-signal | status
   iem-engine --version
 
 run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
@@ -175,6 +179,14 @@ render: the input WAV must be 96 kHz with one channel per RX channel of the
 site; the output has one channel per TX channel.
 check-site: validates the site (I4; [card] and [guard] hil_tx too) and
 prints its topology hash and counts.
+supervise (the Gen 3 box, where no guard runs; refused off Unix, where the
+guard is the supervisor): one call as the engine's supervisor over its
+control socket (--pipe, default /run/iemmixer/engine.sock), which replaces
+any supervisor before it. test-signal: the HIL test signal on every spare
+output the engine opened (an engine run with --test-signal; at most -20
+dBFS, 1 to 60 whole seconds, the engine ends it); stop-test-signal ends it;
+status: the engine's next Status. One JSON line on stdout; exit 0, 1 when
+the engine refuses or does not answer, 2 for its command line.
 exit codes: 0 shut down, 1 i/o error or the Dante device ended, 2 usage or
 site error, 3 card refused (or a channel the Dante device lacks), 70 RT
 fault, 75 state directory busy";
@@ -244,6 +256,10 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let sub = match it.next().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => return Ok(Command::Help),
         Some("--version") => return Ok(Command::Version),
+        Some("supervise") => {
+            let words = args.get(1..).unwrap_or_default();
+            return crate::supervise::parse(words).map(Command::Supervise);
+        }
         Some(s @ ("run" | "render" | "check-site")) => s,
         Some(other) => return Err(format!("unknown command {other:?}")),
     };
@@ -395,7 +411,10 @@ fn backoff(e: &std::io::Error, what: &str) -> Duration {
     }
 }
 
-fn accept_control(listener: Listener, tx: mpsc::Sender<CtlMsg>, stop: Arc<AtomicBool>) {
+/// The control pipe's acceptor: connection ids from 1, each read on a
+/// thread of its own into the control loop (also the supervise client's
+/// tests' engine side, `control/tests/supervise.rs`).
+pub(crate) fn accept_control(listener: Listener, tx: mpsc::Sender<CtlMsg>, stop: Arc<AtomicBool>) {
     let mut next = 1u64;
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {

@@ -1,6 +1,7 @@
 //! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
 //! S6: the ASIO backend and the site check; Gen 3 phase C: the Dante backend
-//! on Linux). See `iem-engine --help`.
+//! on Linux; phase H: `supervise`, the box's supervisor client). See
+//! `iem-engine --help`.
 
 use std::process::ExitCode;
 
@@ -8,6 +9,7 @@ use iem_engine::control::Exit;
 use iem_engine::engine::{
     Command, EngineError, USAGE, check_site, parse_args, render, run, version,
 };
+use iem_engine::supervise;
 use tracing_subscriber::EnvFilter;
 
 fn code(e: &EngineError) -> u8 {
@@ -55,6 +57,19 @@ fn main() -> ExitCode {
         Ok(Command::Render(a)) => render(&a).map(|()| 0),
         Ok(Command::CheckSite(site)) => {
             check_site(&site).and_then(|summary| print_json(&summary).map(|()| 0))
+        }
+        // One line on stdout, or a fixed message on stderr (Gen 3 phase H).
+        Ok(Command::Supervise(a)) => {
+            return match supervise::run(&a) {
+                Ok(outcome) => {
+                    println!("{}", outcome.line());
+                    ExitCode::SUCCESS
+                }
+                Err(failure) => {
+                    eprintln!("iem-engine supervise: {failure}");
+                    ExitCode::from(failure.code())
+                }
+            };
         }
         Err(msg) => {
             eprintln!("iem-engine: {msg}\n\n{USAGE}");
