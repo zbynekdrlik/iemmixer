@@ -99,4 +99,5 @@ Besides the gates, on new hardware or after a timing change:
 - Dante receivers play our flows at our advertised latency, never their own lower setting: a 1 ms `latency_ns` used for TX cost 0.75 ms at the rack.
 - The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot.
 - systemd gives `MONITOR_*` only to ExecStartPre=/ExecStart=, never to ExecCondition=.
+- `iem-dante-dev health` stays degraded (`restarted`) after any automatic restart of a unit until its next deliberate start (`reset-failed` and `restart`, or a deploy): a check right after a crash or a panic reads degraded, not failed.
 - `tcpdump` on the Dante NIC only with `-p`: entering promiscuous mode on the r8169 stalled RX once for ~2.7 ms, every flow late at the same moment (2026-10-28: 63 packets at fpp 4, 17 at fpp 16; the kernel's "entered promiscuous mode" line); with `-p` the capture added no late packet.
