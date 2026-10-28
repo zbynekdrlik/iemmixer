@@ -78,7 +78,7 @@
 - [x] **Step 2:** Provision step `rtkernel`: `linux-image-realtime` installed and held, GRUB default to it, generic kept as fallback. Verify `PREEMPT_RT` runs. **Done in the same `realtime` step;** the box boots it by itself (verified after two reboots).
 - [x] **Step 3:** After each reboot: verify, then 30 minutes; block time and overruns recorded on #72. **Done:** generic 90 overruns / 10 min, realtime 12, isolated 0 (#72).
 - [x] **Step 4:** W swept down (64, 48, 40) at the chosen P: 0 late, 0 re-bootstraps per 10 minutes. **Done:** W 48, longest block 175 µs over 2 h.
-- [ ] **Step 5:** The display poll on for 30 minutes with core 3 isolated. If the RT core stays clear, drop provision's `display` step (#72's low-priority item).
+- [x] **Step 5:** The display poll on for 30 minutes with core 3 isolated. If the RT core stays clear, drop provision's `display` step (#72's low-priority item). **Done 2026-10-28:** the engine stays clear (0 overruns), but the poll on core 0 held the NIC (RX 245–637 late packets a flow): the display step stays; next try for the monitor wish, the NIC on an isolated core (#72).
 
 ### Task 6: The new timing, proven
 
