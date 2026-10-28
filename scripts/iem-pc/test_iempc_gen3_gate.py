@@ -161,6 +161,8 @@ if line == "systemctl show --property=DropInPaths iem-engine.service":
     print("DropInPaths=" + " ".join(paths))
     done()
 if line == "systemctl show --property=NRestarts iem-engine.service":
+    if os.environ.get("FAKE_NRESTARTS_FAILS"):
+        fail("Failed to get properties: Connection timed out")
     print(f"NRestarts={st['nrestarts']}")
     done()
 if line == "systemctl show --property=ActiveState,MainPID,NRestarts iem-engine.service":
@@ -840,6 +842,17 @@ class PanicTests(GateBase):
         st = self.state()
         self.assertEqual(st["journal"][-1]["_PID"], "4101")
         self.assertEqual(st["nrestarts"], 0)   # the end's reset-failed
+
+    def test_an_unread_restart_count_stops_the_fault_and_fails_the_gate(self) -> None:
+        # Without the engine's restart count the job's state is not known:
+        # no fault on top of an unknown, and the gate fails on it.
+        code, docs, err = self.gate_run(FAKE_NRESTARTS_FAILS="1")
+        self.assertEqual(code, 1, err)
+        doc = docs[0]["gen3_gate"]["hil"]
+        self.assertEqual((doc["panic"], doc["failed"]), ("skipped", ["restarts_unread"]))
+        self.assertNotIn(INJECT, self.calls())
+        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+                                               "description=the Gen 3 box's HIL failed: restarts_unread"])
 
     def test_no_restart_within_the_bound_fails_the_panic(self) -> None:
         with mock.patch.object(gate, "PANIC_WAIT_S", 0.2):
