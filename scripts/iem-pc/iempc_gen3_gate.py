@@ -35,7 +35,9 @@ with its spare outputs).
 `StartLimitIntervalSec`, read from the installed unit). systemd's counter is
 reset (`reset-failed`) before each deliberate start, so a job never meets the
 unit's own limit; on top of that, every engine start this command asks for is
-kept in iempc's state (`gen3-gate.json`, wall-clock times) and a plan whose
+kept in iempc's state (`gen3-gate.json`, wall-clock times; `iempc
+gen3-deploy` and `gen3-switch to-3` keep theirs there too, `note_starts`)
+and a plan whose
 starts, with those of the unit's last interval, would pass the burst is
 refused before anything changes (a left job's end counts one; this run
 three: the begin, the panic's restart and the end; the live gate's two). The

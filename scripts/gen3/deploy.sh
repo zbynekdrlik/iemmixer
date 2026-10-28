@@ -89,7 +89,11 @@ set -euo pipefail
 #   `reset-failed` of the units systemd holds (the start limit counts manual
 #   starts too: a deploy is a deliberate new start), then `start iem-engine
 #   iem-server` (--start engine, the default) or `start iem-dante` (--start
-#   device; the units' Conflicts= keep it and the engine apart).
+#   device; the units' Conflicts= keep it and the engine apart). Right before
+#   an engine start is sent, a line `start` is appended to the file
+#   IEMPC_START_MARK names, when it is set (`iempc gen3-deploy`'s count of
+#   the start in the box gates' restart budget; one that cannot be written
+#   starts nothing).
 # - Read back: the binaries and BUILD through /opt/iemmixer/bin against the
 #   slot's SHA256SUMS, `iem-engine --version` and `iem-dante-dev --version`
 #   naming --sha, then `/opt/iemmixer/bin/iem-dante-dev health` once a second
@@ -634,6 +638,15 @@ fi
 disable=""
 if [ "$serving" = 0 ]; then
   disable="sudo -n systemctl disable iem-dante iem-engine iem-server"
+fi
+# `iempc gen3-deploy` counts this engine start in the box gates' restart
+# budget (its gen3-gate.json): the file IEMPC_START_MARK names gets a line
+# right before the start is sent, so a deploy that fails after it counts it
+# too and one refused before it never does. A mark that cannot be written
+# starts nothing (the start would go uncounted).
+if [ "$start" = engine ] && [ -n "${IEMPC_START_MARK:-}" ]; then
+  { printf 'start\n' >> "$IEMPC_START_MARK"; } 2> /dev/null ||
+    die "the file IEMPC_START_MARK names could not be written (iempc's count of this engine start): nothing started"
 fi
 on_box "set -e${end_job:+
 $end_job}

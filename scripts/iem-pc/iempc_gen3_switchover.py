@@ -12,8 +12,11 @@ to-3, each step with its undo (a later failure runs the undos newest first):
  2. our device's takeover config (the card's name and TX labels, read live
     by IP; iempc_gen3_switch.takeover_config) installed on the box;
  3. the card renamed to its spare name, read back (undo: its name back);
- 4. the box's engine and server started (our device under the card's name),
-    health healthy and our device answering with the card's name;
+ 4. a HIL job a dead `iempc gen3-gate` run left ended (its drop-in removed,
+    daemon-reload), then the box's engine and server started (our device
+    under the card's name; the start counted in the box gates' restart
+    budget, gen3-gate.json), health healthy and our device answering with
+    the card's name;
  5. our RX table made the card's (the mirror), the receivers given TX_S to
     ask our device for their flows (at least one live TX flow);
  6. the band's public URL moved to the box's connector (iempc_gen3_tunnel);
@@ -42,6 +45,7 @@ import dante_card
 import gen3_arc
 import iempc_dante
 import iempc_gen3_data as data
+import iempc_gen3_gate as gate
 import iempc_gen3_switch as switch
 import iempc_gen3_tunnel as tunnel
 
@@ -49,6 +53,11 @@ SIDE = "gen3-side.json"
 STAGED = ".cache/iem-gen3-deploy/dante-device.toml"
 INSTALL_CONFIG = f"sudo -n install -D -m 0644 {STAGED} /etc/iemmixer/dante-device.toml"
 STOP = "sudo -n systemctl stop iem-server iem-engine iem-dante"
+# A HIL job a dead `iempc gen3-gate` run left: its runtime drop-in survives
+# to-2 and to-3 without a reboot and would start the band's engine with its
+# test flags. Ended before the start with deploy.sh's own two lines.
+END_HIL = f"sudo -n rm -f {gate.DROPIN}"
+RELOAD = "sudo -n systemctl daemon-reload"
 START = "sudo -n systemctl start iem-engine iem-server"
 ENABLE = "sudo -n systemctl enable iem-engine iem-server iem-tunnel"
 DISABLE = "sudo -n systemctl disable iem-dante iem-engine iem-server"
@@ -293,9 +302,12 @@ def to_3(ctx, ip, s: dict[str, str], dry_run: bool) -> dict:
         flag(ip)
         record(ip, 3)   # from here "ide event" keeps the box (undone: 2 again)
         undo.append(lambda: stop_box(ip, s))
+        must(ip, s, END_HIL, "ending a HIL job a dead gen3-gate run left")
+        must(ip, s, RELOAD, "systemd's daemon-reload")
         # Best effort, as deploy's: it exits 1 for a unit not loaded; a unit it
         # leaves failed makes the start below fail, which undoes.
         on_box(host, RESET_FAILED)
+        gate.note_starts(ip)   # the box gates' restart budget: a sent start counts, answered or not
         must(ip, s, START, "starting the engine and the server")
         if not wait(lambda: on_box(host, HEALTH)[0] == 0 and answers_as(ip, s["GEN3_DANTE_IP"], name), HEALTH_S):
             raise Failed(f"the box is not healthy under the card's name within {HEALTH_S} s")

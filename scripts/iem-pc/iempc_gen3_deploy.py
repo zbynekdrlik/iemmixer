@@ -37,6 +37,14 @@ clean tree), the bundle, its attestation and everything else itself. Its
 stdout goes to stderr here once it succeeded; a failure's error quotes its
 stderr.
 
+The engine start the deploy makes counts in the box gates' restart budget
+(iempc_gen3_gate's gen3-gate.json), so a gate right after it is refused,
+naming the wait: deploy.sh appends a line to the file IEMPC_START_MARK names
+(an empty file of iempc's state, removed after) right before it sends the
+start; a marked start counts whatever deploy.sh's end, and so does a
+deploy.sh left running past its bound. A refusal here, a deploy.sh refused
+before its start and the dry run count nothing.
+
 Dev time, locked, a box command (iempc's Spec: refused while EVENT-NOW
 exists; on either side, so in neither WHILE_2X_SERVES nor WHILE_3X_SERVES).
 A flag during the deploy: deploy.sh's own checks (nothing copied, nothing
@@ -61,6 +69,7 @@ from pathlib import Path
 import dante_card
 import iempc_dante
 import iempc_gen3_data as data
+import iempc_gen3_gate as gate
 import iempc_gen3_switch as switch
 
 HERE = Path(__file__).resolve().parent
@@ -181,6 +190,28 @@ def deploy_env(ip) -> dict[str, str]:
             "PC_ENV": str(ip.env_path())}
 
 
+def start_mark(ip) -> Path:
+    """An empty file of iempc's state folder deploy.sh marks right before it
+    sends the engine's start (IEMPC_START_MARK)."""
+    fd, name = tempfile.mkstemp(prefix="gen3-deploy-start-", dir=ip.state_dir())
+    os.close(fd)
+    return Path(name)
+
+
+def count_start(ip, mark: Path, still_running: bool) -> None:
+    """deploy.sh's engine start into the box gates' restart budget
+    (gen3-gate.json) once deploy.sh marked it, whatever its end, or while
+    it may still reach it (left running past its bound); the mark removed.
+    An unreadable mark counts (an over-count only makes the next gate wait)."""
+    try:
+        started = still_running or mark.read_text(encoding="utf-8").strip() != ""
+    except OSError:
+        started = True
+    mark.unlink(missing_ok=True)
+    if started:
+        gate.note_starts(ip)
+
+
 def run(ctx, ip) -> int:
     """`iempc gen3-deploy` (dev time, locked, on either side)."""
     sha, bundle = arguments(ip, ctx.args)
@@ -195,15 +226,24 @@ def run(ctx, ip) -> int:
         return 0
     iface = box_iface(ip, s["GEN3_HOST"])
     private: Path | None = None
+    mark: Path | None = None
+    still_running = False
     try:
         if serves:
             private = private_file(ip, takeover(ip, s))
         config = str(private) if private else s["GEN3_DEVICE_CONFIG"]
-        out = ip.guarded([*DEPLOY, *options(s, sha, str(bundle), config, iface, serves)], "", DEPLOY_S,
-                         ctx.watch(abandon=False), env=deploy_env(ip))
+        mark = start_mark(ip)
+        try:
+            out = ip.guarded([*DEPLOY, *options(s, sha, str(bundle), config, iface, serves)], "", DEPLOY_S,
+                             ctx.watch(abandon=False), env={**deploy_env(ip), "IEMPC_START_MARK": str(mark)})
+        except ip.StillRunning:
+            still_running = True
+            raise
     finally:
         if private is not None:
             private.unlink(missing_ok=True)
+        if mark is not None:
+            count_start(ip, mark, still_running)
     sys.stderr.write(out)
     sys.stderr.flush()
     ip.emit({"gen3_deploy": {"serves": side, "config": kind, "serving": serves, "sha": sha, "deployed": True}})
