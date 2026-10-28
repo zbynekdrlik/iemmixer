@@ -32,7 +32,7 @@ Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r
 
 ## 3. Provisioning, then one reboot
 
-`scripts/gen3/provision.sh --host <user@host> --ntp-from <ops>/site/gen3-dantesync.json` (stack stopped). It does, idempotently, with a read-back and `verify_box.py` at the end:
+`scripts/gen3/provision.sh --host <user@host> --ntp-from <ops>/site/gen3-dantesync.json --band-roster <ops>/site/roster.toml` (stack stopped; `--band-roster` puts the band's ids into the sudo rule's `{member}` beside the test roster's: the live gate mints a band member's token). It does, idempotently, with a read-back and `verify_box.py` at the end:
 
 - service user `iemmixer`, folders, state ownership, the PIN pepper credential (`systemd-creds`, never in clear);
 - journald on disk; apt: kernel meta packages held, unattended upgrades masked; sleep masked; swap;
