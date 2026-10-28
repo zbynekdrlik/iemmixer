@@ -1266,26 +1266,60 @@ fn the_tx_thread_sends_nothing_before_the_clock_is_ready() {
     join_within(thread, Duration::from_secs(2));
 }
 
+/// The CPUs the calling thread may run on.
+#[cfg(target_os = "linux")]
+fn affinity() -> Vec<usize> {
+    // SAFETY: an all-zero cpu_set_t is valid; the call fills it; pid 0 is
+    // the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        assert_eq!(
+            libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set),
+            0
+        );
+        (0..crate::device::MAX_CPU)
+            .filter(|&c| libc::CPU_ISSET(c, &set))
+            .collect()
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_thread_pins_itself_to_one_cpu_and_a_missing_cpu_is_refused() {
     std::thread::spawn(|| {
         assert!(pin_to_cpu(0), "CPU 0 exists on every runner");
-        // SAFETY: an all-zero cpu_set_t is valid; the call fills it.
-        let only_zero = unsafe {
-            let mut set: libc::cpu_set_t = std::mem::zeroed();
-            assert_eq!(
-                libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set),
-                0
-            );
-            (0..crate::device::MAX_CPU)
-                .filter(|&c| libc::CPU_ISSET(c, &set))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(only_zero, vec![0]);
+        assert_eq!(affinity(), vec![0]);
         assert!(!pin_to_cpu(1023), "no runner has 1024 CPUs");
         assert!(!pin_to_cpu(crate::device::MAX_CPU), "past CPU_SETSIZE");
+        assert_eq!(
+            affinity(),
+            vec![0],
+            "a refused CPU leaves the thread where it was"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn place_pins_a_thread_to_the_configured_cpu_and_leaves_it_without_one() {
+    std::thread::spawn(|| {
+        let before = affinity();
         place("test thread", None);
+        assert_eq!(
+            affinity(),
+            before,
+            "no CPU in the config: the thread stays where it was"
+        );
+        place("test thread", Some(0));
+        assert_eq!(affinity(), vec![0], "pinned to the configured CPU");
+        place("test thread", Some(1023));
+        assert_eq!(
+            affinity(),
+            vec![0],
+            "a CPU the kernel refuses leaves it where it was"
+        );
     })
     .join()
     .unwrap();
