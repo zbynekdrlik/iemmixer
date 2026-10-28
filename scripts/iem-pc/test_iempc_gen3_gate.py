@@ -83,8 +83,24 @@ PEAK = 10 ** (-30 / 20)
 def at(path):
     return os.path.join(root, path.lstrip("/"))
 
+# The state files this call writes (the soak's part adds its own). A file is
+# replaced whole (never read half written by the next call), and once this
+# call raised the flag it writes nothing more: the gate leaves a read-only call
+# to end by itself and goes on, so a later write would undo the next calls'.
+SAVES = [lambda: (state_path, st)]
+FROZEN = []
+
+def save():
+    if FROZEN:
+        return
+    for path, value in (s() for s in SAVES):
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(value, f)
+        os.replace(tmp, path)
+
 def done(code=0):
-    json.dump(st, open(state_path, "w"))
+    save()
     sys.exit(code)
 
 def fail(text, code=1):
@@ -96,6 +112,8 @@ def looped():
     return os.path.exists(p) and json.load(open(p)).get("looped") is True
 
 def flag():
+    save()
+    FROZEN.append(True)
     path = os.environ["FAKE_FLAG"]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     open(path, "w").write("now\n")

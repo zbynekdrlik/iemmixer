@@ -92,13 +92,12 @@ SOAK_ENV = "/run/iem-soak.env"
 SOAK_STAGED = ".cache/iem-gen3-gate/iem-soak.env"
 want = os.environ.get("FAKE_GROW", "")
 clock_fault = os.environ.get("FAKE_CLOCK", "")
+SAVES.append(lambda: (SOAK, so))
 
 def soak_done(code=0):
-    json.dump(so, open(SOAK, "w"))
     done(code)
 
 def soak_fail(text, code=1):
-    json.dump(so, open(SOAK, "w"))
     fail(text, code)
 
 def late():
