@@ -337,6 +337,11 @@ class Spec:
     locked: bool    # one at a time on this box
 
 
+# Commands that test 2.x on the PC (through the band's public URL) or drive
+# the box's TX channels for a test: refused while 3.x serves the band (#72,
+# 2026-10-28), when that URL is the box's and those channels are in-ears.
+WHILE_2X_SERVES = ("dispatch-live", "dispatch-hil", "dispatch-soak", "gen3-loop", "gen3-mix")
+
 COMMANDS: dict[str, Spec] = {
     "status": Spec(cmd_status, pc=True, dev_time=False, locked=False),
     "event": Spec(cmd_event, pc=True, dev_time=False, locked=False),
@@ -496,6 +501,9 @@ def main(argv: list[str]) -> int:
     try:
         if spec.dev_time and flag_at_start:
             raise Refused(f"{core.EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")
+        if args.cmd in WHILE_2X_SERVES and iempc_event.gen3_serves():
+            raise Refused(f"3.x serves the band (gen3-side.json): '{args.cmd}' runs only while 2.x serves; "
+                          "nothing was called")
         with state_lock(spec.locked):
             return spec.fn(Ctx(env, args, flag_at_start))
     except Refused as e:
