@@ -19,6 +19,7 @@ Design note `docs/superpowers/specs/2026-10-07-s7-hil-live-soak-design.md` §6, 
 - Only from the ops `live.yml`, dispatched by `iempc dispatch-live --sha`: `verify` → `pc-begin` → `browser` and `pc` in parallel → `pc-end` (`if: always()`) → `report`. `browser` is a hosted Ubuntu runner with Chromium, against the band's public host through the tunnel (the members' real path); nothing of it runs on the PC.
 - Public CI only lists them: the e2e job's `--list` step, with no `LIVE_*` and the mock PINs removed. Locally: `--list` of both configs. The pure support runs in the mock job (`tone.spec.ts`, `live-support.spec.ts`).
 - The Gen 3 box's browser step (`e2e/tests/gen3/`, its own `playwright.gen3.config.ts`, run by `iempc gen3-mix`, #72) uses this support with the same variables against the box's plain-HTTP UI; the same list step lists it (`.claude/rules/gen3.md`, the browser step).
+- The Gen 3 box's live gate (`iempc gen3-gate live`, #72 phase H Task 5) runs these same specs and this config from the dev box against the band's public URL while 3.x serves: no runner, the jobs' steps in one iempc process, `live_verdict.report` over the same records, the status `live/gen3` (`.claude/rules/gen3.md`, the box's live gate). A spec change serves both.
 
 ## Dispatch and the dispatch guards (`iempc_live.py`, Task 24)
 
