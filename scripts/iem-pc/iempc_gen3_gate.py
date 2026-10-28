@@ -85,7 +85,9 @@ spare outputs' numbers and the site never reach stdout or stderr.
 
 `iempc gen3-gate live` (Task 5) is iempc_gen3_live.py: it builds on this
 module (the preflight without the ARC reads, the job, the budget, the status
-post) and `run` passes the call on to it.
+post) and `run` passes the call on to it. `iempc gen3-gate soak [--minutes
+N]` (Task 7) is iempc_gen3_soak.py: no HIL job (a left one is ended first),
+the Box, the status post; `--minutes` is the soak's only.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
@@ -844,12 +846,17 @@ def post_status(ip, sha: str, doc: dict) -> bool:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate hil|live` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate hil|live|soak` (dev time, locked, while 3.x serves)."""
+    if ctx.args.gate != "soak" and getattr(ctx.args, "minutes", None) is not None:
+        raise ip.Refused("gen3-gate: --minutes is the soak gate's only (nothing was called)")
     if ctx.args.gate == "live":
         import iempc_gen3_live   # it imports this module: imported here, never at the top
         return iempc_gen3_live.run(ctx, ip)
+    if ctx.args.gate == "soak":
+        import iempc_gen3_soak   # it imports this module: imported here, never at the top
+        return iempc_gen3_soak.run(ctx, ip)
     if ctx.args.gate != "hil":
-        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live)")
+        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak)")
     host = g3.gen3_host(ip, ctx.env, WORDS)
     dante = dante_ip(ip, ctx.env)
     box = Box(ip, ctx, host)
