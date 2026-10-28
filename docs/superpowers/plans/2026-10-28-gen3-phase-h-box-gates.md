@@ -40,8 +40,8 @@
 
 ### Task 2: The box's spare HIL outputs
 
-- [ ] **Step 1:** The box device config's TX list covers the site's `[guard] hil_tx` (the takeover gives each the card's label). A `gen3-gate` preflight refuses when any `hil_tx` is above the device's TX count. Tests in `test_iempc_gen3.py`. The preflight is done with Task 6 (`iempc_gen3_gate.counts_refusal`: also each spare output's D5(b) return within the RX count, and `iem-engine check-site` of the installed site; tests in `test_iempc_gen3_gate.py`); open: the ops device config's coverage, read on the box by the first run (Task 6 Step 2).
-- [ ] **Step 2:** A read-only survey that no receiver but our own device subscribes to those TX channels (the rack, FOH), recorded on #72.
+- [x] **Step 1:** The box device config's TX list covers the site's `[guard] hil_tx` (the takeover gives each the card's label). A `gen3-gate` preflight refuses when any `hil_tx` is above the device's TX count. Tests in `test_iempc_gen3.py`. The preflight is done with Task 6 (`iempc_gen3_gate.counts_refusal`: also each spare output's D5(b) return within the RX count, and `iem-engine check-site` of the installed site; tests in `test_iempc_gen3_gate.py`); the ops device config's coverage read on the box by the first run (Task 6 Step 2, 2026-10-28: 128 TX, the preflight passed).
+- [x] **Step 2:** A read-only survey that no receiver but our own device subscribes to those TX channels (the rack, FOH), recorded on #72. Done 2026-10-28: our TX flows go to two receivers (`tcpdump -p` of our outgoing UDP), their ARC 0x3000 lists take TX 3 to 16 and 33 to 34, none a spare output.
 
 ### Task 3: A supervisor client on Linux
 
@@ -61,7 +61,8 @@
 ### Task 6: `gen3-gate hil`
 
 - [x] **Step 1:** In a HIL job: versions and health, the D5(b) loop (a spare TX into our own spare RX by self-subscription, `Status.loopback_samples` and the spare outputs' peaks), the test signal at its level then silent, a panic (`InjectFault`, systemd starts it again), the alarm path's count; the status `hil/gen3`. Done: `iempc gen3-gate hil` (`iempc_gen3_gate.py`), every check but the panic, reported `panic: "not_covered"`: `iem-engine supervise` has no fault injection (a Rust change: an `inject-fault` command and its sudo line, then `--fault-injection` in the drop-in and a third start in the budget).
-- [ ] **Step 2:** A run on the box, recorded on #72.
+- [x] **Step 2:** A run on the box, recorded on #72. Done 2026-10-28 on b41c136: `pass 1`, `hil/gen3` success, loopback 116 samples, both spare outputs at -30 dBFS then still, two starts; the panic `not_covered` (open, below).
+- [ ] **Step 3:** The panic check: `iem-engine supervise inject-fault` and its sudo line, `--fault-injection` in the drop-in, a third start in the budget, the check in `gen3-gate hil`.
 
 ### Task 7: `gen3-gate soak`
 
