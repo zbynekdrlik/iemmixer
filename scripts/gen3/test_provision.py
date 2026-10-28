@@ -49,10 +49,38 @@ INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
  NMI:          0          0          0          0   Non-maskable interrupts
 """
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
-STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "apt", "sleep", "swap", "clock", "napi",
-         "display", "stack", "sudoers")
-CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "apt", "sleep",
-          "swap", "clock", "napi", "display")
+STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "realtime", "apt", "sleep", "swap", "clock",
+         "napi", "display", "stack", "sudoers")
+CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
+          "sleep", "swap", "clock", "napi", "display")
+# verify's information beside the checks, never part of pass.
+INFO = ("tpm2", "realtime_running")
+# The realtime step on a 4-CPU box (#72 phase F): the kernel the stand-in
+# apt-get installs, grub's entry for it, the command line isolating CPUs 2-3,
+# the workqueue mask of CPUs 0-1.
+REALTIME = "7.0.0-38-realtime"
+RT_ENTRY = f"Advanced options for Ubuntu>Ubuntu, with Linux {REALTIME}"
+RT_CMDLINE = "isolcpus=domain,managed_irq,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1"
+GRUB = "/etc/default/grub"
+GRUB_BEFORE = """# If you change this file, run 'update-grub' afterwards to update
+# /boot/grub/grub.cfg.
+
+GRUB_DEFAULT=0
+GRUB_TIMEOUT_STYLE=hidden
+GRUB_TIMEOUT=0
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
+GRUB_CMDLINE_LINUX=""
+
+# Uncomment to disable graphical terminal
+#GRUB_TERMINAL=console
+"""
+GRUB_AFTER = GRUB_BEFORE.replace("GRUB_DEFAULT=0\n", "GRUB_DEFAULT=saved\n").replace(
+    'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"', f'GRUB_CMDLINE_LINUX_DEFAULT="{RT_CMDLINE}"')
+WORKQUEUE_CONF = "/etc/tmpfiles.d/iemmixer-workqueue.conf"
+WORKQUEUE_LINE = "w /sys/devices/virtual/workqueue/cpumask - - - - 3\n"
+AFTER_REBOOT = "realtime: the box runs it after its next reboot"
+# A file the root script renders in its temporary folder, installed 0644 root.
+TMP_INSTALL = ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", "<tmp>"]
 # The display drivers' output polling (the kernel's drm_kms_helper.poll, root
 # only), and the tmpfiles.d file that turns it off at every boot.
 POLL = "sys/module/drm_kms_helper/parameters/poll"
@@ -77,7 +105,7 @@ ROOT = os.environ["FAKE_ROOT"]
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 DB = os.path.join(WORLD, "db.json")
-READS = {"id", "getent", "stat", "dpkg-query", "visudo", "sudo", "find"}
+READS = {"id", "getent", "stat", "dpkg-query", "visudo", "sudo", "find", "nproc", "uname"}
 UNIT_DEFAULT = {"LoadState": "not-found", "UnitFileState": "", "ActiveState": "inactive", "User": "",
                 "DropInPaths": ""}
 REAL_VISUDO = next((p for p in ("/usr/sbin/visudo", "/usr/bin/visudo", "/sbin/visudo") if os.access(p, os.X_OK)), None)
@@ -100,6 +128,8 @@ def is_write():
         return args[:1] != ["show"]
     if name == "systemd-creds":
         return args[:1] == ["encrypt"]
+    if name == "grub-editenv":
+        return args != ["list"]
     return True
 
 
@@ -371,10 +401,20 @@ elif name == "apt-mark":
     save(db)
 elif name == "apt-get":
     db = load()
-    if args[:2] != ["purge", "-y"] or os.environ.get("DEBIAN_FRONTEND") != "noninteractive":
+    if os.environ.get("DEBIAN_FRONTEND") != "noninteractive":
         fail("unexpected apt-get", 97)
-    for package in args[2:]:
-        db["packages"].pop(package, None)
+    if args[:2] == ["purge", "-y"]:
+        for package in args[2:]:
+            db["packages"].pop(package, None)
+    elif args == ["install", "-y", "--no-install-recommends", "linux-image-realtime"]:
+        # The meta package, the kernel it depends on, and that kernel's image.
+        kernel = db["realtime_kernel"]
+        db["packages"]["linux-image-realtime"] = "install ok installed"
+        db["packages"][f"linux-image-{kernel}"] = "install ok installed"
+        with open(os.path.join(ROOT, "boot", f"vmlinuz-{kernel}"), "w", encoding="utf-8") as f:
+            f.write("synthetic realtime kernel\n")
+    else:
+        fail("unexpected apt-get", 97)
     save(db)
 elif name == "systemd-creds":
     if args[:1] == ["has-tpm2"]:
@@ -387,6 +427,31 @@ elif name == "systemd-creds":
     fd = os.open(args[4], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
     os.write(fd, b"FAKE-SEALED " + hashlib.sha256(data).hexdigest().encode() + b"\n")
     os.close(fd)
+elif name == "nproc":
+    if args != ["--all"]:
+        fail("unexpected nproc", 97)
+    print(load()["nproc"])
+elif name == "uname":
+    if args != ["-r"]:
+        fail("unexpected uname", 97)
+    print(load()["uname"])
+elif name == "update-grub":
+    if args:
+        fail("unexpected update-grub", 97)
+    sys.exit(int(os.environ.get("FAKE_UPDATE_GRUB_RC", "0")))
+elif name == "grub-editenv":
+    if args != ["list"]:
+        fail("unexpected grub-editenv", 97)
+    for key, value in load()["grubenv"].items():
+        print(f"{key}={value}")
+elif name == "grub-set-default":
+    if len(args) != 1:
+        fail("unexpected grub-set-default", 97)
+    if not os.environ.get("FAKE_GRUB_SET_IGNORED"):
+        db = load()
+        db["grubenv"].pop("prev_saved_entry", None)
+        db["grubenv"]["saved_entry"] = args[0]
+        save(db)
 elif name == "visudo":
     if args[:1] != ["-cf"] or REAL_VISUDO is None:
         fail("unexpected visudo call, or no visudo on this machine", 127)
@@ -474,7 +539,8 @@ else:
 
 FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
               "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
-              "chrt", "taskset", "sudo", "find", "chown", "systemd-tmpfiles")
+              "chrt", "taskset", "sudo", "find", "chown", "systemd-tmpfiles", "nproc", "uname", "update-grub",
+              "grub-editenv", "grub-set-default")
 
 
 def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
@@ -582,6 +648,9 @@ class World(unittest.TestCase):
         kernel_trees(r, applied=False)
         # The i915 driver polls a box's display outputs every 10 s by default.
         write(r / POLL, "Y\n", 0o600)
+        # Ubuntu's generic kernel and grub's settings as the installer leaves them.
+        write(r / "boot/vmlinuz-7.0.0-1-generic", "synthetic generic kernel\n", 0o600)
+        write(r / GRUB.lstrip("/"), GRUB_BEFORE, 0o644)
         units = {
             **{u: {"LoadState": "loaded", "UnitFileState": "disabled", "ActiveState": "inactive", "User": ADMIN,
                    "DropInPaths": f"/etc/systemd/system/{u}.d/10-user.conf"} for u in STACK},
@@ -601,6 +670,7 @@ class World(unittest.TestCase):
         units["iem-dante.service"]["UnitFileState"] = "enabled"
         self.save_db({
             "uid": "0", "user": ADMIN, "next_id": 990, "ntp": "yes", "owners": owners,
+            "nproc": 4, "uname": "7.0.0-1-generic", "grubenv": {}, "realtime_kernel": REALTIME,
             "passwd": {ADMIN: f"{ADMIN}:x:1000:1000::/home/{ADMIN}:/bin/bash", "root": "root:x:0:0::/root:/bin/bash"},
             "group": {ADMIN: f"{ADMIN}:x:1000:", "systemd-journal": "systemd-journal:x:999:"},
             "units": units,
@@ -752,8 +822,14 @@ class ProvisionRootTests(World):
             ["install", "-d", "-m", "2755", "-o", "root", "-g", "systemd-journal", "--", "/var/log/journal"],
             ["systemctl", "restart", "systemd-journald.service"],
             ["apt-get", "purge", "-y", "rsyslog"],
+            ["apt-get", "install", "-y", "--no-install-recommends", "linux-image-realtime"],
+            [*tmp_install, GRUB],
+            ["update-grub"],
+            ["grub-set-default", RT_ENTRY],
+            [*tmp_install, WORKQUEUE_CONF],
             [*tmp_install, "/etc/apt/apt.conf.d/20auto-upgrades"],
-            ["apt-mark", "hold", "linux-generic", "linux-image-generic", "linux-headers-generic"],
+            ["apt-mark", "hold", "linux-generic", "linux-image-generic", "linux-headers-generic",
+             "linux-image-realtime"],
             ["systemctl", "mask", "unattended-upgrades.service", "apt-daily.timer", "apt-daily-upgrade.timer"],
             ["systemctl", "mask", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
             ["fallocate", "-l", "8G", "--", "/swapfile"],
@@ -815,9 +891,10 @@ class ProvisionRootTests(World):
         self.assertEqual(db["group"]["iemmixer"], f"iemmixer:x:990:{ADMIN}")
         self.assertEqual(db["ntp"], "no")
         self.assertNotIn("rsyslog", db["packages"])
-        for package in ("linux-generic", "linux-image-generic", "linux-headers-generic"):
+        for package in ("linux-generic", "linux-image-generic", "linux-headers-generic", "linux-image-realtime"):
             self.assertEqual(db["packages"][package], "hold ok installed")
-        self.assertEqual(db["packages"]["linux-image-7.0.0-1-generic"], "install ok installed")
+        for package in ("linux-image-7.0.0-1-generic", f"linux-image-{REALTIME}"):
+            self.assertEqual(db["packages"][package], "install ok installed")
         u = db["units"]
         self.assertEqual((u["dantesync.service"]["UnitFileState"], u["dantesync.service"]["ActiveState"]),
                          ("enabled", "active"))
@@ -957,6 +1034,13 @@ class ProvisionRootTests(World):
             db["uid"] = "1000"
             self.save_db(db)
 
+        def cpus(n: int):
+            def apply() -> None:
+                db = self.db()
+                db["nproc"] = n
+                self.save_db(db)
+            return apply
+
         cases = [
             (not_root, "not root"),
             (no_dantesync, "dantesync is not installed"),
@@ -966,6 +1050,8 @@ class ProvisionRootTests(World):
             (lambda: self.set_unit("phc2sys.service", ActiveState="active"), "phc2sys.service is enabled or running"),
             (lambda: self.set_unit("iem-engine.service", ActiveState="active"), "iem-engine.service is active"),
             (lambda: self.set_unit("iem-dante.service", ActiveState="activating"), "iem-dante.service is activating"),
+            (cpus(2), "the box has fewer than 4 CPUs"),
+            (cpus(33), "the box has more than 32 CPUs"),
         ]
         saved = self.snapshot()
         for change, want in cases:
@@ -1102,6 +1188,122 @@ class ProvisionRootTests(World):
         for out in (r.stdout + r.stderr, r2.stdout + r2.stderr):
             for value in (NTP, ADMIN, IFACE):
                 self.assertNotIn(value, out)
+
+
+class RealtimeTests(World):
+    """The realtime step (#72 phase F): measured on the box, the PREEMPT_RT
+    kernel with CPUs 2-3 isolated removed every engine overrun; provision
+    makes it the boot state a reboot keeps."""
+
+    def grub(self) -> str:
+        return (self.root / GRUB.lstrip("/")).read_text(encoding="utf-8")
+
+    def workqueue(self) -> str:
+        return (self.root / WORKQUEUE_CONF.lstrip("/")).read_text(encoding="utf-8")
+
+    def test_the_first_run_makes_the_realtime_kernel_and_the_isolated_cores_the_boot_state(self) -> None:
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["realtime"], "changed")
+        self.assertEqual(r.stdout.splitlines().count(AFTER_REBOOT), 1)
+        writes = self.writes()
+        at = writes.index([*TMP_INSTALL, GRUB])
+        self.assertEqual(writes[at - 1:at + 4], [
+            ["apt-get", "install", "-y", "--no-install-recommends", "linux-image-realtime"],
+            [*TMP_INSTALL, GRUB],
+            ["update-grub"],
+            ["grub-set-default", RT_ENTRY],
+            [*TMP_INSTALL, WORKQUEUE_CONF],
+        ])
+        self.assertEqual([c[0] for c in writes].count("update-grub"), 1)
+        # grub's two keys set, every other line as it was; the file 0644.
+        self.assertEqual(self.grub(), GRUB_AFTER)
+        self.assertEqual((self.root / GRUB.lstrip("/")).stat().st_mode & 0o777, 0o644)
+        self.assertEqual([line for line in self.workqueue().splitlines(keepends=True) if not line.startswith("#")],
+                         [WORKQUEUE_LINE])
+        self.assertEqual((self.root / WORKQUEUE_CONF.lstrip("/")).stat().st_mode & 0o777, 0o644)
+        db = self.db()
+        self.assertEqual(db["grubenv"], {"saved_entry": RT_ENTRY})
+        # Installed, and held by the apt step of the same run.
+        self.assertEqual(db["packages"]["linux-image-realtime"], "hold ok installed")
+        self.assertTrue((self.root / "boot" / f"vmlinuz-{REALTIME}").is_file())
+        # Nothing rebooted.
+        self.assertFalse([c for c in writes if "reboot" in c or c[0] in ("reboot", "shutdown")])
+        # A second run changes nothing; the box still runs the generic kernel.
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["realtime"], "unchanged")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(r.stdout.splitlines().count(AFTER_REBOOT), 1)
+        # Once the box booted it, the line is gone.
+        self.save_db({**self.db(), "uname": REALTIME})
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["realtime"], "unchanged")
+        self.assertNotIn(AFTER_REBOOT, r.stdout)
+
+    def test_the_isolated_cores_are_the_box_s_last_two(self) -> None:
+        self.save_db({**self.db(), "nproc": 8})
+        self.provisioned()
+        self.assertIn('\nGRUB_CMDLINE_LINUX_DEFAULT="isolcpus=domain,managed_irq,6-7 nohz_full=6-7 rcu_nocbs=6-7 '
+                      'irqaffinity=0-5"\n', self.grub())
+        self.assertTrue(self.workqueue().endswith("\nw /sys/devices/virtual/workqueue/cpumask - - - - 3f\n"))
+        # verify reads the same count and agrees.
+        self.deploy_units()
+        r = self.verify()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.verify_line(r)["realtime"], 1)
+
+    def test_an_installed_package_is_kept_and_the_newest_realtime_kernel_is_saved(self) -> None:
+        # 7.0.0-9 sorts after 7.0.0-38 as text, before it as a version.
+        older = "7.0.0-9-realtime"
+        db = self.db()
+        for kernel in (older, REALTIME):
+            db["packages"][f"linux-image-{kernel}"] = "install ok installed"
+            write(self.root / "boot" / f"vmlinuz-{kernel}", "synthetic realtime kernel\n", 0o600)
+        db["packages"]["linux-image-realtime"] = "install ok installed"
+        db["grubenv"] = {"next_entry": "", "saved_entry": f"Advanced options for Ubuntu>Ubuntu, with Linux {older}"}
+        self.save_db(db)
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["realtime"], "changed")
+        self.assertFalse([c for c in self.writes() if c[:2] == ["apt-get", "install"]])
+        self.assertEqual([c for c in self.writes() if c[0] == "grub-set-default"], [["grub-set-default", RT_ENTRY]])
+        self.assertEqual(self.db()["grubenv"], {"next_entry": "", "saved_entry": RT_ENTRY})
+
+    def test_a_saved_entry_changed_since_is_set_again_and_nothing_else_is_written(self) -> None:
+        self.provisioned()
+        db = self.db()
+        db["grubenv"]["saved_entry"] = "0"
+        self.save_db(db)
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["realtime"], "changed")
+        self.assertEqual(self.writes(), [["grub-set-default", RT_ENTRY]])
+
+    def test_grub_s_two_keys_are_set_once_and_every_other_line_is_kept(self) -> None:
+        write(self.root / GRUB.lstrip("/"), "# a comment naming GRUB_DEFAULT=2\n"
+              "GRUB_TIMEOUT=5\n"
+              '  GRUB_CMDLINE_LINUX_DEFAULT="quiet"\n'
+              'GRUB_CMDLINE_LINUX="console=ttyS0"\n'
+              'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT splash"\n'
+              "#GRUB_DEFAULT=saved\n", 0o644)
+        self.provisioned()
+        self.assertEqual(self.grub(), "# a comment naming GRUB_DEFAULT=2\n"
+                         "GRUB_TIMEOUT=5\n"
+                         f'GRUB_CMDLINE_LINUX_DEFAULT="{RT_CMDLINE}"\n'
+                         'GRUB_CMDLINE_LINUX="console=ttyS0"\n'
+                         "#GRUB_DEFAULT=saved\n"
+                         "GRUB_DEFAULT=saved\n")
+        self.deploy_units()
+        self.assertEqual(self.verify_line(self.verify())["realtime"], 1)
+
+    def test_a_failed_update_grub_or_a_saved_entry_that_does_not_take_fails_the_run(self) -> None:
+        r = self.provision(FAKE_UPDATE_GRUB_RC="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("update-grub failed (exit 1)", r.stderr)
+        self.assertIsNone(self.steps(r).get("realtime"))
+        r = self.provision(FAKE_GRUB_SET_IGNORED="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("grub's saved entry is not the realtime kernel after grub-set-default", r.stderr)
+        self.assertIsNone(self.steps(r).get("realtime"))
 
 
 class SudoersTests(World):
@@ -1317,7 +1519,7 @@ class VerifyTests(World):
         r = self.verify(FAKE_TPM2_RC="0")
         self.assertEqual(r.returncode, 0, r.stderr)
         line = self.verify_line(r)
-        self.assertEqual(line, {"pass": 1, **{check: 1 for check in CHECKS}, "tpm2": 1})
+        self.assertEqual(line, {"pass": 1, **{check: 1 for check in CHECKS}, "tpm2": 1, "realtime_running": 0})
         self.assertEqual(r.stderr, "")
         # Read only: no call it made changes anything.
         self.assertEqual(self.writes(), [])
@@ -1370,6 +1572,9 @@ class VerifyTests(World):
             "napi": (lambda: write(self.root / "proc/irq" / IRQS[0] / "smp_affinity_list", "0-3\n"),
                      "an interrupt of the Dante interface is not on core 0 alone"),
             "display": (lambda: write(self.root / POLL, "Y\n"), "display output polling is on"),
+            "realtime": (lambda: write(self.root / GRUB.lstrip("/"),
+                                       GRUB_AFTER.replace(RT_CMDLINE, RT_CMDLINE + " quiet"), 0o644),
+                         "/etc/default/grub does not boot the saved entry with the engine's CPUs isolated"),
         }
         self.assertEqual(sorted(cases), sorted(CHECKS))
         for check, (change, reason) in cases.items():
@@ -1379,7 +1584,7 @@ class VerifyTests(World):
                 r = self.verify()
                 self.assertEqual(r.returncode, 1, r.stdout)
                 line = self.verify_line(r)
-                self.assertEqual({k: v for k, v in line.items() if v == 0 and k != "tpm2"},
+                self.assertEqual({k: v for k, v in line.items() if v == 0 and k not in INFO},
                                  {"pass": 0, check: 0})
                 self.assertEqual(r.stderr.splitlines(), [f"verify_box: {check}: {reason}"])
 
@@ -1391,7 +1596,40 @@ class VerifyTests(World):
         def unit(name: str, **props: str):
             return lambda: self.set_unit(name, **props)
 
+        def db_update(key: str, changes: dict):
+            def apply() -> None:
+                db = self.db()
+                for name, value in changes.items():
+                    if value is None:
+                        db[key].pop(name, None)
+                    else:
+                        db[key][name] = value
+                self.save_db(db)
+            return apply
+
+        def cpus(n: int):
+            return lambda: self.save_db({**self.db(), "nproc": n})
+
+        grub, workqueue = self.root / GRUB.lstrip("/"), self.root / WORKQUEUE_CONF.lstrip("/")
+        grub_reason = "/etc/default/grub does not boot the saved entry with the engine's CPUs isolated"
+        saved_reason = "grub's saved entry is not the newest realtime kernel"
+        workqueue_reason = f"no {WORKQUEUE_CONF} keeping kernel work off the isolated CPUs"
         cases = [
+            ("realtime", db_update("packages", {"linux-image-realtime": None}), "linux-image-realtime is not installed"),
+            ("apt", db_update("packages", {"linux-image-realtime": "install ok installed"}),
+             "an installed kernel package is not held"),
+            ("realtime", lambda: write(grub, GRUB_AFTER + "GRUB_DEFAULT=0\n", 0o644), grub_reason),
+            ("realtime", lambda: write(grub, GRUB_AFTER.replace("GRUB_DEFAULT=saved\n", ""), 0o644), grub_reason),
+            ("realtime", cpus(8), grub_reason),
+            ("realtime", cpus(2), "the box has fewer than 4 or more than 32 CPUs"),
+            ("realtime", lambda: (self.root / "boot" / f"vmlinuz-{REALTIME}").unlink(), "no realtime kernel in /boot"),
+            ("realtime", db_update("grubenv", {"saved_entry": "0"}), saved_reason),
+            ("realtime", db_update("grubenv", {"saved_entry": None}), saved_reason),
+            # A newer realtime kernel than the saved one: the next provision run saves it.
+            ("realtime", lambda: write(self.root / "boot/vmlinuz-7.0.0-40-realtime", "synthetic\n", 0o600),
+             saved_reason),
+            ("realtime", lambda: workqueue.unlink(), workqueue_reason),
+            ("realtime", lambda: write(workqueue, WORKQUEUE_LINE.replace(" 3\n", " f\n")), workqueue_reason),
             ("units", lambda: (self.root / "etc/systemd/system/iem-alarm@.service").unlink(),
              "iem-alarm@.service is not installed"),
             ("units", unit("iem-dante.service", LoadState="not-found"), "iem-dante.service is not installed"),
@@ -1454,6 +1692,30 @@ class VerifyTests(World):
         self.assertEqual(self.verify_line(r)["display"], 1)
         self.assertNotIn("sudo -n cat /" + POLL, [" ".join(c["argv"]) for c in self.calls()])
 
+    def test_realtime_running_is_1_only_on_a_realtime_kernel_booted_with_the_isolated_cores(self) -> None:
+        # Information beside the checks: provision sets the boot state, a
+        # reboot runs it; verify passes either way.
+        self.good_box()
+        flag, cmdline = self.root / "sys/kernel/realtime", self.root / "proc/cmdline"
+        booted = f"BOOT_IMAGE=/boot/vmlinuz-{REALTIME} root=UUID=0000 ro {RT_CMDLINE}\n"
+        cases = [
+            ("1\n", booted, 1),
+            ("0\n", booted, 0),
+            ("1\n", "BOOT_IMAGE=/boot/vmlinuz-7.0.0-1-generic root=UUID=0000 ro quiet splash\n", 0),
+            ("1\n", booted.replace("nohz_full=2-3", "nohz_full=3"), 0),
+            ("1\n", booted.replace("irqaffinity=0-1", "irqaffinity=0-11"), 0),
+        ]
+        for realtime, text, want in cases:
+            with self.subTest(realtime=realtime, cmdline=text):
+                write(flag, realtime)
+                write(cmdline, text)
+                r = self.verify()
+                self.assertEqual(r.returncode, 0, r.stderr)
+                line = self.verify_line(r)
+                self.assertEqual((line["pass"], line["realtime"], line["realtime_running"]), (1, 1, want))
+        flag.unlink()
+        self.assertEqual(self.verify_line(self.verify())["realtime_running"], 0)
+
     def test_before_the_first_phase_d_deploy_units_fails(self) -> None:
         # Phase C's units without their drop-ins name no user: verify says so
         # until deploy.sh installs the service user's units.
@@ -1461,7 +1723,7 @@ class VerifyTests(World):
         r = self.verify()
         self.assertEqual(r.returncode, 1)
         line = self.verify_line(r)
-        self.assertEqual({k for k, v in line.items() if v == 0 and k != "tpm2"}, {"pass", "units"})
+        self.assertEqual({k for k, v in line.items() if v == 0 and k not in INFO}, {"pass", "units"})
         self.assertIn("verify_box: units: iem-engine.service does not run as iemmixer", r.stderr)
 
     def test_every_sudo_line_verify_sends_is_in_the_template(self) -> None:
@@ -1483,7 +1745,7 @@ class VerifyTests(World):
             self.assertNotIn(value, r.stdout + r.stderr)
         line = self.verify_line(r)
         self.assertTrue(all(isinstance(v, int) for v in line.values()), line)
-        self.assertEqual(list(line), ["pass", *CHECKS, "tpm2"])
+        self.assertEqual(list(line), ["pass", *CHECKS, *INFO])
 
 
 def db_set_passwd(case: World, line: str):
