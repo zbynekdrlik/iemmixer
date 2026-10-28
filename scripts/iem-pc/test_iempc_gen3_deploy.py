@@ -20,6 +20,10 @@ sys.path.insert(0, str(HERE))
 import iempc_gen3_deploy as dep  # noqa: E402
 from iempc_test_support import SHA, Base, ip  # noqa: E402
 
+# deploy.sh's closing line, as test_deploy.py pins it against the real script.
+sys.path.insert(1, str(HERE.parent / "gen3"))
+from test_deploy import GATES  # noqa: E402
+
 CARD, SPARE = "Zyxqw-Iem-Card", "Zyxqw-Iem-Card-2x"
 GEN3 = "admin@192.0.2.40"
 CARD_IP = "192.0.2.10"
@@ -43,6 +47,8 @@ open(log, "a").write(json.dumps(seen) + "\n")
 if c.get("flag"):
     open(os.environ["IEMMIXER_EVENT_NOW"], "w").write("now\n")
 print("deploy.sh: slot-b: synthetic build; health healthy")
+for line in c.get("say", []):
+    print(line)
 if c.get("exit"):
     sys.stderr.write("deploy.sh: zyxqw refused at the box\n")
 sys.exit(c.get("exit", 0))
@@ -192,6 +198,24 @@ class DeployTests(DeployBase):
                                                          "deploy_sh": plan}}])
                 self.assert_private(json.dumps(docs) + err)
         self.assertEqual((self.card_calls, self.box_calls, self.deploys(), self.leftovers()), ([], [], [], []))
+
+    def test_deploy_sh_s_closing_line_names_the_box_s_three_gates_last(self) -> None:
+        # deploy.sh's stdout reaches the operator on stderr once it succeeded, its closing line last: the box's
+        # three gates on the build it now runs; stdout keeps the one JSON line.
+        for side in (3, 2):
+            with self.subTest(side=side):
+                self.serves(side)
+                self.control.write_text(json.dumps({"say": [GATES]}), encoding="utf-8")
+                code, docs, err = self.run_deploy()
+                self.assertEqual(code, 0, err)
+                self.assertEqual(err.strip().splitlines()[-1], GATES)
+                self.assertEqual(len(docs), 1)
+                self.assertNotIn("gen3-gate", json.dumps(docs))
+        # A deploy.sh that failed (its own refusals) names no gate: the error quotes its stderr only.
+        self.control.write_text(json.dumps({"say": [GATES], "exit": 1}), encoding="utf-8")
+        code, docs, err = self.run_deploy()
+        self.assertEqual((code, docs), (1, []), err)
+        self.assertNotIn("gen3-gate", err)
 
     def test_a_failed_deploy_fails_the_command_and_removes_the_private_config(self) -> None:
         self.serves(3)

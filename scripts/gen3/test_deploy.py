@@ -55,6 +55,12 @@ MEMBER_PIN = "6284"
 ENABLE = "sudo -n systemctl enable iem-engine iem-server"
 IS_ENABLED = "systemctl is-enabled iem-engine iem-server"
 CARD_NAME = "Zyxqw-Iem-Card"   # the IEM card's usual name (DANTE_IEM_NAME), invented
+# The closing line of a deploy that started the engine (phase H Task 8): the box's three gates on the build
+# it now runs, in order, with the restart budget's waits; fixed words, no host or value.
+GATES = ("deploy.sh: next, the box's three gates on this build, in this order: iempc gen3-gate soak (no engine "
+         "restart), then iempc gen3-gate hil at least ten minutes after this deploy's start, then iempc gen3-gate "
+         "live at least ten minutes after the hil gate's start (the engine's restart budget: the unit starts it "
+         "at most three times in ten minutes, the hil gate's job takes three)")
 
 
 def holds_pin(text: str | bytes, pin: str) -> bool:
@@ -778,7 +784,9 @@ class DeployTests(unittest.TestCase):
         # Without --pins no call carries anything on stdin.
         self.assertEqual(set(self.stdins()), {""})
         self.assertFalse((self.box / "pins.log").exists())
-        last = r.stdout.strip().splitlines()[-1]
+        lines = r.stdout.strip().splitlines()
+        self.assertEqual(lines[-1], GATES)
+        last = lines[-2]
         self.assertIn("slot-a", last)
         self.assertIn(f"iem-engine 2.0.0-dev.45+{self.sha}", last)
         self.assertIn(f"iem-dante-dev 2.0.0-dev.45 {self.sha}", last)
@@ -1158,6 +1166,8 @@ class DeployTests(unittest.TestCase):
         self.assertTrue(self.exists("/etc/systemd/system/iem-engine.service"))
         self.assertTrue(self.exists("/opt/iemmixer/bin/iem-server"))
         self.assertIn("iem-dante started", r.stdout.strip().splitlines()[-1])
+        # No engine runs: no gate to name.
+        self.assertNotIn("gen3-gate", r.stdout)
 
     # --pins: through systemd-run, only on stdin, never printed.
 
@@ -1389,7 +1399,28 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.health_reads(), 3)
         self.assertEqual(self.sequence(), self.expected("a", health=3))
-        self.assertIn('{"health": {"state": "healthy", "reasons": [], "read": 3}}', r.stdout.strip().splitlines()[-1])
+        self.assertIn('{"health": {"state": "healthy", "reasons": [], "read": 3}}', r.stdout.strip().splitlines()[-2])
+
+    def test_a_deploy_that_starts_the_engine_closes_with_the_box_s_three_gates(self) -> None:
+        # A deploy (and a way back) that started the engine: once, the closing line, no host or value.
+        first_sha = self.sha
+        r = self.deployed()
+        self.assertEqual(r.stdout.strip().splitlines()[-1], GATES)
+        self.assertEqual(r.stdout.count("gen3-gate"), 3)
+        for value in (HOST, self.sha, "eth9", str(self.tmp)):
+            self.assertNotIn(value, GATES)
+        self.assertLess(GATES.index("gen3-gate soak"), GATES.index("gen3-gate hil"))
+        self.assertLess(GATES.index("gen3-gate hil"), GATES.index("gen3-gate live"))
+        sha2, second = self.next_build("the second build")
+        self.deployed(args=self.full_args(sha2, second))
+        self.git("checkout", "-q", "--detach", first_sha)
+        r = self.deployed(args=self.back_args(first_sha))
+        self.assertEqual(r.stdout.strip().splitlines()[-1], GATES)
+        # A deploy that failed at its very end (never healthy) names none.
+        r = self.deploy(FAKE_HEALTH="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("the stack is not healthy", r.stderr)
+        self.assertNotIn("gen3-gate", r.stdout + r.stderr)
 
     def test_a_stack_never_healthy_fails_after_the_wait_with_its_last_line(self) -> None:
         r = self.deploy(FAKE_HEALTH="1")
@@ -1574,6 +1605,8 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
         self.assertIn("iem-engine and iem-server enabled at boot (3.x serves the band; the tunnel unit left as it is)",
                       r.stdout)
+        # Then the box's three gates on this build, the closing line.
+        self.assertEqual(r.stdout.strip().splitlines()[-1], GATES)
         self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"), self.config.read_bytes())
         # The card's name is compared on the dev box: on no ssh or scp command line, never printed.
         self.assertNotIn(CARD_NAME, json.dumps(self.calls()))

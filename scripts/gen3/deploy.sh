@@ -712,3 +712,12 @@ done
 [ "$health_exit" -eq 0 ] ||
   die "the stack is not healthy after $tries tries a second apart (iem-dante-dev health exit $health_exit; journalctl -u iem-engine -u iem-server -u iem-dante on the box): ${health:-no line}"
 echo "deploy.sh: slot-$target: $engine_version; $device_version; sums as SHA256SUMS; ${started[*]} started; health $health"
+# The box's three gates on the build the engine now runs (phase H Task 8,
+# #72; .claude/rules/gen3-new-box.md section 7): the soak first (no engine
+# restart), then the HIL gate and the live gate, each at least ten minutes
+# after the engine start before it, since the unit starts the engine at most
+# three times in ten minutes and the HIL gate's job takes three (its begin,
+# its panic's restart, its end). Fixed words: no host, no value.
+if [ "$start" = engine ]; then
+  echo "deploy.sh: next, the box's three gates on this build, in this order: iempc gen3-gate soak (no engine restart), then iempc gen3-gate hil at least ten minutes after this deploy's start, then iempc gen3-gate live at least ten minutes after the hil gate's start (the engine's restart budget: the unit starts it at most three times in ten minutes, the hil gate's job takes three)"
+fi
