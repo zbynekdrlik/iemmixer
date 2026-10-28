@@ -869,9 +869,10 @@ class MixTests(MixBase):
         for want in (REMOVE, *MINT, *COPY):
             self.assertIn(("iemmixer", want[len(AS_SERVICE) + 1:]), seen)
         self.assertIn(("root", stop[len("sudo -n "):]), seen)
-        # One mint line for every person of the test roster.
-        member = [c for _r, c in template_lines() if "--sub {member}" in c]
+        # One 900 s mint line for every person of the test roster (gen3-gate live has its own 3600 s one).
+        member = [c for _r, c in template_lines() if "--sub {member} --seconds 900 " in c]
         self.assertEqual(len(member), 1)
+        self.assertEqual(len([c for _r, c in template_lines() if "--sub {member}" in c]), 2)
         self.assertIn(MINT[1][len(AS_SERVICE) + 1:], expand(member[0]))
 
     def test_a_job_begin_refusal_leaves_no_token_and_no_source(self) -> None:

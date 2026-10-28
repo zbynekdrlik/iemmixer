@@ -53,9 +53,14 @@ UNIT_LINE = ("/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/i
 # `starts`, `nrestarts`, `phases` (the statuses still to come after a test
 # signal), `loopback`, `since` (device status reads since the last restart).
 # loop.json (written by the FakeDante beside) says whether our RX 94 hears our
-# own TX 94. FAKE_* change one answer each.
+# own TX 94. FAKE_* change one answer each. For `gen3-gate live`
+# (test_iempc_gen3_live): the service user's mint folder (root/var/lib/
+# iemmixer/mint: the mint writes a new owner-only file, never over one), the
+# live burst (each one a line of bursts.log), the server's journal
+# (journal.log), a push subscription left behind (the file push-left) and
+# an engine that is not healthy in the HIL job (FAKE_UNHEALTHY_IN_JOB).
 FAKE_SSH = r'''
-import json, os, sys
+import json, os, sys, time
 box = os.environ["FAKE_GEN3"]
 args = sys.argv[1:]
 data = sys.stdin.read() if not sys.stdin.isatty() else ""
@@ -163,6 +168,12 @@ if words[:2] == ["sudo", "-n"] and words[2:3] != ["-u"]:
         if st["hil"]:
             st["nrestarts"] += int(os.environ.get("FAKE_CRASHES", "0"))
         done()
+    if rest == ["journalctl", "-u", "iem-server.service", "-o", "cat", "-n", "20000", "--no-pager", "-q"]:
+        if os.environ.get("FAKE_JOURNAL_FAILS"):
+            fail("Failed to open the journal: Permission denied")
+        journal = os.path.join(box, "journal.log")
+        sys.stdout.write(open(journal).read() if os.path.exists(journal) else "")
+        done()
     fail("unexpected sudo command: " + line, 97)
 if words[:4] == SVC:
     rest = words[4:]
@@ -188,11 +199,43 @@ if words[:4] == SVC:
         print(json.dumps({"stop_test_signal": {"rev": 4}}))
         done()
     if rest == ["env", f"IEMMIXER_CONFIG={SITE}", "/opt/iemmixer/bin/iem-server", "notify", "--count", "alarm"]:
-        print(os.environ.get("FAKE_ALARMS", "1"))
+        if os.environ.get("FAKE_ALARMS_FAIL"):
+            fail("iem-server notify: the push store cannot be read")
+        count = os.environ.get("FAKE_ALARMS", "1")
+        left = os.path.exists(os.path.join(box, "push-left"))
+        print(str(int(count) + 1) if left and count.isdigit() else count)
+        done()
+    if rest == [ENGINE, "supervise", "test-signal", "mic1", "-20", "30", "--listen"]:
+        with open(os.path.join(box, "bursts.log"), "a") as f:
+            f.write(f"{time.time()}\n")
+        if not st["hil"] or os.environ.get("FAKE_BURST_FAILS"):
+            fail("iem-engine supervise: the engine refused it: forbidden")
+        st["signals"] += 1
+        print(json.dumps({"test_signal": {"rev": 3, "outputs": 2, "dbfs": -20.0, "seconds": 30, "listen": True}}))
+        done()
+    if rest[:2] == ["/opt/iemmixer/bin/iem-soakclient", "token"]:
+        out = rest[rest.index("--out") + 1]
+        name = os.path.basename(out).split(".")[0]
+        if os.environ.get("FAKE_MINT_FAILS") == name:
+            fail("secret-unreadable")
+        try:
+            fd = os.open(at(out), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            fail("cannot create the token file: File exists")
+        os.write(fd, (json.loads(os.environ["FAKE_TOKENS"])[name] + "\n").encode())
+        os.close(fd)
+        sys.stderr.write("token-written\n")
+        done()
+    if rest[:1] == ["cat"] and len(rest) == 2 and rest[1].startswith("/var/lib/iemmixer/mint/"):
+        cat(rest[1])
+    if rest[:2] == ["rm", "-f"] and all(p.startswith("/var/lib/iemmixer/mint/") for p in rest[2:]):
+        for path in rest[2:]:
+            if os.path.exists(at(path)):
+                os.remove(at(path))
         done()
     fail("unexpected command as the service user: " + " ".join(rest), 97)
 if line == f"{DANTE} health":
-    if os.environ.get("FAKE_UNHEALTHY"):
+    if os.environ.get("FAKE_UNHEALTHY") or (os.environ.get("FAKE_UNHEALTHY_IN_JOB") and st["hil"]):
         print(json.dumps({"health": {"state": "degraded", "reasons": ["holdover"]}}))
         done(1)
     print(json.dumps({"health": {"state": "healthy", "reasons": []}}))
