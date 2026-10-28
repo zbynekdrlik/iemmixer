@@ -59,7 +59,7 @@ CARD_NAME = "Zyxqw-Iem-Card"   # the IEM card's usual name (DANTE_IEM_NAME), inv
 # it now runs, in order, with the restart budget's waits; fixed words, no host or value.
 GATES = ("deploy.sh: next, the box's three gates on this build, in this order: iempc gen3-gate soak (no engine "
          "restart), then iempc gen3-gate hil at least ten minutes after this deploy's start, then iempc gen3-gate "
-         "live at least ten minutes after the hil gate's start (the engine's restart budget: the unit starts it "
+         "live at least ten minutes after the hil gate ended (the engine's restart budget: the unit starts it "
          "at most three times in ten minutes, the hil gate's job takes three)")
 
 
