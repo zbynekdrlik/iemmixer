@@ -114,6 +114,7 @@ name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 DB = os.path.join(WORLD, "db.json")
 READS = {"id", "getent", "stat", "dpkg-query", "visudo", "sudo", "find", "nproc", "uname"}
+READ_ARGS = {"ethtool": "--show-eee"}
 UNIT_DEFAULT = {"LoadState": "not-found", "UnitFileState": "", "ActiveState": "inactive", "User": "",
                 "DropInPaths": ""}
 REAL_VISUDO = next((p for p in ("/usr/sbin/visudo", "/usr/bin/visudo", "/sbin/visudo") if os.access(p, os.X_OK)), None)
@@ -138,6 +139,8 @@ def is_write():
         return args[:1] == ["encrypt"]
     if name == "grub-editenv":
         return args != ["list"]
+    if name in READ_ARGS:
+        return args[:1] != [READ_ARGS[name]]
     return True
 
 
@@ -532,6 +535,24 @@ elif name == "systemd-tmpfiles":
                 if len(words) == 7 and words[0] == "w" and os.path.exists(ROOT + words[1]):
                     with open(ROOT + words[1], "w", encoding="utf-8") as out:
                         out.write(words[6] + "\n")
+elif name == "ethtool":
+    # EEE only: its state is FAKE_ROOT/fake-eee/<interface> (no such file: the
+    # NIC has no EEE, as ethtool says "not supported").
+    assert args[0] in ("--show-eee", "--set-eee"), args
+    state_file = os.path.join(ROOT, "fake-eee", args[1])
+    if args[0] == "--set-eee":
+        assert args[2:] == ["eee", "off"], args
+        if os.environ.get("FAKE_ETHTOOL_RC"):
+            fail("netlink error: Operation not supported", int(os.environ["FAKE_ETHTOOL_RC"]))
+        if not os.environ.get("FAKE_EEE_IGNORED"):
+            with open(state_file, "w", encoding="utf-8") as f:
+                f.write("disabled\n")
+    else:
+        state = open(state_file, encoding="utf-8").read().strip() if os.path.exists(state_file) else "not supported"
+        print(f"EEE settings for {args[1]}:")
+        print(f"\tEEE status: {state}")
+        if state != "not supported":
+            print("\tTx LPI: disabled")
 elif name == "taskset":
     assert args[:2] == ["-p", "-c"], args
     cores, pid = args[2], args[3]
@@ -580,7 +601,7 @@ else:
 FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
               "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
               "chrt", "taskset", "sudo", "find", "chown", "systemd-tmpfiles", "nproc", "uname", "update-grub",
-              "grub-editenv", "grub-set-default")
+              "grub-editenv", "grub-set-default", "ethtool")
 
 
 def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
@@ -613,6 +634,9 @@ def kernel_trees(root: Path, applied: bool) -> None:
     write(root / "proc/interrupts", INTERRUPTS)
     for irq in (*IRQS, *OTHER_IRQS):
         write(root / "proc/irq" / irq / "smp_affinity_list", "0\n" if applied and irq in IRQS else "0-3\n")
+    # EEE as the NICs come up: on, not in use (the switch does not take it).
+    write(root / "fake-eee" / IFACE, "disabled\n" if applied else "enabled - inactive\n")
+    write(root / "fake-eee" / OTHER, "enabled - inactive\n")
 
 
 class World(unittest.TestCase):
@@ -845,6 +869,7 @@ class ProvisionRootTests(World):
         napi_calls = []
         for pid in sorted(NAPI_THREADS):
             napi_calls += [["chrt", "-f", "-p", "60", pid], ["taskset", "-p", "-c", "0", pid]]
+        napi_calls.append(["ethtool", "--set-eee", IFACE, "eee", "off"])
         self.assertEqual(self.writes(), [
             ["groupadd", "--system", "iemmixer"],
             ["useradd", "--system", "--gid", "iemmixer", "--no-create-home", "--home-dir", "/nonexistent",
@@ -1498,7 +1523,7 @@ class NapiTests(unittest.TestCase):
         (self.world / "db.json").write_text("{}", encoding="utf-8")
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name in ("chrt", "taskset"):
+        for name in ("chrt", "taskset", "ethtool"):
             p = bin_dir / name
             p.write_text(f"#!{sys.executable}\n{FAKE}", encoding="utf-8")
             p.chmod(0o755)
@@ -1522,7 +1547,7 @@ class NapiTests(unittest.TestCase):
     def test_it_sets_every_value_and_reads_it_back(self) -> None:
         r = self.napi()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("2 NAPI threads SCHED_FIFO 60 on core 0; 2 interrupts on core 0", r.stdout)
+        self.assertIn("2 NAPI threads SCHED_FIFO 60 on core 0; 2 interrupts on core 0; EEE disabled", r.stdout)
         self.assertEqual(self.read(f"sys/class/net/{IFACE}/threaded"), "1")
         for pid in NAPI_THREADS:
             fields = self.read(f"proc/{pid}/stat").rsplit(") ", 1)[1].split()
@@ -1533,7 +1558,10 @@ class NapiTests(unittest.TestCase):
         expected = []
         for pid in sorted(NAPI_THREADS):
             expected += [["chrt", "-f", "-p", "60", pid], ["taskset", "-p", "-c", "0", pid]]
+        show = ["ethtool", "--show-eee", IFACE]
+        expected += [show, ["ethtool", "--set-eee", IFACE, "eee", "off"], show, show]
         self.assertEqual(self.calls(), expected)
+        self.assertEqual(self.read(f"fake-eee/{IFACE}"), "disabled")
         # The other interface (its name starts with the Dante one's) and
         # every other thread are untouched.
         self.assertEqual(self.read(f"sys/class/net/{OTHER}/threaded"), "0")
@@ -1541,6 +1569,7 @@ class NapiTests(unittest.TestCase):
             self.assertIn("Cpus_allowed_list:\t0-3", self.read(f"proc/{pid}/status"))
         for irq in OTHER_IRQS:
             self.assertEqual(self.read(f"proc/irq/{irq}/smp_affinity_list"), "0-3")
+        self.assertEqual(self.read(f"fake-eee/{OTHER}"), "enabled - inactive")
         self.assertNotIn(IFACE, r.stdout + r.stderr)
 
     def test_check_only_reads_and_names_each_value_that_does_not_hold(self) -> None:
@@ -1552,13 +1581,33 @@ class NapiTests(unittest.TestCase):
             self.assertIn(f"NAPI thread {pid} runs on cores 0-3, not 0", r.stderr)
         for irq in IRQS:
             self.assertIn(f"interrupt {irq} runs on cores 0-3, not 0", r.stderr)
-        self.assertEqual(self.calls(), [])
+        self.assertIn("EEE is 'enabled - inactive' on the Dante interface, not disabled", r.stderr)
+        show = ["ethtool", "--show-eee", IFACE]
+        self.assertEqual(self.calls(), [show], "reads only")
         self.assertEqual(self.read(f"sys/class/net/{IFACE}/threaded"), "0")
         kernel_trees(self.root, applied=True)
         r = self.napi("--check", IFACE)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stderr, "")
-        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.calls(), [show, show], "reads only")
+
+    def test_eee_goes_off_and_a_nic_without_it_is_left_as_it_is(self) -> None:
+        # #72 phase F (Waves SoundGrid's network rules): EEE's low-power idle
+        # wakes the link late. A NIC without EEE needs nothing.
+        (self.root / "fake-eee" / IFACE).unlink()
+        r = self.napi()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("EEE not supported", r.stdout)
+        self.assertNotIn(["ethtool", "--set-eee", IFACE, "eee", "off"], self.calls())
+        # EEE that does not go off, or a refused set, fails the run.
+        write(self.root / "fake-eee" / IFACE, "enabled - active\n")
+        r = self.napi(FAKE_EEE_IGNORED="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("EEE is 'enabled - active' on the Dante interface, not disabled", r.stderr)
+        r = self.napi(FAKE_ETHTOOL_RC="75")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ethtool --set-eee of the Dante interface failed", r.stderr)
+        self.assertNotIn(IFACE, r.stdout + r.stderr)
 
     def test_a_value_that_does_not_take_fails(self) -> None:
         r = self.napi(FAKE_CHRT_IGNORED="1")

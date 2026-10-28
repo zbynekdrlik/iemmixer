@@ -52,7 +52,7 @@
 ### Task 1: The real gap, end to end
 
 - [x] **Step 1:** With the stage on, read every receiver flow from the card (the rack, FOH) and, in a dev-time takeover window or through the HIL loop, from our device: latency and fpp per flow. Record on #72. **Done 2026-10-27:** the IEM card and the stage rack play every flow at 0.25 ms; the card played ours at our advertised 1 ms (fpp 32), then at 0.25 ms (fpp 8) with `tx_latency_ns` (#72).
-- [ ] **Step 2:** The loop through the card for 2.x and 3.x (phase E Task 1's method), now with the receiver's latency inside the number. Record the real gap on #72.
+- [x] **Step 2:** The loop through the card for 2.x and 3.x (phase E Task 1's method), now with the receiver's latency inside the number. Record the real gap on #72. **Done 2026-10-28:** base 153 against 225 (the card plays our flow at 0.25 ms), 5 bursts equal (#72).
 
 ### Task 2: What the rack adds (settings and TX timing)
 
@@ -67,7 +67,7 @@
 
 ### Task 4: The kernel receive path (packet priority)
 
-- [ ] **Step 1:** EEE off on the Dante NIC (`ethtool --set-eee … eee off`), in provision and verify.
+- [x] **Step 1:** EEE off on the Dante NIC (`ethtool --set-eee … eee off`), in provision and verify. **Done 2026-10-28:** `napi-priority` turns it off at every boot (d6cc727); the box reads `EEE status: disabled`, verify passes.
 - [x] **Step 2:** Busy polling on our RX sockets (`SO_BUSY_POLL`, `SO_PREFER_BUSY_POLL`, `napi_defer_hard_irqs` and `gro_flush_timeout` set for it) against today's threaded NAPI; measure the RX lateness and its spread (the judge) each way. **Measured, rejected for now:** on shared cores it trimmed the FOH flows a little and made 3 blocks late (#72).
 - [x] **Step 3:** The NIC's interrupt and NAPI thread on a core of their own (with Task 5's isolation), above our audio threads and dantesync. **Done:** core 0 with the housekeeping, the engine's cores 2–3 isolated; `napi-priority` waits for the interrupt at boot (65a56d2).
 - [x] **Step 4 (only if Steps 2–3 leave the receive path the limit):** early capture with AF_XDP for the audio flows (the Linux analogue of dantesync's pcap and of SoundGrid's RX in the interrupt). **Not needed:** the receive path is not the limit at P 0.375 ms.
@@ -78,10 +78,10 @@
 - [x] **Step 2:** Provision step `rtkernel`: `linux-image-realtime` installed and held, GRUB default to it, generic kept as fallback. Verify `PREEMPT_RT` runs. **Done in the same `realtime` step;** the box boots it by itself (verified after two reboots).
 - [x] **Step 3:** After each reboot: verify, then 30 minutes; block time and overruns recorded on #72. **Done:** generic 90 overruns / 10 min, realtime 12, isolated 0 (#72).
 - [x] **Step 4:** W swept down (64, 48, 40) at the chosen P: 0 late, 0 re-bootstraps per 10 minutes. **Done:** W 48, longest block 175 µs over 2 h.
-- [ ] **Step 5:** The display poll on for 30 minutes with core 3 isolated. If the RT core stays clear, drop provision's `display` step (#72's low-priority item).
+- [x] **Step 5:** The display poll on for 30 minutes with core 3 isolated. If the RT core stays clear, drop provision's `display` step (#72's low-priority item). **Done 2026-10-28:** the engine stays clear (0 overruns), but the poll on core 0 held the NIC (RX 245–637 late packets a flow): the display step stays; next try for the monitor wish, the NIC on an isolated core (#72).
 
 ### Task 6: The new timing, proven
 
 - [x] **Step 1:** The chosen settings into the ops device config (the takeover config inherits them). **Done:** iemmixer-ops PR #19.
 - [x] **Step 2:** Two hours, Live 4's way, stage on: `live_guard.py --seconds 7200`, health every 10 minutes, 0 late, 0 missed, 0 holes, no alarm. **Done 2026-10-28:** 21.6 M blocks, 0/0/0/0, RX 0 late, TX 0 restarts, no holdover (#72).
-- [ ] **Step 3:** Task 1's end-to-end loop again: 3.x against 2.x. Record on #72 and tick phase F. If 3.x is still later, the remaining gap and its cause go on #72 (the NIC first suspect; buying a part is the owner's decision).
+- [x] **Step 3:** Task 1's end-to-end loop again: 3.x against 2.x. Record on #72 and tick phase F. If 3.x is still later, the remaining gap and its cause go on #72 (the NIC first suspect; buying a part is the owner's decision). **Done 2026-10-28:** 269 at F = D against 449 before; 3.x 140 against 2.x 153 on phase E's footing (#72).
