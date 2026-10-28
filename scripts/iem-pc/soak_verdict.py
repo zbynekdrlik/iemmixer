@@ -30,7 +30,9 @@ Counts before the first poll never count: every gate reads last minus first.
 `harness` is CI's e2e step: the checks 9 to 12 with CI's bounds, then at
 least one meter frame (the run against the real server is the one place that
 proves the client reads its Meters; the PC verdict does not judge them); it
-prints the problems and exits 1 when there are any.
+prints the problems and exits 1 when there are any. `box_check` is the Gen 3
+box's soak gate (`iempc gen3-gate soak`): the checks 9 to 12 at the PC's
+bounds (no gap) and the meter frame, with the harness's numbers.
 
 The summary holds numbers and fixed words only (P6): never a member id, a
 host or a SHA. The harness's and the PC job's reason codes are printed only
@@ -324,6 +326,12 @@ def _ci_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[list[
     if h and h["meter_frames"] == 0:
         problems.append("no meter frames")
     return problems, h
+
+
+def box_check(summary: object, min_seconds: float) -> tuple[list[str], dict]:
+    """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the checks 9 to 12 at the PC's
+    bounds (no gap), then a meter frame (the box's real server sends them), and the harness's numbers."""
+    return _ci_check(summary, min_seconds, 0)
 
 
 def harness_problems(summary: object, min_seconds: float, max_gaps: int) -> list[str]:
