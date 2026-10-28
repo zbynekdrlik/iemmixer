@@ -18,6 +18,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import iempc_gen3_deploy as dep  # noqa: E402
+import iempc_gen3_gate as gate  # noqa: E402
 from iempc_test_support import SHA, Base, ip  # noqa: E402
 
 # deploy.sh's closing line, as test_deploy.py pins it against the real script.
@@ -31,9 +32,13 @@ IFACE = "ethz9"
 DEVICE = (HERE.parent.parent / "config" / "test-dante-device.toml").read_text(encoding="utf-8")
 LABELS = {str(n): f"ZYXQW out {n:02d}" for n in range(1, 129)}
 REAL_DEPLOY = dep.DEPLOY   # before any test puts its stand-in there
+NOW = 1_900_000_000.0
 
 # deploy.sh: records what it got, then exits as control.json says (writing
-# the flag first when asked, as "ide event" would meanwhile).
+# the flag first when asked, as "ide event" would meanwhile). It marks its
+# engine start where IEMPC_START_MARK names, as deploy.sh does right before the
+# start is sent: a deploy.sh that succeeded started the engine; a failed one
+# only when control.json says `started`.
 STAND_IN = r'''
 import json, os, stat, sys
 log, control = sys.argv[1], sys.argv[2]
@@ -46,6 +51,8 @@ seen["config_text"] = open(config, encoding="utf-8").read()
 open(log, "a").write(json.dumps(seen) + "\n")
 if c.get("flag"):
     open(os.environ["IEMMIXER_EVENT_NOW"], "w").write("now\n")
+if os.environ.get("IEMPC_START_MARK") and c.get("started", not c.get("exit")):
+    open(os.environ["IEMPC_START_MARK"], "a").write("start\n")
 print("deploy.sh: slot-b: synthetic build; health healthy")
 for line in c.get("say", []):
     print(line)
@@ -265,6 +272,51 @@ class DeployTests(DeployBase):
                 self.assertEqual((code, docs), (1, []), err)
                 self.assertIn(words, err)
                 self.assertEqual((self.card_calls, self.deploys(), self.leftovers()), ([], [], []))
+
+
+class BudgetTests(DeployBase):
+    """The review of PR #87: the engine start a deploy makes counts in the box
+    gates' restart budget (gen3-gate.json), so `iempc gen3-gate hil` right
+    after it is refused, naming the wait."""
+
+    def ledger(self) -> list[float]:
+        return ip.read_json(ip.state_dir() / gate.LEDGER, {}).get("restarts", [])
+
+    def test_a_deploy_that_started_the_engine_counts_one_start_on_either_side(self) -> None:
+        for side in (3, 2):
+            with self.subTest(side=side), mock.patch.object(gate, "wall", lambda: NOW):
+                (ip.STATE_DIR / gate.LEDGER).unlink(missing_ok=True)
+                self.serves(side)
+                code, docs, err = self.run_deploy()
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.ledger(), [NOW])
+                self.assertEqual(self.leftovers(), [])   # the mark is gone too
+        # The gate then refuses its three starts until the deploy's start left the unit's window.
+        self.assertIsNotNone(gate.budget_refusal(self.ledger(), NOW + 60, 600, 3, 3))
+
+    def test_a_deploy_sh_that_failed_after_its_start_counts_it_one_that_refused_before_it_does_not(self) -> None:
+        self.serves(3)
+        self.control.write_text(json.dumps({"exit": 1, "started": True}), encoding="utf-8")
+        code, docs, err = self.run_deploy()
+        self.assertEqual((code, len(self.ledger())), (1, 1), err)
+        (ip.STATE_DIR / gate.LEDGER).unlink()
+        self.control.write_text(json.dumps({"exit": 1}), encoding="utf-8")
+        code, docs, err = self.run_deploy()
+        self.assertEqual((code, self.ledger()), (1, []), err)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_flag_during_the_deploy_still_counts_its_start(self) -> None:
+        self.serves(3)
+        self.control.write_text(json.dumps({"flag": True}), encoding="utf-8")
+        code, docs, err = self.run_deploy()
+        self.assertEqual((code, len(self.ledger())), (ip.PREEMPTED, 1), err)
+
+    def test_a_dry_run_or_a_refusal_counts_nothing(self) -> None:
+        self.serves(3)
+        self.assertEqual(self.run_deploy("--dry-run")[0], 0)
+        self.write_env({k: v for k, v in self.keys.items() if k != "GEN3_SITE_FILE"})
+        self.assertEqual(self.run_deploy()[0], 1)
+        self.assertEqual((self.ledger(), self.deploys()), ([], []))
 
 
 class RefusalTests(DeployBase):

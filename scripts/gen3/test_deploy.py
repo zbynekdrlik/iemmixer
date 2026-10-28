@@ -1128,6 +1128,37 @@ class DeployTests(unittest.TestCase):
         self.assertFalse((self.box / "removed.log").exists())
         self.assertNotIn("HIL job", r.stdout)
 
+    def test_the_engine_start_is_marked_for_iempc_s_restart_budget_once_it_is_sent(self) -> None:
+        # The review of PR #87: `iempc gen3-deploy` counts the deploy's engine start in the box gates' budget
+        # (gen3-gate.json) when deploy.sh marks it in the file IEMPC_START_MARK names, right before the start is
+        # sent: after a deploy that started it (one that fails after the start too), never after one refused
+        # before it or one that starts the standalone device.
+        mark = self.tmp / "start.mark"
+        r = self.deploy(IEMPC_START_MARK=str(mark))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(mark.read_text(encoding="utf-8"), "start\n")
+        mark.unlink()
+        self.flag.parent.mkdir()
+        r = self.deploy(IEMPC_START_MARK=str(mark), FAKE_FLAG_ON="start")   # stopped again after its start
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(mark.read_text(encoding="utf-8"), "start\n")
+        mark.unlink()
+        self.flag.unlink()
+        r = self.deploy(IEMPC_START_MARK=str(mark), FAKE_LEFT_FAILS="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("nothing started", r.stderr)
+        self.assertFalse(mark.exists())
+        r = self.deploy("--start", "device", IEMPC_START_MARK=str(mark))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(mark.exists())
+        # A mark that cannot be written starts nothing: the start would go uncounted.
+        self.clear_logs()
+        r = self.deploy(IEMPC_START_MARK=str(self.tmp / "no-such-folder" / "start.mark"))
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("IEMPC_START_MARK", r.stderr)
+        self.assertIn("nothing started", r.stderr)
+        self.assertFalse(any("systemctl start" in c for c in self.remote()))
+
     def test_a_look_for_a_left_hil_job_that_fails_starts_nothing(self) -> None:
         self.set_states({"iem-dante": "inactive", "iem-engine": "inactive", "iem-server": "inactive"})
         r = self.deploy(FAKE_LEFT_FAILS="1")
