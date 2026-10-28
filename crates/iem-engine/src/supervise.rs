@@ -7,7 +7,11 @@
 //! `HilTestSignal` (every mix TX written as zero while it runs, the sine
 //! only on HIL's spare outputs, which the engine opens under its
 //! `--test-signal` flag and refuses without it), `stop-test-signal` sends
-//! `StopTestSignal`, `status` prints the engine's next `Status`.
+//! `StopTestSignal`, `status` prints the engine's next `Status`, and
+//! `inject-fault` sends `InjectFault` (HIL's panic check, the guard's
+//! `win::engine::inject_fault`: the engine panics on its RT thread and ends
+//! itself with its fault exit, which systemd starts again; refused without
+//! its `--fault-injection` flag, which only the box HIL gate's job gives it).
 //!
 //! The protocol is the engine's own (`iem_engine_proto`: the same frames,
 //! `ClientMsg` and `EngineMsg` the control loop reads and writes), read
@@ -71,6 +75,8 @@ pub enum Ask {
     StopTestSignal,
     /// `Ping`, then the engine's next `Status`.
     Status,
+    /// `InjectFault`: the RT panic of HIL's panic check.
+    InjectFault,
 }
 
 /// `iem-engine supervise`'s command line.
@@ -146,7 +152,9 @@ pub fn parse(words: &[String]) -> Result<Supervise, String> {
         _ => (PIPE.to_owned(), words.as_slice()),
     };
     let Some((what, values)) = rest.split_first() else {
-        return Err("supervise needs test-signal, stop-test-signal or status".to_owned());
+        return Err(
+            "supervise needs test-signal, stop-test-signal, status or inject-fault".to_owned(),
+        );
     };
     let ask = match *what {
         "test-signal" => {
@@ -163,6 +171,10 @@ pub fn parse(words: &[String]) -> Result<Supervise, String> {
         "status" => {
             let [] = exactly(values)?;
             Ask::Status
+        }
+        "inject-fault" => {
+            let [] = exactly(values)?;
+            Ask::InjectFault
         }
         other => return Err(format!("unknown supervise command {other:?}")),
     };
@@ -240,6 +252,11 @@ pub enum Outcome {
         rev: u64,
     },
     Status(Box<Status>),
+    /// The engine took the fault: the state's revision of its answer (the
+    /// panic comes on its RT thread right after).
+    Injected {
+        rev: u64,
+    },
 }
 
 impl Outcome {
@@ -262,6 +279,7 @@ impl Outcome {
             }}),
             Self::Stopped { rev } => json!({"stop_test_signal": {"rev": rev}}),
             Self::Status(status) => json!({ "status": status }),
+            Self::Injected { rev } => json!({"inject_fault": {"rev": rev}}),
         };
         v.to_string()
     }
@@ -414,6 +432,10 @@ pub fn exchange<S: Read + Write>(s: &mut S, ask: &Ask, waits: Waits) -> Result<O
             request(s, &mut framer, Cmd::Ping, waits.reply)?;
             let status = next_status(s, &mut framer, waits.status)?;
             Ok(Outcome::Status(Box::new(status)))
+        }
+        Ask::InjectFault => {
+            let rev = request(s, &mut framer, Cmd::InjectFault, waits.reply)?;
+            Ok(Outcome::Injected { rev })
         }
     }
 }

@@ -57,6 +57,20 @@ fn the_commands_parse_with_the_box_pipe_unless_one_is_given() {
             ask: Ask::Status,
         })
     );
+    assert_eq!(
+        ask("inject-fault"),
+        Ok(Supervise {
+            pipe: PIPE.to_owned(),
+            ask: Ask::InjectFault,
+        })
+    );
+    assert_eq!(
+        ask("--pipe p inject-fault"),
+        Ok(Supervise {
+            pipe: "p".to_owned(),
+            ask: Ask::InjectFault,
+        })
+    );
 }
 
 /// The guard's caps (`daemon::hil::test_signal`) with its words: the
@@ -156,14 +170,17 @@ fn the_command_line_is_exact() {
         ("test-signal mic1", "3 arguments expected, 1 given"),
         ("stop-test-signal now", "0 arguments expected, 1 given"),
         ("status --listen", "0 arguments expected, 1 given"),
+        ("inject-fault now", "0 arguments expected, 1 given"),
+        ("inject-fault --pipe p", "0 arguments expected, 2 given"),
         (
             "",
-            "supervise needs test-signal, stop-test-signal or status",
+            "supervise needs test-signal, stop-test-signal, status or inject-fault",
         ),
         (
             "--pipe p",
-            "supervise needs test-signal, stop-test-signal or status",
+            "supervise needs test-signal, stop-test-signal, status or inject-fault",
         ),
+        ("inject-seh", "unknown supervise command \"inject-seh\""),
         ("--pipe", "--pipe needs a value"),
         ("arm", "unknown supervise command \"arm\""),
         ("status --pipe p", "0 arguments expected, 2 given"),
@@ -189,7 +206,28 @@ fn the_engine_parser_hands_supervise_its_words() {
     );
     assert_eq!(
         parse_args(&words("supervise")),
-        Err("supervise needs test-signal, stop-test-signal or status".to_owned())
+        Err("supervise needs test-signal, stop-test-signal, status or inject-fault".to_owned())
+    );
+    assert_eq!(
+        parse_args(&words("supervise inject-fault")),
+        Ok(Command::Supervise(Supervise {
+            pipe: PIPE.to_owned(),
+            ask: Ask::InjectFault,
+        }))
+    );
+}
+
+/// The engine's usage names every supervise command, `inject-fault` too.
+#[test]
+fn the_usage_names_every_supervise_command() {
+    let usage = crate::engine::USAGE;
+    assert!(
+        usage.contains("| stop-test-signal | status | inject-fault"),
+        "{usage}"
+    );
+    assert!(
+        usage.contains("inject-fault: the engine's injected RT panic"),
+        "{usage}"
     );
 }
 
@@ -247,6 +285,10 @@ fn each_outcome_is_one_json_line() {
     assert_eq!(
         read(Outcome::Stopped { rev: 8 }),
         json!({"stop_test_signal": {"rev": 8}})
+    );
+    assert_eq!(
+        read(Outcome::Injected { rev: 9 }),
+        json!({"inject_fault": {"rev": 9}})
     );
     let status = Status {
         callbacks: 9,
@@ -483,6 +525,35 @@ fn stop_sends_one_command_and_status_reads_the_next_status() {
     };
     assert_eq!(got.callbacks, 2, "the Status after the answer");
     assert_eq!(s.sent(), vec![supervisor_hello(), request_of(Cmd::Ping)]);
+}
+
+/// `inject-fault` sends `InjectFault` at once and prints the revision of its
+/// answer; without its fault-injection flag the engine refuses it, and the
+/// call names the engine's code only, never its text.
+#[test]
+fn inject_fault_sends_one_command_and_names_the_engines_refusal() {
+    let mut s = Script::of(&[hello(), status(1, &[94, 95]), reply(1, 5, None)], false);
+    assert_eq!(
+        exchange(&mut s, &Ask::InjectFault, SHORT),
+        Ok(Outcome::Injected { rev: 5 })
+    );
+    assert_eq!(
+        s.sent(),
+        vec![supervisor_hello(), request_of(Cmd::InjectFault)]
+    );
+    let mut s = Script::of(&[hello(), reply(1, 5, Some(ErrCode::Forbidden))], false);
+    let got = exchange(&mut s, &Ask::InjectFault, SHORT);
+    assert_eq!(got, Err(Failure::Refused("forbidden".into())));
+    assert_eq!(
+        got.unwrap_err().to_string(),
+        "the engine refused it: forbidden"
+    );
+    // The engine that faults at once may close before it answers: an end, exit 1.
+    let mut s = Script::of(&[hello()], true);
+    assert_eq!(
+        exchange(&mut s, &Ask::InjectFault, SHORT),
+        Err(Failure::Closed)
+    );
 }
 
 /// Only the answer to its own request counts; a message this build cannot

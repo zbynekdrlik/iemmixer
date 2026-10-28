@@ -354,6 +354,69 @@ fn the_binary_refuses_a_supervise_call_it_cannot_make() {
     }
 }
 
+/// `iem-engine supervise inject-fault` (Gen 3 phase H Task 6 Step 3, #72):
+/// against an engine run without `--fault-injection` it is refused, exit 1
+/// and one fixed line, and the engine plays on; against one run with it
+/// (the box HIL gate's job) it is answered with one JSON line, exit 0, and
+/// the engine faults its RT callback by the injected panic and ends itself
+/// (exit 70 for the binary, which systemd starts again on the box).
+#[cfg(unix)]
+#[test]
+fn the_binary_injects_the_rt_panic_only_into_an_engine_run_with_the_flag() {
+    let inject = |pipe: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
+            .args(["supervise", "--pipe", pipe, "inject-fault"])
+            .output()
+            .unwrap()
+    };
+    let e = Engine::start(
+        Flags {
+            test_signal: true,
+            fault_injection: false,
+        },
+        InputSignal::Silence,
+    );
+    // The engine's pipe is up once an observer has its hello.
+    let mut obs = e.client();
+    obs.hello(Role::Observe);
+    let refused = inject(e.pipe.as_str());
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&refused.stderr),
+        "iem-engine supervise: the engine refused it: forbidden\n"
+    );
+    drop(obs);
+    e.shutdown();
+
+    let mut e = Engine::start(
+        Flags {
+            test_signal: false,
+            fault_injection: true,
+        },
+        InputSignal::Silence,
+    );
+    let mut obs = e.client();
+    obs.hello(Role::Observe);
+    let out = inject(e.pipe.as_str());
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let line = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(line.lines().count(), 1, "{line}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+        serde_json::json!({"inject_fault": {"rev": 0}})
+    );
+    drop(obs);
+    let Exit::Fault(why) = e.exit() else {
+        panic!("the injected panic did not fault the engine")
+    };
+    assert!(
+        why.contains("fault injection: panic on the RT thread"),
+        "{why}"
+    );
+}
+
 /// `iem-engine supervise` (Gen 3 phase H, #72) against an engine run with
 /// `--test-signal` (the box's HIL job): the burst sounds on both spare
 /// outputs at its level (the `Status` the `status` call prints), the stop

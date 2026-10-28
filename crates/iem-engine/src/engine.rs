@@ -163,7 +163,7 @@ usage:
                  [--block <frames>]
   iem-engine check-site --site <site.toml>
   iem-engine supervise [--pipe <socket>] test-signal <input> <dbfs> <seconds> [--listen]
-                 | stop-test-signal | status
+                 | stop-test-signal | status | inject-fault
   iem-engine --version
 
 run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
@@ -185,8 +185,10 @@ control socket (--pipe, default /run/iemmixer/engine.sock), which replaces
 any supervisor before it. test-signal: the HIL test signal on every spare
 output the engine opened (an engine run with --test-signal; at most -20
 dBFS, 1 to 60 whole seconds, the engine ends it); stop-test-signal ends it;
-status: the engine's next Status. One JSON line on stdout; exit 0, 1 when
-the engine refuses or does not answer, 2 for its command line.
+status: the engine's next Status; inject-fault: the engine's injected RT panic
+(an engine run with --fault-injection; it ends itself with exit 70). One JSON
+line on stdout; exit 0, 1 when the engine refuses or does not answer, 2 for
+its command line.
 exit codes: 0 shut down, 1 i/o error or the Dante device ended, 2 usage or
 site error, 3 card refused (or a channel the Dante device lacks), 70 RT
 fault, 75 state directory busy";

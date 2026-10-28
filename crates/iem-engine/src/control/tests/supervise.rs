@@ -157,6 +157,46 @@ fn the_client_sounds_reads_and_stops_the_hil_signal_under_the_flag() {
     assert!(*listen);
 }
 
+/// With the fault-injection flag (the box HIL gate's job), the client's
+/// `inject-fault` is accepted and reaches the processor as the RT panic;
+/// without it (a live engine, the live gate's job) the engine refuses it and
+/// nothing reaches the processor. The ring here has no processor behind it,
+/// so nothing faults: the loop ends by its controller's `Shutdown`.
+#[test]
+fn the_client_injects_the_rt_panic_only_under_the_fault_injection_flag() {
+    for fault_injection in [true, false] {
+        let Rig {
+            c,
+            mut ring,
+            status,
+            dir,
+            meters: _meters,
+        } = rig_with(
+            crate::core::Flags {
+                test_signal: true,
+                fault_injection,
+            },
+            false,
+        );
+        status.faded_out.store(true, Ordering::Release);
+        let e = serve(c, dir.path());
+        let got = e.ask(Ask::InjectFault);
+        if fault_injection {
+            assert_eq!(got, Ok(Outcome::Injected { rev: 0 }));
+        } else {
+            assert_eq!(got, Err(Failure::Refused("forbidden".into())));
+        }
+        assert_eq!(e.shut_down(), Exit::Shutdown { faded: true });
+        let mut panics = 0;
+        while let Ok(cmd) = ring.pop() {
+            if matches!(cmd.op, RtOp::Panic) {
+                panics += 1;
+            }
+        }
+        assert_eq!(panics, usize::from(fault_injection), "{fault_injection}");
+    }
+}
+
 /// Without the flag (a live engine) the engine opens no spare output and
 /// refuses the client's burst; nothing reaches the processor.
 #[test]
