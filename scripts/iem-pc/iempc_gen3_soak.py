@@ -60,8 +60,10 @@ reset-failed), the env file and the summary removed on the box.
 - not_finished: the client still ran at the bound; client: its unit's
   result not `success` or its exit not 0;
 - harness: soak_verdict.box_check over the client's summary (the PC
-  verdict's checks 9 to 12 at its bounds: complete, the run's seconds, no
-  gap, no reconnect, 99 % of the expected listen frames; then a meter frame);
+  verdict's checks 9, 11 and 12 at its bounds: complete, the run's seconds,
+  no reconnect, 99 % of the expected listen frames; then a meter frame). The
+  listen gaps are counted, not judged (owner on #72, 2026-10-29: the browser
+  listen is low priority, #88);
 - polls: no status read or no health read during the run, or more than
   POLL_HOLE_S between two good reads of either (`failed_reads` counted);
 - health: a health read not healthy (its reasons, known words only);

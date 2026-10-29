@@ -31,8 +31,9 @@ Counts before the first poll never count: every gate reads last minus first.
 least one meter frame (the run against the real server is the one place that
 proves the client reads its Meters; the PC verdict does not judge them); it
 prints the problems and exits 1 when there are any. `box_check` is the Gen 3
-box's soak gate (`iempc gen3-gate soak`): the checks 9 to 12 at the PC's
-bounds (no gap) and the meter frame, with the harness's numbers.
+box's soak gate (`iempc gen3-gate soak`): the checks 9, 11 and 12 at the PC's
+bounds and the meter frame, with the harness's numbers; its gaps are counted,
+not judged (owner on #72, 2026-10-29: the browser listen is low priority, #88).
 
 The summary holds numbers and fixed words only (P6): never a member id, a
 host or a SHA. The harness's and the PC job's reason codes are printed only
@@ -295,8 +296,9 @@ def _harness(summary: object) -> dict:
     return {**h, "seconds": seconds, "complete": complete}
 
 
-def _harness_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[list[str], dict]:
-    """The checks 9 to 12 in order, and the harness's numbers (none when unreadable)."""
+def _harness_check(summary: object, min_seconds: float, max_gaps: int | None) -> tuple[list[str], dict]:
+    """The checks 9 to 12 in order (10 skipped when `max_gaps` is None), and the harness's numbers (none when
+    unreadable)."""
     if summary is None:
         return ["no harness summary"], {}
     try:
@@ -309,7 +311,7 @@ def _harness_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[
         problems.append(f"harness incomplete ({code})" if code in HARNESS_REASONS else "harness incomplete")
     if h["seconds"] < min_seconds:  # rounded down at 0.1 s: a short run never reads as the bound
         problems.append(f"harness ran {math.floor(h['seconds'] * 10) / 10:g} s of {min_seconds:g} s")
-    if h["gaps"] > max_gaps:
+    if max_gaps is not None and h["gaps"] > max_gaps:
         problems.append(f"gaps {h['gaps']}")
     if h["reconnects"]:
         problems.append(f"reconnects {h['reconnects']}")
@@ -320,7 +322,7 @@ def _harness_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[
     return problems, {k: v for k, v in h.items() if k != "complete"}
 
 
-def _ci_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[list[str], dict]:
+def _ci_check(summary: object, min_seconds: float, max_gaps: int | None) -> tuple[list[str], dict]:
     """CI's e2e step: the checks 9 to 12, then at least one meter frame (a readable summary only)."""
     problems, h = _harness_check(summary, min_seconds, max_gaps)
     if h and h["meter_frames"] == 0:
@@ -329,9 +331,10 @@ def _ci_check(summary: object, min_seconds: float, max_gaps: int) -> tuple[list[
 
 
 def box_check(summary: object, min_seconds: float) -> tuple[list[str], dict]:
-    """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the checks 9 to 12 at the PC's
-    bounds (no gap), then a meter frame (the box's real server sends them), and the harness's numbers."""
-    return _ci_check(summary, min_seconds, 0)
+    """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the checks 9, 11 and 12 at the
+    PC's bounds, then a meter frame (the box's real server sends them), and the harness's numbers. Gaps are
+    counted, not judged (owner on #72, 2026-10-29: the browser listen is low priority, #88)."""
+    return _ci_check(summary, min_seconds, None)
 
 
 def harness_problems(summary: object, min_seconds: float, max_gaps: int) -> list[str]:
