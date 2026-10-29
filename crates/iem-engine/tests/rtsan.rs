@@ -69,9 +69,10 @@ fn the_dante_pump_block_is_realtime_safe() {
     for &block in &iem_dante::stream::BLOCKS {
         let block = block as usize;
         let mut r = common::dante::pump_rig(BLOCKS, block);
-        common::dante::pump_drive(&mut r, BLOCKS);
+        let blocks = common::dante::blocks_of(&r, BLOCKS);
+        common::dante::pump_drive(&mut r, blocks);
         let v = r.stats.view();
-        assert_eq!((v.blocks, v.late, v.rebootstraps), (BLOCKS as u64, 0, 0));
+        assert_eq!((v.blocks, v.late, v.rebootstraps), (blocks as u64, 0, 0));
         assert!(!r.stats.stream_stats().faulted, "the processor ran clean");
         assert_eq!(
             r.measured, block as u64,
@@ -82,7 +83,7 @@ fn the_dante_pump_block_is_realtime_safe() {
             "the probe path ran"
         );
         assert!(
-            common::dante::loudest_output(&mut r, BLOCKS) > 0,
+            common::dante::loudest_output(&mut r, blocks) > 0,
             "the mixes reached the engine rings"
         );
     }

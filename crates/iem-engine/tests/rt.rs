@@ -74,15 +74,16 @@ fn the_dante_pump_block_does_not_allocate() {
     for &block in &iem_dante::stream::BLOCKS {
         let block = block as usize;
         let mut r = common::dante::pump_rig(BLOCKS, block);
+        let blocks = common::dante::blocks_of(&r, BLOCKS);
         reset_violation_count();
-        assert_no_alloc(|| common::dante::pump_drive(&mut r, BLOCKS));
+        assert_no_alloc(|| common::dante::pump_drive(&mut r, blocks));
         assert_eq!(
             violation_count(),
             0,
             "the pump's blocks allocated at block {block}"
         );
         let v = r.stats.view();
-        assert_eq!((v.blocks, v.late, v.rebootstraps), (BLOCKS as u64, 0, 0));
+        assert_eq!((v.blocks, v.late, v.rebootstraps), (blocks as u64, 0, 0));
         assert!(!r.stats.stream_stats().faulted, "the processor ran clean");
         assert_eq!(
             r.measured, block as u64,
@@ -94,10 +95,10 @@ fn the_dante_pump_block_does_not_allocate() {
         );
         assert!(r.handles.meters.read().seq > 0);
         assert!(
-            common::dante::loudest_output(&mut r, BLOCKS) > 0,
+            common::dante::loudest_output(&mut r, blocks) > 0,
             "the mixes reached the engine rings"
         );
         let h = r.stats.histograms();
-        assert_eq!(h.process.iter().map(|e| e.1).sum::<u64>(), BLOCKS as u64);
+        assert_eq!(h.process.iter().map(|e| e.1).sum::<u64>(), blocks as u64);
     }
 }

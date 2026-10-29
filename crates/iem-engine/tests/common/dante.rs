@@ -25,7 +25,7 @@ use iem_engine::cmd::push_group;
 use iem_engine::dante::{check, timing};
 use iem_engine::rt::{Processor, RtHandles};
 
-use super::{HIL, Scenario, scenario};
+use super::{BLOCK, HIL, Scenario, scenario};
 
 /// Ten years of a grandmaster's uptime at 96 kHz, a multiple of either
 /// block: the first block's first input stamp.
@@ -67,7 +67,8 @@ fn device() -> DeviceConfig {
 }
 
 /// The scenario's processor in a pump on the device's rings at the
-/// device's `block` (16 or 32), `blocks` blocks of hot input written ahead.
+/// device's `block` (16 or 32), hot input written ahead for `blocks`
+/// blocks of the scenario's [`BLOCK`] (the run's samples, [`blocks_of`]).
 pub fn pump_rig(blocks: usize, block: usize) -> PumpRig {
     let Scenario {
         topo,
@@ -87,7 +88,7 @@ pub fn pump_rig(blocks: usize, block: usize) -> PumpRig {
         .into();
     // Hot topology inputs (0.3) for every block; the returns stay empty
     // until the loopback writes them.
-    let hot = vec![quantize(0.3, 24); blocks * block + block];
+    let hot = vec![quantize(0.3, 24); blocks * BLOCK + block];
     for &rx in map.rx.iter().take(topo.rx.len()) {
         rings[rx].write_at(T, &hot);
     }
@@ -138,14 +139,28 @@ pub fn pump_rig(blocks: usize, block: usize) -> PumpRig {
     }
 }
 
+/// The pump blocks of the scenario's run at the rig's block: as many
+/// samples as `blocks` blocks of the scenario's [`BLOCK`] (300 of 32: 9600).
+pub fn blocks_of(r: &PumpRig, blocks: usize) -> usize {
+    blocks * BLOCK / r.block
+}
+
 /// Runs `blocks` pump blocks from stamp [`T`] as the media clock would,
 /// with the scenario's command groups, talkback, taps and meters, and the
 /// one-block D5(b) loopback through the rings; allocates nothing itself.
+/// One command group every [`BLOCK`] samples, whatever the rig's block, so
+/// the scenario keeps its timeline in samples: at one group a block,
+/// block 16 would halve the HIL test signal's run between its start and
+/// its stop, and its fades (the sine's 50 ms, the engine's 500 ms fade-in)
+/// would never reach the loopback probe's onset.
 pub fn pump_drive(r: &mut PumpRig, blocks: usize) {
     let returns = r.map.rx.len() - HIL.len();
     let spare = r.map.tx.len() - HIL.len();
+    let every = BLOCK / r.block;
     for k in 0..blocks {
-        if let Some(g) = r.groups.get(k % r.groups.len()) {
+        if k % every == 0
+            && let Some(g) = r.groups.get(k / every % r.groups.len())
+        {
             push_group(&mut r.handles.cmds, 0, g);
         }
         let _ = r.handles.talkback.push_partial_slice(&r.talk);
