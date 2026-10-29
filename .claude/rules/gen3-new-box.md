@@ -46,19 +46,21 @@ Then reboot once (`# airuleset:destructive-ok <reason>` on the command) and run 
 
 ## 4. The device config (ops)
 
-Copy the shape of `iemmixer-ops/site/gen3-device.toml`: the device name, RX/TX channel names, and the timing proven in phase F:
+Copy the shape of `iemmixer-ops/site/gen3-device.toml`: the device name, RX/TX channel names, and the timing proven on the first box (build 3b18f30: `soak/gen3` 2 h with 19 listen gaps counted, `hil/gen3` and `live/gen3` green; numbers on #72, 2026-10-29):
 
 ```
-latency_ns = 375000      # P: the RX playout (0.375 ms)
-block = 32               # 16 halves B; W must be at least the block
-work_margin = 48         # W in samples (0.5 ms)
+latency_ns = 250000      # P: the RX playout (0.25 ms, 24 samples; the stage's worst packet 13 late)
+block = 16               # B (167 us); W must be at least the block
+work_margin = 16         # W in samples (the longest block 88 us)
 tx_latency_ns = 250000   # what our TX advertises: receivers play us at it (the IEM card's 0.25 ms)
 tx_margin_ns = 30000     # a packet leaves 30 us after its last sample
 tx_fpp_max = 8           # the most frames a receiver may ask per packet
-arc_rx_fpp = 16          # frames per packet asked of the stage devices (ARC-resolved); lower cuts RX lateness, prove it first
+arc_rx_fpp = 4           # frames per packet asked of the stage devices (ARC-resolved): 16 left P at 36
 pump_cpu = <N-1>         # N = nproc --all: the two CPUs provisioning isolated
 io_cpu = <N-2>
 ```
+
+D = B + P + W = 16 + 24 + 16 = 56 samples; mic to ear with the rack's 24 is 80 samples, 0.83 ms at 96 kHz (phase F's 32 + 36 + 48 was 140, 1.46 ms).
 
 - `pump_cpu`/`io_cpu` must be exactly the isolated pair, or the engine runs on housekeeping cores and the timing breaks.
 - The config refuses `tx_latency_ns` shorter than `tx_fpp_max` frames + `tx_margin_ns` + 50 µs.
@@ -82,7 +84,7 @@ While 3.x serves, a provision is followed at once by `iempc gen3-deploy`: provis
 
 A build the box serves is proven by the box's three gates, run from the dev box in dev time while 3.x serves (each refused with `EVENT-NOW` or while 2.x serves). `deploy.sh`, so `iempc gen3-deploy` too, closes with one line naming them. Each posts a commit status on the box's build (its engine's `--version` SHA). Phase G's confirmation needs `soak/gen3`, `hil/gen3` and `live/gen3` all green on the build the box runs.
 
-1. `iempc gen3-gate soak [--minutes 10|30|60|120]` (default 120), right after the deploy: `iem-soakclient` on the box beside the dev box's reads of `ctl status`, health and the stack's units. No HIL job and no engine restart. It proves the engine as it serves runs an event's length clean: the pump never late, missed, overrun or re-bootstrapped, the clock ready with no holdover or re-anchor, no late RX packet, no TX hole, the listen stream whole. Status `soak/gen3`.
+1. `iempc gen3-gate soak [--minutes 10|30|60|120]` (default 120), right after the deploy: `iem-soakclient` on the box beside the dev box's reads of `ctl status`, health and the stack's units. No HIL job and no engine restart. It proves the engine as it serves runs an event's length clean: the pump never late, missed, overrun or re-bootstrapped, the clock ready with no holdover or re-anchor, no late RX packet, no TX hole, the listen stream complete with no reconnect (its gaps counted, not judged: the browser listen is low priority, #88). Status `soak/gen3`.
 2. `iempc gen3-gate hil`, at least ten minutes after the deploy's start. A HIL job (the engine restarted with `--test-signal --fault-injection`): the builds, health, the RX flows back, the D5(b) loop through our own device, one -30 dBFS burst on the spare outputs then silence, the alarm path's reach, then the panic (the engine's own injected RT fault, systemd's one restart, healthy again, the alarm unit not started), then the job's end. Three engine starts. Status `hil/gen3`.
 3. `iempc gen3-gate live`, at least ten minutes after the HIL gate ended (its three starts span its run, its end's restart the last). The live E2E specs in a real browser through the band's public URL, a 30 s burst every 60 s, the client-error marker, the push count. Two engine starts. Status `live/gen3`.
 
@@ -91,7 +93,7 @@ The waits are the engine's restart budget: the unit starts it at most three time
 Besides the gates, on new hardware or after a timing change:
 
 - `scripts/gen3/live_guard.py --rate 96000 --seconds <n>` as a background task for the whole session.
-- 30 minutes with the stage on and the RX mirrored (`iempc gen3-mirror`), reading `ctl status` each second: expect late / missed / overruns 0, the longest block well under 333 µs (175–235 µs on the N100), every RX flow's worst `lateness` under P (14–27 against 36).
+- 30 minutes with the stage on and the RX mirrored (`iempc gen3-mirror`), reading `ctl status` each second: expect late / missed / overruns 0, the longest block well under one block's time (167 µs at block 16: 88 µs on the N100), every RX flow's worst `lateness` under P (13 against 24 at `arc_rx_fpp` 4).
 - The loop through the IEM card (`iempc gen3-loop --offsets 116,153 --bursts 5 --slot <spare HIL output>`, the PC in maintenance): round trips equal within a burst set, base 153 at `tx_latency_ns` 0.25 ms.
 - How to measure each part (RX lateness, block time, a receiver's flow latency through its ARC 0x3200, our TX send spread with `tcpdump -p --time-stamp-precision=nano`, never without `-p`): `.claude/rules/gen3.md`, "Measuring latency on the box".
 
@@ -105,3 +107,5 @@ Besides the gates, on new hardware or after a timing change:
 - `iem-dante-dev health` stays degraded (`restarted`) after any automatic restart of a unit until its next deliberate start (`reset-failed` and `restart`, or a deploy): a check right after a crash or a panic reads degraded, not failed.
 - A timing key changed on the box by hand is checked against `device.rs`'s bounds first: a device config the engine cannot load keeps it down (exit 2, no restart) and the alarm notifies people (2026-10-28 22:26: `work_margin = 24` with the block at 32, 3 min 41 s down). Keep the previous config and put it back at once when the engine is not healthy within seconds.
 - `tcpdump` on the Dante NIC only with `-p`: entering promiscuous mode on the r8169 stalled RX once for ~2.7 ms, every flow late at the same moment (2026-10-28: 63 packets at fpp 4, 17 at fpp 16; the kernel's "entered promiscuous mode" line); with `-p` the capture added no late packet.
+- dantesync steps the box's date by +1.6 s at 03:00 every day (the fleet's coordinated step): the engine holds its clock ~5.6 s around it (`holdover`, then back) with no pump fault, but a soak spanning 03:00 counts that holdover and fails. Run the gates outside it (#72, 2026-10-29).
+- The soak's listen `gaps` (#88, low priority) come with the dev box's ssh reads beside it (measured on #88: more reads, more gaps; the server's own sends stall); the in-ear path is untouched by them (the 2 h soak with 19 gaps: pump, RX and TX counts all 0). The gate counts them and never judges them; a run with gaps and every other check clean is a pass.
