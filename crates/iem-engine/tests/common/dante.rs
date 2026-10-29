@@ -7,7 +7,9 @@
 //! `iem_engine::dante::check` maps for a device with every channel of the
 //! test site and HIL's spare pair. Every buffer, ring and socket is built
 //! before the blocks run. `rt.rs` runs it under `assert_no_alloc`, `rtsan.rs`
-//! under RealtimeSanitizer (`Pump::block` carries the real-time attribute).
+//! under RealtimeSanitizer (`Pump::block` carries the real-time attribute),
+//! each at both of the device's blocks (`iem_dante::stream::BLOCKS`: 32 and
+//! the box's 16, #72).
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -23,10 +25,10 @@ use iem_engine::cmd::push_group;
 use iem_engine::dante::{check, timing};
 use iem_engine::rt::{Processor, RtHandles};
 
-use super::{BLOCK, HIL, Scenario, scenario};
+use super::{HIL, Scenario, scenario};
 
-/// Ten years of a grandmaster's uptime at 96 kHz, a multiple of the block:
-/// the first block's first input stamp.
+/// Ten years of a grandmaster's uptime at 96 kHz, a multiple of either
+/// block: the first block's first input stamp.
 pub const T: u64 = 10 * 365 * 86_400 * 96_000;
 const RATE: u32 = 96_000;
 
@@ -36,6 +38,8 @@ pub struct PumpRig {
     pub rx: Arc<RxShared>,
     pub tx: Arc<TxShared>,
     pub map: Map,
+    /// B: the device's `block`, the pump's frames a block.
+    pub block: usize,
     /// D: an output stamped t is the input stamped t − D.
     pub offset: u64,
     pub groups: Vec<Vec<iem_engine::cmd::RtOp>>,
@@ -62,9 +66,9 @@ fn device() -> DeviceConfig {
     cfg
 }
 
-/// The scenario's processor in a pump on the device's rings, `blocks`
-/// blocks of hot input written ahead.
-pub fn pump_rig(blocks: usize) -> PumpRig {
+/// The scenario's processor in a pump on the device's rings at the
+/// device's `block` (16 or 32), `blocks` blocks of hot input written ahead.
+pub fn pump_rig(blocks: usize, block: usize) -> PumpRig {
     let Scenario {
         topo,
         groups,
@@ -72,7 +76,8 @@ pub fn pump_rig(blocks: usize) -> PumpRig {
         handles,
         ..
     } = scenario();
-    let cfg = device();
+    let mut cfg = device();
+    cfg.block = block as u64;
     let map = check(&cfg, &topo, &HIL).unwrap();
     assert_eq!(map.rx.len(), processor.input_channels());
     assert_eq!(map.tx.len(), processor.outputs());
@@ -82,7 +87,7 @@ pub fn pump_rig(blocks: usize) -> PumpRig {
         .into();
     // Hot topology inputs (0.3) for every block; the returns stay empty
     // until the loopback writes them.
-    let hot = vec![quantize(0.3, 24); blocks * BLOCK + BLOCK];
+    let hot = vec![quantize(0.3, 24); blocks * block + block];
     for &rx in map.rx.iter().take(topo.rx.len()) {
         rings[rx].write_at(T, &hot);
     }
@@ -102,6 +107,10 @@ pub fn pump_rig(blocks: usize) -> PumpRig {
         assert!(tx.set_source(c, Source::Engine));
     }
     let timing = timing(&cfg);
+    assert_eq!(
+        timing.block, block as u64,
+        "the pump runs the device's block"
+    );
     let stats = Arc::new(PumpStats::new(timing, RATE));
     let pump = Pump::new(
         processor,
@@ -118,13 +127,14 @@ pub fn pump_rig(blocks: usize) -> PumpRig {
         rx,
         tx,
         map,
+        block,
         offset: timing.offset(),
         groups,
         handles,
         measured: 0,
-        talk: vec![0.25; BLOCK],
+        talk: vec![0.25; block],
         drain: vec![0.0; 8192],
-        samples: vec![0; BLOCK],
+        samples: vec![0; block],
     }
 }
 
@@ -139,13 +149,13 @@ pub fn pump_drive(r: &mut PumpRig, blocks: usize) {
             push_group(&mut r.handles.cmds, 0, g);
         }
         let _ = r.handles.talkback.push_partial_slice(&r.talk);
-        let start = T + (k * BLOCK) as u64;
+        let start = T + (k * r.block) as u64;
         r.pump.block(start);
         // Each spare output's block is its return input in the next one.
         for j in 0..HIL.len() {
             let out = r.tx.engine_ring(r.map.tx[spare + j]).unwrap();
             out.read_at(start + r.offset, &mut r.samples);
-            r.rx.rings()[r.map.rx[returns + j]].write_at(start + BLOCK as u64, &r.samples);
+            r.rx.rings()[r.map.rx[returns + j]].write_at(start + r.block as u64, &r.samples);
         }
         let rt = r.handles.status.loopback_samples.load(Ordering::Relaxed);
         r.measured = r.measured.max(rt);
@@ -161,7 +171,7 @@ pub fn pump_drive(r: &mut PumpRig, blocks: usize) {
 /// The largest magnitude the engine wrote to its TX rings in the last
 /// block of `blocks`.
 pub fn loudest_output(r: &mut PumpRig, blocks: usize) -> i64 {
-    let at = T + ((blocks - 1) * BLOCK) as u64 + r.offset;
+    let at = T + ((blocks - 1) * r.block) as u64 + r.offset;
     let mut loudest = 0i64;
     for &c in &r.map.tx {
         r.tx.engine_ring(c).unwrap().read_at(at, &mut r.samples);
