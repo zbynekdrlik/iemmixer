@@ -412,7 +412,6 @@ class CriteriaTests(SoakBase):
         cases = (
             ({"FAKE_SUMMARY": "incomplete", "FAKE_CLIENT_EXIT": "1"}, ["client", "harness"],
              ["harness incomplete (connection-lost)", "harness ran 61 s of 7200 s"], 1, "exit-code"),
-            ({"FAKE_GAPS": "1"}, ["harness"], ["gaps 1"], 0, "success"),
             ({"FAKE_NO_SUMMARY": "1"}, ["harness"], ["no harness summary"], 0, "success"),
         )
         for env, failed, problems, exit_code, result in cases:
@@ -428,6 +427,13 @@ class CriteriaTests(SoakBase):
         self.again()
         code, docs, err = self.gate_run(FAKE_CLIENT_EXIT="1")
         self.assertEqual(self.calls()[-4:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY])
+
+    def test_listen_gaps_are_counted_not_judged(self) -> None:
+        # Owner on #72, 2026-10-29: the browser listen is low priority; its gaps never fail the gate.
+        code, docs, err = self.gate_run(FAKE_GAPS="3")
+        self.assertEqual(code, 0, err)
+        doc = self.line(docs)
+        self.assertEqual((doc["failed"], doc["harness"]["problems"], doc["harness"]["gaps"]), ([], [], 3))
 
     def test_reads_that_fail_or_leave_a_hole_fail_polls(self) -> None:
         code, docs, err = self.gate_run(FAKE_STATUS_FAILS="1")

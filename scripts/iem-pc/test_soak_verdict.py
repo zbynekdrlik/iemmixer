@@ -383,13 +383,17 @@ class Harness(unittest.TestCase):
         self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
 
     def test_the_gen3_box_gate_judges_the_summary_at_the_pc_s_bounds_with_a_meter_frame(self):
-        # iempc gen3-gate soak (#72 phase H Task 7): the checks 9 to 12 at the PC's bounds (no gap), then a meter
-        # frame (the box's real server sends them), and the numbers for the gate's line.
+        # iempc gen3-gate soak (#72 phase H Task 7): the checks 9, 11 and 12 at the PC's bounds, then a meter frame
+        # (the box's real server sends them), and the numbers for the gate's line. Gaps are counted, not judged
+        # (owner on #72, 2026-10-29: the browser listen is low priority).
         box = harness(seconds=7200.4, frames=360_000, expected_frames=360_000, meter_frames=72_000)
         self.assertEqual(sv.box_check(box, 7200), ([], {"frames": 360_000, "expected_frames": 360_000, "gaps": 0,
                                                          "reconnects": 0, "decode_errors": 0, "meter_frames": 72_000,
                                                          "seconds": 7200.4}))
-        self.assertEqual(sv.box_check({**box, "gaps": 1}, 7200)[0], ["gaps 1"])
+        self.assertEqual(sv.box_check({**box, "gaps": 8}, 7200), ([], {"frames": 360_000, "expected_frames": 360_000,
+                                                                        "gaps": 8, "reconnects": 0, "decode_errors": 0,
+                                                                        "meter_frames": 72_000, "seconds": 7200.4}))
+        self.assertEqual(sv.box_check({**box, "gaps": 8, "reconnects": 1}, 7200)[0], ["reconnects 1"])
         self.assertEqual(sv.box_check({**box, "meter_frames": 0}, 7200)[0], ["no meter frames"])
         self.assertEqual(sv.box_check({**box, "seconds": 7199.9}, 7200)[0], ["harness ran 7199.9 s of 7200 s"])
         self.assertEqual(sv.box_check({**box, "complete": False, "error": "connection-lost"}, 7200)[0],
