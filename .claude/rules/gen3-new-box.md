@@ -46,7 +46,7 @@ Then reboot once (`# airuleset:destructive-ok <reason>` on the command) and run 
 
 ## 4. The device config (ops)
 
-Copy the shape of `iemmixer-ops/site/gen3-device.toml`: the device name, RX/TX channel names, and the timing proven on the first box (2026-10-29, build 3b18f30: the soak's 2 h, the HIL and live gates):
+Copy the shape of `iemmixer-ops/site/gen3-device.toml`: the device name, RX/TX channel names, and the timing proven on the first box (build 3b18f30: `soak/gen3` 2 h with 19 listen gaps counted, `hil/gen3` and `live/gen3` green; numbers on #72, 2026-10-29):
 
 ```
 latency_ns = 250000      # P: the RX playout (0.25 ms, 24 samples; the stage's worst packet 13 late)
@@ -108,4 +108,4 @@ Besides the gates, on new hardware or after a timing change:
 - A timing key changed on the box by hand is checked against `device.rs`'s bounds first: a device config the engine cannot load keeps it down (exit 2, no restart) and the alarm notifies people (2026-10-28 22:26: `work_margin = 24` with the block at 32, 3 min 41 s down). Keep the previous config and put it back at once when the engine is not healthy within seconds.
 - `tcpdump` on the Dante NIC only with `-p`: entering promiscuous mode on the r8169 stalled RX once for ~2.7 ms, every flow late at the same moment (2026-10-28: 63 packets at fpp 4, 17 at fpp 16; the kernel's "entered promiscuous mode" line); with `-p` the capture added no late packet.
 - dantesync steps the box's date by +1.6 s at 03:00 every day (the fleet's coordinated step): the engine holds its clock ~5.6 s around it (`holdover`, then back) with no pump fault, but a soak spanning 03:00 counts that holdover and fails. Run the gates outside it (#72, 2026-10-29).
-- The soak's listen `gaps` (#88, low priority) grow with the dev box's ssh reads beside it; the in-ear path is untouched by them. The gate counts them and never judges them; a run with gaps and every other check clean is a pass.
+- The soak's listen `gaps` (#88, low priority) come with the dev box's ssh reads beside it (measured on #88: more reads, more gaps; the server's own sends stall); the in-ear path is untouched by them (the 2 h soak with 19 gaps: pump, RX and TX counts all 0). The gate counts them and never judges them; a run with gaps and every other check clean is a pass.

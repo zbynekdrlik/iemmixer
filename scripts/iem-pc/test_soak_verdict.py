@@ -395,6 +395,7 @@ class Harness(unittest.TestCase):
                                                                         "meter_frames": 72_000, "seconds": 7200.4}))
         self.assertEqual(sv.box_check({**box, "gaps": 8, "reconnects": 1}, 7200)[0], ["reconnects 1"])
         self.assertEqual(sv.box_check({**box, "meter_frames": 0}, 7200)[0], ["no meter frames"])
+        self.assertEqual(sv.box_check({**box, "frames": 350_000}, 7200)[0], ["frames 97.22 % of expected"])
         self.assertEqual(sv.box_check({**box, "seconds": 7199.9}, 7200)[0], ["harness ran 7199.9 s of 7200 s"])
         self.assertEqual(sv.box_check({**box, "complete": False, "error": "connection-lost"}, 7200)[0],
                          ["harness incomplete (connection-lost)"])
