@@ -92,6 +92,7 @@ class DeployBase(Base):
         self.card_doc = {"name": SPARE, "tx_count": 128, "tx": LABELS, "rx_count": 0, "rx": {}}
         self.box_calls: list[str] = []
         self.box_reply = (0, f"IEM_DANTE_IFACE={IFACE}\n".encode(), b"")
+        self.enabled_reply = (1, b"disabled\n", b"")
         for module, name, fake in ((dep, "DEPLOY", (sys.executable, str(script), str(self.log), str(self.control))),
                                    (dep.iempc_dante, "ask_card", self.ask_card), (dep.data, "box", self.box)):
             patcher = mock.patch.object(module, name, fake)
@@ -109,7 +110,7 @@ class DeployBase(Base):
 
     def box(self, host, command, data, timeout):
         self.box_calls.append(f"{host} {command}")
-        return self.box_reply
+        return self.enabled_reply if "is-enabled" in command else self.box_reply
 
     def serves(self, side: int | None) -> None:
         record = ip.STATE_DIR / "gen3-side.json"
@@ -257,6 +258,19 @@ class DeployTests(DeployBase):
                 code, docs, err = self.run_deploy()
                 self.assertEqual((code, docs), (1, []), err)
                 self.assertIn(words, err)
+                self.assertEqual((self.deploys(), self.leftovers()), ([], []))
+
+    def test_a_box_enabled_at_boot_refuses_a_deploy_as_2x(self) -> None:
+        # The incident of 2026-10-30 (#72): the side record did not move with
+        # the account, its absence reads as 2.x, and the deploy took the
+        # serving box off the band. A box whose engine starts at boot serves.
+        for record in (None, 2):
+            with self.subTest(record=record):
+                self.serves(record)
+                self.enabled_reply = (0, b"enabled\n", b"")
+                code, docs, err = self.run_deploy()
+                self.assertEqual((code, docs), (1, []), err)
+                self.assertIn("enabled at boot", err)
                 self.assertEqual((self.deploys(), self.leftovers()), ([], []))
 
     def test_a_box_without_its_interface_refuses_before_the_deploy(self) -> None:
