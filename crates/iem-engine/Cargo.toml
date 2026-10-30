@@ -43,7 +43,7 @@ widestring = "1"
 # clock. GPL-3.0-or-later, as the engine already is (the limiter); never
 # linked on Windows, and never by iem-server outside its tests.
 # The Dante device lives in dante-stack (all Dante code, #72 2026-10-30).
-iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dante-stack", tag = "v0.1.0" }
+iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dante-stack", tag = "v0.1.1" }
 
 [dev-dependencies]
 assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }

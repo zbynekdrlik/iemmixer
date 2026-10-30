@@ -13,4 +13,4 @@ name = "iem-dante-dev"
 path = "src/main.rs"
 
 [dependencies]
-iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dante-stack", tag = "v0.1.0" }
+iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dante-stack", tag = "v0.1.1" }
