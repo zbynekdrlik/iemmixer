@@ -47,6 +47,11 @@ allow = ["GPL-3.0-or-later"]
 crate = "dante-stack"
 allow = ["GPL-3.0-or-later"]
 
+# The Gen 3 box's device binary: a thin wrapper that links dante-stack (#72).
+[[licenses.exceptions]]
+crate = "iem-dante-dev"
+allow = ["GPL-3.0-or-later"]
+
 # The audio contract shared with the Dante device (#72, 2026-10-30), from dante-stack:
 # linked through iem-audio-io by the GPL engine only (iem-server, the UI and the guard
 # do not depend on iem-audio-io).
