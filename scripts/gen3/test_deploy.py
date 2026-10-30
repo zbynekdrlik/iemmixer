@@ -1657,7 +1657,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         # No side refusal; the start without a disable, then the engine and
         # the server enabled at boot and read back; the read back as always.
-        self.assertEqual(self.sequence(), self.expected("a", serving=True))
+        self.assertEqual(self.sequence(), self.expected("a", serving=True, held=("iem-engine", "iem-server")))
         self.assertEqual(self.states(), {"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
         self.assertIn("iem-engine and iem-server enabled at boot (3.x serves the band; the tunnel unit left as it is)",
@@ -1673,7 +1673,8 @@ class DeployTests(unittest.TestCase):
         sha2, second = self.next_build("the second build")
         r = self.deploy(args=[*self.full_args(sha2, second), *serving])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.sequence(), self.expected("b", link="slot-a/bin", serving=True))
+        self.assertEqual(self.sequence(), self.expected("b", link="slot-a/bin", serving=True,
+                                                       held=("iem-engine", "iem-server")))
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
 
     def test_serving_only_while_3x_serves_and_while_3x_serves_only_serving(self) -> None:
@@ -1810,7 +1811,8 @@ class DeployTests(unittest.TestCase):
         self.git("checkout", "-q", "--detach", self.sha)
         r = self.deploy(args=[*self.back_args(self.sha), *serving])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True, serving=True))
+        self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True, serving=True,
+                                                       held=("iem-engine", "iem-server")))
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
         sent += self.remote()
         allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
