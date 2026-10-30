@@ -74,3 +74,37 @@ async fn a_same_origin_request_still_works() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["version"], iem_core::VERSION);
 }
+
+async fn headers_for(config: Config) -> axum::http::HeaderMap {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_router(AppState::new(config, dir.path()));
+    let resp = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    resp.headers().clone()
+}
+
+#[tokio::test]
+async fn no_page_may_frame_the_ui_by_default() {
+    let h = headers_for(Config::default()).await;
+    assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+    let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+    assert!(csp.ends_with("; frame-ancestors 'none'"), "{csp}");
+}
+
+#[tokio::test]
+async fn a_listed_parent_may_frame_the_ui() {
+    let config = Config {
+        frame_ancestors: vec!["https://surface.example".into()],
+        ..Config::default()
+    };
+    let h = headers_for(config).await;
+    assert!(h.get("x-frame-options").is_none());
+    let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+    assert!(
+        csp.ends_with("; frame-ancestors https://surface.example"),
+        "{csp}"
+    );
+    assert!(csp.starts_with("default-src 'self'; "), "{csp}");
+}

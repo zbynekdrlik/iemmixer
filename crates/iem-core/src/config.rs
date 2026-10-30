@@ -23,6 +23,27 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 /// of an engine group are always `stems`.
 pub const CATEGORIES: [&str; 3] = ["mics", "stems", "tech"];
 
+/// An https origin with no path: `https://host` or `https://host:port`.
+/// Anything else could inject into the CSP header.
+fn valid_frame_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (rest, None),
+    };
+    let host_ok = !host.is_empty()
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    let port_ok =
+        port.is_none_or(|p| p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok());
+    host_ok && port_ok
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +126,11 @@ pub struct Config {
     /// tunnel is down (e.g. "http://10.0.0.10").
     #[serde(default)]
     pub lan_url: Option<String>,
+
+    /// Origins allowed to show the UI in a frame (CSP `frame-ancestors`),
+    /// e.g. "https://surface.example". Empty: no page may frame it.
+    #[serde(default)]
+    pub frame_ancestors: Vec<String>,
 
     /// Web Push contact (VAPID `sub` claim).
     #[serde(default = "default_vapid_subject")]
@@ -227,6 +253,7 @@ impl Default for Config {
             https_domain: None,
             local_public_ip: None,
             lan_url: None,
+            frame_ancestors: Vec::new(),
             vapid_subject: default_vapid_subject(),
             backup_schedule: default_backup_schedule(),
             backup_retention_days: default_backup_retention_days(),
@@ -289,7 +316,24 @@ impl Config {
                 out.push(format!("input '{}': owner '{o}' is not a member", i.id));
             }
         }
+        for a in &self.frame_ancestors {
+            if !valid_frame_origin(a) {
+                out.push(format!(
+                    "frame_ancestors: '{a}' is not an https origin (https://host or https://host:port)"
+                ));
+            }
+        }
         out
+    }
+
+    /// The CSP `frame-ancestors` source list: the configured origins, or
+    /// `'none'` when there are none.
+    pub fn frame_ancestors_source(&self) -> String {
+        if self.frame_ancestors.is_empty() {
+            "'none'".to_string()
+        } else {
+            self.frame_ancestors.join(" ")
+        }
     }
 
     /// `Ok` when [`Config::problems`] is empty.
@@ -384,6 +428,52 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_ancestors_default_to_none() {
+        assert_eq!(Config::default().frame_ancestors_source(), "'none'");
+    }
+
+    #[test]
+    fn frame_ancestors_join_the_configured_origins() {
+        let c = Config {
+            frame_ancestors: vec![
+                "https://surface.example".into(),
+                "https://other.example:8443".into(),
+            ],
+            ..Config::default()
+        };
+        assert!(c.validate().is_ok());
+        assert_eq!(
+            c.frame_ancestors_source(),
+            "https://surface.example https://other.example:8443"
+        );
+    }
+
+    #[test]
+    fn a_frame_ancestor_that_is_not_an_https_origin_is_refused() {
+        for bad in [
+            "http://surface.example",
+            "https://surface.example/",
+            "https://surface.example/path",
+            "https://",
+            "https://.example",
+            "https://surface.example:",
+            "https://surface.example:+443",
+            "https://surface.example:70000",
+            "https://a.example; script-src *",
+            "https://a.example https://b.example",
+            "*",
+            "'self'",
+        ] {
+            let c = Config {
+                frame_ancestors: vec![bad.into()],
+                ..Config::default()
+            };
+            let err = c.validate().expect_err(bad).to_string();
+            assert!(err.contains("frame_ancestors"), "{bad}: {err}");
+        }
+    }
 
     fn site() -> Config {
         toml::from_str(include_str!("../../../config/test-site.toml")).expect("test site")

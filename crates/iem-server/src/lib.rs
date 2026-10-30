@@ -675,10 +675,21 @@ pub struct Assets;
 /// loaded from this server, so its requests are same-origin; a foreign page
 /// gets no `Access-Control-Allow-Origin` and cannot read API responses.
 fn app_router(state: AppState) -> Router {
-    let x_frame_options = SetResponseHeaderLayer::overriding(
-        HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("DENY"),
-    );
+    // Framing (fohmixer's surface, #91): CSP `frame-ancestors` from the site
+    // list; with no list it is `'none'` and the legacy X-Frame-Options DENY
+    // stays for browsers without CSP 2. A listed parent must not also get
+    // DENY, which would refuse it in browsers that read only that header.
+    let frame_ancestors = state
+        .config
+        .try_read()
+        .map(|c| c.frame_ancestors_source())
+        .unwrap_or_else(|_| "'none'".to_string());
+    let x_frame_options = (frame_ancestors == "'none'").then(|| {
+        SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        )
+    });
     let x_content_type_options = SetResponseHeaderLayer::overriding(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
@@ -688,17 +699,21 @@ fn app_router(state: AppState) -> Router {
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
     // CSP allows WASM + inline scripts (Trunk), inline styles (Leptos), and WebSocket connections
+    let csp_value = format!(
+        "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self'; frame-ancestors {frame_ancestors}"
+    );
     let csp = SetResponseHeaderLayer::overriding(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self'",
-        ),
+        HeaderValue::from_str(&csp_value).expect("site validation keeps the CSP a valid header"),
     );
 
-    Router::new()
+    let mut router = Router::new()
         .merge(routes::api_routes(state.clone()))
-        .merge(routes::static_routes())
-        .layer(x_frame_options)
+        .merge(routes::static_routes());
+    if let Some(deny) = x_frame_options {
+        router = router.layer(deny);
+    }
+    router
         .layer(x_content_type_options)
         .layer(referrer_policy)
         .layer(csp)
