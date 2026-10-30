@@ -15,6 +15,7 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Engine core, RT contract at B = 32, site `[engine]` table, protocol, persistence, pipes, rtsan/bench → `.claude/rules/engine.md`
 - Server ↔ engine: ids, pan/dB domains, echoes, solo, talk lock → `.claude/rules/server-engine.md`
 - Cloudflare tunnel watchdog, LAN URL / public host → `.claude/rules/tunnel-watchdog.md`
+- HTTPS certificate keeper (ACME DNS-01 via Cloudflare, `[acme]`, `cloudflare set-token`, sealed store) → `.claude/rules/https-acme.md`
 - ASIO host, the S1a spike, the PC window driver → `.claude/rules/asio-spike.md`
 - PC tuning window (S1c), tuning/measure modules, bundle sync, graceful reboot / I8 → `.claude/rules/pc-tuning.md`
 - Importer, exporter, band data migration (`iem-migrate`, iem-rpp import/export) → `.claude/rules/migration.md`
