@@ -54,6 +54,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 # TLS support for HTTPS (PWA installability on phones)
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 rustls = { version = "0.23", features = ["ring"], optional = true }
+# The certificate of `https_domain` from an ACME CA by DNS-01 through the
+# Cloudflare DNS API (#91, ported from fohmixer): instant-acme on rustls/ring
+# (rcgen makes the key and the CSR), plain http only for a loopback test
+# directory (hyper-util), the certificate's names and expiry read back
+# (x509-parser), and a stand-in certificate while none is stored (rcgen)
+instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "ring", "rcgen"], optional = true }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"], optional = true }
+x509-parser = { version = "0.18", optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"], optional = true }
 
 # Listen and talkback: Opus in the server (X4; the engine links no codec, I1)
 bytes = { version = "1", optional = true }
@@ -99,7 +108,7 @@ required-features = ["standalone"]
 [features]
 default = []
 standalone = ["tracing-subscriber", "tokio/signal"]
-tls = ["axum-server", "rustls"]
+tls = ["axum-server", "rustls", "dep:instant-acme", "dep:hyper-util", "dep:x509-parser", "dep:rcgen", "dep:bytes"]
 audio = ["dep:bytes", "dep:opus"]
 
 [dev-dependencies]
@@ -112,3 +121,10 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 # The real engine for the server's tests (never linked into the server)
 iem-engine = { path = "../iem-engine" }
 iem-audio-io = { path = "../iem-audio-io" }
+# ACME tests (#91): the test CA signs the double's CSRs (rcgen), ring checks
+# the double's JWS signatures, the test certificates' validity (time) and a
+# TLS client for the reloaded listener (tokio-rustls)
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
+ring = "0.17"
+time = "0.3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
