@@ -2863,6 +2863,8 @@ name = "iem-dante-dev"
 version = "2.0.0-dev.53"
 dependencies = [
  "dante-stack",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

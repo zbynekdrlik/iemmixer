@@ -97,6 +97,10 @@ exclude_globs = [
   # #[cfg(windows)] CPU Set call is not compiled on the Linux runners, so no
   # test there could catch its mutant.
   "crates/iem-soakclient/src/main.rs",
+  # iem-dante-dev's main (#72): it only names the binary and hands the
+  # command line to the mutated lib (parse_args, run_health) or to
+  # dante-stack's daemon::cli; tests/cli.rs runs the binary.
+  "crates/iem-dante-dev/src/main.rs",
 ]
 
 exclude_re = [
@@ -194,6 +198,17 @@ exclude_re = [
   # `pause` is the real 200 ms wait between read tries: only time shows it,
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
+  # `iem-dante-dev health`'s glue (#72 phase D, plan Task 6; ported from
+  # dante-stack fdfc321 with the health): `check` reads the box's own
+  # systemd units and CLOCK_MONOTONIC and sleeps the second between the two
+  # control-socket reads, `systemctl_show` runs the box's systemctl: a test
+  # cannot hold the build machine's units (nor stand in for systemctl
+  # without a PATH seam the binary would then carry). Every decision stays
+  # mutated: `parse_units`, `server_answer`, `verdict`, `Verdict::line`,
+  # `State::exit_code`, the read `ask_server` (health/tests.rs runs it
+  # against stand-ins on 127.0.0.1), and lib.rs's `parse_args` and
+  # `run_health` (tests/cli.rs runs the binary).
+  "iem-dante-dev/src/health\\.rs.*\\bglue::(check|systemctl_show)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
   # always Released (NullRt holds no card; #35).
