@@ -179,7 +179,9 @@ def systemctl(words):
         return 0
     if verb == "reset-failed":
         for unit in units:
-            if st["units"].get(unit, "inactive") == "inactive":
+            # An inactive unit stays loaded only while it is enabled (a
+            # disable's reload lets systemd drop it, the real box 2026-10-30).
+            if st["units"].get(unit, "inactive") == "inactive" and unit not in st.get("enabled", []):
                 return err(f"Failed to reset failed state of unit {unit}.service: Unit {unit}.service not loaded.")
         log("reset.log", json.dumps(units))
         return 0
@@ -302,7 +304,7 @@ def run(line):
         # listed. Not in the deploy's order, as systemd's own.
         for unit in ("iem-server", "iem-engine", "iem-dante"):
             state = st["units"].get(unit, "inactive")
-            if unit not in st["not_loaded"] and state != "inactive":
+            if unit not in st["not_loaded"] and (state != "inactive" or unit in st.get("enabled", [])):
                 print(f"{unit}.service loaded {state} {state} {unit}")
         return 0
     if line == "systemctl is-enabled iem-engine iem-server":
@@ -727,9 +729,9 @@ class DeployTests(unittest.TestCase):
         started = "iem-engine iem-server" if start == "engine" else "iem-dante"
         out += [LEFT_JOB, LIST_UNITS,
                 "\n".join(["set -e", *([f"sudo -n rm -f {HIL_DROPIN}"] if left else []),
+                           *([f"sudo -n systemctl reset-failed {' '.join(held)}"] if held else []),
                            "sudo -n systemctl daemon-reload",
                            *([] if serving else ["sudo -n systemctl disable iem-dante iem-engine iem-server"]),
-                           *([f"sudo -n systemctl reset-failed {' '.join(held)}"] if held else []),
                            f"sudo -n systemctl start {started}"]),
                 *([ENABLE, IS_ENABLED] if serving else []),
                 *self.READ_BACK, *["/opt/iemmixer/bin/iem-dante-dev health"] * health]
@@ -1101,6 +1103,18 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn("not loaded", r.stderr)
         self.assertEqual(self.states()["iem-engine"], "active")
         self.assertFalse((self.box / "reset.log").exists())
+
+    def test_a_deploy_over_an_enabled_stack_resets_before_the_disable(self) -> None:
+        # The box 2026-10-30 (#72): 2.x served and the engine and the server
+        # were still enabled from 3.x. Stopped, they stayed loaded and were
+        # listed; the disable's reload let systemd drop them, and the
+        # reset-failed after it failed "not loaded", so nothing started.
+        self.set_states({"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"},
+                        enabled=("iem-engine", "iem-server"))
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("not loaded", r.stderr)
+        self.assertEqual(self.states()["iem-engine"], "active")
 
     def test_a_hil_job_a_dead_gen3_gate_run_left_is_ended_before_the_start(self) -> None:
         # Phase H (#72): a dev box that died during `iempc gen3-gate` leaves
