@@ -5,6 +5,8 @@
 //! server's own logic (permissions, Mute All, solo clean-up, presets,
 //! history, backups, photos, push, SOS, tunnel health).
 
+#[cfg(feature = "tls")]
+pub mod acme;
 pub mod auth;
 pub mod backup;
 pub mod backup_daemon;
@@ -12,6 +14,9 @@ pub mod backup_routes;
 pub mod backup_store;
 pub mod band_import;
 pub mod band_store;
+pub mod cf_token;
+#[cfg(feature = "tls")]
+pub mod cloudflare;
 pub mod console;
 pub mod engine;
 pub mod lineup_routes;
@@ -34,11 +39,14 @@ pub mod push_store;
 pub mod roster_state;
 pub mod roster_watch;
 pub mod routes;
+pub mod sealed;
 pub mod secrets;
 pub mod site_view;
 pub mod snapshot_routes;
 pub mod solo;
 pub mod talk;
+#[cfg(feature = "tls")]
+pub mod tls_cert;
 pub mod tunnel_watch;
 pub mod view;
 pub mod ws_alive;
@@ -73,6 +81,11 @@ use engine::client::EngineError;
 use iem_engine_proto::Cmd;
 use meters::Merged;
 use site_view::{Page, SiteView};
+
+/// What the ACME keeper (#91) knows of `https_domain`'s certificate, read
+/// by `GET /api/site`: `None` while no keeper runs (no `[acme]`, no `tls`
+/// feature).
+pub type CertStatusCell = Arc<std::sync::RwLock<Option<iem_core::tunnel::CertStatus>>>;
 
 /// Write data to a file atomically by writing to a temp file then renaming.
 /// Prevents corruption on crash/power failure.
@@ -214,6 +227,8 @@ pub struct AppState {
     pub push_store: Arc<RwLock<push_store::PushStore>>,
     /// Cloudflare tunnel watchdog state
     pub tunnel_watch: Arc<RwLock<tunnel_watch::TunnelWatch>>,
+    /// The ACME keeper's status (#91)
+    pub cert_status: CertStatusCell,
     /// The engine's media pipe: Listen taps in, talkback out
     #[cfg(feature = "audio")]
     pub media: engine::media::MediaLink,
@@ -326,6 +341,7 @@ impl AppState {
             tunnel_watch: Arc::new(RwLock::new(tunnel_watch::TunnelWatch::new(
                 std::time::Instant::now(),
             ))),
+            cert_status: Arc::default(),
             #[cfg(feature = "audio")]
             media: engine::media::MediaLink::detached(),
             #[cfg(feature = "audio")]
@@ -818,41 +834,48 @@ where
         let config = state.config.read().await;
         if config.tls {
             // Next to the site file: `iem-migrate band` writes them into the
-            // server's config directory (S6 design note §6).
-            let cert_path = server_config.config_dir.join(&config.tls_cert);
-            let key_path = server_config.config_dir.join(&config.tls_key);
+            // server's config directory (S6 design note §6); with `[acme]`
+            // the keeper writes them there too (#91).
+            let files = tls_cert::CertFiles::new(
+                &server_config.config_dir,
+                &config.tls_cert,
+                &config.tls_key,
+            );
             let https_port = config.https_port;
+            let keeper = match (&config.acme, &config.https_domain) {
+                (Some(acme), Some(name)) => Some((acme.clone(), name.clone())),
+                _ => None,
+            };
             drop(config);
 
-            if cert_path.exists() && key_path.exists() {
-                match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-                    .await
-                {
-                    Ok(rustls_config) => {
-                        let https_addr = SocketAddr::from(([0, 0, 0, 0], https_port));
-                        let https_app = app.clone();
-                        let handle = axum_server::Handle::new();
-                        let server_handle = handle.clone();
-                        let task = tokio::spawn(async move {
-                            tracing::info!(port = https_port, "HTTPS server listening");
-                            if let Err(e) = axum_server::bind_rustls(https_addr, rustls_config)
-                                .handle(server_handle)
-                                .serve(
-                                    https_app.into_make_service_with_connect_info::<SocketAddr>(),
-                                )
-                                .await
-                            {
-                                tracing::error!("HTTPS server failed: {}", e);
-                            }
-                        });
-                        https = Some((handle, task));
+            let keeper_name = keeper.as_ref().map(|(_, name)| name.as_str());
+            if let Some(rustls_config) = https_config(&files, keeper_name).await {
+                let https_addr = SocketAddr::from(([0, 0, 0, 0], https_port));
+                let https_app = app.clone();
+                let handle = axum_server::Handle::new();
+                let server_handle = handle.clone();
+                let served = rustls_config.clone();
+                let task = tokio::spawn(async move {
+                    tracing::info!(port = https_port, "HTTPS server listening");
+                    if let Err(e) = axum_server::bind_rustls(https_addr, served)
+                        .handle(server_handle)
+                        .serve(https_app.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                    {
+                        tracing::error!("HTTPS server failed: {}", e);
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to load TLS certificates: {}", e);
-                    }
+                });
+                https = Some((handle, task));
+                if let Some((acme_config, name)) = keeper {
+                    spawn_keeper(
+                        &state,
+                        &name,
+                        &acme_config,
+                        &server_config.config_dir,
+                        files,
+                        rustls_config,
+                    );
                 }
-            } else {
-                tracing::warn!("TLS enabled but cert files not found at {:?}", cert_path);
             }
         }
     }
@@ -943,6 +966,88 @@ where
         }
     }
     Ok(())
+}
+
+/// The HTTPS listener's certificate: the site's files when they load;
+/// otherwise, with an ACME keeper for `keeper_name`, a stand-in the keeper's
+/// first certificate replaces (#91); otherwise none (no HTTPS listener).
+#[cfg(feature = "tls")]
+async fn https_config(
+    files: &tls_cert::CertFiles,
+    keeper_name: Option<&str>,
+) -> Option<axum_server::tls_rustls::RustlsConfig> {
+    use axum_server::tls_rustls::RustlsConfig;
+    if files.cert.exists() && files.key.exists() {
+        match RustlsConfig::from_pem_file(&files.cert, &files.key).await {
+            Ok(config) => return Some(config),
+            Err(e) => tracing::error!("Failed to load TLS certificates: {}", e),
+        }
+    } else if keeper_name.is_none() {
+        tracing::warn!("TLS enabled but cert files not found at {:?}", files.cert);
+    }
+    let name = keeper_name?;
+    let stand_in = match tls_cert::stand_in(name) {
+        Ok(pem) => pem,
+        Err(e) => {
+            tracing::error!("ACME: no stand-in certificate: {e}");
+            return None;
+        }
+    };
+    match RustlsConfig::from_pem(stand_in.chain.into_bytes(), stand_in.key.into_bytes()).await {
+        Ok(config) => {
+            tracing::warn!(
+                name,
+                "ACME: no usable certificate stored: HTTPS serves a self-signed stand-in until the keeper's first certificate"
+            );
+            Some(config)
+        }
+        Err(e) => {
+            tracing::error!("ACME: the stand-in certificate does not load: {e}");
+            None
+        }
+    }
+}
+
+/// Starts the ACME keeper of `name` (#91) on the HTTPS listener's
+/// `rustls_config`; its status goes to `state.cert_status`.
+#[cfg(feature = "tls")]
+fn spawn_keeper(
+    state: &AppState,
+    name: &str,
+    acme_config: &iem_core::config::AcmeConfig,
+    config_dir: &std::path::Path,
+    files: tls_cert::CertFiles,
+    rustls_config: axum_server::tls_rustls::RustlsConfig,
+) {
+    *state
+        .cert_status
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(Default::default());
+    match acme::Acme::new(name, acme_config, config_dir, files) {
+        Ok(keeper) => {
+            tracing::info!(
+                name,
+                directory = %acme_config.directory,
+                "ACME: keeping the certificate"
+            );
+            tokio::spawn(acme::keep(
+                keeper,
+                rustls_config,
+                Arc::clone(&state.cert_status),
+            ));
+        }
+        Err(e) => {
+            tracing::error!("ACME: the keeper cannot start: {e}");
+            if let Some(status) = state
+                .cert_status
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut()
+            {
+                status.last_error = Some(e);
+            }
+        }
+    }
 }
 
 /// Redirect HTTP requests to HTTPS when the Host header matches the configured domain.
@@ -1114,6 +1219,99 @@ mod tests {
         assert_eq!(
             response.headers().get("location").unwrap(),
             "https://mixer.example.org/api/mixer/1?token=abc123"
+        );
+    }
+
+    /// The certificate a TLS client gets from a listener on `config`, which
+    /// trusts only `ca_pem`.
+    async fn served_by(
+        config: axum_server::tls_rustls::RustlsConfig,
+        ca_pem: &str,
+    ) -> Result<tls_cert::CertInfo, String> {
+        let handle = axum_server::Handle::new();
+        let stop = handle.clone();
+        tokio::spawn(async move {
+            axum_server::bind_rustls("127.0.0.1:0".parse().unwrap(), config)
+                .handle(stop)
+                .serve(Router::new().into_make_service())
+                .await
+        });
+        let addr = handle.listening().await.unwrap();
+        let info = tls_cert::test_certs::handshake(addr, "mixer.example.org", ca_pem).await;
+        handle.shutdown();
+        info
+    }
+
+    #[tokio::test]
+    async fn https_serves_the_site_files_else_a_stand_in_only_for_a_keeper() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let files = tls_cert::CertFiles::new(dir.path(), "cert.pem", "key.pem");
+        // Nothing stored: no listener without a keeper, a stand-in with one.
+        assert!(https_config(&files, None).await.is_none());
+        let stand_in = https_config(&files, Some("mixer.example.org"))
+            .await
+            .expect("a stand-in for the keeper");
+        let refused = served_by(stand_in, &tls_cert::test_certs::TestCa::new().pem).await;
+        assert!(refused.is_err(), "self-signed: no CA trusts it");
+        // Stored files are served, with or without a keeper.
+        let ca = tls_cert::test_certs::TestCa::new();
+        let now = chrono::Utc::now().timestamp();
+        let (chain, key) = ca.leaf(&["mixer.example.org"], now - 86_400, now + 90 * 86_400);
+        files
+            .save(&tls_cert::checked(chain, key, "mixer.example.org").unwrap())
+            .unwrap();
+        for keeper in [None, Some("mixer.example.org")] {
+            let config = https_config(&files, keeper).await.unwrap();
+            let info = served_by(config, &ca.pem).await.unwrap();
+            assert_eq!(info.not_after, now + 90 * 86_400, "{keeper:?}");
+        }
+        // Files that do not load: none without a keeper, a stand-in with one.
+        std::fs::write(&files.key, "not a key").unwrap();
+        assert!(https_config(&files, None).await.is_none());
+        assert!(
+            https_config(&files, Some("mixer.example.org"))
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_keeper_starts_and_its_status_reaches_the_state() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(Config::default(), dir.path());
+        assert!(state.cert_status.read().unwrap().is_none());
+        let files = tls_cert::CertFiles::new(dir.path(), "cert.pem", "key.pem");
+        let config = https_config(&files, Some("mixer.example.org"))
+            .await
+            .unwrap();
+        // No token is set: the keeper's first attempt fails at once, before
+        // anything is asked of Cloudflare or the CA.
+        spawn_keeper(
+            &state,
+            "mixer.example.org",
+            &iem_core::config::AcmeConfig::default(),
+            dir.path(),
+            files,
+            config,
+        );
+        assert!(state.cert_status.read().unwrap().is_some());
+        let mut status = None;
+        for _ in 0..250 {
+            status = state.cert_status.read().unwrap().clone();
+            if status.as_ref().is_some_and(|s| s.failures > 0) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            status,
+            Some(iem_core::tunnel::CertStatus {
+                expires: None,
+                last_error: Some(acme::NO_TOKEN.to_string()),
+                failures: 1,
+            })
         );
     }
 }

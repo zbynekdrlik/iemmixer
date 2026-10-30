@@ -44,6 +44,107 @@ fn valid_frame_origin(origin: &str) -> bool {
     host_ok && port_ok
 }
 
+/// Let's Encrypt's production directory: `[acme] directory`'s default.
+pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+/// `[acme] propagation_s`'s default: the wait between writing the DNS-01
+/// record and asking the CA to check it (seconds).
+pub const DEFAULT_PROPAGATION_S: u64 = 20;
+/// The longest allowed propagation wait (seconds).
+pub const MAX_PROPAGATION_S: u64 = 600;
+
+/// `[acme]` (#91): keep a certificate for `https_domain` from an ACME CA by
+/// DNS-01 through the Cloudflare DNS API (`iem_server::acme`). The
+/// Cloudflare token and the ACME account key are never in this file: they
+/// are sealed under the config dir (`iem-server cloudflare set-token`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeConfig {
+    /// The CA's directory URL (default [`LETS_ENCRYPT`]); https, or http
+    /// to a loopback address only (a test double).
+    #[serde(default = "default_acme_directory")]
+    pub directory: String,
+    /// The account's contact address (`owner@example.org`), optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    /// Seconds between writing the challenge record and the CA's check.
+    #[serde(default = "default_propagation_s")]
+    pub propagation_s: u64,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            directory: default_acme_directory(),
+            contact: None,
+            propagation_s: default_propagation_s(),
+        }
+    }
+}
+
+fn default_acme_directory() -> String {
+    LETS_ENCRYPT.to_string()
+}
+
+fn default_propagation_s() -> u64 {
+    DEFAULT_PROPAGATION_S
+}
+
+/// Whether a URL may be fetched by the server's ACME client: `https://…`,
+/// or `http://` to a loopback address (a test double), never plain http
+/// across a network.
+pub fn acme_url_allowed(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty() && !rest.starts_with('/');
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((host, _)) => host,
+            None => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `name` is a DNS name like `mixer.example.org`: two labels or
+/// more of letters, digits and inner `-`.
+pub fn is_dns_name(name: &str) -> bool {
+    let labels: Vec<&str> = name.split('.').collect();
+    name.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|label| {
+            (1..=63).contains(&label.len())
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+/// Whether `address` is an e-mail address like `owner@example.org`.
+pub fn is_email(address: &str) -> bool {
+    match address.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && local
+                    .chars()
+                    .all(|c| c.is_ascii_graphic() && !matches!(c, '@' | '<' | '>' | ',' | ':'))
+                && is_dns_name(domain)
+        }
+        None => false,
+    }
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,6 +232,11 @@ pub struct Config {
     /// e.g. "https://surface.example". Empty: no page may frame it.
     #[serde(default)]
     pub frame_ancestors: Vec<String>,
+
+    /// `[acme]` (#91): the server keeps `https_domain`'s certificate
+    /// itself. Absent: the certificate files are served as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme: Option<AcmeConfig>,
 
     /// Web Push contact (VAPID `sub` claim).
     #[serde(default = "default_vapid_subject")]
@@ -254,6 +360,7 @@ impl Default for Config {
             local_public_ip: None,
             lan_url: None,
             frame_ancestors: Vec::new(),
+            acme: None,
             vapid_subject: default_vapid_subject(),
             backup_schedule: default_backup_schedule(),
             backup_retention_days: default_backup_retention_days(),
@@ -323,6 +430,46 @@ impl Config {
                 ));
             }
         }
+        if let Some(acme) = &self.acme {
+            out.extend(self.acme_problems(acme));
+        }
+        out
+    }
+
+    /// The problems of the `[acme]` table: it needs `tls` and a DNS name in
+    /// `https_domain` (the certificate's name), an allowed directory, a
+    /// contact that is an address, a bounded propagation wait.
+    fn acme_problems(&self, acme: &AcmeConfig) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.tls {
+            out.push("[acme] needs tls = true: the certificate is for the HTTPS listener".into());
+        }
+        match &self.https_domain {
+            None => out.push("[acme] needs https_domain: the certificate is for that name".into()),
+            Some(name) if !is_dns_name(name) => out.push(format!(
+                "[acme] https_domain '{name}' is not a DNS name like mixer.example.org"
+            )),
+            Some(_) => {}
+        }
+        if !acme_url_allowed(&acme.directory) {
+            out.push(format!(
+                "[acme] directory '{}' is not an https URL",
+                acme.directory
+            ));
+        }
+        if let Some(contact) = &acme.contact
+            && !is_email(contact)
+        {
+            out.push(format!(
+                "[acme] contact '{contact}' is not an address like owner@example.org"
+            ));
+        }
+        if acme.propagation_s > MAX_PROPAGATION_S {
+            out.push(format!(
+                "[acme] propagation_s {} is above {MAX_PROPAGATION_S}",
+                acme.propagation_s
+            ));
+        }
         out
     }
 
@@ -371,6 +518,7 @@ impl Config {
         crate::tunnel::SiteLinks {
             lan_url: self.lan_url.clone(),
             public_host: self.https_domain.clone(),
+            certificate: None,
         }
     }
 
@@ -428,6 +576,138 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acme_site(acme: &str) -> Config {
+        toml::from_str(&format!(
+            "tls = true\nhttps_domain = \"mixer.example.org\"\n[acme]\n{acme}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_acme_table_takes_its_defaults() {
+        let site = acme_site("");
+        assert_eq!(site.acme, Some(AcmeConfig::default()));
+        let acme = site.acme.clone().unwrap();
+        assert_eq!(acme.directory, LETS_ENCRYPT);
+        assert_eq!(
+            LETS_ENCRYPT,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(acme.propagation_s, 20);
+        assert_eq!(acme.contact, None);
+        assert!(site.validate().is_ok(), "{:?}", site.problems());
+        assert_eq!(Config::default().acme, None);
+        let explicit = acme_site(
+            "directory = \"http://127.0.0.1:9/dir\"\ncontact = \"owner@example.org\"\npropagation_s = 600\n",
+        );
+        let acme = explicit.acme.clone().unwrap();
+        assert_eq!(acme.directory, "http://127.0.0.1:9/dir");
+        assert_eq!(acme.contact.as_deref(), Some("owner@example.org"));
+        assert_eq!(acme.propagation_s, 600);
+        assert!(explicit.validate().is_ok(), "{:?}", explicit.problems());
+    }
+
+    #[test]
+    fn the_acme_table_refuses_unknown_keys_and_secrets() {
+        for key in [
+            "token = \"x\"",
+            "account_key = \"x\"",
+            "email = \"a@example.org\"",
+        ] {
+            let text = format!("tls = true\nhttps_domain = \"mixer.example.org\"\n[acme]\n{key}\n");
+            assert!(toml::from_str::<Config>(&text).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn acme_problems_name_every_offender() {
+        let mut site = acme_site(
+            "directory = \"http://10.0.0.10/dir\"\ncontact = \"nobody\"\npropagation_s = 601\n",
+        );
+        site.tls = false;
+        site.https_domain = None;
+        assert_eq!(
+            site.problems(),
+            vec![
+                "[acme] needs tls = true: the certificate is for the HTTPS listener".to_string(),
+                "[acme] needs https_domain: the certificate is for that name".to_string(),
+                "[acme] directory 'http://10.0.0.10/dir' is not an https URL".to_string(),
+                "[acme] contact 'nobody' is not an address like owner@example.org".to_string(),
+                "[acme] propagation_s 601 is above 600".to_string(),
+            ]
+        );
+        site.https_domain = Some("mixer.example.org&x=1".into());
+        assert!(
+            site.problems().contains(
+                &"[acme] https_domain 'mixer.example.org&x=1' is not a DNS name like mixer.example.org"
+                    .to_string()
+            ),
+            "{:?}",
+            site.problems()
+        );
+    }
+
+    #[test]
+    fn an_acme_url_is_https_or_http_on_loopback() {
+        for url in [
+            "https://acme-v02.api.letsencrypt.org/directory",
+            "http://127.0.0.1:9/directory",
+            "http://localhost:9/x",
+            "http://[::1]:9/x",
+            "http://127.1.2.3/",
+        ] {
+            assert!(acme_url_allowed(url), "{url}");
+        }
+        for url in [
+            "http://10.0.0.10:9/directory",
+            "http://example.org/",
+            "http://127.0.0.1@example.org/",
+            "http://[::1/",
+            "https://",
+            "https:///x",
+            "ftp://127.0.0.1/",
+            "/relative",
+            "",
+        ] {
+            assert!(!acme_url_allowed(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn dns_names_and_addresses() {
+        for name in ["mixer.example.org", "a-b.example.org", "x.y"] {
+            assert!(is_dns_name(name), "{name}");
+        }
+        for name in [
+            "example",
+            "",
+            ".example.org",
+            "example.org.",
+            "-a.example.org",
+            "a-.example.org",
+            "a b.example.org",
+            "a_b.example.org",
+            &format!("{}.org", "a".repeat(64)),
+            &format!("{}.org", ["a"; 127].join(".")),
+        ] {
+            assert!(!is_dns_name(name), "{name}");
+        }
+        assert!(is_dns_name(&format!("{}.org", "a".repeat(63))));
+        assert!(is_email("owner@example.org"));
+        for bad in [
+            "owner",
+            "@example.org",
+            "owner@",
+            "owner@example",
+            "a b@example.org",
+            "a@b@example.org",
+            "a<b@example.org",
+            "a:b@example.org",
+        ] {
+            assert!(!is_email(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn frame_ancestors_default_to_none() {

@@ -122,6 +122,11 @@ exclude_re = [
   "spawn_tunnel_watch",
   "restart_service_blocking",
   "sc_windows",
+  # The sealed store's unseal outside the unit tests on Linux (#91): no
+  # caller reaches it (the ACME keeper stops at `sealed::AVAILABLE`, and
+  # set-token, which tests/cloudflare_cli.rs runs, only seals); the unit
+  # tests' unseal and the Windows one are tested.
+  "iem-server/src/sealed\\.rs.*\\bunseal\\b",
   # Browser-only fetches and context accessors in the UI; covered by
   # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
   # e2e/tests/engineer.spec.ts (the switch; its messages are the tested

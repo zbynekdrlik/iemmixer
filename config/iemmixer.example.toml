@@ -41,6 +41,18 @@ pin_changes = true
 # No [activity] table: the band-activity alarm was removed by the owner's
 # decision (#38); an older site's table is still accepted and ignored.
 
+# The server keeps https_domain's certificate itself (#91): ACME DNS-01
+# through the Cloudflare DNS API, renewed when under 30 days are left, written
+# to tls_cert/tls_key and loaded without a restart. Needs tls = true and
+# https_domain. The Cloudflare token (Zone > DNS > Edit on the name's zone)
+# is never in this file: `iem-server cloudflare set-token` reads it from
+# stdin and seals it for the server's user (Windows, DPAPI). Absent: the
+# certificate files are served as they are.
+# [acme]
+# directory = "https://acme-v02.api.letsencrypt.org/directory"  # the default
+# contact = "owner@example.org"                                 # optional
+# propagation_s = 20                                            # at most 600
+
 # Band members and the engineer (login grid). `id` is the URL and the login
 # (keep the predecessor's ids: tokens stay valid), `name` the tile label,
 # `mix` the engine mix the person hears.

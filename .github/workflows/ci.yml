@@ -678,8 +678,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Clippy (server + tray, Windows-only code)
         run: cargo clippy --locked -p iem-server -p iem-tray --all-targets --all-features -- -D warnings
-      - name: Pepper DPAPI tests
-        run: "cargo test --locked -p iem-server --all-features --lib pepper::"
+      - name: DPAPI tests (pepper, sealed store, Cloudflare token)
+        run: "cargo test --locked -p iem-server --all-features --lib -- pepper:: sealed:: cf_token::"
+      - name: Cloudflare set-token CLI (DPAPI)
+        run: cargo test --locked -p iem-server --all-features --test cloudflare_cli
       - name: Clippy (engine crates on the engine's target OS)
         run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
       - name: Engine crate tests (library)

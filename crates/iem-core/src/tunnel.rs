@@ -16,6 +16,25 @@ pub struct SiteLinks {
     pub lan_url: Option<String>,
     #[serde(default)]
     pub public_host: Option<String>,
+    /// The ACME keeper's status of `public_host`'s certificate (#91);
+    /// absent without `[acme]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<CertStatus>,
+}
+
+/// What the ACME keeper (#91) knows of the certificate it keeps.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CertStatus {
+    /// The served certificate's end of validity (Unix seconds); `None`
+    /// while no certificate of the name is stored.
+    #[serde(default)]
+    pub expires: Option<i64>,
+    /// Why the last attempt failed; `None` after a success or before any.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// Failed attempts in a row.
+    #[serde(default)]
+    pub failures: u32,
 }
 
 const MEMBER_BANNER_PREFIX: &str = "Internetový prístup nefunguje";
@@ -164,6 +183,7 @@ mod tests {
         let links = SiteLinks {
             lan_url: Some("http://10.0.0.10".to_string()),
             public_host: Some("mixer.example.org".to_string()),
+            certificate: None,
         };
         let json = serde_json::to_value(&links).unwrap();
         assert_eq!(
@@ -172,6 +192,21 @@ mod tests {
         );
         let empty: SiteLinks = serde_json::from_str("{}").unwrap();
         assert_eq!(empty, SiteLinks::default());
+        // With the ACME keeper (#91): its status, read back the same.
+        let kept = SiteLinks {
+            certificate: Some(CertStatus {
+                expires: Some(1_900_000_000),
+                last_error: Some("HTTP 500".to_string()),
+                failures: 2,
+            }),
+            ..links
+        };
+        let json = serde_json::to_value(&kept).unwrap();
+        assert_eq!(
+            json["certificate"],
+            serde_json::json!({"expires": 1_900_000_000, "last_error": "HTTP 500", "failures": 2})
+        );
+        assert_eq!(serde_json::from_value::<SiteLinks>(json).unwrap(), kept);
     }
 
     fn info(state: TunnelState, last_restart_ok: Option<bool>) -> TunnelStatusInfo {

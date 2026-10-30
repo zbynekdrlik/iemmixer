@@ -614,6 +614,7 @@ fn the_wire_forms_are_the_servers_own() {
     let site = serde_json::to_value(SiteLinks {
         lan_url: Some("http://10.0.0.10/".to_owned()),
         public_host: Some("mixer.example.org".to_owned()),
+        certificate: None,
     })
     .unwrap();
     assert_eq!(

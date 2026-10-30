@@ -49,9 +49,18 @@ async fn get_version() -> Json<VersionInfo> {
 }
 
 /// `GET /api/site` — where the mixer is reachable (LAN URL, public host), for
-/// the UI's tunnel banner and reconnect hint. Public: it holds no secret.
+/// the UI's tunnel banner and reconnect hint, and the ACME keeper's status of
+/// the public host's certificate while one runs (#91: `certificate`). Public:
+/// it holds no secret (an attempt's error names calls and statuses, never
+/// the token or a key).
 async fn get_site_links(State(state): State<AppState>) -> Json<iem_core::tunnel::SiteLinks> {
-    Json(state.config.read().await.site_links())
+    let mut links = state.config.read().await.site_links();
+    links.certificate = state
+        .cert_status
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    Json(links)
 }
 
 /// API routes
