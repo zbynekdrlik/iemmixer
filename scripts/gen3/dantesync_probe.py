@@ -8,7 +8,7 @@ install-dantesync.sh (stdlib only, no file left on the box), or by hand:
 Once a second, until everything holds or --wait seconds passed:
 
 - a "DSYX" request to dantesync's time server (127.0.0.1:31900; the layout in
-  crates/iem-dante/src/clock/dsyx.rs): a reply, locked, and the date-offset
+  dante-stack crates/dante-stack/src/clock/dsyx.rs): a reply, locked, and the date-offset
   extension present (dantesync holds the fleet date offset the device's media
   clock needs);
 - its HTTP status (127.0.0.1:8898/status): `date_authority` "follower" (never

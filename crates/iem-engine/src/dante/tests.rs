@@ -104,6 +104,26 @@ fn a_device_at_another_rate_is_refused() {
 }
 
 #[test]
+fn a_device_block_above_the_engines_b_is_refused() {
+    let topo = test_site();
+    for block in [64, 128, 256] {
+        let mut cfg = device(132, 95);
+        cfg.block = block;
+        match check(&cfg, &topo, &[]) {
+            Err(EngineError::Card(why)) => {
+                assert!(why.contains(&format!("block {block}")), "{why}")
+            }
+            other => panic!("{block}: {other:?}"),
+        }
+    }
+    for block in BLOCKS {
+        let mut cfg = device(132, 95);
+        cfg.block = block;
+        assert!(check(&cfg, &topo, &[]).is_ok(), "block {block} runs");
+    }
+}
+
+#[test]
 fn the_timing_is_32_samples_the_devices_latency_and_1_ms() {
     let mut cfg = device(2, 2);
     let t = timing(&cfg);

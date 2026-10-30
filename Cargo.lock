@@ -1119,6 +1119,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dante-audio-io"
+version = "0.1.0"
+source = "git+https://github.com/zbynekdrlik/dante-stack?tag=v0.1.0#da801bcb4341b6f0d158cbd6c6efba9b017d7ea8"
+
+[[package]]
+name = "dante-stack"
+version = "0.1.0"
+source = "git+https://github.com/zbynekdrlik/dante-stack?tag=v0.1.0#da801bcb4341b6f0d158cbd6c6efba9b017d7ea8"
+dependencies = [
+ "dante-audio-io",
+ "if-addrs",
+ "libc",
+ "mdns-sd",
+ "mio",
+ "serde",
+ "serde_json",
+ "socket2",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2743,6 +2769,7 @@ version = "2.0.0-dev.53"
 dependencies = [
  "assert_no_alloc",
  "azo",
+ "dante-audio-io",
  "iem-win",
  "serde_json",
  "tracing",
@@ -2768,24 +2795,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "iem-dante"
+name = "iem-dante-dev"
 version = "2.0.0-dev.53"
 dependencies = [
- "assert_no_alloc",
- "iem-audio-io",
- "if-addrs",
- "libc",
- "mdns-sd",
- "mio",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
+ "dante-stack",
 ]
 
 [[package]]
@@ -2802,8 +2815,8 @@ name = "iem-engine"
 version = "2.0.0-dev.53"
 dependencies = [
  "assert_no_alloc",
+ "dante-stack",
  "iem-audio-io",
- "iem-dante",
  "iem-dsp",
  "iem-engine-proto",
  "iem-limiter-mga",

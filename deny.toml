@@ -44,7 +44,14 @@ allow = ["GPL-3.0-or-later"]
 # links it on Linux (its Dante backend, plan 2026-10-26 Task 3; already GPL through the
 # limiter); the server, the UI and the guard never do (only iem-server's tests run the engine)
 [[licenses.exceptions]]
-crate = "iem-dante"
+crate = "dante-stack"
+allow = ["GPL-3.0-or-later"]
+
+# The audio contract shared with the Dante device (#72, 2026-10-30), from dante-stack:
+# linked through iem-audio-io by the GPL engine only (iem-server, the UI and the guard
+# do not depend on iem-audio-io).
+[[licenses.exceptions]]
+crate = "dante-audio-io"
 allow = ["GPL-3.0-or-later"]
 
 [bans]
@@ -55,3 +62,5 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# All Dante code lives in dante-stack (#72, owner 2026-10-30), consumed by git tag.
+allow-git = ["https://github.com/zbynekdrlik/dante-stack"]

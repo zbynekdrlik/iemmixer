@@ -8,6 +8,9 @@ repository.workspace = true
 description = "iemmixer audio backends: the Process trait, deterministic Offline, paced NullRt and the Windows ASIO host (S1a spike) and backend (S6)"
 
 [dependencies]
+# The audio contract shared with the Dante device (Block, Process, StreamStats,
+# Planar, Fault, panic_message, hist, telemetry), #72.
+dante-audio-io = { git = "https://github.com/zbynekdrlik/dante-stack", tag = "v0.1.0" }
 
 [target.'cfg(windows)'.dependencies]
 # ASIO host (S1a design note §3). Pinned exactly; fallbacks in program spec §2.2.

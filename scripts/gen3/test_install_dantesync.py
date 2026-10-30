@@ -477,7 +477,7 @@ class InstallTests(unittest.TestCase):
 
 def dsyx_reply(request_id: int, locked: bool = True, mode: int = 4, freq_ppb: int = -750, ext: int = 2) -> bytes:
     """A reply laid out as dantesync's build_response and encode_extension
-    write it (crates/iem-dante/src/clock/dsyx.rs); ext 0: the 64-byte base
+    write it (dante-stack crates/dante-stack/src/clock/dsyx.rs); ext 0: the 64-byte base
     alone."""
     base = bytearray(64)
     base[0:4] = b"DSYR"

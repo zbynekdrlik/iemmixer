@@ -66,7 +66,7 @@ fn process_is_realtime_safe() {
 #[test]
 fn the_dante_pump_block_is_realtime_safe() {
     const BLOCKS: usize = 300;
-    for &block in &iem_dante::stream::BLOCKS {
+    for &block in &iem_engine::dante::BLOCKS {
         let block = block as usize;
         let mut r = common::dante::pump_rig(BLOCKS, block);
         let blocks = common::dante::blocks_of(&r, BLOCKS);

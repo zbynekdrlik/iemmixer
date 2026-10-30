@@ -71,7 +71,7 @@ fn process_does_not_allocate() {
 #[test]
 fn the_dante_pump_block_does_not_allocate() {
     const BLOCKS: usize = 300;
-    for &block in &iem_dante::stream::BLOCKS {
+    for &block in &iem_engine::dante::BLOCKS {
         let block = block as usize;
         let mut r = common::dante::pump_rig(BLOCKS, block);
         let blocks = common::dante::blocks_of(&r, BLOCKS);

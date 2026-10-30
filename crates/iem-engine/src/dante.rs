@@ -71,6 +71,12 @@ pub const STOP_WITHIN: Duration = Duration::from_secs(7);
 /// same number (indices from 0). A channel the device lacks is
 /// [`EngineError::Card`] (exit 3).
 pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, EngineError> {
+    if !BLOCKS.contains(&cfg.block) {
+        return Err(EngineError::Card(format!(
+            "the Dante device's block {} is not one the engine runs: {BLOCKS:?} (B = 32, RT contract)",
+            cfg.block
+        )));
+    }
     if cfg.sample_rate != SAMPLE_RATE {
         return Err(EngineError::Card(format!(
             "the Dante device runs at {} Hz; the engine runs at {SAMPLE_RATE} Hz only (I2)",
@@ -91,6 +97,10 @@ pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, En
         tx: map.tx().to_vec(),
     })
 }
+
+/// The device blocks the engine runs, frames: 16 or B = 32 (the RT
+/// contract). dante-stack also allows larger blocks for other hosts.
+pub const BLOCKS: [u64; 2] = [16, iem_dante::stream::BLOCK];
 
 /// The pump's timing on the device `cfg`: B = the device's `block` (32
 /// unless the config sets 16), P = the device's latency in samples (the

@@ -1,6 +1,6 @@
 ---
 paths:
-  - "crates/iem-dante/**"
+  - "crates/iem-dante-dev/**"
   - "scripts/gen3/**"
   - "scripts/iem-pc/iempc_gen3.py"
   - "scripts/iem-pc/test_iempc_gen3.py"

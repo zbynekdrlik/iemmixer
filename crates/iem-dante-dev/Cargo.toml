@@ -1,0 +1,16 @@
+[package]
+name = "iem-dante-dev"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+# Links dante-stack (GPL-3.0-or-later, parts adapted from teodly/inferno).
+license = "GPL-3.0-or-later"
+repository.workspace = true
+description = "iemmixer's Dante device binary on the Gen 3 box (#72): a thin wrapper around dante-stack's daemon CLI, stamped with iemmixer's version and build"
+
+[[bin]]
+name = "iem-dante-dev"
+path = "src/main.rs"
+
+[dependencies]
+iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dante-stack", tag = "v0.1.0" }
