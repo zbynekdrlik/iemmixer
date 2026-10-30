@@ -657,11 +657,14 @@ if [ "$start" = engine ] && [ -n "${IEMPC_START_MARK:-}" ]; then
     echo "deploy.sh: WARNING: the file IEMPC_START_MARK names could not be written: this engine start goes uncounted in iempc's restart budget; the start goes on" >&2
   fi
 fi
+# The reset goes first: a disable reloads systemd, which drops a stopped
+# unit it kept only because it was enabled, and a reset-failed after that
+# fails "not loaded" (the box 2026-10-30).
 on_box "set -e${end_job:+
-$end_job}
-sudo -n systemctl daemon-reload${disable:+
-$disable}${reset:+
+$end_job}${reset:+
 $reset}
+sudo -n systemctl daemon-reload${disable:+
+$disable}
 sudo -n systemctl start ${started[*]}" ||
   die "the start on the box failed (journalctl -u iem-engine -u iem-server -u iem-dante there): the stack may be partly up; deploy again, or stop it (sudo $STOP)"
 if [ "$serving" = 1 ]; then
