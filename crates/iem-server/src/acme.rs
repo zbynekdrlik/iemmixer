@@ -28,7 +28,6 @@
 //! through reqwest.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum_server::tls_rustls::RustlsConfig;
@@ -69,7 +68,7 @@ pub const NO_TOKEN: &str = "no Cloudflare API token: run `iem-server cloudflare 
      user (a token with Zone > DNS > Edit on the name's zone)";
 
 /// The keeper's status, read by `GET /api/site` (`None` without `[acme]`).
-pub type StatusCell = Arc<std::sync::RwLock<Option<CertStatus>>>;
+pub type StatusCell = crate::CertStatusCell;
 
 /// The wait before the next attempt after `failures` failed ones in a row:
 /// [`FIRST_RETRY`] doubling, at most [`MAX_RETRY`].
