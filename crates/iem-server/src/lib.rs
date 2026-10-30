@@ -5,6 +5,8 @@
 //! server's own logic (permissions, Mute All, solo clean-up, presets,
 //! history, backups, photos, push, SOS, tunnel health).
 
+#[cfg(feature = "tls")]
+pub mod acme;
 pub mod auth;
 pub mod backup;
 pub mod backup_daemon;
@@ -13,6 +15,8 @@ pub mod backup_store;
 pub mod band_import;
 pub mod band_store;
 pub mod cf_token;
+#[cfg(feature = "tls")]
+pub mod cloudflare;
 pub mod console;
 pub mod engine;
 pub mod lineup_routes;
@@ -41,6 +45,8 @@ pub mod site_view;
 pub mod snapshot_routes;
 pub mod solo;
 pub mod talk;
+#[cfg(feature = "tls")]
+pub mod tls_cert;
 pub mod tunnel_watch;
 pub mod view;
 pub mod ws_alive;
