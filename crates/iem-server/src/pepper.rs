@@ -20,7 +20,7 @@ use crate::pin_hash::PEPPER_LEN;
 use crate::pin_store::{PIN_HASHES_FILE, PinStore};
 
 #[cfg(windows)]
-mod dpapi;
+pub(crate) mod dpapi;
 // Windows protects the pepper with DPAPI directly (no wrappers here: Linux
 // CI cannot build them, so their mutants could never be caught).
 #[cfg(windows)]

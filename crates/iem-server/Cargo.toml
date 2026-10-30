@@ -101,6 +101,11 @@ path = "tests/roster_cli.rs"
 required-features = ["standalone"]
 
 [[test]]
+name = "cloudflare_cli"
+path = "tests/cloudflare_cli.rs"
+required-features = ["standalone"]
+
+[[test]]
 name = "graceful_stop"
 path = "tests/graceful_stop.rs"
 required-features = ["standalone"]

@@ -13,6 +13,9 @@
 //!                                   (removes: the ids it takes out of the roster
 //!                                   applied last, null before one), exit 0 when
 //!                                   it can be installed, 1 when not
+//!   iem-server cloudflare set-token read a Cloudflare API token from stdin and
+//!                                   store it sealed for this user (the ACME
+//!                                   keeper's DNS-01 records, #91; Windows only)
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
@@ -32,7 +35,7 @@ use iem_server::ServerConfig;
 use iem_server::notify::Audience;
 use iem_server::provision::{self, PinTarget, ProvisionError};
 
-const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file>]   (a PIN is read from stdin)";
+const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file> | cloudflare set-token]   (a PIN or a token is read from stdin)";
 
 fn config_path() -> PathBuf {
     PathBuf::from(std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string()))
@@ -57,6 +60,7 @@ fn main() -> ExitCode {
         },
         ["notify", "--count", "alarm"] => count_command(),
         ["roster", "check", file] => roster_check(file),
+        ["cloudflare", "set-token"] => set_token_command(),
         _ => usage(),
     }
 }
@@ -90,6 +94,28 @@ fn pin_command(target: PinTarget) -> ExitCode {
     match provision::run(&config_path(), &target, stdin.lock()) {
         Ok(()) => {
             eprintln!("iem-server: stored the {} PIN hash", target.label());
+            ExitCode::SUCCESS
+        }
+        Err(e @ ProvisionError::Invalid(_)) => {
+            eprintln!("iem-server: {e}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("iem-server: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Stores the Cloudflare API token read from stdin, sealed for this user
+/// next to the site file: exit 0, 2 for a line that is no token, 1 on an
+/// error (no sealed store on this platform included). Never echoes it.
+fn set_token_command() -> ExitCode {
+    let stdin = std::io::stdin();
+    let config_dir = provision::config_dir_of(&config_path());
+    match iem_server::cf_token::run(&config_dir, stdin.lock()) {
+        Ok(()) => {
+            eprintln!("iem-server: stored the Cloudflare API token (sealed)");
             ExitCode::SUCCESS
         }
         Err(e @ ProvisionError::Invalid(_)) => {

@@ -1,6 +1,7 @@
-//! DPAPI (current user) protection of the PIN pepper — Windows only.
+//! DPAPI (current user) protection of the PIN pepper and the sealed store
+//! (`sealed.rs`: the Cloudflare token, the ACME account, #91) — Windows only.
 //! Excluded from mutation testing (not compiled on Linux CI); the `windows`
-//! CI job runs `pepper::` tests against it.
+//! CI job runs the `pepper::`, `sealed::` and `cf_token::` tests against it.
 
 use std::io;
 
@@ -10,7 +11,7 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::core::PCWSTR;
 
-pub(super) fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
     let input = blob_for(data)?;
     let mut output = CRYPT_INTEGER_BLOB::default();
     // SAFETY: `input` points at `data` for the duration of the call; on success
@@ -30,7 +31,7 @@ pub(super) fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
     Ok(take_output(output))
 }
 
-pub(super) fn unprotect(data: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn unprotect(data: &[u8]) -> io::Result<Vec<u8>> {
     let input = blob_for(data)?;
     let mut output = CRYPT_INTEGER_BLOB::default();
     // SAFETY: as in `protect`.

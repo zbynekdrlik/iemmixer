@@ -113,9 +113,54 @@ pub(crate) fn write_new_private(path: &Path, data: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Replace `path` whole with `data`: a new owner-only (Unix) temporary file
+/// next to it, then a rename, so a crash never leaves half a secret. For the
+/// secrets that are meant to change (a rotated Cloudflare token, a renewed
+/// certificate key; #91, ported from fohmixer 9f3d440 `secrets.rs`). A
+/// temporary file a crashed write left is removed first; one that cannot be
+/// removed fails the exclusive create below.
+pub(crate) fn replace_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("new");
+    let _ = std::fs::remove_file(&tmp);
+    write_new_private(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_private_replaces_the_whole_file_and_leaves_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.test");
+        replace_private(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        // A stale temporary file of a crashed write does not block the next one.
+        std::fs::write(dir.path().join("token.new"), b"stale").unwrap();
+        replace_private(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert!(!dir.path().join("token.new").exists());
+    }
+
+    #[test]
+    fn replace_private_reports_a_temporary_it_cannot_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("token.new")).unwrap();
+        assert!(replace_private(&dir.path().join("token.test"), b"x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_secret_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.test");
+        std::fs::write(&path, b"old").unwrap();
+        replace_private(&path, b"x").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn creates_both_secrets_once_and_reloads_them() {
