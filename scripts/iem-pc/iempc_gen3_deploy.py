@@ -153,6 +153,17 @@ def box_iface(ip, host: str) -> str:
     return values[0]
 
 
+def refuse_a_serving_box(ip, host: str) -> None:
+    """A deploy as 2.x stops the stack and installs the usual device config:
+    on a box whose engine starts at boot, 3.x serves whatever the side record
+    says (2026-10-30: the record did not move with the account, and a missing
+    one reads as 2.x, so the band lost the box)."""
+    code, out, _ = data.box(host, "systemctl is-enabled iem-engine", b"", data.BOX_S)
+    if code == 0 and out.decode(errors="replace").strip() == "enabled":
+        raise ip.StepError("gen3-deploy: the side record says 2.x but the box's engine is enabled at boot, so 3.x "
+                           "serves the band: fix gen3-side.json in iempc's state first: nothing was deployed")
+
+
 def takeover(ip, s: dict[str, str]) -> str:
     """Our device's config under the card's usual name with its TX labels, as
     `gen3-switch to-3` builds it; the card is read under its spare name, the
@@ -225,6 +236,8 @@ def run(ctx, ip) -> int:
         ip.emit({"gen3_deploy": {"dry_run": True, "serves": side, "config": kind, "deploy_sh": plan}})
         return 0
     iface = box_iface(ip, s["GEN3_HOST"])
+    if not serves:
+        refuse_a_serving_box(ip, s["GEN3_HOST"])
     private: Path | None = None
     mark: Path | None = None
     still_running = False
