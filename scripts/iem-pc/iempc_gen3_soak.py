@@ -77,8 +77,7 @@ reset-failed), the env file and the summary removed on the box.
 - clock_not_ready: a read whose clock was not ready;
 - holdover: a read in holdover, or the clock's holdovers rose;
 - re_anchor: the clock's re_anchors rose or its epoch changed;
-- rx_late: an RX flow's late packets rose (a flow of packets as long as the
-  playout counts all late by design: its rings judge it, rx_holes);
+- rx_late: an RX flow's late packets rose (judged per flow by the stack);
 - tx_holes: a TX flow's holes rose;
 - rx_holes: an RX channel's ring holes rose (owner, 2026-10-31 on #72: zero
   loss, a stage device that stops fails it too);
@@ -206,10 +205,7 @@ def sample(status, optional: frozenset[int] = frozenset()) -> dict | None:
         return None
     try:
         rx = g3.rows(status, "rx")
-        # A packet leaves only after its last frame: a flow of packets as long as
-        # the playout counts every packet late by design; its rings judge it.
-        playout = _count(status.get("engine"), "playout")
-        s["rx_late"] = _by([r for r in rx if playout is None or r.get("fpp", 0) < playout], "flow", "late")
+        s["rx_late"] = _by(rx, "flow", "late")
         s["tx_holes"] = _by(g3.rows(status, "tx"), "flow", "holes")
         s["rx_holes"] = _by([c for c in g3.rows(status, "channels") if c.get("rx") not in optional], "rx", "holes")
         s["rx_off"] = len(gate.not_receiving(status, optional))
