@@ -30,6 +30,10 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/iemmixer/iem-dante.env
 ExecStart=/usr/local/lib/iemmixer/napi-priority ${IEM_DANTE_IFACE}
+# No qdisc on the Dante interface (#72, 2026-10-31): a low-priority sender held
+# fq_codel while preempted and our packets waited behind it, a receiver read
+# 812 us against 229 us; the stack's counters end at send_to and see none of it.
+ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} root noqueue
 # The helper's own waits (30 s for the interface, 5 s for its threads, 20 s
 # for its interrupts: 55 s) fit with the forks of each try (the review of PR
 # #84); a stop runs nothing (the values stay until the next boot) and is
