@@ -82,6 +82,8 @@ set -euo pipefail
 #             stack); irqbalance masked (it would move the interrupt off its
 #             core); run now and read back once deploy.sh has written the
 #             Dante interface (/etc/iemmixer/iem-dante.env).
+#   idle      /etc/tmpfiles.d/iemmixer-idle.conf: no deep CPU idle (C6, C8,
+#             C10) at every boot, and now when a CPU may still enter one
 #   display   /etc/tmpfiles.d/iemmixer-display.conf: the display drivers'
 #             output polling off (drm_kms_helper's poll N) at every boot,
 #             applied with systemd-tmpfiles and read back when the box has
@@ -125,6 +127,7 @@ SWAPFILE=/swapfile
 NAPI_HELPER=/usr/local/lib/iemmixer/napi-priority
 NAPI_UNIT=/etc/systemd/system/iem-napi.service
 DISPLAY_CONF=/etc/tmpfiles.d/iemmixer-display.conf
+IDLE_CONF=/etc/tmpfiles.d/iemmixer-idle.conf
 POLL_PARAM=/sys/module/drm_kms_helper/parameters/poll
 ENVFILE=/etc/iemmixer/iem-dante.env
 SUDOERS=/etc/sudoers.d/iemmixer-gen3
@@ -463,6 +466,16 @@ cat > "$work/iemmixer-display.conf" << 'EOF'
 # Applied at every boot by systemd-tmpfiles. Written by
 # scripts/gen3/provision-root.sh.
 w /sys/module/drm_kms_helper/parameters/poll - - - - N
+EOF
+cat > "$work/iemmixer-idle.conf" << 'EOF'
+# The Gen 3 box (#72, 2026-10-31): no deep CPU idle. With the package asleep the
+# NIC's DMA waits for the wake: a Dante receiver read our packets up to 490 us
+# old against 240 us with these states off, and no counter of ours sees it.
+# States 2 to 4 are C6, C8 and C10 on the N100. Applied at every boot by
+# systemd-tmpfiles. Written by scripts/gen3/provision-root.sh.
+w /sys/devices/system/cpu/cpu*/cpuidle/state2/disable - - - - 1
+w /sys/devices/system/cpu/cpu*/cpuidle/state3/disable - - - - 1
+w /sys/devices/system/cpu/cpu*/cpuidle/state4/disable - - - - 1
 EOF
 cat > "$work/iemmixer-workqueue.conf" << EOF
 # The Gen 3 box (#72 phase F): unbound kernel work off the CPUs the kernel
@@ -874,7 +887,20 @@ step_sudoers() {
   changed=1
 }
 
-for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display stack sudoers; do
+step_idle() {
+  put_file 0644 root root "$IDLE_CONF" "$work/iemmixer-idle.conf"
+  local f
+  for f in "$R"/sys/devices/system/cpu/cpu*/cpuidle/state[234]/disable; do
+    [ -e "$f" ] || continue
+    [ "$(cat -- "$f")" != 1 ] || continue
+    systemd-tmpfiles --create "$R$IDLE_CONF" ||
+      die "systemd-tmpfiles --create $IDLE_CONF failed (exit $?)"
+    changed=1
+    return 0
+  done
+}
+
+for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display idle stack sudoers; do
   changed=0
   "step_${step//-/_}"
   if [ "$changed" = 1 ]; then

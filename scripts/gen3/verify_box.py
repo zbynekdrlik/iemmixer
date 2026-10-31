@@ -50,6 +50,8 @@ with a fixed reason
 - napi: iem-napi enabled and active, irqbalance not running; on the Dante
   interface of /etc/iemmixer/iem-dante.env threaded NAPI 1, each of its NAPI
   threads SCHED_FIFO 60 on core 0, each of its interrupts on core 0.
+- idle: /etc/tmpfiles.d/iemmixer-idle.conf keeps the CPUs out of C6, C8 and
+  C10, and no CPU may enter them (a receiver read 490 us against 240 us, #72).
 - display: /etc/tmpfiles.d/iemmixer-display.conf turns the display output
   polling off at boot, and on a box with the parameter `sudo -n cat
   /sys/module/drm_kms_helper/parameters/poll` reads N (the i915 driver's poll
@@ -67,6 +69,7 @@ name: the tests' seams.
 from __future__ import annotations
 
 import json
+import glob
 import os
 import re
 import subprocess
@@ -108,8 +111,11 @@ IFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
 POLL_PARAM = "/sys/module/drm_kms_helper/parameters/poll"
 POLL_OFF = f"w {POLL_PARAM} - - - - N"
+IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
+IDLE_STATES = (2, 3, 4)   # C6, C8, C10 on the N100
+IDLE_OFF = tuple(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1" for n in IDLE_STATES)
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
-          "sleep", "swap", "clock", "napi", "display")
+          "sleep", "swap", "clock", "napi", "display", "idle")
 
 
 class Failed(Exception):
@@ -444,6 +450,19 @@ def check_napi(box: Box) -> None:
     for irq in irqs:
         if read(f"/proc/irq/{irq}/smp_affinity_list").strip() != CORE:
             raise Failed("an interrupt of the Dante interface is not on core 0 alone")
+
+
+def check_idle(box: Box) -> None:
+    try:
+        lines = {" ".join(line.split()) for line in read(IDLE_CONF).splitlines()}
+    except FileNotFoundError:
+        lines = set()
+    if not set(IDLE_OFF) <= lines:
+        raise Failed(f"no {IDLE_CONF} keeping the CPUs out of deep idle")
+    for path in glob.glob(at("/sys/devices/system/cpu/cpu*/cpuidle/state[234]/disable")):
+        with open(path, encoding="utf-8") as f:
+            if f.read().strip() != "1":
+                raise Failed("a CPU may enter deep idle")
 
 
 def check_display(box: Box) -> None:
