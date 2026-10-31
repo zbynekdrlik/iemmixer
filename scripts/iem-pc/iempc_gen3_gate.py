@@ -305,6 +305,16 @@ def receiving(status: dict) -> set[int]:
     return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") == g3.RECEIVING}
 
 
+def not_receiving(status: dict) -> set[int]:
+    """The RX channels with a subscription that do not show Receiving (pure):
+    a required source that is off or gone; 0 is a channel without one."""
+    try:
+        rows = g3.rows(status, "channels")
+    except ValueError:
+        return set()
+    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") not in (0, None, g3.RECEIVING)}
+
+
 def hil_peaks(status) -> dict[int, float] | None:
     """The engine's spare outputs and their peaks from a supervise status
     (`Status.hil`); None without that list."""
@@ -711,6 +721,10 @@ def preflight(box: Box, dante: str | None) -> Facts:
     before = box.device_status()
     if before is None:
         raise ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
+    off = not_receiving(before)
+    if off:   # owner, 2026-10-31 on #72: a required device off is a failure, never a pass
+        raise ip.Refused(f"{no}: {len(off)} subscribed RX channels are not receiving: a required device is off or "
+                         "gone, get it switched on (nothing was changed)")
     facts = Facts(left=left == "left", line=line, burst=burst, interval=interval, hil_tx=hil_tx, dante=dante or "",
                   own="", ret_before=None, ret_tx_name="", receiving=receiving(before))
     if dante is None:

@@ -78,10 +78,11 @@ reset-failed), the env file and the summary removed on the box.
 - holdover: a read in holdover, or the clock's holdovers rose;
 - re_anchor: the clock's re_anchors rose or its epoch changed;
 - rx_late: an RX flow's late packets rose;
-- tx_holes: a TX flow's holes rose.
-Information only: the RX channels' ring holes (`rx_holes`: a stage device
-that stops leaves holes the box did not cause), the longest block since the
-engine started (`max_process_us`), the worst RX flow lateness of a second in
+- tx_holes: a TX flow's holes rose;
+- rx_holes: an RX channel's ring holes rose (owner, 2026-10-31 on #72: zero
+  loss, a stage device that stops fails it too);
+- rx_off: a read with a subscribed RX channel that does not receive.
+Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in
 samples (`lateness_max`). A rise is summed read to read; a count that went
 back counts its new value from 0.
 
@@ -150,7 +151,7 @@ RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "
 # The failures a verdict names, in its order.
 FAILURES = ("not_finished", "client", "harness", "polls", "health", "restarted", "pump_stalled", "pump_late",
             "pump_missed", "pump_overruns", "pump_rebootstraps", "clock_not_ready", "holdover", "re_anchor",
-            "rx_late", "tx_holes")
+            "rx_late", "tx_holes", "rx_holes", "rx_off")
 DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min)"
 DESC_FAIL = "the Gen 3 box's soak failed: "
 
@@ -206,6 +207,7 @@ def sample(status) -> dict | None:
         s["rx_late"] = _by(rx, "flow", "late")
         s["tx_holes"] = _by(g3.rows(status, "tx"), "flow", "holes")
         s["rx_holes"] = _by(g3.rows(status, "channels"), "rx", "holes")
+        s["rx_off"] = len(gate.not_receiving(status))
         lateness = [_count(r, "lateness") for r in rx]
     except ValueError:
         return None
@@ -214,7 +216,7 @@ def sample(status) -> dict | None:
     s["lateness"] = max(lateness, default=0)
     engine = {k: _count(status.get("engine"), k) for k in ENGINE_KEYS}
     s["engine"] = None if any(v is None for v in engine.values()) else engine
-    return {k: s[k] for k in (*CLOCK_KEYS, "engine", "rx_late", "tx_holes", "rx_holes", "lateness")}
+    return {k: s[k] for k in (*CLOCK_KEYS, "engine", "rx_late", "tx_holes", "rx_holes", "rx_off", "lateness")}
 
 
 def growth(values: list[dict]) -> tuple[int, int]:
@@ -337,6 +339,7 @@ def judged(samples: list[dict]) -> dict:
     for key in ("rx_late", "tx_holes", "rx_holes"):
         out[key], b = growth([s[key] for s in samples])
         back += b
+    out["rx_off"] = sum(1 for s in samples if s["rx_off"])
     out["lateness_max"] = max((s["lateness"] for s in samples), default=None)
     out["counts_back"] = back
     return out
@@ -391,7 +394,8 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
                             ("pump_missed", j["pump_missed"]), ("pump_overruns", j["pump_overruns"]),
                             ("pump_rebootstraps", j["pump_rebootstraps"]), ("clock_not_ready", j["clock_not_ready"]),
                             ("holdover", j["holdovers"] + j["in_holdover"]), ("re_anchor", j["re_anchors"]),
-                            ("rx_late", j["rx_late"]), ("tx_holes", j["tx_holes"])):
+                            ("rx_late", j["rx_late"]), ("tx_holes", j["tx_holes"]),
+                            ("rx_holes", j["rx_holes"]), ("rx_off", j["rx_off"])):
             if value:
                 failed.append(word)
     ended = w.finished and w.unit is not None
