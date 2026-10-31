@@ -311,7 +311,7 @@ class SoakTests(SoakBase):
         staged = (self.box / "home" / STAGED).read_text(encoding="utf-8")
         self.assertEqual(staged, f"IEM_SOAK_BUILD={SHA}\n")
         # The status on the box's build: success, a fixed description.
-        self.assertEqual(self.posts(), [["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{SHA}", "-f",
+        self.assertEqual(self.posts(), [["workflow", "run", "gate-status.yml", "-R", ip.REPO, "-f", f"sha={SHA}", "-f",
                                          "state=success", "-f", "context=soak/gen3", "-f",
                                          "description=the Gen 3 box's soak passed (iempc gen3-gate soak, 120 min)"]])
         # Nothing left on the box: the unit, its file, the summary; no HIL job, no engine start.
@@ -389,7 +389,7 @@ class CriteriaTests(SoakBase):
                 doc = self.line(docs)
                 self.assertEqual((doc["failed"], doc[key], doc["pass"], doc["conclusion"]), ([word], value, 0,
                                                                                              "failure"))
-                self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=soak/gen3", "-f",
+                self.assertEqual(self.posts()[0][7:], ["-f", "state=failure", "-f", "context=soak/gen3", "-f",
                                                        f"description=the Gen 3 box's soak failed: {word}"])
                 self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
                 self.assertEqual(self.soak_state()["unit"], None)   # the unit ended all the same

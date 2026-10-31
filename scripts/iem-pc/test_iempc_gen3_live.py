@@ -201,7 +201,7 @@ class LiveTests(LiveBase):
         self.assertEqual(self.calls(), [*BEFORE, *gt.BEGIN, BURST, BURST, *AFTER])
         self.assertEqual(self.device.packets, [])
         self.assertEqual(self.public["asked"], [PUBLIC])
-        self.assertEqual(self.posts(), [["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{SHA}", "-f",
+        self.assertEqual(self.posts(), [["workflow", "run", "gate-status.yml", "-R", ip.REPO, "-f", f"sha={SHA}", "-f",
                                          "state=success", "-f", "context=live/gen3", "-f",
                                          "description=the Gen 3 box's live E2E passed (iempc gen3-gate live)"]])
         # Playwright: the live config in e2e/, the run's values, no PIN, the owner-only token file.
@@ -262,7 +262,7 @@ class LiveTests(LiveBase):
                 doc = self.doc(docs)
                 self.assertEqual((doc["pass"], doc["conclusion"], doc["failed"], doc["first_failure"]),
                                  (0, "failure", failed, first))
-                self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=live/gen3", "-f",
+                self.assertEqual(self.posts()[0][7:], ["-f", "state=failure", "-f", "context=live/gen3", "-f",
                                                        "description=the Gen 3 box's live E2E failed: "
                                                        + ", ".join(failed)])
                 self.assertTrue(set(doc["failed"]) <= set(live.LIVE_FAILURES))
@@ -280,7 +280,7 @@ class LiveTests(LiveBase):
         self.assertEqual(self.record("begin.json"), {"reason": "engine-not-up", "push_before": 1})
         self.assertFalse((self.records() / "pc.json").exists())
         self.assertFalse(self.dropin_there())   # the job ended all the same
-        self.assertEqual(self.posts()[0][5], "state=failure")
+        self.assertEqual(self.posts()[0][8], "state=failure")
         self.assert_no_token_left()
 
     def test_an_engine_that_restarts_by_itself_in_the_job_fails_although_the_specs_pass(self) -> None:
@@ -291,7 +291,7 @@ class LiveTests(LiveBase):
         doc = self.doc(docs)
         self.assertEqual((doc["conclusion"], doc["pass"], doc["unit_restarts"], doc["failed"]),
                          ("success", 0, 1, ["restarted"]))
-        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=live/gen3", "-f",
+        self.assertEqual(self.posts()[0][7:], ["-f", "state=failure", "-f", "context=live/gen3", "-f",
                                                "description=the Gen 3 box's live E2E failed: restarted"])
         self.assertEqual(self.ledger(), [gt.NOW] * 3)
 
