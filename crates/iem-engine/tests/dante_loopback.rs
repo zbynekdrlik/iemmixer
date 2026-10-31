@@ -141,6 +141,7 @@ fn device(dir: &Path) -> Device {
         arc_rx_fpp: directory::FPP,
         pump_cpu: None,
         io_cpu: None,
+        rx_cpu: None,
         state_file: dir.join("state.toml"),
     })
     .unwrap()
