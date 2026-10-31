@@ -10,7 +10,7 @@ description = "iemmixer audio backends: the Process trait, deterministic Offline
 [dependencies]
 # The audio contract shared with the Dante device (Block, Process, StreamStats,
 # Planar, Fault, panic_message, hist, telemetry), #72.
-dante-audio-io = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.3.4" }
+dante-audio-io = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.3.6" }
 
 [target.'cfg(windows)'.dependencies]
 # ASIO host (S1a design note §3). Pinned exactly; fallbacks in program spec §2.2.
