@@ -329,6 +329,8 @@ if line == f"{DANTE} ctl status":
     lag = st["since"] <= int(os.environ.get("FAKE_RX_LAG", "1"))
     channels = [{"rx": n, "status": 8 if lag else 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
                  "early": 0} for n in (101, 102, 103, 104)]
+    if os.environ.get("FAKE_RX_OFF"):
+        channels[3]["status"] = 1
     if looped():
         channels.append({"rx": 94, "status": 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
                          "early": 0})
@@ -935,6 +937,7 @@ class PreflightTests(GateBase):
              "another drop-in changes the engine's unit"),
             ({"FAKE_CHECK_SITE_FAILS": "1"}, None, "iem-engine check-site refuses the installed site"),
             ({"FAKE_UNHEALTHY": "1"}, None, "the box is not healthy"),
+            ({"FAKE_RX_OFF": "1"}, None, "1 subscribed RX channels are not receiving"),
             ({}, text.replace("--dante-iface ${IEM_DANTE_IFACE}", "--dante-iface ${IEM_DANTE_IFACE} --test-signal"),
              "the installed engine unit's ExecStart already holds a HIL flag"),
             ({}, text.replace("StartLimitBurst=3\n", ""), "names no StartLimitBurst and StartLimitIntervalSec"),

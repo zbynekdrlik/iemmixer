@@ -169,7 +169,8 @@ if line == f"{DANTE} ctl status":
            "recv_errors": 0} for f in (1, 2)]
     tx = [{"flow": 1, "live": 1, "fpp": 8, "channels": 8, "packets": 2000 * so["all"], "send_errors": 0,
            "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes")}]
-    channels = [{"rx": n, "status": 0x01010009, "written": 1,
+    off = os.environ.get("FAKE_RX_OFF") == "1" and late()
+    channels = [{"rx": n, "status": 1 if off and n == 104 else 0x01010009, "written": 1,
                  "holes": (2 if n == 101 else 0) + (grown("rx_holes") if n == 102 else 0), "late": 0,
                  "duplicate": 0, "early": 0} for n in (101, 102, 103, 104)]
     doc = {"clock": clock, "requests": [], "sent": [], "uncounted": 0, "tx": tx, "rx": rx, "rx_poll_errors": 0,
@@ -241,7 +242,7 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "reads": 3, "failed_reads": 0, "health_reads": 2, "not_healthy": 0, "health_reasons": [],
         "pump_late": 0, "pump_missed": 0, "pump_overruns": 0, "pump_rebootstraps": 0, "pump_stalled": 0,
         "max_process_us": 210, "clock_not_ready": 0, "holdovers": 0, "in_holdover": 0, "re_anchors": 0,
-        "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "lateness_max": 16, "counts_back": 0, "unit_restarts": 0,
+        "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0, "unit_restarts": 0,
         "left_job": 0, "left_soak": 0, "failed": []}
 
 
@@ -372,6 +373,8 @@ class CriteriaTests(SoakBase):
             ({"FAKE_CLOCK": "epoch"}, "re_anchor", "re_anchors", 1),
             ({"FAKE_GROW": "rx_late"}, "rx_late", "rx_late", 1),
             ({"FAKE_GROW": "tx_holes"}, "tx_holes", "tx_holes", 1),
+            ({"FAKE_GROW": "rx_holes"}, "rx_holes", "rx_holes", 1),
+            ({"FAKE_RX_OFF": "1"}, "rx_off", "rx_off", 1),
             ({"FAKE_UNIT_RESTART": "iem-engine.service"}, "restarted", "unit_restarts", 1),
             ({"FAKE_UNIT_RESTART": "iem-server.service"}, "restarted", "unit_restarts", 1),
             ({"FAKE_UNIT_ENTER": "iem-server.service"}, "restarted", "unit_restarts", 1),
@@ -401,12 +404,6 @@ class CriteriaTests(SoakBase):
         code, docs, err = self.gate_run(FAKE_UNIT_RESTART="iem-engine.service")
         self.assertEqual(code, 1, err)
         self.assertEqual(self.ledger(), [gt.NOW])
-
-    def test_ring_holes_on_the_rx_channels_are_information_only(self) -> None:
-        code, docs, err = self.gate_run(FAKE_GROW="rx_holes")
-        self.assertEqual(code, 0, err)
-        doc = self.line(docs)
-        self.assertEqual((doc["rx_holes"], doc["failed"]), (1, []))
 
     def test_the_harness_checks_judge_the_client_s_summary(self) -> None:
         cases = (
@@ -651,7 +648,7 @@ class PureTests(unittest.TestCase):
             "ready": 1, "epoch": 0, "re_anchors": 2, "holdovers": 3, "holdover": 0,
             "engine": {"media": 1, "blocks": 30, "late": 5, "missed": 7, "overruns": 11, "rebootstraps": 1,
                        "max_process_us": 210},
-            "rx_late": {"1": 4, "3": 0}, "tx_holes": {"2": 6}, "rx_holes": {"101": 2, "102": 0}, "lateness": 31})
+            "rx_late": {"1": 4, "3": 0}, "tx_holes": {"2": 6}, "rx_holes": {"101": 2, "102": 0}, "rx_off": 0, "lateness": 31})
         self.assertIsNone(soak.sample({**status, "engine": None})["engine"])
         for bad in ({}, {**status, "clock": {"ready": 1}}, {**status, "rx": "x"},
                     {**status, "rx": [{"flow": 1, "late": -1, "lateness": 0}]}):
