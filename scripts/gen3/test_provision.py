@@ -52,9 +52,9 @@ INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
 """
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "realtime", "apt", "sleep", "swap", "clock",
-         "napi", "display", "stack", "sudoers")
+         "napi", "display", "idle", "stack", "sudoers")
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
-          "sleep", "swap", "clock", "napi", "display")
+          "sleep", "swap", "clock", "napi", "display", "idle")
 # verify's information beside the checks, never part of pass.
 INFO = ("tpm2", "realtime_running")
 # The realtime step on a 4-CPU box (#72 phase F): the kernel the stand-in
@@ -94,6 +94,10 @@ TMP_INSTALL = ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", 
 POLL = "sys/module/drm_kms_helper/parameters/poll"
 DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
 POLL_OFF = "w /sys/module/drm_kms_helper/parameters/poll - - - - N\n"
+# No deep CPU idle (#72, 2026-10-31: a package asleep held the NIC's DMA, a
+# receiver read 490 us against 240 us).
+IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
+IDLE_OFF = "".join(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1\n" for n in (2, 3, 4))
 STACK = ("iem-engine.service", "iem-server.service", "iem-dante.service")
 # The stack's state folders (the units' StateDirectory=), and find's question
 # about them: the first path not owned by iemmixer:iemmixer.
@@ -914,6 +918,7 @@ class ProvisionRootTests(World):
             *napi_calls,
             [*tmp_install, DISPLAY_CONF],
             ["systemd-tmpfiles", "--create", DISPLAY_CONF],
+            [*tmp_install, IDLE_CONF],
             ["systemctl", "disable", "iem-dante.service"],
             ["install", "-D", "-m", "0440", "-o", "root", "-g", "root", "--", "<tmp>",
              "/etc/sudoers.d/.iemmixer-gen3.new"],
@@ -1745,6 +1750,8 @@ class VerifyTests(World):
             "napi": (lambda: write(self.root / "proc/irq" / IRQS[0] / "smp_affinity_list", "0-3\n"),
                      "an interrupt of the Dante interface is not on core 0 alone"),
             "display": (lambda: write(self.root / POLL, "Y\n"), "display output polling is on"),
+            "idle": (lambda: write(self.root / "sys/devices/system/cpu/cpu0/cpuidle/state2/disable", "0\n"),
+                     "a CPU may enter deep idle"),
             "realtime": (lambda: write(self.root / GRUB.lstrip("/"),
                                        GRUB_AFTER.replace(RT_CMDLINE, RT_CMDLINE + " quiet"), 0o644),
                          "/etc/default/grub does not boot the saved entry with the engine's CPUs isolated"),
@@ -1841,6 +1848,8 @@ class VerifyTests(World):
              "a file of the stack's state is not the service user's"),
             ("state", lambda: shutil.rmtree(self.root / "var/lib/iem-dante"),
              "the stack's state folders cannot be searched (sudo -n find)"),
+            ("idle", lambda: (self.root / IDLE_CONF.lstrip("/")).unlink(),
+             "no /etc/tmpfiles.d/iemmixer-idle.conf keeping the CPUs out of deep idle"),
             ("display", lambda: (self.root / DISPLAY_CONF.lstrip("/")).unlink(),
              "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
             ("display", lambda: write(self.root / DISPLAY_CONF.lstrip("/"), POLL_OFF.replace(" N", " Y")),
