@@ -1925,9 +1925,15 @@ class UnitTests(unittest.TestCase):
                          "pepper:/etc/credstore.encrypted/iemmixer-pepper")
         for name, unit in self.all_four().items():
             for key in self.CREDENTIALS:
-                if name == "iem-server" and key == "LoadCredentialEncrypted":
+                if name == "iem-server" and key in ("LoadCredentialEncrypted", "ImportCredential"):
                     continue
                 self.assertNotIn(key, unit["Service"], (name, key))
+
+    def test_the_keepers_token_never_stops_the_server_when_it_is_absent(self) -> None:
+        # #91: ImportCredential= only; a LoadCredentialEncrypted= with an
+        # absolute path ends the start when the file does not exist.
+        server = self.units["iem-server"]
+        self.assertEqual(one(server, "Service", "ImportCredential"), "iemmixer-cloudflare")
 
     def test_the_runtime_folders_open_to_the_service_group_only(self) -> None:
         # 0750: the admin user, in the group `iemmixer`, reaches the device's

@@ -259,13 +259,14 @@ jobs:
           path: crates/iem-ui/dist
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build the engine, the soak client, the device and the server (release, x86_64 Linux)
-        # The server as the box runs it (plan choice 4): the e2e job's
-        # features, plain HTTP, the UI from wasm-dist embedded.
+        # The server as the box runs it (plan choice 4): plain HTTP on
+        # port 80, the UI from wasm-dist embedded, and the tls feature for
+        # the HTTPS listener and its certificate keeper (#91).
         run: |
           set -euo pipefail
           cargo build --locked --release -p iem-engine -p iem-soakclient
           cargo build --locked --release -p iem-dante-dev --bin iem-dante-dev
-          cargo build --locked --release -p iem-server --features standalone,audio
+          cargo build --locked --release -p iem-server --features standalone,tls,audio
       - name: Stage the bundle (the checks below run the staged copies)
         run: |
           set -euo pipefail

@@ -1,6 +1,7 @@
 //! `iem-server cloudflare set-token` end to end (#91): the token is read from
 //! stdin and stored sealed for this user next to the site file (Windows,
-//! DPAPI); a platform without a sealed store refuses and stores nothing.
+//! DPAPI); outside Windows it refuses, names the systemd credential and
+//! stores nothing.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -48,7 +49,7 @@ fn a_cloudflare_command_without_set_token_is_a_usage_error() {
 
 #[cfg(not(windows))]
 #[test]
-fn without_a_sealed_store_set_token_refuses_and_stores_nothing() {
+fn outside_windows_set_token_refuses_names_the_credential_and_stores_nothing() {
     let dir = site_dir();
     let out = run(
         dir.path(),
@@ -57,7 +58,7 @@ fn without_a_sealed_store_set_token_refuses_and_stores_nothing() {
     );
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no sealed store on this platform"), "{err}");
+    assert!(err.contains("iemmixer-cloudflare"), "{err}");
     assert!(!err.contains(&token()), "never the token");
     assert!(!dir.path().join("secrets").exists());
 }

@@ -18,10 +18,10 @@
 //! token is set, warned of once); the old certificate keeps being served
 //! meanwhile.
 //!
-//! The ACME account's key is sealed for the server's user in
-//! `secrets/acme_account.dpapi`; the Cloudflare token is `cf_token.rs`'s.
-//! Neither is ever logged. Without a sealed store (any platform but
-//! Windows for now) the keeper only says so and does nothing.
+//! The ACME account's key is kept for the server's user (`sealed.rs`:
+//! `secrets/acme_account.dpapi` on Windows, an owner-only
+//! `secrets/acme_account.private` on the box); the Cloudflare token is
+//! `cf_token.rs`'s. Neither is ever logged.
 //!
 //! Adapted from fohmixer: one name (no second keeper, so no shared turn),
 //! the listener is axum-server's `RustlsConfig`, the Cloudflare calls go
@@ -466,23 +466,7 @@ impl Acme {
 }
 
 /// Keeps the name's certificate for the server's life (see the module doc).
-/// Without a sealed store it says so once, shows it in the status and
-/// returns.
 pub async fn keep(acme: Acme, rustls: RustlsConfig, status: StatusCell) {
-    keep_on(crate::sealed::AVAILABLE, acme, rustls, status).await;
-}
-
-/// [`keep`], with or without a sealed store (`sealed`).
-async fn keep_on(sealed: bool, acme: Acme, rustls: RustlsConfig, status: StatusCell) {
-    if !sealed {
-        tracing::warn!(
-            name = %acme.name,
-            "ACME: {}; the certificate files are served as they are",
-            crate::sealed::NO_SEALED_STORE
-        );
-        record_failure(&status, crate::sealed::NO_SEALED_STORE.to_string());
-        return;
-    }
     loop {
         let now = chrono::Utc::now().timestamp();
         let wait = acme.check(&rustls, &status, now).await;

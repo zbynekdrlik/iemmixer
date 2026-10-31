@@ -28,6 +28,12 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Stores the doubles' Cloudflare token in `dir`, as the keeper finds it.
+fn store_token(dir: &std::path::Path) {
+    let token = crate::cf_token::read_token(format!("{}\n", cf_secret()).as_bytes()).unwrap();
+    crate::cf_token::store(dir, &token).unwrap();
+}
+
 /// The two doubles and an ACME client of NAME pointed at them, with the
 /// Cloudflare token set in `dir` when `set_token`.
 async fn setup(dir: &std::path::Path, set_token: bool) -> (Acme, CfApi, SharedCa) {
@@ -35,7 +41,7 @@ async fn setup(dir: &std::path::Path, set_token: bool) -> (Acme, CfApi, SharedCa
     let (cf_base, cf_api) = cf::start(&cf_secret(), &[("example.org", "zone-1")]).await;
     let (directory, ca) = ca_double::start(Arc::clone(&cf_api)).await;
     if set_token {
-        crate::cf_token::run(dir, format!("{}\n", cf_secret()).as_bytes()).unwrap();
+        store_token(dir);
     }
     let cfg = AcmeConfig {
         contact: Some("owner@example.org".into()),
@@ -361,7 +367,7 @@ async fn a_failed_attempt_is_counted_and_keeps_the_served_certificate() {
     assert_eq!(served, old.info);
     // With the token set, the next attempt succeeds, resets the count and
     // serves the CA's certificate.
-    crate::cf_token::run(dir.path(), format!("{}\n", cf_secret()).as_bytes()).unwrap();
+    store_token(dir.path());
     assert_eq!(acme.renew(&rustls, &status).await, Ok(()));
     let ca_pem = ca.lock().unwrap().test_ca.pem.clone();
     let served = handshake(addr, NAME, &ca_pem).await.unwrap();
@@ -464,31 +470,6 @@ async fn an_attempt_that_never_ends_is_cut_off() {
     );
     assert!(!acme.files.cert.exists());
     drop(silent);
-    handle.shutdown();
-}
-
-#[tokio::test]
-async fn without_a_sealed_store_the_keeper_only_says_so() {
-    let dir = tempfile::tempdir().unwrap();
-    let (acme, cf_api, ca) = setup(dir.path(), true).await;
-    let (rustls, _addr, handle) = listener(&crate::tls_cert::stand_in(NAME).unwrap()).await;
-    let status: StatusCell = Arc::default();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        keep_on(false, acme, rustls, Arc::clone(&status)),
-    )
-    .await
-    .expect("it returns at once");
-    assert_eq!(
-        status_of(&status),
-        CertStatus {
-            expires: None,
-            last_error: Some(crate::sealed::NO_SEALED_STORE.to_string()),
-            failures: 1,
-        }
-    );
-    assert!(cf_api.lock().unwrap().calls.is_empty());
-    assert!(ca.lock().unwrap().requests.is_empty());
     handle.shutdown();
 }
 

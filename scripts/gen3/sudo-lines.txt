@@ -127,6 +127,12 @@ root | chmod 0600 /etc/credstore.encrypted/iemmixer-pepper
 root | systemd-creds encrypt --name=tunnel --with-key=auto - /etc/credstore.encrypted/iemmixer-tunnel
 root | chmod 0600 /etc/credstore.encrypted/iemmixer-tunnel
 root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-tunnel
+
+# The certificate keeper's Cloudflare token (#91), sent by hand from dev with
+# the value on stdin; optional like the keeper, the server's restart loads it.
+root | systemd-creds encrypt --name=iemmixer-cloudflare --with-key=auto - /etc/credstore.encrypted/iemmixer-cloudflare
+root | chmod 0600 /etc/credstore.encrypted/iemmixer-cloudflare
+root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-cloudflare
 root | systemctl start iem-tunnel
 root | systemctl stop iem-tunnel
 
