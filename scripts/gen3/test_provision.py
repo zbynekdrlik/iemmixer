@@ -1549,6 +1549,10 @@ class NapiTests(unittest.TestCase):
     def read(self, rel: str) -> str:
         return (self.root / rel).read_text(encoding="utf-8").strip()
 
+    def test_the_unit_takes_the_qdisc_off_the_dante_interface(self) -> None:
+        unit = NAPI_UNIT.read_text(encoding="utf-8")
+        self.assertIn("ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} root noqueue\n", unit)
+
     def test_it_sets_every_value_and_reads_it_back(self) -> None:
         r = self.napi()
         self.assertEqual(r.returncode, 0, r.stderr)
