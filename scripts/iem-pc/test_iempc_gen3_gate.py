@@ -955,6 +955,18 @@ class PreflightTests(GateBase):
                         encoding="utf-8")
         self.refused("the installed site names no [guard] hil_tx spare outputs")
 
+    def test_an_optional_rx_channel_that_does_not_receive_refuses_nothing(self) -> None:
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=104\n")
+        code, docs, err = self.gate_run(FAKE_RX_OFF="1")
+        self.assertNotIn("not receiving", err)
+        self.assertTrue(docs, err)
+
+    def test_a_bad_optional_rx_list_refuses_before_any_call(self) -> None:
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=one\n")
+        self.refused("GEN3_OPTIONAL_RX")
+
     def test_a_device_that_does_not_answer_its_arc_reads_refuses(self) -> None:
         with mock.patch.object(gen3_arc, "send", Network().send):
             self.refused("our device did not answer its ARC reads (TimeoutError)")

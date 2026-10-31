@@ -405,6 +405,17 @@ class CriteriaTests(SoakBase):
         self.assertEqual(code, 1, err)
         self.assertEqual(self.ledger(), [gt.NOW])
 
+    def test_an_optional_rx_channel_fails_no_gate(self) -> None:
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=102,104\n")
+        for env in ({"FAKE_RX_OFF": "1"}, {"FAKE_GROW": "rx_holes"}):
+            with self.subTest(env=env):
+                self.again()
+                code, docs, err = self.gate_run(**env)
+                self.assertEqual(code, 0, err)
+                doc = self.line(docs)
+                self.assertEqual((doc["rx_off"], doc["rx_holes"], doc["failed"]), (0, 0, []))
+
     def test_the_harness_checks_judge_the_client_s_summary(self) -> None:
         cases = (
             ({"FAKE_SUMMARY": "incomplete", "FAKE_CLIENT_EXIT": "1"}, ["client", "harness"],
