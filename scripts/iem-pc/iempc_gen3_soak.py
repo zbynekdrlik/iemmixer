@@ -82,6 +82,7 @@ reset-failed), the env file and the summary removed on the box.
 - rx_holes: an RX channel's ring holes rose (owner, 2026-10-31 on #72: zero
   loss, a stage device that stops fails it too);
 - rx_off: a read with a subscribed RX channel that does not receive.
+Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
 Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in
 samples (`lateness_max`). A rise is summed read to read; a count that went
 back counts its new value from 0.
@@ -195,7 +196,7 @@ def _by(rows: list[dict], key: str, value: str) -> dict[str, int]:
     return out
 
 
-def sample(status) -> dict | None:
+def sample(status, optional: frozenset[int] = frozenset()) -> dict | None:
     """The numbers the soak judges from one `ctl status` (pure); None when it
     is not a status. `engine` is None without the pump's object."""
     clock = status.get("clock") if isinstance(status, dict) else None
@@ -206,8 +207,8 @@ def sample(status) -> dict | None:
         rx = g3.rows(status, "rx")
         s["rx_late"] = _by(rx, "flow", "late")
         s["tx_holes"] = _by(g3.rows(status, "tx"), "flow", "holes")
-        s["rx_holes"] = _by(g3.rows(status, "channels"), "rx", "holes")
-        s["rx_off"] = len(gate.not_receiving(status))
+        s["rx_holes"] = _by([c for c in g3.rows(status, "channels") if c.get("rx") not in optional], "rx", "holes")
+        s["rx_off"] = len(gate.not_receiving(status, optional))
         lateness = [_count(r, "lateness") for r in rx]
     except ValueError:
         return None
@@ -508,7 +509,7 @@ def baseline(box: gate.Box, w: Watch) -> None:
     pump, the stack's units."""
     no = f"no {NAME} gate"
     status = box.device_status()
-    s = sample(status) if status is not None else None
+    s = sample(status, box.optional) if status is not None else None
     if s is None:
         raise box.ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
     if s["engine"] is None:
@@ -560,7 +561,7 @@ def start(job: Job, sha: str, member: str, minutes: int) -> None:
 
 def read_sample(box: gate.Box, w: Watch) -> None:
     status = box.device_status()
-    s = sample(status) if status is not None else None
+    s = sample(status, box.optional) if status is not None else None
     if s is None:
         w.failed_reads += 1
         return

@@ -305,14 +305,25 @@ def receiving(status: dict) -> set[int]:
     return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") == g3.RECEIVING}
 
 
-def not_receiving(status: dict) -> set[int]:
-    """The RX channels with a subscription that do not show Receiving (pure):
-    a required source that is off or gone; 0 is a channel without one."""
+def optional_rx(ip, env: dict) -> frozenset[int]:
+    """GEN3_OPTIONAL_RX in iempc's private env, RX channels by number with
+    commas: sources a musician carries away (owner, 2026-10-31 on #72). They
+    fail no gate, off or with holes."""
+    words = [w.strip() for w in env.get("GEN3_OPTIONAL_RX", "").split(",") if w.strip()]
+    if not all(w.isdecimal() for w in words):
+        raise ip.Refused("gen3-gate: GEN3_OPTIONAL_RX is not a list of RX channel numbers (nothing was called)")
+    return frozenset(int(w) for w in words)
+
+
+def not_receiving(status: dict, optional: frozenset[int] = frozenset()) -> set[int]:
+    """The required RX channels with a subscription that do not show Receiving
+    (pure): a required source that is off or gone; 0 is a channel without one."""
     try:
         rows = g3.rows(status, "channels")
     except ValueError:
         return set()
-    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") not in (0, None, g3.RECEIVING)}
+    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") not in (0, None, g3.RECEIVING)
+            and c["rx"] not in optional}
 
 
 def hil_peaks(status) -> dict[int, float] | None:
@@ -525,6 +536,7 @@ class Box:
 
     def __init__(self, ip, ctx, host: str, name: str = "HIL") -> None:
         self.ip, self.ctx, self.host, self.name = ip, ctx, host, name
+        self.optional = optional_rx(ip, ctx.env)
 
     def call(self, words: list[str], *, change: bool = False, event: str | None = None, stdin: str = "",
              timeout: float = CALL_S) -> str:
@@ -721,7 +733,7 @@ def preflight(box: Box, dante: str | None) -> Facts:
     before = box.device_status()
     if before is None:
         raise ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
-    off = not_receiving(before)
+    off = not_receiving(before, box.optional)
     if off:   # owner, 2026-10-31 on #72: a required device off is a failure, never a pass
         raise ip.Refused(f"{no}: {len(off)} subscribed RX channels are not receiving: a required device is off or "
                          "gone, get it switched on (nothing was changed)")
