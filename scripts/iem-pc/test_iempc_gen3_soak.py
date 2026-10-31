@@ -665,6 +665,14 @@ class PureTests(unittest.TestCase):
                     {**status, "rx": [{"flow": 1, "late": -1, "lateness": 0}]}):
             self.assertIsNone(soak.sample(bad), bad)
 
+    def test_a_flow_whose_packets_outlast_the_playout_is_judged_by_its_rings_only(self) -> None:
+        status = {"clock": {"ready": 1, "epoch": 0, "re_anchors": 0, "holdovers": 0, "holdover": 0},
+                  "rx": [{"flow": 1, "fpp": 4, "late": 4, "lateness": 8}, {"flow": 2, "fpp": 32, "late": 900, "lateness": 37}],
+                  "tx": [], "channels": [],
+                  "engine": {"media": 1, "blocks": 30, "late": 0, "missed": 0, "overruns": 0, "rebootstraps": 0,
+                             "max_process_us": 90, "playout": 31}}
+        self.assertEqual(soak.sample(status)["rx_late"], {"1": 4})
+
     def test_growth_counts_each_rise_and_a_count_that_went_back_from_zero(self) -> None:
         self.assertEqual(soak.growth([{"a": 1}, {"a": 3}, {"a": 2, "b": 1}, {"a": 2, "b": 1}]), (5, 1))
         self.assertEqual(soak.growth([{"a": 4}]), (0, 0))
