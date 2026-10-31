@@ -502,7 +502,7 @@ class GateBase(Base):
         return [p for p in self.device.packets if int.from_bytes(p[6:8], "big") == gen3_arc.OPCODE]
 
     def posts(self) -> list[list[str]]:
-        return self.gh.named("workflow", "run")
+        return self.gh.named("api", "-X", "POST")
 
     def gate_run(self, **env: str) -> tuple[int, list[dict], str]:
         with mock.patch.dict(os.environ, env):
@@ -538,7 +538,7 @@ class GateTests(GateBase):
         self.assertEqual(self.calls(), [*PREFLIGHT, *BEGIN, *VERSIONS, CTL, SIGNAL, *[STATUS] * 4, ALARM, ENABLED,
                                         NRESTARTS, *PANIC, *END])
         # The status on the box's build: success, a fixed description.
-        self.assertEqual(self.posts(), [["workflow", "run", "gate-status.yml", "-R", ip.REPO, "-f", f"sha={SHA}", "-f",
+        self.assertEqual(self.posts(), [["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{SHA}", "-f",
                                          "state=success", "-f", "context=hil/gen3", "-f",
                                          "description=the Gen 3 box's HIL passed (iempc gen3-gate hil)"]])
         # The job's drop-in: ExecStart reset, then the unit's own line and the test flags (the burst's and the
@@ -582,7 +582,7 @@ class GateTests(GateBase):
         doc = docs[0]["gen3_gate"]["hil"]
         self.assertEqual((doc["pass"], doc["failed"]), (0, ["level", "alarm_count", "alarm_not_armed"]))
         self.assertEqual((doc["lowest_dbfs"], doc["alarm_devices"], doc["alarm_armed"]), (-33.98, 0, 0))
-        self.assertEqual(self.posts()[0][7:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
                                                "description=the Gen 3 box's HIL failed: level, alarm_count, "
                                                "alarm_not_armed"])
         self.assertFalse(self.dropin_there())   # the job ended all the same
@@ -628,7 +628,7 @@ class GateTests(GateBase):
                 code, docs, err = self.gate_run(**env)
                 self.assertEqual(code, 1, err)
                 self.assertEqual(docs[-1]["gen3_gate"]["hil"]["failed"], ["versions"])
-                self.assertEqual(self.posts()[0][6], f"sha={SHA}")
+                self.assertEqual(self.posts()[0][3], f"repos/{ip.REPO}/statuses/{SHA}")
                 self.now += 601   # the next run's budget
 
     def test_a_refused_status_post_fails_the_command_after_its_verdict(self) -> None:
@@ -827,7 +827,7 @@ class PanicTests(GateBase):
         self.assertEqual(code, 1, err)
         doc = docs[0]["gen3_gate"]["hil"]
         self.assertEqual((doc["pass"], doc["panic"], doc["failed"]), (0, 0, ["panic"]))
-        self.assertEqual(self.posts()[0][7:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
                                                "description=the Gen 3 box's HIL failed: panic"])
         self.assertEqual(self.calls()[-len(END):], END)
         self.assertFalse(self.dropin_there())
@@ -856,7 +856,7 @@ class PanicTests(GateBase):
         doc = docs[0]["gen3_gate"]["hil"]
         self.assertEqual((doc["panic"], doc["failed"]), ("skipped", ["restarts_unread"]))
         self.assertNotIn(INJECT, self.calls())
-        self.assertEqual(self.posts()[0][7:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
                                                "description=the Gen 3 box's HIL failed: restarts_unread"])
 
     def test_a_restart_right_after_the_count_still_stops_the_fault(self) -> None:
