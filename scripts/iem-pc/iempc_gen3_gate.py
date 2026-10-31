@@ -87,7 +87,7 @@ end.
 **The verdict:** one line `{"gen3_gate": {"hil": {...}}}`, numbers and the
 fixed words of FAILURES only (no name, address, channel number or build
 hash), then the commit status `hil/gen3` on the engine's build SHA through
-the workflow gate-status (`gh workflow run`; success or failure, a fixed
+`gh api repos/<repo>/statuses/<sha>` (success or failure, a fixed
 description naming the failed checks' words). Exit 0 only when it passes,
 the job ended and the status was posted.
 
@@ -1123,17 +1123,13 @@ def in_job(job: Job, c: Checks) -> None:
 
 # ---- the status ----
 
-STATUS_WORKFLOW = "gate-status.yml"
-
-
 def post(ip, sha: str, passed: bool, description: str, context: str) -> bool:
     """The commit status `context` on the box's build, success or failure,
-    its description cut to 140 characters, through the workflow gate-status
-    (the App token holds statuses: read, airuleset#1272); False (a warning)
-    when gh refused it."""
+    its description cut to 140 characters (a user token posts a status);
+    False (a warning) when gh refused it."""
     state = "success" if passed else "failure"
     try:
-        ip.gh(["workflow", "run", STATUS_WORKFLOW, "-R", ip.REPO, "-f", f"sha={sha}", "-f", f"state={state}",
+        ip.gh(["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{sha}", "-f", f"state={state}",
                "-f", f"context={context}", "-f", f"description={description[:140]}"])
     except ip.StepError as e:
         warn(f"the status {context} was not posted ({e})")
