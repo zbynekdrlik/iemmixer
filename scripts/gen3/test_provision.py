@@ -1234,6 +1234,18 @@ class ProvisionRootTests(World):
         self.assertNotIn("systemd-tmpfiles", [c[0] for c in self.writes()])
         self.assertTrue((self.root / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8").endswith(POLL_OFF))
 
+    def test_a_box_serving_the_band_stays_enabled_at_boot(self) -> None:
+        # Provisioning the serving box on 2026-11-01 (#72) disabled the engine
+        # and the server: the next reboot would have left the band silent.
+        self.provisioned()
+        for unit in ("iem-engine.service", "iem-server.service"):
+            self.set_unit(unit, UnitFileState="enabled")
+        self.set_unit("iem-dante.service", UnitFileState="enabled")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["stack"], "changed")
+        self.assertEqual(self.writes(), [["systemctl", "disable", "iem-dante.service"]])
+
     def test_the_service_user_may_hold_the_cpu_wake_latency(self) -> None:
         # The engine warned "CPU wake latency not held" at every start
         # (#72, 2026-11-01): /dev/cpu_dma_latency is root's alone, so C1E
@@ -1765,7 +1777,7 @@ class VerifyTests(World):
             "user": (db_change(lambda db: db["group"].update(iemmixer="iemmixer:x:990:")),
                      "the admin is not in the group iemmixer"),
             "units": (drop_in, "iem-server.service does not run as iemmixer"),
-            "boot": (unit("iem-engine.service", UnitFileState="enabled"), "iem-engine.service is enabled at boot"),
+            "boot": (unit("iem-dante.service", UnitFileState="enabled"), "iem-dante.service is enabled at boot"),
             "sudoers": (lambda: (self.root / "etc/sudoers.d/iemmixer-gen3").unlink(), "sudo -n visudo -c fails"),
             "pepper": (lambda: (self.root / "etc/credstore.encrypted/iemmixer-pepper").chmod(0o644),
                        "the pepper's credential is not 600 root"),
