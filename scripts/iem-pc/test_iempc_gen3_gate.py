@@ -715,7 +715,7 @@ class JobTests(GateBase):
         self.assertFalse(self.dropin_there())
         self.assertFalse(self.state()["hil"])
         self.assertEqual(self.posts(), [])
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
+        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
 
     def test_a_flag_before_the_begin_changes_nothing_on_the_box(self) -> None:
         original = gate.preflight
@@ -916,7 +916,7 @@ class PanicTests(GateBase):
         self.assertFalse(self.state()["fault"])
         self.assertEqual(self.posts(), [])
         self.assertEqual(self.ledger(), [NOW] * 2)   # the begin and the end, no fault
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
+        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
 
 
 class PreflightTests(GateBase):

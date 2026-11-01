@@ -244,7 +244,7 @@ class DeployTests(DeployBase):
         self.assertNotIn("gen3_deploy", json.dumps(docs))
         self.assertEqual(len(self.deploys()), 1)
         self.assertEqual(self.leftovers(), [])
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
+        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
 
     def test_a_card_that_cannot_give_the_takeover_refuses_before_the_deploy(self) -> None:
         self.serves(3)

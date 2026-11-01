@@ -486,7 +486,7 @@ class FlagTests(SoakBase):
         self.assertEqual(calls[calls.index(client(7200)) + 1:], [gt.CTL, UNIT_SHOW, STOP_UNIT, RM_ENV, RM_SUMMARY])
         self.assertEqual((self.soak_state()["unit"], self.env_file_there()), (None, False))
         self.assertEqual(self.posts(), [])
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
+        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
         self.assert_private(err + json.dumps(docs))
 
     def test_a_flag_before_the_start_changes_nothing_on_the_box(self) -> None:

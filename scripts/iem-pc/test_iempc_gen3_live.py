@@ -330,7 +330,7 @@ class FlagTests(LiveBase):
         self.assertFalse(self.state()["hil"])
         self.assertEqual(self.posts(), [])   # never a status for a cancelled run
         self.assertEqual(self.record("pc.json"), {"reason": "left-dev"})
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
+        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
         self.assert_no_token_left()
         self.assert_private(err + json.dumps(docs))
 
