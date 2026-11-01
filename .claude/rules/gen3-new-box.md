@@ -42,7 +42,7 @@ Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r
 - **`napi` also shapes the Dante interface** (`iem-napi.service`): TSO/GSO off, root `prio` with `tbf` 100 Mbit on the non-audio bands, PTP (UDP 319/320) in the unlimited band; audio goes past the qdisc through AF_PACKET (`CAP_NET_RAW` on the engine). Without it 300 kB of TCP from the box read 650 µs at a receiver and no counter of ours saw it. Read a receiver's Latency tab, not the box's counters;
 - **`idle`:** C6, C8 and C10 off at every boot (a receiver read 490 µs against 240 µs with them on, no counter of ours sees it; the state numbers are the N100's);
 - **`display`:** the display poll off at every boot;
-- the stack's units never enabled at boot; the sudoers rule.
+- `iem-dante.service` disabled at boot (the engine and the server are the deploy's to enable); the sudoers rule.
 
 Then reboot once (`# airuleset:destructive-ok <reason>` on the command) and run verify again: every check 1, `realtime_running` 1 (`uname -r` ends `-realtime`, `/sys/devices/system/cpu/isolated` the last two CPUs).
 

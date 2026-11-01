@@ -1168,13 +1168,13 @@ dependencies = [
 
 [[package]]
 name = "dante-audio-io"
-version = "0.4.22"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.22#c77cf651458998a73b2fb4e205bbed64b141f677"
+version = "0.4.26"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.26#cfd62480b2c41c6ecd634d647e49b86fa4628d3c"
 
 [[package]]
 name = "dante-stack"
-version = "0.4.22"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.22#c77cf651458998a73b2fb4e205bbed64b141f677"
+version = "0.4.26"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.26#cfd62480b2c41c6ecd634d647e49b86fa4628d3c"
 dependencies = [
  "dante-audio-io",
  "if-addrs",
@@ -1454,7 +1454,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1699,7 +1699,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "assert_no_alloc",
  "azo",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2861,7 +2861,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dante-dev"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "dante-stack",
  "serde",
@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2879,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "assert_no_alloc",
  "dante-stack",
@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "iem-guard"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "iem-win",
  "interprocess",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "assert_no_alloc",
  "iem-rpp",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "iem-migrate"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "iem-rpp"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "base64 0.22.1",
  "iem-core",
@@ -2973,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "iem-tray"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "dirs 6.0.0",
  "iem-core",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "iem-win"
-version = "2.0.0-dev.54"
+version = "2.0.0-dev.55"
 dependencies = [
  "tokio",
  "windows-registry 0.100.0",
@@ -3813,7 +3813,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3938,7 +3938,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5439,7 +5439,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5497,7 +5497,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6141,7 +6141,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6757,7 +6757,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7248,7 +7248,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7329,7 +7329,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7823,7 +7823,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7844,7 +7844,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "raw-window-handle",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "windows-version",
 ]
 
