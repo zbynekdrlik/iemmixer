@@ -77,10 +77,12 @@ RuntimeDirectoryMode=0750
 # for 40 (below dantesync's 50); without this limit they run at normal
 # priority and say so once.
 LimitRTPRIO=80
-# No capability: every port is above 1024 (the device's, see iem-dante.service;
-# dantesync is the box's one PTP owner, our device never opens UDP 319/320).
-CapabilityBoundingSet=
-AmbientCapabilities=
+# CAP_NET_RAW only: the device's audio TX goes past the qdisc through AF_PACKET
+# with PACKET_QDISC_BYPASS (dstack v0.4.15), so a stalled non-audio sender cannot
+# hold audio back (#72). Every port is above 1024 (see iem-dante.service);
+# dantesync is the box's one PTP owner, our device never opens UDP 319/320.
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
