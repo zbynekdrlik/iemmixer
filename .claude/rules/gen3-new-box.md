@@ -39,7 +39,7 @@ Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r
 - dantesync as the only clock;
 - **`realtime`:** `linux-image-realtime` (Ubuntu's PREEMPT_RT, in the normal archive) as grub's saved default, the generic kernel kept as a menu entry; the kernel command line isolates the last two CPUs (`isolcpus=domain,managed_irq`, `nohz_full`, `rcu_nocbs`, `irqaffinity` on the rest); unbound kernel work off them (tmpfiles); `update-grub` again whenever `grub.cfg` lacks the line or the entry. Check `/etc/default/grub.d/*.cfg` sets neither key (it would win);
 - **`napi`:** the Dante NIC's packet priority at every boot (`iem-napi.service`): threaded NAPI at SCHED_FIFO 60 on core 0, its interrupt on core 0 (it waits up to 20 s for the interface to be opened), **EEE off**;
-- **`napi` also sets `noqueue`** on the Dante interface (`iem-napi.service`): with fq_codel a receiver read 812 µs against 229 µs, and no counter of ours sees it. Read a receiver's Latency tab, not the box's counters;
+- **`napi` also shapes the Dante interface** (`iem-napi.service`): TSO/GSO off, root `prio` with `tbf` 100 Mbit on the non-audio bands, PTP (UDP 319/320) in the unlimited band; audio goes past the qdisc through AF_PACKET (`CAP_NET_RAW` on the engine). Without it 300 kB of TCP from the box read 650 µs at a receiver and no counter of ours saw it. Read a receiver's Latency tab, not the box's counters;
 - **`idle`:** C6, C8 and C10 off at every boot (a receiver read 490 µs against 240 µs with them on, no counter of ours sees it; the state numbers are the N100's);
 - **`display`:** the display poll off at every boot;
 - the stack's units never enabled at boot; the sudoers rule.
