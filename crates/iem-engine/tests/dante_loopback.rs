@@ -138,6 +138,7 @@ fn device(dir: &Path) -> Device {
         cmc_port: iem_dante::cmc::PORT,
         flows_port: iem_dante::flows::control::PORT,
         process_id: 0,
+        rx_port_base: None,
         arc_rx_fpp: directory::FPP,
         pump_cpu: None,
         io_cpu: None,
