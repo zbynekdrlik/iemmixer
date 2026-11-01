@@ -99,13 +99,13 @@ dependencies = [
 
 [[package]]
 name = "dante-audio-io"
-version = "0.4.15"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.15#eb06a9b93dc514802c2fdd76fc82b20a4a5655d2"
+version = "0.4.22"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.22#c77cf651458998a73b2fb4e205bbed64b141f677"
 
 [[package]]
 name = "dante-stack"
-version = "0.4.15"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.15#eb06a9b93dc514802c2fdd76fc82b20a4a5655d2"
+version = "0.4.22"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.22#c77cf651458998a73b2fb4e205bbed64b141f677"
 dependencies = [
  "dante-audio-io",
  "if-addrs",
@@ -206,7 +206,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.53"
+version = "2.0.0-dev.54"
 dependencies = [
  "azo",
  "dante-audio-io",
@@ -217,11 +217,11 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.53"
+version = "2.0.0-dev.54"
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.53"
+version = "2.0.0-dev.54"
 dependencies = [
  "dante-stack",
  "iem-audio-io",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.53"
+version = "2.0.0-dev.54"
 dependencies = [
  "serde",
  "serde_json",
@@ -261,11 +261,11 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.53"
+version = "2.0.0-dev.54"
 
 [[package]]
 name = "iem-win"
-version = "2.0.0-dev.53"
+version = "2.0.0-dev.54"
 dependencies = [
  "windows-registry",
  "windows-sys",
