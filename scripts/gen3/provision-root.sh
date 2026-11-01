@@ -476,6 +476,9 @@ cat > "$work/iemmixer-idle.conf" << 'EOF'
 w /sys/devices/system/cpu/cpu*/cpuidle/state2/disable - - - - 1
 w /sys/devices/system/cpu/cpu*/cpuidle/state3/disable - - - - 1
 w /sys/devices/system/cpu/cpu*/cpuidle/state4/disable - - - - 1
+# The engine holds the CPU wake latency through this device (2026-11-01):
+# root's alone by default, and then it warns and leaves C1E open.
+z /dev/cpu_dma_latency 0660 root iemmixer - -
 EOF
 cat > "$work/iemmixer-workqueue.conf" << EOF
 # The Gen 3 box (#72 phase F): unbound kernel work off the CPUs the kernel
@@ -890,6 +893,12 @@ step_sudoers() {
 step_idle() {
   put_file 0644 root root "$IDLE_CONF" "$work/iemmixer-idle.conf"
   local f
+  if [ -e "$R/dev/cpu_dma_latency" ] && [ "$(stat -c %a -- "$R/dev/cpu_dma_latency")" != 660 ]; then
+    systemd-tmpfiles --create "$R$IDLE_CONF" ||
+      die "systemd-tmpfiles --create $IDLE_CONF failed (exit $?)"
+    changed=1
+    return 0
+  fi
   for f in "$R"/sys/devices/system/cpu/cpu*/cpuidle/state[234]/disable; do
     [ -e "$f" ] || continue
     [ "$(cat -- "$f")" != 1 ] || continue

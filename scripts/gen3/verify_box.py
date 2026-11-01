@@ -113,7 +113,9 @@ POLL_PARAM = "/sys/module/drm_kms_helper/parameters/poll"
 POLL_OFF = f"w {POLL_PARAM} - - - - N"
 IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
 IDLE_STATES = (2, 3, 4)   # C6, C8, C10 on the N100
-IDLE_OFF = tuple(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1" for n in IDLE_STATES)
+WAKE_DEVICE = "/dev/cpu_dma_latency"
+WAKE_GRANT = f"z {WAKE_DEVICE} 0660 root iemmixer - -"
+IDLE_OFF = (*(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1" for n in IDLE_STATES), WAKE_GRANT)
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
           "sleep", "swap", "clock", "napi", "display", "idle")
 
@@ -463,6 +465,8 @@ def check_idle(box: Box) -> None:
         with open(path, encoding="utf-8") as f:
             if f.read().strip() != "1":
                 raise Failed("a CPU may enter deep idle")
+    if os.path.exists(at(WAKE_DEVICE)) and os.stat(at(WAKE_DEVICE)).st_mode & 0o060 != 0o060:
+        raise Failed("the service user cannot hold the CPU wake latency")
 
 
 def check_display(box: Box) -> None:
