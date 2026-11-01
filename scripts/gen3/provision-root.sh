@@ -859,9 +859,11 @@ step_display() {
 }
 
 step_stack() {
+  # Only the retired standalone device. The engine and the server are the
+  # deploy's: enabled while the box serves the band, and a reboot must serve.
   local unit
   local -a todo=()
-  for unit in "${STACK_UNITS[@]}"; do
+  for unit in iem-dante.service; do
     unit_states "$unit"
     if is_enabled; then todo+=("$unit"); fi
   done

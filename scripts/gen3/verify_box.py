@@ -219,9 +219,11 @@ def check_units(box: Box) -> None:
 
 
 def check_boot(box: Box) -> None:
-    for name in STACK:
-        if box.unit(name).get("UnitFileState") in ENABLED:
-            raise Failed(f"{name} is enabled at boot")
+    # The engine and the server are the deploy's to enable: a box serving the
+    # band keeps them enabled, so only the retired standalone device is judged.
+    name = "iem-dante.service"
+    if box.unit(name).get("UnitFileState") in ENABLED:
+        raise Failed(f"{name} is enabled at boot")
 
 
 def check_sudoers(box: Box) -> None:
