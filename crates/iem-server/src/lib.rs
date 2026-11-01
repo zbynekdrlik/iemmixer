@@ -90,9 +90,26 @@ pub type CertStatusCell = Arc<std::sync::RwLock<Option<iem_core::tunnel::CertSta
 /// Write data to a file atomically by writing to a temp file then renaming.
 /// Prevents corruption on crash/power failure.
 pub fn atomic_write(path: &std::path::Path, data: &str) -> std::io::Result<()> {
+    atomic_write_bytes(path, data.as_bytes())
+}
+
+/// [`atomic_write`] for bytes: the data reaches the disk before the file takes
+/// the name, and the name reaches the disk before this returns, so a power cut
+/// leaves the old file or the new one, never an empty or a partial one.
+pub fn atomic_write_bytes(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, data)?;
-    std::fs::rename(&tmp_path, path)
+    let mut file = std::fs::File::create(&tmp_path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp_path, path)?;
+    // Windows cannot open a directory; only the Linux box needs this sync.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Where a UI event goes.
