@@ -98,6 +98,24 @@ mod tests {
         assert!(!store.exists("oldmember1"));
     }
 
+    /// A power cut in the middle of a save must leave the old photo or the
+    /// new one (#72): the new file is complete before it takes the name, so
+    /// the name moves to another inode instead of truncating the old file.
+    #[cfg(unix)]
+    #[test]
+    fn test_save_replaces_the_photo_whole() {
+        use std::os::unix::fs::MetadataExt;
+        let (store, dir) = test_store();
+        store.save("alice", b"old").unwrap();
+        let path = dir.path().join(PHOTOS_DIR).join(format!("alice.{PHOTO_EXT}"));
+        let held = std::fs::File::open(&path).unwrap();
+        let before = held.metadata().unwrap().ino();
+        store.save("alice", b"new").unwrap();
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), before);
+        assert_eq!(store.load("alice").unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(dir.path().join(PHOTOS_DIR)).unwrap().count(), 1);
+    }
+
     #[test]
     fn test_save_and_load_roundtrip() {
         let (store, _dir) = test_store();
