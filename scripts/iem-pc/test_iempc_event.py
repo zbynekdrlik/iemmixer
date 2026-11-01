@@ -406,6 +406,16 @@ class Gen3StopTests(Base):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             return ip.main(list(argv))
 
+    def test_while_3x_serves_the_event_leaves_the_pc_alone(self) -> None:
+        # The owner ended Gen 2 (#72): the PC holds no band system, and an
+        # iemmode call, or its --direct fallback, could bring REAPER back.
+        self.gen3_host()
+        core.write_json(core.state_dir() / "gen3-side.json", {"side": 3, "at": "2026-11-01T12:00:00+00:00"})
+        code, docs, _ = self.run_main("event")
+        self.assertEqual((code, self.pc.calls), (0, []))
+        self.assertTrue(ip.event_now())
+        self.assertIn({"pc": "left alone: 3.x serves the band"}, docs)
+
     def gen3_warnings(self, err: str) -> list[str]:
         return [line for line in err.splitlines() if "WARNING" in line and "Gen 3" in line]
 
