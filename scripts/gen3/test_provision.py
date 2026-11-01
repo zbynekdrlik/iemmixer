@@ -1549,9 +1549,24 @@ class NapiTests(unittest.TestCase):
     def read(self, rel: str) -> str:
         return (self.root / rel).read_text(encoding="utf-8").strip()
 
-    def test_the_unit_takes_the_qdisc_off_the_dante_interface(self) -> None:
+    def test_the_unit_rate_limits_non_audio_and_keeps_ptp_unlimited(self) -> None:
+        # Audio goes past the qdisc (AF_PACKET); what stays in it is limited so a
+        # burst cannot fill the switch's queue, except the box's clock (UDP 319/320).
         unit = NAPI_UNIT.read_text(encoding="utf-8")
-        self.assertIn("ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} root noqueue\n", unit)
+        tc = "ExecStartPost=/usr/sbin/tc "
+        wanted = [
+            "ExecStartPost=/usr/sbin/ethtool -K ${IEM_DANTE_IFACE} tso off gso off\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} root noqueue\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} root handle 1: prio bands 3\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} parent 1:1 handle 10: pfifo limit 1000\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} parent 1:2 handle 20: tbf rate 100mbit burst 3028 limit 100000\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} parent 1:3 handle 30: tbf rate 100mbit burst 3028 limit 100000\n",
+            tc + "filter add dev ${IEM_DANTE_IFACE} parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 319 0xffff flowid 1:1\n",
+            tc + "filter add dev ${IEM_DANTE_IFACE} parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 320 0xffff flowid 1:1\n",
+        ]
+        at = [unit.find(line) for line in wanted]
+        self.assertNotIn(-1, at, unit)
+        self.assertEqual(at, sorted(at))
 
     def test_it_sets_every_value_and_reads_it_back(self) -> None:
         r = self.napi()
