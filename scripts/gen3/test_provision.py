@@ -98,6 +98,7 @@ POLL_OFF = "w /sys/module/drm_kms_helper/parameters/poll - - - - N\n"
 # receiver read 490 us against 240 us).
 IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
 IDLE_OFF = "".join(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1\n" for n in (2, 3, 4))
+WAKE_GRANT = "z /dev/cpu_dma_latency 0660 root iemmixer - -\n"
 STACK = ("iem-engine.service", "iem-server.service", "iem-dante.service")
 # The stack's state folders (the units' StateDirectory=), and find's question
 # about them: the first path not owned by iemmixer:iemmixer.
@@ -1233,6 +1234,21 @@ class ProvisionRootTests(World):
         self.assertNotIn("systemd-tmpfiles", [c[0] for c in self.writes()])
         self.assertTrue((self.root / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8").endswith(POLL_OFF))
 
+    def test_the_service_user_may_hold_the_cpu_wake_latency(self) -> None:
+        # The engine warned "CPU wake latency not held" at every start
+        # (#72, 2026-11-01): /dev/cpu_dma_latency is root's alone, so C1E
+        # stayed open while the service user asked to keep it shut.
+        device = self.root / "dev/cpu_dma_latency"
+        write(device, "", 0o660)
+        self.provisioned()
+        self.assertIn(WAKE_GRANT, (self.root / IDLE_CONF.lstrip("/")).read_text(encoding="utf-8"))
+        # A device back at root's mode (a boot before the file) is granted again.
+        device.chmod(0o600)
+        self.clear_calls()
+        r = self.provision()
+        self.assertEqual(self.steps(r)["idle"], "changed")
+        self.assertEqual(self.writes(), [["systemd-tmpfiles", "--create", IDLE_CONF]])
+
     def test_swap_is_sized_to_the_memory_and_a_box_with_swap_keeps_its_own(self) -> None:
         for mem_kb, want in ((900_000, "2G"), (3_500_000, "4G"), (16_123_456, "8G")):
             with self.subTest(mem_kb=mem_kb):
@@ -1869,6 +1885,10 @@ class VerifyTests(World):
              "the stack's state folders cannot be searched (sudo -n find)"),
             ("idle", lambda: (self.root / IDLE_CONF.lstrip("/")).unlink(),
              "no /etc/tmpfiles.d/iemmixer-idle.conf keeping the CPUs out of deep idle"),
+            ("idle", lambda: write(self.root / IDLE_CONF.lstrip("/"), IDLE_OFF),
+             "no /etc/tmpfiles.d/iemmixer-idle.conf keeping the CPUs out of deep idle"),
+            ("idle", lambda: write(self.root / "dev/cpu_dma_latency", "", 0o600),
+             "the service user cannot hold the CPU wake latency"),
             ("display", lambda: (self.root / DISPLAY_CONF.lstrip("/")).unlink(),
              "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
             ("display", lambda: write(self.root / DISPLAY_CONF.lstrip("/"), POLL_OFF.replace(" N", " Y")),
