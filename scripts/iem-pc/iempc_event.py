@@ -333,6 +333,13 @@ def cmd_event(ctx: Ctx, ip) -> int:
     end within GEN3_STOP_S of its start and never changes the exit code."""
     dry = bool(getattr(ctx.args, "dry_run", False))
     deadline = event_clock() + EVENT_BUDGET_S
+    if gen3_serves():
+        # Gen 2 ended (#72): no band system on the PC, and an iemmode call or
+        # its --direct fallback could start REAPER.
+        if not dry:
+            write_flag()
+        emit({"pc": "left alone: 3.x serves the band"})
+        return 0
     if dry:
         if ctx.env.get("GEN3_HOST"):
             gen3_emit({"plan": "systemctl stop iem-server iem-engine iem-dante"})
