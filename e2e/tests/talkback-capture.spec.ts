@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,7 +18,7 @@ import { toneWav } from "./support/wav";
 // this test (a secure context, as getUserMedia and AudioWorklet need); the
 // talkback socket is held by the test, no server is involved.
 
-const MIC_WAV = toneWav(join(tmpdir(), "iemmixer-e2e-talkback-capture.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
+const MIC_WAV = toneWav(join(mkdtempSync(join(tmpdir(), "iemmixer-e2e-talkback-capture-")), "mic.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
 
 // Launch options are the worker's: top level, never in a describe.
 test.use({

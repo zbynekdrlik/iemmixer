@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect, liveNumber, type Page } from "./support/live";
@@ -18,7 +19,7 @@ import { toneWav } from "../support/wav";
 // before it ends (`desk.during`), and Talk is held at most 8 s. Numbers leave
 // a test only as `live_number` annotations (`live_verdict.py`).
 
-const MIC_WAV = toneWav(join(tmpdir(), "iemmixer-live-talkback-1k-half.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
+const MIC_WAV = toneWav(join(mkdtempSync(join(tmpdir(), "iemmixer-live-talkback-1k-half-")), "mic.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
 
 // Launch options are the worker's: top level, never in a describe.
 test.use({
