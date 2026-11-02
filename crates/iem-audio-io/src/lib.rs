@@ -69,9 +69,9 @@ pub mod spike_run;
 pub mod wav;
 
 // The audio contract the Dante device shares (#72, 2026-10-30): defined once
-// in dante-stack's dante-audio-io, so iem-engine's `Process` is the very trait
+// in dstack's dstack-audio-io, so iem-engine's `Process` is the very trait
 // the device's pump calls.
-pub use dante_audio_io::{
+pub use dstack_audio_io::{
     Block, Fault, Planar, Process, StreamStats, hist, panic_message, telemetry,
 };
 pub use nullrt::{InputSignal, NullRt, NullRtConfig};

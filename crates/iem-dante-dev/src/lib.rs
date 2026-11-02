@@ -2,7 +2,7 @@
 // Copyright (C) 2026 iemmixer contributors.
 
 //! `iem-dante-dev`'s own part (#72): the box's health ([`health`], the
-//! `health` subcommand), which moved here from dante-stack at its v0.2.0
+//! `health` subcommand), which moved here from dstack at its v0.2.0
 //! (ROZHODNUTÉ on #72, 30.10.2026). Every other command line is the
 //! stack's (`daemon::cli::main`); [`parse_args`] tells them apart.
 
@@ -31,7 +31,7 @@ pub fn parse_args(args: &[String]) -> Option<Result<Command, String>> {
     }
 }
 
-// Ported from dante-stack fdfc321 crates/dante-stack/src/daemon.rs (#72):
+// Ported from dstack fdfc321 crates/dante-stack/src/daemon.rs (#72):
 // `parse_health`.
 fn parse_health(args: &[String]) -> Result<Command, String> {
     let mut socket = None;
@@ -113,7 +113,7 @@ pub fn run_health(
             return ExitCode::from(2);
         }
     };
-    // Ported from dante-stack fdfc321 crates/dante-stack/src/daemon/cli.rs
+    // Ported from dstack fdfc321 crates/dante-stack/src/daemon/cli.rs
     // (#72): `health_line`.
     let verdict = health::check(&opts, build.name, build.sha);
     if let Err(e) = writeln!(std::io::stdout(), "{}", verdict.line()) {

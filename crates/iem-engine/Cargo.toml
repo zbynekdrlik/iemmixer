@@ -42,8 +42,8 @@ widestring = "1"
 # in the engine's process and the pump that drives `Process` on its media
 # clock. GPL-3.0-or-later, as the engine already is (the limiter); never
 # linked on Windows, and never by iem-server outside its tests.
-# The Dante device lives in dante-stack (all Dante code, #72 2026-10-30).
-iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dstack", tag = "v0.4.26" }
+# The Dante device lives in dstack (all Dante code, #72 2026-10-30).
+iem-dante = { package = "dstack", git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.0" }
 
 [dev-dependencies]
 assert_no_alloc = { version = "1.1.2", default-features = false, features = ["warn_debug", "warn_release"] }

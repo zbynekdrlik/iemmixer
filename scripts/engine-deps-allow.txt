@@ -12,10 +12,10 @@ cfg-if
 cpufeatures
 crossbeam-utils
 crypto-common
-# The audio contract shared with the Dante device (#72, 2026-10-30): Block, Process, StreamStats, hist, telemetry (GPL-3.0-or-later, dante-stack).
-dante-audio-io
-# Gen 3 (#72), Linux only: our own Dante device as the engine's backend, now in dante-stack (GPL-3.0-or-later, as the engine).
-dante-stack
+# The audio contract shared with the Dante device (#72, 2026-10-30): Block, Process, StreamStats, hist, telemetry (GPL-3.0-or-later, dstack).
+dstack-audio-io
+# Gen 3 (#72), Linux only: our own Dante device as the engine's backend, now in dstack (GPL-3.0-or-later, as the engine).
+dstack
 digest
 doctest-file
 equivalent
@@ -81,7 +81,7 @@ syn
 thiserror
 thiserror-impl
 thread_local
-# Gen 3 phase C (#72), Linux only: the device's own current-thread runtime on its dante-device thread (MIT), never the engine's RT path.
+# Gen 3 phase C (#72), Linux only: the device's own current-thread runtime on its dstack-device thread (MIT), never the engine's RT path.
 tokio
 # Gen 3 phase C (#72), Linux only: tokio's select! and main macros (MIT).
 tokio-macros

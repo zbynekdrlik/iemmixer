@@ -42,7 +42,6 @@ use iem_audio_io::StreamStats;
 use iem_audio_io::channels::{ChannelMap, MapError};
 use iem_audio_io::hist::HistSnapshot;
 use iem_audio_io::owner::StopOutcome;
-use iem_dante::clock::to_samples;
 use iem_dante::daemon::{Options, Place};
 use iem_dante::device::DeviceConfig;
 use iem_dante::host::{self, Host, HostError, Signals, Stopped};
@@ -99,19 +98,16 @@ pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, En
 }
 
 /// The device blocks the engine runs, frames: 16 or B = 32 (the RT
-/// contract). dante-stack also allows larger blocks for other hosts.
+/// contract). dstack also allows larger blocks for other hosts.
 pub const BLOCKS: [u64; 2] = [16, iem_dante::stream::BLOCK];
 
 /// The pump's timing on the device `cfg`: B = the device's `block` (32
 /// unless the config sets 16), P = the device's latency in samples (the
 /// playout point its RX checks read at), W = the device's `work_margin` (1
-/// ms unless the config sets it; at least B).
+/// ms unless the config sets it; at least B). dstack's own `Timing::of`, so
+/// the pump cannot read a sample off the RX's playout point.
 pub fn timing(cfg: &DeviceConfig) -> Timing {
-    Timing {
-        block: cfg.block,
-        playout: to_samples(cfg.latency_ns, cfg.sample_rate),
-        margin: cfg.work_margin,
-    }
+    Timing::of(cfg)
 }
 
 /// The device's options from the engine's `--dante-*` flags.

@@ -99,7 +99,7 @@ exclude_globs = [
   "crates/iem-soakclient/src/main.rs",
   # iem-dante-dev's main (#72): it only names the binary and hands the
   # command line to the mutated lib (parse_args, run_health) or to
-  # dante-stack's daemon::cli; tests/cli.rs runs the binary.
+  # dstack's daemon::cli; tests/cli.rs runs the binary.
   "crates/iem-dante-dev/src/main.rs",
 ]
 
@@ -199,7 +199,7 @@ exclude_re = [
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
   # `iem-dante-dev health`'s glue (#72 phase D, plan Task 6; ported from
-  # dante-stack fdfc321 with the health): `check` reads the box's own
+  # dstack fdfc321 with the health): `check` reads the box's own
   # systemd units and CLOCK_MONOTONIC and sleeps the second between the two
   # control-socket reads, `systemctl_show` runs the box's systemctl: a test
   # cannot hold the build machine's units (nor stand in for systemctl
@@ -221,7 +221,7 @@ exclude_re = [
   # a Setup refusal) and must not announce on the build machine's network;
   # the box's live runs (plan Tasks 9 to 11) run it. `<impl Device for
   # Host>` only forwards to `Host::ended` and `Host::stop`, mutated and
-  # tested in dante-stack's host/tests.rs. Every decision stays mutated:
+  # tested in dstack's host/tests.rs. Every decision stays mutated:
   # `check`, `timing`, `options`, `host_error`, `join_within` and the
   # `DanteDriver` (dante/tests.rs), the parser and `dante_args`
   # (engine/tests.rs), the endings (control/tests.rs).

@@ -1085,7 +1085,7 @@ class PureTests(unittest.TestCase):
     def test_the_injected_panic_is_the_faulted_process_s_own_line(self) -> None:
         esc = chr(27)
         coloured = f"{esc}[31mERROR{esc}[0m the RT callback faulted: {gate.PANIC_TEXT}"
-        hook = f"thread 'dante-engine' panicked at crates/iem-engine/src/rt.rs:577:9:\n{gate.PANIC_TEXT}"
+        hook = f"thread 'dstack-engine' panicked at crates/iem-engine/src/rt.rs:577:9:\n{gate.PANIC_TEXT}"
         lines = "\n".join([
             "not json", json.dumps([1, 2]), json.dumps({"_PID": "4100", "MESSAGE": None}),
             json.dumps({"_PID": "999", "MESSAGE": gate.PANIC_TEXT}),             # another process's

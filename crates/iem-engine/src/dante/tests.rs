@@ -132,6 +132,12 @@ fn the_timing_is_32_samples_the_devices_latency_and_1_ms() {
     cfg.latency_ns = 2_000_000;
     let t = timing(&cfg);
     assert_eq!((t.playout, t.offset()), (192, 320), "2 ms");
+    cfg.latency_ns = 333_333;
+    assert_eq!(
+        timing(&cfg).playout,
+        32,
+        "the RX's nearest whole samples, not 31 cut down"
+    );
 }
 
 #[test]

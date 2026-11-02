@@ -1,4 +1,4 @@
-// Ported from dante-stack fdfc321 crates/dante-stack/src/health/tests.rs (#72).
+// Ported from dstack fdfc321 crates/dante-stack/src/health/tests.rs (#72).
 use super::*;
 
 /// This binary's build in the tests: 40 synthetic hex digits.

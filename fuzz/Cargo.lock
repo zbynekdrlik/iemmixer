@@ -98,16 +98,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "dante-audio-io"
-version = "0.4.26"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.26#cfd62480b2c41c6ecd634d647e49b86fa4628d3c"
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+]
 
 [[package]]
-name = "dante-stack"
-version = "0.4.26"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.4.26#cfd62480b2c41c6ecd634d647e49b86fa4628d3c"
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
+name = "dstack"
+version = "0.5.0"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.0#09a10083d7531932379412e53b7f3e39535e5f87"
 dependencies = [
- "dante-audio-io",
+ "dstack-audio-io",
  "if-addrs",
  "libc",
  "mdns-sd",
@@ -125,20 +136,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "digest"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
-dependencies = [
- "block-buffer",
- "crypto-common",
-]
-
-[[package]]
-name = "doctest-file"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+name = "dstack-audio-io"
+version = "0.5.0"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.0#09a10083d7531932379412e53b7f3e39535e5f87"
 
 [[package]]
 name = "equivalent"
@@ -209,7 +209,7 @@ name = "iem-audio-io"
 version = "2.0.0-dev.55"
 dependencies = [
  "azo",
- "dante-audio-io",
+ "dstack-audio-io",
  "iem-win",
  "tracing",
  "windows-sys",
@@ -223,7 +223,7 @@ version = "2.0.0-dev.55"
 name = "iem-engine"
 version = "2.0.0-dev.55"
 dependencies = [
- "dante-stack",
+ "dstack",
  "iem-audio-io",
  "iem-dsp",
  "iem-engine-proto",

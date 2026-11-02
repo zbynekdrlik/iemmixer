@@ -3,10 +3,10 @@
 
 //! `iem-dante-dev`: our own Dante device on the Gen 3 box (#72), run by
 //! systemd as `iem-dante.service` (`scripts/gen3/iem-dante.service`). The
-//! device and its command line live in dante-stack (`daemon::cli`); this
+//! device and its command line live in dstack (`daemon::cli`); this
 //! binary names itself, stamps iemmixer's version and build, which
 //! `scripts/gen3/deploy.sh` checks with `iem-dante-dev --version`, and runs
-//! the box's `health` itself (`iem_dante_dev::health`, since dante-stack
+//! the box's `health` itself (`iem_dante_dev::health`, since dstack
 //! v0.2.0).
 
 fn main() -> std::process::ExitCode {

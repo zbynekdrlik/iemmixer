@@ -3,10 +3,10 @@ name = "iem-dante-dev"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-# Links dante-stack (GPL-3.0-or-later, parts adapted from teodly/inferno).
+# Links dstack (GPL-3.0-or-later, parts adapted from teodly/inferno).
 license = "GPL-3.0-or-later"
 repository.workspace = true
-description = "iemmixer's Dante device binary on the Gen 3 box (#72): dante-stack's daemon CLI stamped with iemmixer's version and build, plus the box's health"
+description = "iemmixer's Dante device binary on the Gen 3 box (#72): dstack's daemon CLI stamped with iemmixer's version and build, plus the box's health"
 
 [lib]
 path = "src/lib.rs"
@@ -16,9 +16,9 @@ name = "iem-dante-dev"
 path = "src/main.rs"
 
 [dependencies]
-iem-dante = { package = "dante-stack", git = "https://github.com/zbynekdrlik/dstack", tag = "v0.4.26" }
-# The box's health (#72, taken from dante-stack at its v0.2.0): its line and
+iem-dante = { package = "dstack", git = "https://github.com/zbynekdrlik/dstack", tag = "v0.5.0" }
+# The box's health (#72, taken from dstack at its v0.2.0): its line and
 # the server's /api/version reply. Both already in the closure through
-# dante-stack.
+# dstack.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

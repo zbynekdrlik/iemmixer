@@ -1,4 +1,4 @@
-// Ported from dante-stack fdfc321 crates/dante-stack/src/daemon/tests.rs (#72).
+// Ported from dstack fdfc321 crates/dante-stack/src/daemon/tests.rs (#72).
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 

@@ -1,4 +1,4 @@
-// Ported from dante-stack fdfc321 crates/dante-stack/src/health.rs (#72).
+// Ported from dstack fdfc321 crates/dante-stack/src/health.rs (#72).
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 
@@ -12,13 +12,13 @@
 //! the engine protocol stay unchanged.
 //!
 //! It reads the three units' systemd states ([`parse_units`] of `systemctl
-//! show`), the device's control socket twice a second apart (dante-stack's
+//! show`), the device's control socket twice a second apart (dstack's
 //! `health::read_status` and `parse_status`: the clock and the engine's
 //! pump; its `device_reasons` judges the device between the reads) and the
 //! server's `/api/version` on 127.0.0.1 ([`server_answer`]: its build
 //! against this binary's), and [`verdict`] judges them (pure). The I/O is
 //! the Linux glue (`check`, `ask_server`). The box health lives here, not
-//! in dante-stack, since its v0.2.0 (#72, 30.10.2026).
+//! in dstack, since its v0.2.0 (#72, 30.10.2026).
 //!
 //! The line: `{"health": {state, reasons, units: [{unit, active, result,
 //! restarts}], clock: {ready, holdover, holdovers, re_anchors, freq_ppb},
@@ -54,7 +54,7 @@ pub const CLOCK_GRACE_US: u64 = 30_000_000;
 /// `health`'s options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The device's control socket (dante-stack's `ctl::SOCKET` unless
+    /// The device's control socket (dstack's `ctl::SOCKET` unless
     /// `--socket`).
     pub socket: std::path::PathBuf,
     /// The server's port on 127.0.0.1 ([`SERVER_PORT`] unless
@@ -378,7 +378,7 @@ fn fails(reason: Reason, clock_grace: bool) -> bool {
 ///   the three).
 /// - The host (the engine, or the device) active: both reads, else
 ///   `no_status`; the second's clock ready, else `clock_not_ready`; a
-///   holdover; with the engine, its pump between the reads (dante-stack's
+///   holdover; with the engine, its pump between the reads (dstack's
 ///   `device_reasons`, in its order).
 /// - With the engine and the server active: the server's answer and its
 ///   build.
@@ -523,7 +523,7 @@ impl Verdict {
 pub use glue::{ask_server, check};
 
 /// The Linux glue: the `systemctl` call, the control socket's reads
-/// (dante-stack's `read_status`) and the server's version over loopback.
+/// (dstack's `read_status`) and the server's version over loopback.
 #[cfg(target_os = "linux")]
 mod glue {
     use std::io::{self, ErrorKind, Read, Write};
@@ -543,7 +543,7 @@ mod glue {
     pub const STATUS_WAIT: Duration = Duration::from_secs(2);
     /// How long the server's version may take, connect to last byte.
     pub const SERVER_WAIT: Duration = Duration::from_secs(2);
-    /// The longest HTTP reply read, bytes (dante-stack keeps its own for
+    /// The longest HTTP reply read, bytes (dstack keeps its own for
     /// the status line).
     pub const MAX_READ: u64 = 1 << 20;
     /// The request (HTTP/1.0: the server answers with a length or closes).
