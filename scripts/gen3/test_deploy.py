@@ -502,7 +502,7 @@ class DeployTests(unittest.TestCase):
         self.repo = self.tmp / "checkout"
         (self.repo / "scripts" / "gen3").mkdir(parents=True)
         (self.repo / "config").mkdir()
-        for path in (DEPLOY, TEMPLATE, HERE / "band_receive.py", *(HERE / name for name in UNIT_FILES)):
+        for path in (DEPLOY, TEMPLATE, HERE / "band_receive.py", HERE / "band_send.py", *(HERE / name for name in UNIT_FILES)):
             shutil.copyfile(path, self.repo / "scripts" / "gen3" / path.name)
         for path in (TEST_SITE, TEST_ROSTER):
             shutil.copyfile(path, self.repo / "config" / path.name)
@@ -702,6 +702,7 @@ class DeployTests(unittest.TestCase):
         f"sudo -n install -D -m 0644 {STAGE}/dante-device.toml /etc/iemmixer/dante-device.toml",
         f"sudo -n install -D -m 0644 {STAGE}/iem-dante.env /etc/iemmixer/iem-dante.env",
         f"sudo -n install -D -m 0755 {STAGE}/band_receive.py /opt/iemmixer/lib/band_receive.py",
+        f"sudo -n install -D -m 0755 {STAGE}/band_send.py /opt/iemmixer/lib/band_send.py",
         "sudo -n install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site",
         f"sudo -n install -D -o iemmixer -g iemmixer -m 0600 {STAGE}/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml",
         f"sudo -n install -D -o iemmixer -g iemmixer -m 0600 {STAGE}/roster.toml /var/lib/iemmixer/site/roster.toml"])
@@ -767,14 +768,14 @@ class DeployTests(unittest.TestCase):
             "root root 0644 /opt/iemmixer/slot-a/bin/BUILD", "root root 0644 /opt/iemmixer/slot-a/bin/SHA256SUMS",
             *(f"root root 0644 /etc/systemd/system/{n}" for n in UNIT_FILES),
             "root root 0644 /etc/iemmixer/dante-device.toml", "root root 0644 /etc/iemmixer/iem-dante.env",
-            "root root 0755 /opt/iemmixer/lib/band_receive.py",
+            "root root 0755 /opt/iemmixer/lib/band_receive.py", "root root 0755 /opt/iemmixer/lib/band_send.py",
             "dir iemmixer iemmixer 0700 /var/lib/iemmixer/site",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/iemmixer.toml",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/roster.toml"])
         self.assertFalse(any(" enable " in command for command in self.remote()))
         # The copy: the bundle's six files and the box's own files, one scp.
         self.assertEqual(self.scp_names(), sorted([*SLOT_FILES, *UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "band_receive.py", "iemmixer.toml", "roster.toml"]))
+                                                   "band_receive.py", "band_send.py", "iemmixer.toml", "roster.toml"]))
         # The attestation of exactly the bundle's SHA256SUMS, by this
         # repository's CI workflow, before any call.
         self.assertEqual(self.gh_calls(), [{
@@ -923,7 +924,7 @@ class DeployTests(unittest.TestCase):
         # and the configs copied; no slot filled; no attestation asked.
         self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True))
         self.assertEqual(self.scp_names(), sorted([*UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "band_receive.py", "iemmixer.toml", "roster.toml"]))
+                                                   "band_receive.py", "band_send.py", "iemmixer.toml", "roster.toml"]))
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(self.link(), "slot-a/bin")
         self.assert_slot_holds("a", first)
@@ -1695,6 +1696,32 @@ class DeployTests(unittest.TestCase):
         self.assertIn("`iempc gen3-deploy` deploys the box in place", r.stderr)
         self.assertEqual((self.calls(), self.gh_calls()), ([], []))
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+
+    def new_box(self) -> list[str]:
+        """3.x serves the band on another box; this host is a spare."""
+        self.side(3)
+        self.write_pc_env("GEN3_HOST=admin@198.51.100.77\n")
+        site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
+        return ["--site-file", str(site), "--roster-file", str(roster), "--new-box"]
+
+    def test_a_new_box_deploys_past_the_other_box_s_side_record_and_stays_disabled(self) -> None:
+        r = self.deploy(*self.new_box())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.enabled(), [])
+        self.assertNotIn("WARNING", r.stderr)
+
+    def test_a_new_box_is_never_the_box_that_serves(self) -> None:
+        added = self.new_box()
+        self.write_pc_env(f"GEN3_HOST={HOST}\n")
+        r = self.deploy(*added)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("--new-box on GEN3_HOST", r.stderr)
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_a_new_box_needs_the_band_s_site_and_is_not_serving(self) -> None:
+        added = self.new_box()
+        self.assertEqual(self.deploy("--new-box").returncode, 2)
+        self.assertEqual(self.deploy(*added, "--serving").returncode, 2)
 
     def test_serving_refuses_a_config_not_under_the_cards_usual_name(self) -> None:
         serving = self.serving_box()

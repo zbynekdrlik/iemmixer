@@ -31,7 +31,10 @@ GEN3_HOST and SOAK_MEMBER below), the Gen 3 box
 deployed in place on either side of the switch,
 with the takeover config while 3.x serves (`gen3-deploy`:
 iempc_gen3_deploy.py and scripts/gen3/deploy.sh, GEN3_SITE_FILE and
-GEN3_ROSTER_FILE below; #72), and the hand-over of an open S1a window.
+GEN3_ROSTER_FILE below; #72), the box's data into the private store, a new box
+from a fresh OS and the drift between a box and this checkout (`gen3-backup`,
+`gen3-new-box`, `gen3-drift`: iempc_gen3_newbox.py; #72), and the hand-over of
+an open S1a window.
 
 "ide event": the flag file (~/.config/iemmixer/EVENT-NOW) exists. `event`
 writes it first when it is missing (a flag it cannot write is a warning,
@@ -148,6 +151,7 @@ import iempc_gen3
 import iempc_gen3_data
 import iempc_gen3_deploy
 import iempc_gen3_gate
+import iempc_gen3_newbox
 import iempc_gen3_switch
 import iempc_gen3_switchover
 import iempc_gen3_tunnel
@@ -328,6 +332,11 @@ def cmd_gen3_data(ctx: Ctx) -> int:
     return iempc_gen3_data.run(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_backup(ctx: Ctx) -> int:
+    """The box's band data and pepper into the private store; the code lives in iempc_gen3_newbox.py (#72)."""
+    return iempc_gen3_newbox.run_backup(ctx, sys.modules[__name__])
+
+
 def cmd_gen3_tunnel(ctx: Ctx) -> int:
     """The band's tunnel connector between the PC and the Gen 3 box; the code lives in iempc_gen3_tunnel.py (#72
     phase E)."""
@@ -412,6 +421,8 @@ COMMANDS: dict[str, Spec] = {
     "gen3-deploy": Spec(cmd_gen3_deploy, pc=False, dev_time=True, locked=True),
     # No PC call: reads the card, writes only our own Gen 3 device (#72 phase E).
     "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
+    # No PC call: the box over ssh, its data into the private store, a new box, a read of the drift (#72).
+    "gen3-backup": Spec(cmd_gen3_backup, pc=False, dev_time=True, locked=True),
     # Reads the PC, writes only the Gen 3 box (#72 phase E).
     "gen3-data": Spec(cmd_gen3_data, pc=True, dev_time=True, locked=True),
     # Not dev time: `to-pc` is the way back to 2.x during an event too; `token` and `to-box` refuse the flag.
@@ -505,6 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="its commit, 40 hex: this checkout must be at it with a clean tree (deploy.sh's check)")
     deploy.add_argument("--dry-run", action="store_true",
                         help="the plan: the side, the config's kind, deploy.sh's options; no call")
+    sub.add_parser("gen3-backup")
     gate = sub.add_parser("gen3-gate")
     gate.add_argument("gate", choices=("hil", "live", "soak", "reboot", "reset"),
                       help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "

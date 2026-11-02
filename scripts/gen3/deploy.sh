@@ -11,7 +11,7 @@ set -euo pipefail
 #   deploy.sh --host <user@host> --bundle <the downloaded gen3-bundle-<sha>>
 #             --sha <its commit, 40 hex> --config <the private device config>
 #             --iface <the box's Dante interface> [--start engine|device] [--pins]
-#             [--site-file <path> --roster-file <path> [--serving]]
+#             [--site-file <path> --roster-file <path> [--serving | --new-box]]
 #   deploy.sh --host <user@host> --back --sha <the build in the other slot>
 #             --config <...> --iface <...> [--start engine|device] [--site-file ...]
 #
@@ -37,6 +37,11 @@ set -euo pipefail
 #   "ide event" keeps the box running while 3.x serves, so the flag never
 #   holds down a stack this deploy stopped: once the stack is stopped the
 #   start runs whatever the flag says, and a flag after it stops nothing.
+# - --new-box (`iempc gen3-new-box`, #72): a box that does not serve the band,
+#   beside the one that does: the side record is not this host's, so it is not
+#   read. Refused with --serving and on GEN3_HOST itself, which `iempc
+#   gen3-deploy` deploys; it needs the band's --site-file and --roster-file.
+#   The units stay disabled, as in a deploy while 2.x serves.
 # - The bundle (CI's gen3-bin job uploads gen3-bundle-<sha>, its gen3-attest
 #   job attests the bundle's SHA256SUMS by digest): BUILD is --sha and a
 #   newline, SHA256SUMS lists exactly the four binaries and BUILD and holds for
@@ -66,7 +71,8 @@ set -euo pipefail
 #   device and the alarm unit, each under the service user `iemmixer` of its
 #   own), the config, the interface (written as /etc/iemmixer/iem-dante.env)
 #   phase E's receiver of the band's data (band_receive.py, into
-#   /opt/iemmixer/lib, root's, 0755; #72), and this checkout's public test
+#   /opt/iemmixer/lib, root's, 0755; #72) with its sender (band_send.py, the
+#   same way), and this checkout's public test
 #   site and roster, or with --site-file and --roster-file the band's from
 #   the ops repo (phase E: the site's one-line back_to_reaper left out, no
 #   --pins: the band's PINs come with `iempc gen3-data`), go by scp into
@@ -126,6 +132,7 @@ SIGNER=$GITHUB_REPO/.github/workflows/ci.yml
 BINARIES=(iem-engine iem-server iem-dante-dev iem-soakclient)
 UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service)
 RECEIVER=band_receive.py
+SENDER=band_send.py
 LIBDIR=/opt/iemmixer/lib
 # iempc gen3-gate's HIL job (phase H): the engine's ExecStart with its test flag.
 HIL_DROPIN=/run/systemd/system/iem-engine.service.d/iem-hil.conf
@@ -177,7 +184,7 @@ env_value_of() {
 
 usage() {
   echo "deploy.sh: $*" >&2
-  echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins | --site-file <path> --roster-file <path> [--serving]]" >&2
+  echo "usage: deploy.sh --host <user@host> --bundle <dir> --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--pins | --site-file <path> --roster-file <path> [--serving | --new-box]]" >&2
   echo "       deploy.sh --host <user@host> --back --sha <40 hex> --config <path> --iface <name> [--start engine|device] [--site-file <path> --roster-file <path> [--serving]]" >&2
   exit 2
 }
@@ -187,7 +194,7 @@ on_box() {
   ssh "${SSH_OPTS[@]}" "$host" "$@"
 }
 
-host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0 site_file="" roster_file="" serving=0
+host="" bundle="" sha="" config="" iface="" start=engine pins=0 back=0 site_file="" roster_file="" serving=0 new_box=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --host | --bundle | --sha | --config | --iface | --start | --site-file | --roster-file)
@@ -216,6 +223,10 @@ while [ $# -gt 0 ]; do
       serving=1
       shift
       ;;
+    --new-box)
+      new_box=1
+      shift
+      ;;
     *) usage "unknown argument '$1'" ;;
   esac
 done
@@ -236,6 +247,10 @@ if [ -n "$site_file$roster_file" ]; then
   [ -f "$site_file" ] || usage "--site-file is not a file"
   [ -f "$roster_file" ] || usage "--roster-file is not a file"
   [ "$pins" = 0 ] || usage "--site-file takes no --pins: the band's PINs come with iempc gen3-data"
+fi
+if [ "$new_box" = 1 ]; then
+  [ "$serving" = 0 ] || usage "--new-box is a box that does not serve the band, --serving the one that does"
+  [ -n "$site_file" ] || usage "--new-box needs the band's --site-file and --roster-file"
 fi
 if [ "$serving" = 1 ]; then
   [ -n "$site_file" ] || usage "--serving needs the band's --site-file and --roster-file: the box serves the band"
@@ -270,7 +285,9 @@ serves_3=0
 if [ -e "$side_file" ] && ! grep -Eq '"side": *2([^0-9]|$)' -- "$side_file"; then
   serves_3=1
 fi
-if [ "$serving" = 1 ]; then
+if [ "$new_box" = 1 ]; then
+  :   # the record is the serving box's, not this host's
+elif [ "$serving" = 1 ]; then
   [ "$serves_3" = 1 ] ||
     die "--serving deploys the box while 3.x serves the band, and $side_file says 2.x serves it (or is not there): deploy without --serving: nothing was copied"
 elif [ "$serves_3" = 1 ]; then
@@ -284,6 +301,10 @@ if [ -f "$pc_env" ]; then
   env_value=""
   if ! env_value_of "$pc_env" GEN3_HOST; then
     warn "iempc's private env has no GEN3_HOST: \"ide event\" stops no Gen 3 stack; add GEN3_HOST=<this --host> to it"
+  elif [ "$env_value" = "$host" ] && [ "$new_box" = 1 ]; then
+    die "--new-box on GEN3_HOST, the box that serves the band: \`iempc gen3-deploy\` deploys it: nothing was copied"
+  elif [ "$new_box" = 1 ]; then
+    :   # another host than GEN3_HOST is the point of --new-box
   elif [ "$env_value" != "$host" ]; then
     warn "--host is not the GEN3_HOST of iempc's private env: \"ide event\" stops the stack on GEN3_HOST, not on this host; make them the same"
   fi
@@ -320,7 +341,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 test_site="${site_file:-$repo/config/test-site.toml}"
 test_roster="${roster_file:-$repo/config/test-roster.toml}"
-for unit in "${UNITS[@]}" "$RECEIVER"; do
+for unit in "${UNITS[@]}" "$RECEIVER" "$SENDER"; do
   [ -f "$here/$unit" ] || die "$here/$unit is missing"
 done
 for path in "$test_site" "$test_roster"; do
@@ -482,7 +503,7 @@ else
   cp -- "$test_site" "$work/iemmixer.toml"
 fi
 cp -- "$test_roster" "$work/roster.toml"
-for unit in "${UNITS[@]}" "$RECEIVER"; do
+for unit in "${UNITS[@]}" "$RECEIVER" "$SENDER"; do
   cp -- "$here/$unit" "$work/$unit"
 done
 
@@ -493,7 +514,7 @@ if [ "$back" = 0 ]; then
     sources+=("$bundle/$name")
   done
 fi
-for name in "${UNITS[@]}" "$RECEIVER" dante-device.toml iem-dante.env iemmixer.toml roster.toml; do
+for name in "${UNITS[@]}" "$RECEIVER" "$SENDER" dante-device.toml iem-dante.env iemmixer.toml roster.toml; do
   sources+=("$work/$name")
 done
 scp -q "${SSH_OPTS[@]}" "${sources[@]}" "$host:$STAGE/"
@@ -564,6 +585,7 @@ done
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/dante-device.toml $CONFIG"
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/iem-dante.env $ENVFILE"
 install+=$'\n'"sudo -n install -D -m 0755 $STAGE/$RECEIVER $LIBDIR/$RECEIVER"
+install+=$'\n'"sudo -n install -D -m 0755 $STAGE/$SENDER $LIBDIR/$SENDER"
 install+=$'\n'"sudo -n install -d -o $SERVICE_USER -g $SERVICE_USER -m 0700 $SITEDIR"
 install+=$'\n'"sudo -n install -D -o $SERVICE_USER -g $SERVICE_USER -m 0600 $STAGE/iemmixer.toml $SITE"
 install+=$'\n'"sudo -n install -D -o $SERVICE_USER -g $SERVICE_USER -m 0600 $STAGE/roster.toml $ROSTER"

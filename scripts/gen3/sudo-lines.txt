@@ -48,6 +48,7 @@ root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd
 root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
 root | install -D -m 0755 .cache/iem-gen3-deploy/band_receive.py /opt/iemmixer/lib/band_receive.py
+root | install -D -m 0755 .cache/iem-gen3-deploy/band_send.py /opt/iemmixer/lib/band_send.py
 root | install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site
 root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/iemmixer.toml /var/lib/iemmixer/site/iemmixer.toml
 root | install -D -o iemmixer -g iemmixer -m 0600 .cache/iem-gen3-deploy/roster.toml /var/lib/iemmixer/site/roster.toml
@@ -130,6 +131,11 @@ iemmixer | sha256sum /var/lib/iemmixer/site/iemmixer.toml /var/lib/iemmixer/site
 iemmixer | python3 -I /opt/iemmixer/lib/band_receive.py /var/lib/iemmixer/site /var/lib/iemmixer/engine
 root | systemd-creds encrypt --name=pepper --with-key=auto - /etc/credstore.encrypted/iemmixer-pepper
 root | chmod 0600 /etc/credstore.encrypted/iemmixer-pepper
+
+# iempc gen3-backup and gen3-new-box (#72): the band's files read as the
+# service user with the stack running, the pepper read out of the credential.
+iemmixer | python3 -I /opt/iemmixer/lib/band_send.py /var/lib/iemmixer/site /var/lib/iemmixer/engine
+root | systemd-creds decrypt --name=pepper /etc/credstore.encrypted/iemmixer-pepper -
 
 # iempc gen3-tunnel (phase E, #72): the PC's connector token into the
 # box's credential, and the box's connector started and stopped.

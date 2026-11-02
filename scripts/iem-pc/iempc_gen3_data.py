@@ -91,9 +91,9 @@ PEPPER_SCRIPT = "\n".join([
 ])
 
 
-def band_zip(ip, env: dict[str, str], event: str) -> tuple[bytes, dict[str, str]]:
-    """The PC's zip and its manifest, every member's sha256 checked here."""
-    out = ip.ssh_ps(env, pc_script(env["PC_ROOT"]), PC_S, event)
+def unpack(ip, out: str, source: str) -> tuple[bytes, dict[str, str]]:
+    """`source`'s one JSON line as its zip and manifest, every member's sha256
+    checked here (the PC's script or the box's band_send.py)."""
     lines = [line for line in out.splitlines() if line.strip()]
     try:
         doc = json.loads(lines[-1]) if lines else None
@@ -102,12 +102,17 @@ def band_zip(ip, env: dict[str, str], event: str) -> tuple[bytes, dict[str, str]
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             got = {i.filename: hashlib.sha256(z.read(i)).hexdigest() for i in z.infolist()}
     except (ValueError, TypeError, KeyError, binascii.Error, zipfile.BadZipFile):
-        raise ip.StepError("gen3-data: the PC's answer is not the band's zip and its manifest") from None
+        raise ip.StepError(f"gen3-data: {source}'s answer is not the band's zip and its manifest") from None
     if not isinstance(manifest, dict) or got != manifest:
-        raise ip.StepError("gen3-data: the PC's zip does not match its own manifest")
+        raise ip.StepError(f"gen3-data: {source}'s zip does not match its own manifest")
     if "engine/current.json" not in got:
-        raise ip.StepError("gen3-data: the PC's zip holds no engine/current.json")
+        raise ip.StepError(f"gen3-data: {source}'s zip holds no engine/current.json")
     return raw, manifest
+
+
+def band_zip(ip, env: dict[str, str], event: str) -> tuple[bytes, dict[str, str]]:
+    """The PC's zip and its manifest, every member's sha256 checked here."""
+    return unpack(ip, ip.ssh_ps(env, pc_script(env["PC_ROOT"]), PC_S, event), "the PC")
 
 
 STILL_RUNNING = 124   # box()'s exit for a command past its bound, left running (never ended by force)
@@ -152,18 +157,10 @@ def stopped(ip, host: str) -> None:
                          "nothing was sent")
 
 
-def pepper(ip, env: dict[str, str], host: str, event: str) -> None:
-    """The PC's pepper into the box's credential, read back."""
-    out = ip.ssh_ps(env, PEPPER_SCRIPT, PC_S, event)
-    lines = [line.strip() for line in out.splitlines() if line.strip()]
-    try:
-        value = base64.b64decode(lines[-1], validate=True) if lines else b""
-    except (ValueError, binascii.Error):
-        value = b""
-    if len(value) != PEPPER_LEN:
-        raise ip.StepError("gen3-data: the PC's pepper is not 32 bytes: the box's credential is unchanged")
+def install_pepper(ip, host: str, value: bytes) -> None:
+    """32 bytes into the box's credential, made owner-only, read back. The
+    value only on ssh's stdin (iempc_gen3_newbox has it from another box)."""
     code, _, err = box(host, ENCRYPT, value, BOX_S)
-    del value
     if code != 0:
         raise ip.StepError(f"gen3-data: systemd-creds encrypt failed on the box (exit {code}): "
                            f"{err.decode(errors='replace').strip()[-300:]}")
@@ -178,12 +175,22 @@ def pepper(ip, env: dict[str, str], host: str, event: str) -> None:
         raise ip.StepError("gen3-data: the box's pepper credential does not read back as 600 root")
 
 
-def send_band(ip, env: dict[str, str], host: str, event: str) -> dict:
-    """The PC's band files onto the box (stopped) and read back: the counts."""
-    stopped(ip, host)
-    raw, manifest = band_zip(ip, env, event)
-    if ip.event_now():
-        raise ip.Refused("gen3-data: the flag appeared: nothing was sent to the box")
+def pepper(ip, env: dict[str, str], host: str, event: str) -> None:
+    """The PC's pepper into the box's credential, read back."""
+    out = ip.ssh_ps(env, PEPPER_SCRIPT, PC_S, event)
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    try:
+        value = base64.b64decode(lines[-1], validate=True) if lines else b""
+    except (ValueError, binascii.Error):
+        value = b""
+    if len(value) != PEPPER_LEN:
+        raise ip.StepError("gen3-data: the PC's pepper is not 32 bytes: the box's credential is unchanged")
+    install_pepper(ip, host, value)
+    del value
+
+
+def receive(ip, host: str, raw: bytes, manifest: dict[str, str]) -> dict[str, str]:
+    """A checked zip through the box's receiver, what it wrote read back."""
     code, out, err = box(host, RECEIVE, raw, BOX_S)
     if code != 0:
         raise ip.StepError(f"gen3-data: the box's receiver failed (exit {code}): "
@@ -193,7 +200,17 @@ def send_band(ip, env: dict[str, str], host: str, event: str) -> dict:
     except (ValueError, IndexError, KeyError, TypeError):
         raise ip.StepError("gen3-data: the box's receiver gave no answer to read back") from None
     if written != manifest:
-        raise ip.StepError("gen3-data: what the box wrote does not read back as the PC's files")
+        raise ip.StepError("gen3-data: what the box wrote does not read back as the sent files")
+    return written
+
+
+def send_band(ip, env: dict[str, str], host: str, event: str) -> dict:
+    """The PC's band files onto the box (stopped) and read back: the counts."""
+    stopped(ip, host)
+    raw, manifest = band_zip(ip, env, event)
+    if ip.event_now():
+        raise ip.Refused("gen3-data: the flag appeared: nothing was sent to the box")
+    written = receive(ip, host, raw, manifest)
     return {"members": len(manifest), "bytes": len(raw), "written": len(written), "manifest": manifest}
 
 

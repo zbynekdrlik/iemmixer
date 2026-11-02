@@ -11,6 +11,8 @@ paths:
 
 # A Gen 3 box from zero (#72; the cookbook)
 
+**Off-box copy:** `iempc gen3-backup` (the stack keeps running) writes `~/.config/iemmixer/box-backup/<stamp>/` (0700; band.zip, manifest.json, pepper, 0600). It holds the band's secrets and stays there: never in this repo, never in the ops repo. The box needs a deploy that carries `band_send.py`, and a provision for the rule of `systemd-creds decrypt`.
+
 Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r8169, Ubuntu 26.04) in phases D–F; the details and numbers live in `.claude/rules/gen3.md` and on #72. Real names, addresses and the ops files' contents never enter this repo (P6): they are in `iemmixer-ops` and iempc's private env. Every step is dev time only (never while `EVENT-NOW` exists).
 
 ## 0. Hardware
