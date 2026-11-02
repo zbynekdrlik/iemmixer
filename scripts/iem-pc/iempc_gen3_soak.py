@@ -514,6 +514,10 @@ def baseline(box: gate.Box, w: Watch) -> None:
         raise box.ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
     if s["engine"] is None:
         raise box.ip.Refused(f"{no}: the Gen 3 device's status shows no engine (nothing was changed)")
+    if s["rx_off"]:
+        # Right after a start the flows still subscribe: their first holes are
+        # no loss, and a run counted from here fails on them.
+        raise box.ip.Refused(f"{no}: {s['rx_off']} required RX channels do not receive yet (nothing was changed)")
     units = read_stack(box)
     if units is None:
         raise box.ip.Refused(f"{no}: the stack's units could not be read (systemctl show of {', '.join(STACK)}) "
