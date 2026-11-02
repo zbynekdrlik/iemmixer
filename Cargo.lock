@@ -1427,7 +1427,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1514,8 +1514,8 @@ checksum = "669a445ee724c5c69b1b06fe0b63e70a1c84bc9bb7d9696cd4f4e3ec45050408"
 
 [[package]]
 name = "dstack"
-version = "0.5.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.6#93d5d6d48ccc24b8f1db5f7eea0fba71eb00b71c"
+version = "0.5.12"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.12#7a388ae06cca881b1aa747427a998270e18188a4"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -1537,13 +1537,13 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.5.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.6#93d5d6d48ccc24b8f1db5f7eea0fba71eb00b71c"
+version = "0.5.12"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.5.12#7a388ae06cca881b1aa747427a998270e18188a4"
 
 [[package]]
 name = "dsync-ptp"
-version = "1.24.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.24.0#cf97662026f7d14b640c664b454ba6ef7ffa621b"
+version = "1.26.0"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.26.0#f40d77a7890a1f888eccb9f3e0c399a6add15bd1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -1728,7 +1728,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3872,7 +3872,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4009,7 +4009,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5525,7 +5525,7 @@ dependencies = [
  "errno 0.3.14",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5583,7 +5583,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6237,7 +6237,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6853,7 +6853,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7344,7 +7344,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7425,7 +7425,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7919,7 +7919,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7940,7 +7940,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "raw-window-handle",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "windows-version",
 ]
 

@@ -133,6 +133,7 @@ fn device(dir: &Path) -> Device {
         tx_margin_ns: TX_MARGIN_NS,
         tx_fpp_max: FPP_MAX,
         playout_override: Default::default(),
+        subscribe: Default::default(),
         timing: Default::default(),
         arc_port: iem_dante::arc::PORT,
         cmc_port: iem_dante::cmc::PORT,
