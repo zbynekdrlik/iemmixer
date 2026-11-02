@@ -337,6 +337,11 @@ def cmd_gen3_backup(ctx: Ctx) -> int:
     return iempc_gen3_newbox.run_backup(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_new_box(ctx: Ctx) -> int:
+    """A fresh OS to the band's state, one command; the code lives in iempc_gen3_newbox.py (#72)."""
+    return iempc_gen3_newbox.run_new_box(ctx, sys.modules[__name__])
+
+
 def cmd_gen3_tunnel(ctx: Ctx) -> int:
     """The band's tunnel connector between the PC and the Gen 3 box; the code lives in iempc_gen3_tunnel.py (#72
     phase E)."""
@@ -423,6 +428,7 @@ COMMANDS: dict[str, Spec] = {
     "gen3-mirror": Spec(cmd_gen3_mirror, pc=False, dev_time=True, locked=True),
     # No PC call: the box over ssh, its data into the private store, a new box, a read of the drift (#72).
     "gen3-backup": Spec(cmd_gen3_backup, pc=False, dev_time=True, locked=True),
+    "gen3-new-box": Spec(cmd_gen3_new_box, pc=False, dev_time=True, locked=True),
     # Reads the PC, writes only the Gen 3 box (#72 phase E).
     "gen3-data": Spec(cmd_gen3_data, pc=True, dev_time=True, locked=True),
     # Not dev time: `to-pc` is the way back to 2.x during an event too; `token` and `to-box` refuse the flag.
@@ -517,6 +523,12 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--dry-run", action="store_true",
                         help="the plan: the side, the config's kind, deploy.sh's options; no call")
     sub.add_parser("gen3-backup")
+    fresh = sub.add_parser("gen3-new-box")
+    fresh.add_argument("--host", required=True, help="the fresh box's ssh destination, never GEN3_HOST")
+    fresh.add_argument("--bundle", required=True, help="the downloaded CI bundle gen3-bundle-<sha> (a folder)")
+    fresh.add_argument("--sha", required=True, help="its commit, 40 hex: this checkout must be at it, clean")
+    fresh.add_argument("--iface", help="the Dante interface (default: the box's default route's)")
+    fresh.add_argument("--from-backup", help="a gen3-backup stamp, for a box that no longer answers")
     gate = sub.add_parser("gen3-gate")
     gate.add_argument("gate", choices=("hil", "live", "soak", "reboot", "reset"),
                       help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "

@@ -186,3 +186,182 @@ def run_backup(ctx, ip) -> int:
     del value
     ip.emit({"gen3_backup": {"stamp": stamp, "members": len(manifest), "bytes": len(raw), "pepper": "kept"}})
     return 0
+
+
+# ---- the new box ----
+
+def settings(ip, env: dict[str, str]) -> dict[str, str]:
+    missing = [k for k in NEW_BOX_KEYS if not env.get(k)]
+    if missing:
+        raise ip.Refused(f"gen3-new-box: {', '.join(missing)} missing in the private env: nothing was changed")
+    for key in FILE_KEYS:
+        if not Path(env[key]).is_file():
+            raise ip.Refused(f"gen3-new-box: {key} is not a file: nothing was changed")
+    return {k: env[k] for k in NEW_BOX_KEYS}
+
+
+def same_box(a: str, b: str) -> bool:
+    """One machine under two users is still one machine."""
+    return a.rsplit("@", 1)[-1].lower() == b.rsplit("@", 1)[-1].lower()
+
+
+def arguments(ip, args, s: dict[str, str]) -> tuple[str, str, Path]:
+    host, sha = args.host, ip.check_sha(args.sha)
+    if not HOST.fullmatch(host or "") or host.startswith("-"):
+        raise ip.Refused("gen3-new-box: --host must be an ssh destination: nothing was changed")
+    if same_box(host, s["GEN3_HOST"]):
+        raise ip.Refused("gen3-new-box: --host is GEN3_HOST, the box that serves the band: nothing was changed")
+    if not args.bundle or not Path(args.bundle).is_dir():
+        raise ip.Refused("gen3-new-box: --bundle is not a folder (the downloaded gen3-bundle-<sha>): "
+                         "nothing was changed")
+    return host, sha, Path(args.bundle)
+
+
+def clean_checkout(ip, sha: str) -> None:
+    """deploy.sh's own check, made before the first step instead of half way."""
+    head = ip.guarded(["git", "-C", str(REPO), "rev-parse", "HEAD"], "", 30, "ignore").strip()
+    dirty = ip.guarded(["git", "-C", str(REPO), "status", "--porcelain"], "", 30, "ignore").strip()
+    if head != sha or dirty:
+        raise ip.Refused("gen3-new-box: this checkout must be exactly --sha with a clean tree: nothing was changed")
+
+
+def verify(ip, host: str) -> dict:
+    """verify_box.py's numbers. Its exit is the verdict's, so only ssh's own counts here."""
+    code, out, err = data.box(host, "python3 -", (GEN3 / "verify_box.py").read_bytes(), data.BOX_S)
+    lines = out.decode(errors="replace").strip().splitlines()
+    try:
+        doc = json.loads(lines[-1])["verify"]
+    except (ValueError, IndexError, KeyError, TypeError):
+        raise ip.StepError(f"verify_box.py gave no answer (exit {code}): {tail(err)}") from None
+    return doc
+
+
+def failing(doc: dict) -> set[str]:
+    return {k for k, v in doc.items() if k not in ("pass", "tpm2", "realtime_running") and v != 1}
+
+
+def stop_stack(ip, host: str) -> None:
+    """A fresh box has no such units, so the stop's own exit is not the verdict:
+    provision refuses a stack that still runs, and band_onto reads `quiet`."""
+    code, _, err = data.box(host, STOP, b"", data.BOX_S)
+    if code == SSH_LOST:
+        raise ip.StepError(f"ssh to the new box failed: {tail(err)}")
+
+
+def provision(ctx, ip, s: dict[str, str], host: str) -> None:
+    words = ["bash", str(GEN3 / "provision.sh"), "--host", host, "--ntp-from", s["GEN3_DANTESYNC_CONFIG"],
+             "--band-roster", s["GEN3_ROSTER_FILE"]]
+    try:
+        ip.guarded(words, "", PROVISION_S, ctx.watch(abandon=False), env=deploy.deploy_env(ip))
+    except ip.StillRunning:
+        raise
+    except ip.StepError as e:
+        if "verify_box.py found" not in str(e):
+            raise
+        left = failing(verify(ip, host))
+        if not left <= BEFORE_DEPLOY:
+            raise ip.StepError(f"provision: verify_box.py names {sorted(left)}") from None
+
+
+def reboot_once(ctx, ip, host: str) -> bool:
+    """The realtime kernel takes one boot; a rerun past that reboots nothing."""
+    if verify(ip, host).get("realtime_running") == 1:
+        return False
+    code, out, err = data.box(host, BOOT_ID, b"", data.BOX_S)
+    before = out.decode(errors="replace").strip()
+    if code != 0 or not before:
+        raise ip.StepError(f"the new box's boot id could not be read: {tail(err)}")
+    say("gen3-new-box: reboot into the realtime kernel")
+    data.box(host, REBOOT, b"", 30)   # ssh may lose the box before it answers: the new boot id judges it
+    end = time.monotonic() + BACK_S
+    while time.monotonic() < end:
+        ip.pause(ctx, PROBE_S)
+        code, out, _ = data.box(host, BOOT_ID, b"", 20)
+        now = out.decode(errors="replace").strip()
+        if code == 0 and now and now != before:
+            if verify(ip, host).get("realtime_running") != 1:
+                raise ip.StepError("the new box came back without the realtime kernel")
+            return True
+    raise ip.StepError(f"the new box did not come back within {BACK_S} s of its reboot")
+
+
+def interface(ip, args, host: str) -> str:
+    """--iface, else the one interface of the box's default route."""
+    if args.iface:
+        if not deploy.IFACE.fullmatch(args.iface):
+            raise ip.Refused("gen3-new-box: --iface is not an interface name: nothing was changed")
+        return args.iface
+    code, out, _ = data.box(host, ROUTE, b"", data.BOX_S)
+    names = {m for m in re.findall(r"\bdev (\S+)", out.decode(errors="replace"))}
+    if code != 0 or len(names) != 1:
+        raise ip.StepError("gen3-new-box: the new box has no one default route's interface: name it with --iface")
+    name = names.pop()
+    if not deploy.IFACE.fullmatch(name):
+        raise ip.StepError("gen3-new-box: the default route's interface is not an interface name")
+    return name
+
+
+def deploy_new(ctx, ip, s: dict[str, str], host: str, sha: str, bundle: Path, iface: str) -> None:
+    words = [*deploy.DEPLOY, "--host", host, "--bundle", str(bundle), "--sha", sha, "--config",
+             s["GEN3_DEVICE_CONFIG"], "--iface", iface, "--start", "engine", "--site-file", s["GEN3_SITE_FILE"],
+             "--roster-file", s["GEN3_ROSTER_FILE"], "--new-box"]
+    ip.guarded(words, "", deploy.DEPLOY_S, ctx.watch(abandon=False), env=deploy.deploy_env(ip))
+
+
+def band_onto(ctx, ip, host: str, raw: bytes, manifest: dict[str, str], value: bytes) -> None:
+    """The data into a stopped stack, then the stack started and healthy."""
+    stop_stack(ip, host)
+    if not data.quiet(host):
+        raise ip.StepError("the new box's stack did not stop: its data was not sent")
+    data.receive(ip, host, raw, manifest)
+    data.install_pepper(ip, host, value)
+    code, _, err = data.box(host, START, b"", data.BOX_S)
+    if code != 0:
+        raise ip.StepError(f"the new box's stack did not start (exit {code}): {tail(err)}")
+    end = time.monotonic() + HEALTHY_S
+    while True:
+        code, _, _ = data.box(host, HEALTH, b"", 20)
+        if code == 0:
+            return
+        if time.monotonic() >= end:
+            raise ip.StepError(f"the new box is not healthy within {HEALTHY_S} s of its data")
+        ip.pause(ctx, PROBE_S)
+
+
+def install(ctx, ip, script: str, words: list[str]) -> None:
+    ip.guarded(["bash", str(GEN3 / script), *words], "", INSTALL_S, ctx.watch(abandon=False),
+               env=deploy.deploy_env(ip))
+
+
+def run_new_box(ctx, ip) -> int:
+    """`iempc gen3-new-box`."""
+    args = ctx.args
+    s = settings(ip, ctx.env)
+    host, sha, bundle = arguments(ip, args, s)
+    clean_checkout(ip, sha)
+    stored = load_backup(ip, backups(ip), args.from_backup) if args.from_backup else None
+    say("gen3-new-box: dantesync")
+    install(ctx, ip, "install-dantesync.sh", ["--host", host, "--version", s["GEN3_DANTESYNC_VERSION"], "--sha256",
+                                              s["GEN3_DANTESYNC_SHA256"], "--config", s["GEN3_DANTESYNC_CONFIG"]])
+    say("gen3-new-box: provision")
+    stop_stack(ip, host)
+    provision(ctx, ip, s, host)
+    rebooted = reboot_once(ctx, ip, host)
+    say("gen3-new-box: deploy")
+    deploy_new(ctx, ip, s, host, sha, bundle, interface(ip, args, host))
+    say("gen3-new-box: the band's data")
+    if stored:
+        raw, manifest, value = stored
+    else:
+        raw, manifest = read_band(ip, s["GEN3_HOST"])
+        value = read_pepper(ip, s["GEN3_HOST"])
+    band_onto(ctx, ip, host, raw, manifest, value)
+    del value
+    say("gen3-new-box: cloudflared")
+    install(ctx, ip, "install-cloudflared.sh", ["--host", host, "--version", s["GEN3_CLOUDFLARED_VERSION"], "--sha256",
+                                                s["GEN3_CLOUDFLARED_SHA256"]])
+    doc = verify(ip, host)
+    passed = doc.get("pass") == 1 and doc.get("realtime_running") == 1
+    ip.emit({"gen3_new_box": {"pass": int(passed), "sha": sha, "rebooted": rebooted, "members": len(manifest),
+                              "data": "backup" if stored else "running box", "failed": sorted(failing(doc))}})
+    return 0 if passed else 1

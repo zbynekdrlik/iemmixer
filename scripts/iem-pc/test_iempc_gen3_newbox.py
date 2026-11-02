@@ -224,6 +224,106 @@ class BackupTests(Base):
             nb.load_backup(self.ip, nb.backups(self.ip), "../secret")
 
 
+class NewBoxTests(Base):
+    def fresh(self) -> None:
+        self.box.verify.update(realtime_running=0)
+
+    def test_the_steps_run_in_the_cookbook_s_order_and_the_box_ends_verified(self) -> None:
+        self.fresh()
+        self.assertEqual(self.new_box(), 0)
+        self.assertEqual(self.scripts(), ["install-dantesync.sh", "provision.sh", "deploy.sh", "install-cloudflared.sh"])
+        cmds = self.box.commands(NEW)
+        self.assertLess(cmds.index(nb.REBOOT), cmds.index(nb.data.RECEIVE))
+        self.assertLess(cmds.index(nb.data.RECEIVE), cmds.index(nb.START))
+        self.assertEqual(self.box.credential, PEPPER)
+        self.assertEqual(self.ip.emitted[-1]["gen3_new_box"]["pass"], 1)
+        self.assertTrue((self.box.new_engine / "current.json").is_file())
+
+    def test_the_running_box_is_only_read(self) -> None:
+        self.assertEqual(self.new_box(), 0)
+        self.assertEqual(set(self.box.commands(OLD)), {nb.SEND, nb.DECRYPT})
+
+    def test_the_deploy_is_a_spare_s(self) -> None:
+        self.new_box()
+        words = next(c for c in self.ip.calls if any(w.endswith("deploy.sh") for w in c))
+        self.assertIn("--new-box", words)
+        self.assertNotIn("--serving", words)
+        self.assertEqual(words[words.index("--iface") + 1], "eth7")
+
+    def test_a_rerun_past_the_kernel_does_not_reboot(self) -> None:
+        self.assertEqual(self.new_box(), 0)
+        self.assertNotIn(nb.REBOOT, self.box.commands(NEW))
+
+    def test_the_serving_box_is_refused_under_any_user(self) -> None:
+        for host in (OLD, "other@192.0.2.40"):
+            with self.subTest(host=host), self.assertRaises(Ip.Refused):
+                self.new_box(host=host)
+        self.assertEqual(self.ip.calls, [])
+
+    def test_a_dirty_or_other_checkout_changes_nothing(self) -> None:
+        self.ip.fail["dirty"] = " M file\n"
+        with self.assertRaises(Ip.Refused):
+            self.new_box()
+        self.assertEqual(self.box.sent, [])
+
+    def test_a_missing_key_is_named_and_its_value_is_not(self) -> None:
+        del self.env["GEN3_CLOUDFLARED_SHA256"]
+        with self.assertRaises(Ip.Refused) as e:
+            self.new_box()
+        self.assertIn("GEN3_CLOUDFLARED_SHA256", str(e.exception))
+        self.assertNotIn(OLD, str(e.exception))
+
+    def test_a_fresh_provision_s_expected_verify_failures_pass(self) -> None:
+        self.ip.fail["provision.sh"] = "provision.sh failed (exit 1): provision.sh: verify_box.py found the box not"
+        self.box.verify.update({"pass": 0, "units": 0, "napi": 0})
+        with mock.patch.object(nb, "reboot_once", lambda *_: False), \
+                mock.patch.object(nb, "deploy_new", lambda *_: self.box.verify.update(GOOD)):
+            self.assertEqual(self.new_box(), 0)
+
+    def test_any_other_provision_failure_stops(self) -> None:
+        self.ip.fail["provision.sh"] = "provision.sh failed (exit 1): verify_box.py found the box not"
+        self.box.verify.update({"pass": 0, "state": 0})
+        with self.assertRaises(Ip.StepError) as e:
+            self.new_box()
+        self.assertIn("state", str(e.exception))
+        self.ip.fail["provision.sh"] = "provision.sh failed (exit 1): provision-root.sh failed"
+        with self.assertRaises(Ip.StepError):
+            self.new_box()
+
+    def test_a_box_back_without_the_realtime_kernel_stops(self) -> None:
+        self.fresh()
+        self.box.realtime_after_boot = False
+        with self.assertRaises(Ip.StepError) as e:
+            self.new_box()
+        self.assertIn("realtime", str(e.exception))
+        self.assertNotIn(nb.data.RECEIVE, self.box.commands(NEW))
+
+    def test_a_stack_that_does_not_stop_gets_no_data(self) -> None:
+        self.box.overrides[nb.data.STATES] = (0, b"active\ninactive\ninactive\n", b"")
+        with self.assertRaises(Ip.StepError):
+            self.new_box()
+        self.assertNotIn(nb.data.RECEIVE, self.box.commands(NEW))
+
+    def test_a_failing_final_verify_fails_the_command(self) -> None:
+        self.box.verify.update({"pass": 0, "journal": 0})
+        self.assertEqual(self.new_box(), 1)
+        self.assertEqual(self.ip.emitted[-1]["gen3_new_box"]["failed"], ["journal"])
+
+    def test_a_backup_replaces_the_running_box(self) -> None:
+        nb.run_backup(self.ctx(), self.ip)
+        stamp = self.ip.emitted[-1]["gen3_backup"]["stamp"]
+        self.box.sent.clear()
+        self.assertEqual(self.new_box(from_backup=stamp), 0)
+        self.assertEqual(self.box.commands(OLD), [])
+        self.assertEqual(self.box.credential, PEPPER)
+        self.assertEqual(self.ip.emitted[-1]["gen3_new_box"]["data"], "backup")
+
+    def test_a_bad_backup_is_refused_before_the_first_step(self) -> None:
+        with self.assertRaises(Ip.Refused):
+            self.new_box(from_backup="20260101T000000")
+        self.assertEqual(self.box.sent, [])
+
+
 class SudoTests(unittest.TestCase):
     def test_every_sudo_command_is_a_line_of_the_template(self) -> None:
         lines = set(template_lines())
