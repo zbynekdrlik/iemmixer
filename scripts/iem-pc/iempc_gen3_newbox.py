@@ -365,3 +365,70 @@ def run_new_box(ctx, ip) -> int:
     ip.emit({"gen3_new_box": {"pass": int(passed), "sha": sha, "rebooted": rebooted, "members": len(manifest),
                               "data": "backup" if stored else "running box", "failed": sorted(failing(doc))}})
     return 0 if passed else 1
+
+
+# ---- the drift ----
+
+def sums_on_box(host: str, paths: list[str]) -> dict[str, str]:
+    """{path: sha256} of what the box can read; a missing file is left out (sha256sum's exit is not the verdict)."""
+    _, out, _ = data.box(host, "sha256sum " + " ".join(paths), b"", data.BOX_S)
+    found = {}
+    for line in out.decode(errors="replace").splitlines():
+        digest, _, name = line.partition("  ")
+        if name:
+            found[name] = digest
+    return found
+
+
+def build_drift(ip, ctx, host: str) -> bool:
+    """A commit after the box's build that changes no crate is no drift."""
+    sha = g3.box_build(ip, ctx, host)
+    try:
+        changed = ip.guarded(["git", "-C", str(REPO), "diff", "--name-only", sha, "HEAD", "--", "crates", "Cargo.toml",
+                              "Cargo.lock"], "", 30, "ignore")
+    except ip.StepError:
+        return True   # the box runs a commit this checkout does not hold
+    return bool(changed.strip())
+
+
+def expected_config(ip, env: dict[str, str]) -> str:
+    serves = ip.gen3_serves()
+    s = deploy.settings(ip, env, serves)
+    return deploy.takeover(ip, s) if serves else Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8")
+
+
+def differences(ctx, ip, host: str) -> list[str]:
+    """Every word that differs between the box and this checkout, sorted."""
+    env, out = ctx.env, []
+    want = {path: hashlib.sha256((GEN3 / name).read_bytes()).hexdigest() for path, name in CHECKOUT_FILES.items()}
+    want[DEVICE_CONFIG] = hashlib.sha256(expected_config(ip, env).encode()).hexdigest()
+    got = sums_on_box(host, sorted(want))
+    out += [f"file:{Path(path).name}" for path, digest in want.items() if got.get(path) != digest]
+    if build_drift(ip, ctx, host):
+        out.append("build")
+    doc = verify(ip, host)
+    out += [f"verify:{name}" for name in failing(doc)]
+    if doc.get("realtime_running") != 1:
+        out.append("realtime_running")
+    _, answer, _ = data.box(host, "systemctl is-enabled " + " ".join(ENABLED), b"", data.BOX_S)
+    states = answer.decode(errors="replace").split()
+    if len(states) != len(ENABLED):
+        out.append("boot")
+    else:
+        out += [f"boot:{unit}" for unit, state in zip(ENABLED, states) if state != "enabled"]
+    for name, command, key in VERSIONS:
+        _, answer, _ = data.box(host, command, b"", data.BOX_S)
+        if env[key].removeprefix("v") not in answer.decode(errors="replace"):
+            out.append(f"version:{name}")
+    return sorted(out)
+
+
+def run_drift(ctx, ip) -> int:
+    """`iempc gen3-drift`."""
+    host = g3.gen3_host(ip, ctx.env, DRIFT_WORDS)
+    missing = [key for _, _, key in VERSIONS if not ctx.env.get(key)]
+    if missing:
+        raise ip.Refused(f"gen3-drift: {', '.join(missing)} missing in the private env")
+    found = differences(ctx, ip, host)
+    ip.emit({"gen3_drift": {"pass": int(not found), "differ": found}})
+    return 0 if not found else 1

@@ -342,6 +342,11 @@ def cmd_gen3_new_box(ctx: Ctx) -> int:
     return iempc_gen3_newbox.run_new_box(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_drift(ctx: Ctx) -> int:
+    """The box against this checkout; the code lives in iempc_gen3_newbox.py (#72)."""
+    return iempc_gen3_newbox.run_drift(ctx, sys.modules[__name__])
+
+
 def cmd_gen3_tunnel(ctx: Ctx) -> int:
     """The band's tunnel connector between the PC and the Gen 3 box; the code lives in iempc_gen3_tunnel.py (#72
     phase E)."""
@@ -429,6 +434,7 @@ COMMANDS: dict[str, Spec] = {
     # No PC call: the box over ssh, its data into the private store, a new box, a read of the drift (#72).
     "gen3-backup": Spec(cmd_gen3_backup, pc=False, dev_time=True, locked=True),
     "gen3-new-box": Spec(cmd_gen3_new_box, pc=False, dev_time=True, locked=True),
+    "gen3-drift": Spec(cmd_gen3_drift, pc=False, dev_time=True, locked=True),
     # Reads the PC, writes only the Gen 3 box (#72 phase E).
     "gen3-data": Spec(cmd_gen3_data, pc=True, dev_time=True, locked=True),
     # Not dev time: `to-pc` is the way back to 2.x during an event too; `token` and `to-box` refuse the flag.
@@ -523,6 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--dry-run", action="store_true",
                         help="the plan: the side, the config's kind, deploy.sh's options; no call")
     sub.add_parser("gen3-backup")
+    sub.add_parser("gen3-drift")
     fresh = sub.add_parser("gen3-new-box")
     fresh.add_argument("--host", required=True, help="the fresh box's ssh destination, never GEN3_HOST")
     fresh.add_argument("--bundle", required=True, help="the downloaded CI bundle gen3-bundle-<sha> (a folder)")

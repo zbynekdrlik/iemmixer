@@ -324,6 +324,54 @@ class NewBoxTests(Base):
         self.assertEqual(self.box.sent, [])
 
 
+class DriftTests(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        self.config = "synthetic device config\n"
+        patcher = mock.patch.object(nb, "expected_config", lambda *_: self.config)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.box.sums = {path: hashlib.sha256((nb.GEN3 / name).read_bytes()).hexdigest()
+                         for path, name in nb.CHECKOUT_FILES.items()}
+        self.box.sums[nb.DEVICE_CONFIG] = hashlib.sha256(self.config.encode()).hexdigest()
+
+    def drift(self) -> tuple[int, list[str]]:
+        code = nb.run_drift(self.ctx(), self.ip)
+        return code, self.ip.emitted[-1]["gen3_drift"]["differ"]
+
+    def test_a_box_equal_to_the_checkout_passes(self) -> None:
+        self.assertEqual(self.drift(), (0, []))
+
+    def test_every_kind_of_difference_is_named(self) -> None:
+        path = "/etc/systemd/system/iem-engine.service"
+        for word, change in (
+                ("file:iem-engine.service", lambda: self.box.sums.update({path: "0" * 64})),
+                ("file:iem-engine.service", lambda: self.box.sums.pop(path)),
+                ("file:dante-device.toml", lambda: self.box.sums.update({nb.DEVICE_CONFIG: "0" * 64})),
+                ("build", lambda: self.ip.fail.update(crates="crates/iem-engine/src/lib.rs\n")),
+                ("verify:journal", lambda: self.box.verify.update(journal=0)),
+                ("realtime_running", lambda: self.box.verify.update(realtime_running=0)),
+                ("boot:iem-engine", lambda: self.box.overrides.update(
+                    {"systemctl is-enabled " + " ".join(nb.ENABLED): (1, b"disabled\nenabled\nenabled\nenabled\n", b"")})),
+                ("version:dantesync", lambda: self.box.overrides.update({"dantesync --version": (0, b"0.0.1\n", b"")})),
+                ("version:cloudflared", lambda: self.box.overrides.update({"cloudflared --version": (127, b"", b"")}))):
+            with self.subTest(word=word):
+                saved = (dict(self.box.sums), dict(self.ip.fail), dict(self.box.verify), dict(self.box.overrides))
+                change()
+                code, words = self.drift()
+                self.assertEqual(code, 1)
+                self.assertIn(word, words)
+                self.box.sums, self.ip.fail, self.box.verify, self.box.overrides = saved
+
+    def test_docs_after_the_build_are_no_drift(self) -> None:
+        self.ip.fail["crates"] = ""
+        self.assertEqual(self.drift()[0], 0)
+
+    def test_a_build_this_checkout_does_not_hold_is_drift(self) -> None:
+        with mock.patch.object(self.ip, "guarded", side_effect=[f"iem-engine 2.0.0+{SHA}\n", Ip.StepError("bad object")]):
+            self.assertEqual(self.drift(), (1, ["build"]))
+
+
 class SudoTests(unittest.TestCase):
     def test_every_sudo_command_is_a_line_of_the_template(self) -> None:
         lines = set(template_lines())

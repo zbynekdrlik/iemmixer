@@ -15,6 +15,8 @@ paths:
 
 **Off-box copy:** `iempc gen3-backup` (the stack keeps running) writes `~/.config/iemmixer/box-backup/<stamp>/` (0700; band.zip, manifest.json, pepper, 0600). It holds the band's secrets and stays there: never in this repo, never in the ops repo. The box needs a deploy that carries `band_send.py`, and a provision for the rule of `systemd-creds decrypt`.
 
+**Drift:** `iempc gen3-drift` compares the box with this checkout: the units, the helpers, the sudo template provision left in its stage, the device config (the takeover config while 3.x serves), the build (a commit after it that changes no crate is no drift), `verify_box.py`, the units that start at boot, the pinned dantesync and cloudflared. Exit 1 names each difference.
+
 **What it does not carry:** Dante state files (`state.toml`, `takeover.toml`) stay behind on purpose. `iempc gen3-deploy` builds the takeover config from the card.
 
 **A spare takes the band over:** stop the old box if it still runs, set `GEN3_HOST` to the spare, run `iempc gen3-deploy` (it installs the takeover config, enables the units), then `iempc gen3-tunnel token`, then prove it (section 7).
