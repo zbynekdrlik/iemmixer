@@ -99,6 +99,10 @@ Besides the gates, on new hardware or after a timing change:
 - The loop through the IEM card (`iempc gen3-loop --offsets 116,153 --bursts 5 --slot <spare HIL output>`, the PC in maintenance): round trips equal within a burst set, base 153 at `tx_latency_ns` 0.25 ms.
 - How to measure each part (RX lateness, block time, a receiver's flow latency through its ARC 0x3200, our TX send spread with `tcpdump -p --time-stamp-precision=nano`, never without `-p`): `.claude/rules/gen3.md`, "Measuring latency on the box".
 
+**Reboot and sudden loss (#72).** After the three gates: `iempc gen3-gate reboot`, then `iempc gen3-gate reset` (magic SysRq `b` under 20 Hz level writes, no sync). Each restarts the box for real and fails on a late or wide clock, a failed unit, a filesystem error, a lost state, a changed file. The first boot of a new box has no `/etc/dantesync/drift.json`: run dantesync locked for 10 minutes first (it saves every 10 minutes), else `phase` fails with about -700 us until dsync#146.
+
+**The BIOS must power the box up by itself** after a power cut (the setting's name differs by board; look for restore on AC power, Power On). Set it before the box serves: a box that stays off is an event without in-ears. Software cannot read it, so a real power cut proves it.
+
 ## Gotchas that cost time once
 
 - At most two `iem-engine` restarts in ten minutes: a third hits the start limit and runs the alarm unit (which notifies people only while the box serves the band). `reset-failed` before a deliberate start resets that count, as deploy.sh and the gates do; the gates' own budget still waits ten minutes between runs (section 7).

@@ -11,10 +11,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import iempc_gen3_reboot as rb  # noqa: E402
+import iempc_gen3_reboot as rb
 
 sys.path.insert(1, str(HERE.parent / "gen3"))
-from test_deploy import expand, template_lines  # noqa: E402
+from test_deploy import expand, template_lines
 
 SHA = "a" * 40
 LOCKED = "\x1b[32m[PHASE-LOCK] engaged: the frequency word now follows the PTP phase error (e=-9.5us, word +1ppm)\x1b[0m"
