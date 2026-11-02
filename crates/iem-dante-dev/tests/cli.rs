@@ -82,3 +82,15 @@ fn health_prints_one_line_and_exits_with_its_state() {
     assert_eq!(out.status.code(), Some(want), "{text}");
     assert_eq!(line["health"]["server"]["answers"], 0, "{text}");
 }
+
+#[test]
+fn ctl_without_a_socket_looks_at_the_box_s_socket() {
+    // No device on the build machine: the error names the path it tried.
+    let out = run(&["ctl", "status"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("iem-dante-dev ctl: the control socket /run/iem-dante/control.sock: "),
+        "{err}"
+    );
+}

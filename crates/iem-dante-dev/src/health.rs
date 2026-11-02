@@ -54,7 +54,7 @@ pub const CLOCK_GRACE_US: u64 = 30_000_000;
 /// `health`'s options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    /// The device's control socket (dstack's `ctl::SOCKET` unless
+    /// The device's control socket ([`crate::SOCKET`] unless
     /// `--socket`).
     pub socket: std::path::PathBuf,
     /// The server's port on 127.0.0.1 ([`SERVER_PORT`] unless

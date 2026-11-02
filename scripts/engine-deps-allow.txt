@@ -2,10 +2,16 @@
 # and Linux targets). A new crate needs a reviewed line here (program spec §5.2);
 # scripts/check_engine_deps.py compares this list with cargo metadata --locked.
 aho-corasick
+# Gen 3 (#72), Linux only: dsync-ptp's errors (MIT OR Apache-2.0), through dstack's dsync-ptp (since dstack v0.5.4).
+anyhow
+# Gen 3 (#72), Linux only: memoffset's build script (Apache-2.0 OR MIT), through dstack's dsync-ptp (since dstack v0.5.4).
+autocfg
 azo
 azo-sys
 bitflags
 block-buffer
+# Gen 3 (#72), Linux only: dsync-ptp's packet fields (Unlicense OR MIT), through dstack's dsync-ptp (since dstack v0.5.4).
+byteorder
 # Gen 3 phase C (#72), Linux only: tokio's byte buffers (MIT), through iem-dante.
 bytes
 cfg-if
@@ -16,6 +22,8 @@ crypto-common
 dstack-audio-io
 # Gen 3 (#72), Linux only: our own Dante device as the engine's backend, now in dstack (GPL-3.0-or-later, as the engine).
 dstack
+# Gen 3 (#72), Linux only: dstack's in-process PTP follower, unused by the engine (MIT) (since dstack v0.5.4).
+dsync-ptp
 digest
 doctest-file
 equivalent
@@ -46,8 +54,12 @@ matchers
 # Gen 3 phase C (#72), Linux only: the device's mDNS records and browses (Apache-2.0 OR MIT), iem-dante's announcer.
 mdns-sd
 memchr
+# Gen 3 (#72), Linux only: nix's offsets (MIT), through dstack's dsync-ptp (since dstack v0.5.4).
+memoffset
 # Gen 3 phase C (#72), Linux only: the RX thread's wait on its flow sockets, tokio's and mdns-sd's event loop (MIT).
 mio
+# Gen 3 (#72), Linux only: dsync-ptp's socket calls (MIT), through dstack's dsync-ptp (since dstack v0.5.4).
+nix
 nu-ansi-term
 once_cell
 pin-project-lite

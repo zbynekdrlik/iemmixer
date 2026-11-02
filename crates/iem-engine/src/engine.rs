@@ -94,7 +94,8 @@ pub struct DanteArgs {
 }
 
 /// The device's control socket unless `--dante-control` names another:
-/// `iem_dante::ctl::SOCKET`, where `iem-dante-dev ctl` looks.
+/// where `iem-dante-dev ctl` looks (`iem_dante_dev::SOCKET`; dstack's own
+/// default is another path since its v0.5.6).
 pub const DANTE_CONTROL: &str = "/run/iem-dante/control.sock";
 
 #[derive(Debug, Clone, PartialEq)]

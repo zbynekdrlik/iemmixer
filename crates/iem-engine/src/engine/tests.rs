@@ -209,11 +209,13 @@ fn version_names_the_build() {
     assert!(USAGE.contains("iem-engine --version"));
 }
 
-/// The device's default control socket is where `iem-dante-dev ctl` looks.
+/// The device's control socket is the box's, where `iem-dante-dev ctl`
+/// looks, never dstack's own default.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_dante_control_socket_is_the_devices() {
-    assert_eq!(DANTE_CONTROL, iem_dante::ctl::SOCKET);
+fn the_dante_control_socket_is_the_boxs() {
+    assert_eq!(DANTE_CONTROL, "/run/iem-dante/control.sock");
+    assert_ne!(DANTE_CONTROL, iem_dante::ctl::SOCKET);
 }
 
 #[cfg(not(target_os = "linux"))]

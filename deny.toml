@@ -67,5 +67,6 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# All Dante code lives in dstack (#72, owner 2026-10-30), consumed by git tag.
-allow-git = ["https://github.com/zbynekdrlik/dstack"]
+# All Dante code lives in dstack (#72, owner 2026-10-30), consumed by git tag;
+# dstack's dsync-ptp comes from dsync by git tag too (since dstack v0.5.4).
+allow-git = ["https://github.com/zbynekdrlik/dstack", "https://github.com/zbynekdrlik/dsync"]

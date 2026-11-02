@@ -7,7 +7,8 @@
 //! binary names itself, stamps iemmixer's version and build, which
 //! `scripts/gen3/deploy.sh` checks with `iem-dante-dev --version`, and runs
 //! the box's `health` itself (`iem_dante_dev::health`, since dstack
-//! v0.2.0).
+//! v0.2.0), and `ctl` at the box's socket (`iem_dante_dev::SOCKET`, since
+//! dstack v0.5.6 moved its default).
 
 fn main() -> std::process::ExitCode {
     let build = iem_dante::daemon::Build {
@@ -16,6 +17,10 @@ fn main() -> std::process::ExitCode {
         sha: iem_dante::daemon::build_sha(option_env!("GITHUB_SHA")),
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(request) = iem_dante_dev::parse_ctl(&args) {
+        let socket = std::path::Path::new(iem_dante_dev::SOCKET);
+        return iem_dante_dev::run_ctl(build.name, socket, &request);
+    }
     match iem_dante_dev::parse_args(&args) {
         Some(command) => iem_dante_dev::run_health(build, command),
         None => iem_dante::daemon::cli::main(build),

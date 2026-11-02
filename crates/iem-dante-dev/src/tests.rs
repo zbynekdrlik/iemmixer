@@ -107,3 +107,67 @@ fn the_health_usage_names_the_binary_its_options_and_exit_codes() {
         assert!(usage.contains(part), "{part:?} in {usage}");
     }
 }
+
+#[test]
+fn ctl_without_a_socket_is_ours_and_every_other_command_line_the_stacks() {
+    assert_eq!(
+        parse_ctl(&args(&["ctl", "status"])).as_deref(),
+        Some("status")
+    );
+    assert_eq!(
+        parse_ctl(&args(&["ctl", "source", "1", "echo", "1", "96"])).as_deref(),
+        Some("source 1 echo 1 96")
+    );
+    for line in [
+        &["ctl"][..],
+        &["ctl", "--socket", "/tmp/c.sock", "status"],
+        &["ctl", "--help"],
+        &["ctl", "-h"],
+        &["clock", "--seconds", "1"],
+        &["--version"],
+        &[],
+    ] {
+        assert_eq!(parse_ctl(&args(line)), None, "{line:?}");
+    }
+}
+
+/// A device's control socket answering one request with `answer`: the path
+/// and what it was asked.
+#[cfg(target_os = "linux")]
+fn one_answer(name: &str, answer: &'static str) -> (PathBuf, std::thread::JoinHandle<String>) {
+    use std::io::{BufRead, BufReader, Write};
+    let path =
+        std::env::temp_dir().join(format!("iem-dante-dev-{}-{name}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let asked = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        (&stream).write_all(answer.as_bytes()).unwrap();
+        line
+    });
+    (path, asked)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ctl_exchange_sends_one_line_and_returns_the_answer_without_its_newline() {
+    let (path, asked) = one_answer("exchange", "{\"clock\":{}}\r\n");
+    assert_eq!(ctl_exchange(&path, "status").unwrap(), "{\"clock\":{}}");
+    assert_eq!(asked.join().unwrap(), "status\n");
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_ctl_exits_0_only_when_the_device_did_it() {
+    use std::process::ExitCode;
+    let (path, _) = one_answer("ok", "ok\n");
+    assert_eq!(run_ctl("t", &path, "source 1 silence"), ExitCode::SUCCESS);
+    std::fs::remove_file(&path).unwrap();
+    let (path, _) = one_answer("refused", "error: no such channel\n");
+    assert_eq!(run_ctl("t", &path, "source 999 silence"), ExitCode::from(1));
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(run_ctl("t", &path, "status"), ExitCode::from(1));
+}

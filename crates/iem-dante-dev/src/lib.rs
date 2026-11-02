@@ -3,12 +3,18 @@
 
 //! `iem-dante-dev`'s own part (#72): the box's health ([`health`], the
 //! `health` subcommand), which moved here from dstack at its v0.2.0
-//! (ROZHODNUTÉ on #72, 30.10.2026). Every other command line is the
-//! stack's (`daemon::cli::main`); [`parse_args`] tells them apart.
+//! (ROZHODNUTÉ on #72, 30.10.2026), and `ctl` at our socket ([`SOCKET`]).
+//! Every other command line is the stack's (`daemon::cli::main`);
+//! [`parse_args`] and [`parse_ctl`] tell them apart.
 
 pub mod health;
 
 use std::path::PathBuf;
+
+/// The device's control socket on the box: the units' `--control`, the
+/// `RuntimeDirectory=iem-dante` they make, and where `ctl` and `health`
+/// look. dstack's own default moved away at v0.5.6 (`ctl::SOCKET`).
+pub const SOCKET: &str = "/run/iem-dante/control.sock";
 
 /// What `health`'s command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +60,7 @@ fn parse_health(args: &[String]) -> Result<Command, String> {
     let socket = match socket {
         Some(path) if path.is_empty() => return Err("--socket needs a path".into()),
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(iem_dante::ctl::SOCKET),
+        None => PathBuf::from(SOCKET),
     };
     let server_port = match port {
         None => health::SERVER_PORT,
@@ -86,9 +92,63 @@ engine's pump from two reads of the control socket (default
 answers /api/version on 127.0.0.1 (default port {port}) with this build.
 Exit 0 healthy, 1 degraded or failed, 3 stopped (all three inactive), 2 for
 the command line.",
-        socket = iem_dante::ctl::SOCKET,
+        socket = SOCKET,
         port = health::SERVER_PORT,
     )
+}
+
+/// The request of a `ctl` command line that names no socket, which goes to
+/// [`SOCKET`] (the stack's `ctl` would look at its own default); `None` for
+/// anything else: `--socket`, `--help` and a missing request stay the
+/// stack's.
+pub fn parse_ctl(args: &[String]) -> Option<String> {
+    match args.split_first() {
+        Some((first, rest)) if first == "ctl" => match rest.first().map(String::as_str) {
+            None | Some("--socket" | "--help" | "-h") => None,
+            Some(_) => Some(rest.join(" ")),
+        },
+        _ => None,
+    }
+}
+
+/// One request to the control socket `path`, its answer line (the stack's
+/// `ctl` client, which it does not export).
+#[cfg(target_os = "linux")]
+fn ctl_exchange(path: &std::path::Path, request: &str) -> std::io::Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let wait = Some(std::time::Duration::from_secs(5));
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(wait)?;
+    stream.set_write_timeout(wait)?;
+    stream.write_all(format!("{request}\n").as_bytes())?;
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer)?;
+    Ok(answer.trim_end().to_owned())
+}
+
+/// `ctl <request>`: the answer on stdout; exit 0 when the device did it, 1
+/// for an error answer or no socket, as the stack's `ctl`.
+#[cfg(target_os = "linux")]
+pub fn run_ctl(name: &str, socket: &std::path::Path, request: &str) -> std::process::ExitCode {
+    use std::io::Write;
+    use std::process::ExitCode;
+    let answer = match ctl_exchange(socket, request) {
+        Ok(answer) => answer,
+        Err(e) => {
+            eprintln!("{name} ctl: the control socket {}: {e}", socket.display());
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = writeln!(std::io::stdout(), "{answer}") {
+        eprintln!("{name} ctl: stdout: {e}");
+        return ExitCode::from(1);
+    }
+    if iem_dante::daemon::ctl_succeeded(&answer) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 /// Runs `health`'s parsed command line for the binary `build` (its name
