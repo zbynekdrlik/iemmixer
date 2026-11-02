@@ -169,7 +169,7 @@ if line == f"{DANTE} ctl status":
            "recv_errors": 0} for f in (1, 2)]
     tx = [{"flow": 1, "live": 1, "fpp": 8, "channels": 8, "packets": 2000 * so["all"], "send_errors": 0,
            "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes")}]
-    off = os.environ.get("FAKE_RX_OFF") == "1" and late()
+    off = (os.environ.get("FAKE_RX_OFF") == "1" and late()) or os.environ.get("FAKE_RX_OFF") == "base"
     channels = [{"rx": n, "status": 1 if off and n == 104 else 0x01010009, "written": 1,
                  "holes": (2 if n == 101 else 0) + (grown("rx_holes") if n == 102 else 0), "late": 0,
                  "duplicate": 0, "early": 0} for n in (101, 102, 103, 104)]
@@ -581,7 +581,8 @@ class RefusalTests(SoakBase):
                  ({"FAKE_SERVER_HASH": ""},
                   "no soak gate: the box's server does not name the engine's build in /api/version"),
                  ({"FAKE_BASELINE_FAILS": "1"}, "no soak gate: the Gen 3 device's status could not be read"),
-                 ({"FAKE_NO_ENGINE": "1"}, "no soak gate: the Gen 3 device's status shows no engine"))
+                 ({"FAKE_NO_ENGINE": "1"}, "no soak gate: the Gen 3 device's status shows no engine"),
+                 ({"FAKE_RX_OFF": "base"}, "no soak gate: 1 required RX channels do not receive yet"))
         for env, words in cases:
             with self.subTest(words=words):
                 self.again()
