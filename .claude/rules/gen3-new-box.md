@@ -75,7 +75,7 @@ D = B + P + W = 16 + 24 + 16 = 56 samples; mic to ear with the rack's 24 is 80 s
 
 Once the box has been deployed (and while 3.x serves, always): `iempc gen3-deploy --bundle <gen3-bundle-<sha>> --sha <sha>` (deploy.sh alone refuses while 3.x serves; `.claude/rules/gen3.md`, "Deploy while 3.x serves").
 
-While 3.x serves, a provision is followed at once by `iempc gen3-deploy`: provision's `stack` step disables `iem-engine` and `iem-server`, so a reboot in between would not serve the band (first box, 2026-10-28: stop, provision, deploy took 25 s of silence).
+While 3.x serves, a provision needs a short stop: it refuses a running `iem-engine` or `iem-server`. Stop both, run it, start both; its `stack` step leaves them enabled (it disables only the retired `iem-dante.service`), so a reboot still serves the band and no deploy has to follow. A change to `sudo-lines.txt` reaches the box only this way.
 
 ## 6. The band's data and URL
 
