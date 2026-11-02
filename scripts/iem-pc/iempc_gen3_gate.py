@@ -1146,7 +1146,7 @@ def post_status(ip, sha: str, doc: dict) -> bool:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate hil|live|soak` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate hil|live|soak|reboot|reset` (dev time, locked, while 3.x serves)."""
     if ctx.args.gate != "soak" and getattr(ctx.args, "minutes", None) is not None:
         raise ip.Refused("gen3-gate: --minutes is the soak gate's only (nothing was called)")
     if ctx.args.gate == "live":
@@ -1155,8 +1155,11 @@ def run(ctx, ip) -> int:
     if ctx.args.gate == "soak":
         import iempc_gen3_soak   # it imports this module: imported here, never at the top
         return iempc_gen3_soak.run(ctx, ip)
+    if ctx.args.gate in ("reboot", "reset"):
+        import iempc_gen3_reboot   # it imports this module: imported here, never at the top
+        return iempc_gen3_reboot.run(ctx, ip, ctx.args.gate)
     if ctx.args.gate != "hil":
-        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak)")
+        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak, reboot, reset)")
     host = g3.gen3_host(ip, ctx.env, WORDS)
     dante = dante_ip(ip, ctx.env)
     name = own_name(ip, ctx.env)

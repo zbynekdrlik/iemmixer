@@ -506,7 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--dry-run", action="store_true",
                         help="the plan: the side, the config's kind, deploy.sh's options; no call")
     gate = sub.add_parser("gen3-gate")
-    gate.add_argument("gate", choices=("hil", "live", "soak"),
+    gate.add_argument("gate", choices=("hil", "live", "soak", "reboot", "reset"),
                       help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "
                            "alarm path's count), posted as hil/gen3 on the box's build; live: the live specs in a "
                            "browser through the band's public URL with a burst every minute, posted as live/gen3; "

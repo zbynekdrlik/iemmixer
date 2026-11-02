@@ -116,6 +116,15 @@ root | cat /boot/grub/grub.cfg
 root | systemctl restart iem-engine
 root | systemctl reboot
 
+# iempc gen3-gate reboot and reset (#72): the sudden loss, the logs its verdict
+# reads, the state and the files as the service user.
+root | sysctl kernel.sysrq=1
+root | tee /proc/sysrq-trigger
+root | journalctl -u dantesync.service -b -o cat -n 3000 --no-pager -q
+root | journalctl -k -b -o cat -n 5000 --no-pager -q
+iemmixer | cat /var/lib/iemmixer/engine/current.json
+iemmixer | sha256sum /var/lib/iemmixer/site/iemmixer.toml /var/lib/iemmixer/site/roster.toml /var/lib/iem-dante/takeover.toml
+
 # iempc gen3-data (phase E, #72): the band's files received as the service
 # user with the stack stopped, and the PC's pepper into the credential.
 iemmixer | python3 -I /opt/iemmixer/lib/band_receive.py /var/lib/iemmixer/site /var/lib/iemmixer/engine
