@@ -1933,13 +1933,12 @@ class UnitTests(unittest.TestCase):
                 for key in ("StartLimitIntervalSec", "StartLimitBurst", "StartLimitInterval"):
                     self.assertNotIn(key, unit["Service"])
 
-    def test_capabilities_are_the_servers_port_80_and_the_engines_raw_audio_only(self) -> None:
-        # dantesync is the box's one PTP owner (owner, 2026-10-26): our
-        # device never opens UDP 319/320 and its ports are above 1024. The
-        # server listens on port 80, the band's tunnel's origin (phase E, #72),
-        # and the engine's device sends audio past the qdisc (dstack v0.4.15,
-        # AF_PACKET); each holds that one capability, nothing else.
-        wants = {"iem-server": "CAP_NET_BIND_SERVICE", "iem-engine": "CAP_NET_RAW"}
+    def test_capabilities_are_the_servers_port_80_and_the_engines_audio_and_ptp_only(self) -> None:
+        # The server listens on port 80, the band's tunnel's origin (phase E,
+        # #72). The engine's device sends audio past the qdisc (dstack v0.4.15,
+        # AF_PACKET) and its media clock's PTP follower binds UDP 319 (dstack
+        # v0.6.23, owner 2026-11-04). Nothing holds more than that.
+        wants = {"iem-server": "CAP_NET_BIND_SERVICE", "iem-engine": "CAP_NET_RAW CAP_NET_BIND_SERVICE"}
         for name, unit in self.all_four().items():
             want = wants.get(name, "")
             with self.subTest(unit=name):

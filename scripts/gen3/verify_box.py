@@ -93,6 +93,7 @@ WORKQUEUE_MASK = "/sys/devices/virtual/workqueue/cpumask"
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-pepper"
 SUDOERS = "/etc/sudoers.d/iemmixer-gen3"
 ALARM = "/etc/systemd/system/iem-alarm@.service"
+ENGINE_UNIT = "/etc/systemd/system/iem-engine.service"
 JOURNAL_CONF = "/etc/systemd/journald.conf.d/50-iemmixer.conf"
 JOURNAL = {"Storage": "persistent", "SystemMaxUse": "1G", "MaxRetentionSec": "30day"}
 AUTO_UPGRADES = "/etc/apt/apt.conf.d/20auto-upgrades"
@@ -216,6 +217,12 @@ def check_units(box: Box) -> None:
         raise Failed("iem-alarm@.service is not installed")
     if f"User={SERVICE_USER}" not in (line.strip() for line in read(ALARM).splitlines()):
         raise Failed("iem-alarm@.service does not run as iemmixer")
+    # The media clock's in-process follower binds UDP 319 (dstack v0.6.23);
+    # without the capability it stays silently on dantesync's clock.
+    ambient = [line.strip() for line in read(ENGINE_UNIT).splitlines()
+               if line.strip().startswith("AmbientCapabilities=")]
+    if not any("CAP_NET_BIND_SERVICE" in line.partition("=")[2].split() for line in ambient):
+        raise Failed("iem-engine.service cannot bind PTP's UDP 319 (no CAP_NET_BIND_SERVICE)")
 
 
 def check_boot(box: Box) -> None:

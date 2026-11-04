@@ -77,12 +77,14 @@ RuntimeDirectoryMode=0750
 # for 40 (below dantesync's 50); without this limit they run at normal
 # priority and say so once.
 LimitRTPRIO=80
-# CAP_NET_RAW only: the device's audio TX goes past the qdisc through AF_PACKET
-# with PACKET_QDISC_BYPASS (dstack v0.4.15), so a stalled non-audio sender cannot
-# hold audio back (#72). Every port is above 1024 (see iem-dante.service);
-# dantesync is the box's one PTP owner, our device never opens UDP 319/320.
-CapabilityBoundingSet=CAP_NET_RAW
-AmbientCapabilities=CAP_NET_RAW
+# CAP_NET_RAW: the device's audio TX goes past the qdisc through AF_PACKET with
+# PACKET_QDISC_BYPASS (dstack v0.4.15), so a stalled non-audio sender cannot hold
+# audio back (#72). CAP_NET_BIND_SERVICE: the media clock's in-process PTP
+# follower binds UDP 319 (dstack v0.6.23, owner 2026-11-04). It only listens and
+# shares 319/320 with dantesync, which keeps disciplining the system clock and
+# stays the media clock's fallback; every other port is above 1024.
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

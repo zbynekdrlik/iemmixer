@@ -75,8 +75,9 @@ RuntimeDirectoryMode=0750
 LimitRTPRIO=80
 # No capability: every port is above 1024 (ARC 4440, flow control 4455, CMC
 # 8800, mDNS 5353, the info requests 8700, the flows' ephemeral ports, and
-# dantesync's time server read from an ephemeral port). dantesync is the
-# box's one PTP owner: our device never opens UDP 319/320.
+# dantesync's time server read from an ephemeral port). Without
+# CAP_NET_BIND_SERVICE this standalone device's PTP follower cannot bind UDP 319:
+# it warns once and runs on dantesync's clock. The engine's unit has the capability.
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes

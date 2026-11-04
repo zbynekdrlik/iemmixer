@@ -38,7 +38,7 @@ Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r
 
 ## 2. Time: dantesync
 
-`scripts/gen3/install-dantesync.sh --host <user@host> --version <vX.Y.Z> --sha256 <asset sha256> --config <ops follower config.json>`: the box's one PTP owner, a follower only. Nothing else may own time or PTP (provision refuses another PTP daemon and disables NTP).
+`scripts/gen3/install-dantesync.sh --host <user@host> --version <vX.Y.Z> --sha256 <asset sha256> --config <ops follower config.json>`: the owner of the box's system clock, a follower only, `system.gm_allowlist` the audio network's subnet. Only the engine's in-process follower listens to PTP beside it (`CAP_NET_BIND_SERVICE` in `iem-engine.service`, dstack v0.6.23); nothing else may own time or PTP (provision refuses another PTP daemon and disables NTP).
 
 ## 3. Provisioning, then one reboot
 

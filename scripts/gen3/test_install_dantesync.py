@@ -334,6 +334,15 @@ class InstallTests(unittest.TestCase):
         self.assertIn("dantesync already holds UDP 319/320: updating it", r.stdout)
         self.assertEqual(self.installed("/usr/local/bin/dantesync"), self.binary)
 
+    def test_the_engine_s_follower_beside_dantesync_does_not_refuse(self) -> None:
+        # dstack v0.6.23: the engine's in-process follower shares 319/320.
+        sockets = ('UNCONN 0 0 0.0.0.0:319 0.0.0.0:* users:(("dantesync",pid=812,fd=6))\n'
+                   'UNCONN 0 0 0.0.0.0:319 0.0.0.0:* users:(("iem-engine",pid=900,fd=40))\n'
+                   'UNCONN 0 0 0.0.0.0:320 0.0.0.0:* users:(("iem-engine",pid=900,fd=41))\n')
+        r = self.install(FAKE_SS=sockets)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.installed("/usr/local/bin/dantesync"), self.binary)
+
     def test_a_ptp_daemon_on_the_box_refuses_before_any_copy(self) -> None:
         for daemons in ("ptp4l", "phc2sys", "statime", "ptp4l.service", "phc2sys statime.service"):
             with self.subTest(daemons=daemons):

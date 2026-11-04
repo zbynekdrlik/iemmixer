@@ -144,6 +144,8 @@ fn device(dir: &Path) -> Device {
         pump_cpu: None,
         io_cpu: None,
         rx_cpu: None,
+        flow_slots: Default::default(),
+        spin_tail_ns: Default::default(),
         state_file: dir.join("state.toml"),
     })
     .unwrap()

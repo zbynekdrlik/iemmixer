@@ -2,10 +2,10 @@
 # The remote commands name this script's own constant paths, expanded here on purpose.
 # shellcheck disable=SC2029
 set -euo pipefail
-# Puts dantesync on the Gen 3 box as its one PTP owner, a follower of the
-# band's audio grandmaster, and reads it back (#72 phase B, plan Task 2;
-# .claude/rules/gen3.md). The device reads PTP time from it (UDP 31900) and
-# never opens UDP 319/320 itself.
+# Puts dantesync on the Gen 3 box as its system clock's owner, a follower of
+# the band's audio grandmaster, and reads it back (#72 phase B, plan Task 2;
+# .claude/rules/gen3.md). The engine's in-process PTP follower shares UDP
+# 319/320 with it and takes its time from UDP 31900 as the fallback.
 #
 #   install-dantesync.sh --host <user@host> --version <vX.Y.Z>
 #                        --sha256 <the release asset's sha256>
@@ -20,13 +20,14 @@ set -euo pipefail
 # - Refused (exit 1, nothing changed on the box) while the "ide event" flag
 #   exists ($IEMMIXER_EVENT_NOW, else ~/.config/iemmixer/EVENT-NOW; again
 #   right before the install), when ptp4l, phc2sys or statime is installed
-#   (a binary or a unit), when anything but dantesync holds UDP 319 or 320
-#   (`sudo -n ss -Hulnp`; dantesync's own sockets are an update), when the
+#   (a binary or a unit), when anything but dantesync or the engine's follower
+#   holds UDP 319 or 320 (`sudo -n ss -Hulnp`; dantesync's own sockets are an
+#   update, the engine's only listen beside it), when the
 #   box has no python3 (the read back's probe), and when the staged binary's
 #   --version is not the tag's.
 # - The config must be a follower (exit 2 otherwise, values never printed):
 #   ntp_server set (the fleet's NTP master), ntp_server_mode.enabled false,
-#   system.gm_allowlist not empty (the audio grandmaster),
+#   system.gm_allowlist not empty (the audio network's subnet),
 #   system.clock_discipline absent or ptp_phase_lock (only that mode carries
 #   the date offset the media clock needs), http_status on 8898.
 # - Installed as dantesync's install.sh does it: /usr/local/bin/dantesync,
@@ -118,7 +119,7 @@ def problem():
     system = c.get("system")
     allow = system.get("gm_allowlist") if isinstance(system, dict) else None
     if not isinstance(allow, list) or not allow or not all(isinstance(a, str) and a.strip() for a in allow):
-        return "has no system.gm_allowlist (the audio grandmaster)"
+        return "has no system.gm_allowlist (the audio network's subnet)"
     discipline = system.get("clock_discipline", "ptp_phase_lock")
     if not isinstance(discipline, str) or discipline.strip().lower() != "ptp_phase_lock":
         return "must keep system.clock_discipline ptp_phase_lock (only it carries the date offset)"
@@ -197,21 +198,25 @@ sockets="$(ssh "${SSH_OPTS[@]}" "$host" sudo -n ss -Hulnp)" ||
 held="" own=""
 while read -r _ _ _ local _ users; do
   case "$local" in *:319 | *:320) ;; *) continue ;; esac
-  names="" others="" rest="$users"
+  names="" others="" engine="" rest="$users"
   while [[ "$rest" =~ \"([^\"]*)\"(.*) ]]; do
     names="$names ${BASH_REMATCH[1]}"
-    [ "${BASH_REMATCH[1]}" = dantesync ] || others="$others ${BASH_REMATCH[1]}"
+    case "${BASH_REMATCH[1]}" in
+      dantesync) ;;
+      iem-engine) engine=1 ;;
+      *) others="$others ${BASH_REMATCH[1]}" ;;
+    esac
     rest="${BASH_REMATCH[2]}"
   done
   if [ -n "$names" ] && [ -z "$others" ]; then
-    own=1
+    [ -n "$engine" ] || own=1
   else
     others="${others# }"
     held="${held:+$held, }UDP ${local##*:} by ${others:-an unknown process}"
   fi
 done <<< "$sockets"
 [ -z "$held" ] ||
-  die "UDP 319/320 is already held on the box ($held): dantesync must be its one PTP owner: nothing was copied"
+  die "UDP 319/320 is already held on the box ($held): dantesync and the engine's follower are its only PTP listeners: nothing was copied"
 [ -z "$own" ] || echo "install-dantesync.sh: dantesync already holds UDP 319/320: updating it"
 
 ssh "${SSH_OPTS[@]}" "$host" mkdir -p "$STAGE"
