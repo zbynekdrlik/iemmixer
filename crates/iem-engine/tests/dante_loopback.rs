@@ -146,6 +146,7 @@ fn device(dir: &Path) -> Device {
         rx_cpu: None,
         flow_slots: iem_dante::media::rx::MAX_FLOWS,
         spin_tail_ns: Default::default(),
+        spin_escape_ms: None,
         state_file: dir.join("state.toml"),
     })
     .unwrap()
