@@ -15,8 +15,6 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-import check_parity_manifest as cpm  # noqa: E402
 import live_verdict as lv  # noqa: E402
 
 T0 = 1_790_000_000
@@ -513,23 +511,19 @@ test('second; with a semicolon', async () => { run(); });
         want = ['first "quoted" title', "second; with a semicolon", "third title", "fourth, from a .test.ts file"]
         # Files in path order (nested/ before probe, zz last), titles in source order.
         self.assertEqual(lv.titles(self.dir), [want[2], want[0], want[1], want[3]])
-        # The parity checker's own `test(` rule: the same titles from the same text.
-        self.assertIs(lv.PW_TEST, cpm.PW_TEST)
-        self.assertEqual(set(lv.titles(self.dir)) - {want[2], want[3]}, cpm.playwright_titles(a))
         # A title twice stays twice: each needs its own test.
         self.spec("nested/again.spec.ts", "test(`third title`, async () => { run(); });\n")
         self.assertEqual(lv.titles(self.dir).count("third title"), 2)
 
-    def test_each_files_titles_are_the_parity_checkers_on_every_e2e_spec(self):
-        # One rule for both: on the repository's own spec files, a file's titles in source order hold
-        # exactly the titles check_parity_manifest reads, one per `test(` it finds.
+    def test_each_e2e_spec_file_has_titles_one_per_test_call(self):
+        # On the repository's own spec files: every title read, one per `test(` the rule finds.
         specs = sorted((Path(__file__).resolve().parents[2] / "e2e" / "tests").rglob("*.spec.ts"))
         self.assertGreater(len(specs), 10)
         for path in specs:
             text = path.read_text(encoding="utf-8")
             got = lv.file_titles(text)
-            self.assertEqual(set(got), cpm.playwright_titles(text), path.name)
-            self.assertEqual(len(got), len(cpm.PW_TEST.findall(text)), path.name)
+            self.assertTrue(got, path.name)
+            self.assertEqual(len(got), len(lv.PW_TEST.findall(text)), path.name)
         self.assertEqual(lv.file_titles('test("b", f);\ntest(`a \\` tick`, f);\ntest(\'c\', f);\n'),
                          ["b", "a ` tick", "c"])
 

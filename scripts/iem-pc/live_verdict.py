@@ -33,7 +33,7 @@ written:
  2. the pc job: its reason `browser-done`, at least one burst, every burst
     exit 0, then the pc job success;
  3. every expected title passed: the titles read from the spec files (the
-    parity checker's `test(` rule, check_parity_manifest.PW_TEST), each with
+    `test(` rule, PW_TEST), each with
     at least as many tests in the report as it appears in the specs (another
     project or a repeat adds some), every one passed (status `expected`,
     expected status `passed`); then no other test in the report that did not
@@ -59,10 +59,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parent.parent
-if str(SCRIPTS) not in sys.path:
-    sys.path.append(str(SCRIPTS))
-from check_parity_manifest import PW_TEST  # noqa: E402  (the parity checker's `test(` rule)
+# A Playwright `test(` call and its title, in any of the three quotes.
+PW_TEST = re.compile(r"""(?<![\w.$])test\(\s*(["'`])((?:\\.|(?!\1).)*)\1""", re.S)
 
 BEGIN_REASONS = frozenset({"ready", "not-free", "left-dev", "bundle-not-active", "engine-not-up", "no-client",
                            "token-failed", "push-count-failed"})
@@ -340,8 +338,7 @@ def report(results: object, begin: object, pc: object, evidence: object, bursts:
 
 
 def file_titles(text: str) -> list[str]:
-    """A spec file's `test(` titles in source order, unescaped as check_parity_manifest's
-    playwright_titles does (which returns them as a set)."""
+    """A spec file's `test(` titles in source order, unescaped."""
     return [re.sub(r"\\(.)", r"\1", m.group(2)) for m in PW_TEST.finditer(text)]
 
 
