@@ -3,7 +3,7 @@ subscription writes (#72). The 0x3010 layout is the one phases B-D sent by
 hand to the IEM card and to our own device, which both answered status 1;
 the reads were checked live against both on 2026-10-27 (the card's 31
 subscriptions as netaudio reads them, our device's 136 RX). `FakeDante`
-answers as our device's arc.rs does (test_iempc_gen3_switch uses it too).
+answers as our device's arc.rs does.
 Every value is synthetic (P6: invented names, a loopback socket)."""
 from __future__ import annotations
 

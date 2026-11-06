@@ -479,14 +479,14 @@ class RosterInstallTests(RosterBase):
             self.assertIn(FILE_SHA[:12], alarms[0])
             self.assertIn(way_back, alarms[0])
             self.assertIn(STATUS_FILE, alarms[0])
-            self.assertEqual(self.pc.calls[-1][:2], ("iemmode.exe", ["event", "--signal"]))
+            self.assertNotIn(["event", "--signal"], [c[1] for c in self.pc.calls])
 
     def test_a_flag_during_the_wait_runs_the_event_path(self) -> None:
         self.pc.texts[STATUS_READ] = lambda: (self.flag(), status(OTHER_SHA))[1]
         code, docs, err = self.install()
         self.assertEqual(code, ip.PREEMPTED, err)
         self.assertEqual(len(self.installs()), 1)
-        self.assertEqual(self.pc.calls[-1][:2], ("iemmode.exe", ["event", "--signal"]))
+        self.assertNotIn(["event", "--signal"], [c[1] for c in self.pc.calls])
 
     def test_a_flag_during_the_check_installs_nothing(self) -> None:
         self.pc.replies[CHECK] = lambda: (self.flag(), checked())[1]
@@ -505,7 +505,7 @@ class RosterInstallTests(RosterBase):
             code, _, err = self.install()
         self.assertEqual(code, ip.PREEMPTED, err)
         self.assertEqual((self.installs(), self.status_reads()), ([], []))
-        self.assertEqual(self.pc.calls[-1][:2], ("iemmode.exe", ["event", "--signal"]))
+        self.assertNotIn(["event", "--signal"], [c[1] for c in self.pc.calls])
 
 
 class RosterInstallGuardTests(RunningGuardCases, RosterBase):

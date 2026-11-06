@@ -18,7 +18,7 @@ So the three never overlap within a dev entry:
 - `dispatch-soak` and `switch-test` refuse while a live run of this dev entry
   may still run (`refuse_while_live`, their call sites in iempc.py): a soak
   would meet the run's engine restart, a switch would end the run.
-- `activate`, `dispatch-hil`, `trace`, `roster-install` and `gen3-loop`
+- `activate`, `dispatch-hil`, `trace` and `roster-install`
   refuse while a live run or a soak of this dev entry may still run
   (`refuse_while_running`, their call sites in iempc.py): an activation
   restarts the engine, a HIL run restarts it in its own job, a kernel trace
@@ -115,11 +115,7 @@ RUNNING = {"activate": ("no activation", "the activation restarts the engine (no
                                                "(nothing was dispatched)"),
            "trace": ("no trace", "a kernel trace weighs on the times it measures (nothing was traced)"),
            "roster-install": ("no roster install", "the reload closes every person's mixer socket "
-                                                   "(nothing was installed)"),
-           "gen3-loop": ("no loop test", "it restarts the engine in a HIL job and its test signal silences every "
-                                         "mix's TX (nothing was changed)"),
-           "gen3-mix": ("no mix test", "it restarts the engine in a HIL job and its test signal silences every "
-                                       "mix's TX (nothing was changed)")}
+                                                   "(nothing was installed)")}
 
 
 def live_refusal(reply, sha: str) -> str | None:
@@ -281,14 +277,13 @@ def refuse_while_live(ip, command: str) -> None:
 
 
 def refuse_while_running(ip, command: str) -> None:
-    """`activate`, `dispatch-hil`, `trace`, `roster-install` (not its dry
-    run), `gen3-loop` and `gen3-mix` first, before any call: refused while a
+    """`activate`, `dispatch-hil`, `trace` and `roster-install` (not its dry
+    run) first, before any call: refused while a
     live run (named first) or a soak of this dev entry may still run. An
     activation restarts the engine (inside the live run's HIL job too), a HIL
     run begins its own job and restarts it, a kernel trace weighs on the
     times both measure, a roster reload closes every person's mixer socket
-    (4003), the soak client's and the live run's too, the Gen 3 loop and mix
-    tests restart the engine in a HIL job. `dev` (the owner's "event
+    (4003), the soak client's and the live run's too. `dev` (the owner's "event
     skončil") and `event` are never refused."""
     entry, now = ip.current_entry(), dt.datetime.now().astimezone()
     head, tail = RUNNING[command]

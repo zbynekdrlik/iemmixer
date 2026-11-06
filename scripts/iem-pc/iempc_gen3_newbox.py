@@ -47,8 +47,8 @@ import iempc_gen3 as g3
 import iempc_gen3_data as data
 import iempc_gen3_deploy as deploy
 
-BACKUP_WORDS = g3.Words("gen3-backup", "the backup")
-DRIFT_WORDS = g3.Words("gen3-drift", "the drift check")
+BACKUP_WORDS = g3.Words("gen3-backup")
+DRIFT_WORDS = g3.Words("gen3-drift")
 HERE = Path(__file__).resolve().parent
 GEN3 = HERE.parent / "gen3"
 REPO = HERE.parent.parent
@@ -392,9 +392,7 @@ def build_drift(ip, ctx, host: str) -> bool:
 
 
 def expected_config(ip, env: dict[str, str]) -> str:
-    serves = ip.gen3_serves()
-    s = deploy.settings(ip, env, serves)
-    return deploy.takeover(ip, s) if serves else Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8")
+    return Path(deploy.settings(ip, env)["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8")
 
 
 def differences(ctx, ip, host: str) -> list[str]:

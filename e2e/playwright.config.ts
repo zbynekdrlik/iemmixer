@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests",
-  testIgnore: ["**/live/**", "**/gen3/**"],
+  testIgnore: ["**/live/**"],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 0, // No retries - tests must pass first time
@@ -17,7 +17,7 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      testIgnore: ["**/live/**", "**/gen3/**", "**/mobile.spec.ts"],
+      testIgnore: ["**/live/**", "**/mobile.spec.ts"],
       use: { ...devices["Desktop Chrome"] },
     },
     {
@@ -26,7 +26,7 @@ export default defineConfig({
       // installs. Runs mobile.spec.ts only.
       name: "phone",
       testMatch: "**/mobile.spec.ts",
-      testIgnore: ["**/live/**", "**/gen3/**"],
+      testIgnore: ["**/live/**"],
       use: { ...devices["iPhone SE (3rd gen)"], browserName: "chromium" },
     },
   ],

@@ -44,7 +44,6 @@ class Ip:
 
     def __init__(self, folder: Path) -> None:
         self.folder, self.emitted, self.calls, self.fail = folder, [], [], {}
-        self.serves = True
 
     def env_path(self):
         return self.folder / "iem-pc.env"
@@ -59,9 +58,6 @@ class Ip:
 
     def pause(self, _ctx, _seconds):
         pass
-
-    def gen3_serves(self):
-        return self.serves
 
     def guarded(self, words, _stdin, _timeout, _event, *, env=None, cwd=None):
         self.calls.append(words)

@@ -256,7 +256,7 @@ class InstallTests(Base):
         self.pc.texts["$iemDst"] = flag_then_hash
         code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate"])
 
     def test_an_install_that_outlives_its_bound_is_named_as_still_running(self) -> None:
         def still_running():

@@ -218,7 +218,7 @@ class TuningInstallTests(TuningBase):
         code, docs, _ = self.run_main("tuning-install", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.pc.modules[-1][1], "finish")
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["event", "--signal"], "ignore")])
+        self.assertEqual(self.pc.calls, [])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
 
 
@@ -303,7 +303,7 @@ class RefreshTests(TuningBase):
         self.on_install = still_running
         code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status"])
 
     def test_a_bundle_from_before_the_store_is_a_failed_refresh(self) -> None:
         # #34 (review): activating a bundle from before the store still counts, but
@@ -365,7 +365,7 @@ class RefreshTests(TuningBase):
         self.on_install = install_then_flag
         code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status"])
 
     def test_a_failed_profile_check_after_a_new_flag_runs_the_event_path(self) -> None:
         def ssh_cut():
@@ -375,7 +375,7 @@ class RefreshTests(TuningBase):
         self.pc.texts["profile.json"] = ssh_cut
         code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status"])
         self.assertEqual(self.installs(), [])
 
 

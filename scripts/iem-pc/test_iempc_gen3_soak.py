@@ -565,12 +565,6 @@ class RefusalTests(SoakBase):
                 self.assertIn(words, err)
                 self.assertNotIn("zyx member", err)
         ip.env_path().write_text(text, encoding="utf-8")
-        # While 2.x serves, and in an event: iempc's Spec, before any call.
-        self.again()
-        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 2}), encoding="utf-8")
-        code, docs, err = self.gate_run()
-        self.assertEqual((code, docs, self.calls()), (1, [], []), err)
-        self.assertIn("'gen3-gate' runs only while 3.x serves", err)
 
     def test_every_refusal_before_any_change(self) -> None:
         cases = (({"FAKE_UNHEALTHY": "1"}, "no soak gate: the box is not healthy"),

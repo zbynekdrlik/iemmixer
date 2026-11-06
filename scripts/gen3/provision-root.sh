@@ -32,7 +32,7 @@ set -euo pipefail
 #             admin in its group (the device's control socket, health, the
 #             live guard).
 #   folders   /etc/iemmixer 0755, /etc/credstore.encrypted 0700 root,
-#             /var/lib/iemmixer/mint 0700 iemmixer (gen3-mix's tokens).
+#             /var/lib/iemmixer/mint 0700 iemmixer (the gates' tokens).
 #   state     the stack's state the service user's: /var/lib/iemmixer and
 #             /var/lib/iem-dante 0750 iemmixer:iemmixer (made when missing;
 #             one that is a link refused), and when anything under them is

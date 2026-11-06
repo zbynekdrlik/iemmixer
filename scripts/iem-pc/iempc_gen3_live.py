@@ -5,8 +5,8 @@ live.yml, .claude/rules/live.md) driven from the dev box over ssh, its
 verdict posted as the commit status `live/gen3` on the box's build. Its call
 site is iempc_gen3_gate.run.
 
-Dev time, locked, a box command, only while 3.x serves (iempc's Spec and
-WHILE_3X_SERVES, as `gen3-gate hil`): the dev box's flag is the event gate.
+Dev time, locked, a box command, (iempc's Spec, as
+`gen3-gate hil`): the dev box's flag is the event gate.
 
 **Before any call** (Refused): GEN3_HOST; GEN3_PUBLIC_URL a bare https://
 origin once one trailing slash is taken off (the band's public URL: the
@@ -77,14 +77,15 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import iempc_gen3 as g3
 import iempc_gen3_gate as gate
-import iempc_gen3_tunnel as tunnel
 import live_verdict
 
+USER_AGENT = "iempc-gen3-live/1 (iemmixer)"
 NAME = "live"   # its refusals: "no live gate"
 CONTEXT = "live/gen3"
 ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -211,8 +212,20 @@ def box_build(box: gate.Box) -> str:
         raise box.ip.Refused(f"no live gate: {gate.box_error(box.ip, e)} (nothing was changed)") from None
 
 
+def public_hash(url: str) -> str | None:
+    """The public URL's /api/version `git_hash`, None when it does not answer
+    (tests replace it)."""
+    # A named User-Agent: the tunnel answers Python's default one with 403 (2026-10-27).
+    request = urllib.request.Request(url.rstrip("/") + "/api/version", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as r:
+            return json.loads(r.read().decode()).get("git_hash")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def refuse_other_public_build(ip, origin: str, sha: str) -> None:
-    got = tunnel.public_hash(origin)
+    got = public_hash(origin)
     if not (isinstance(got, str) and gate.HASH.fullmatch(got) and sha.startswith(got)):
         raise ip.Refused("no live gate: the band's public URL does not answer /api/version with the box's build (the "
                          "tunnel reaches another server, or none) (nothing was changed)")
@@ -377,7 +390,7 @@ def cancelled(ip, c: gate.Checks, run: Run, left: bool) -> None:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate live` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate live` (dev time, locked)."""
     s = settings(ip, ctx.env)
     box = gate.Box(ip, ctx, s.host, NAME)
     facts = gate.preflight(box, None)

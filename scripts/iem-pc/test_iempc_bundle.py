@@ -348,7 +348,7 @@ class ActivateTests(Base):
         self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.ACTIVATED)[1]
         code, docs, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish"), ("iemmode.exe", ["event", "--signal"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["activate", SHA], "finish")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
 
     def test_a_new_flag_during_a_status_read_abandons_it_and_runs_the_event_path(self) -> None:
@@ -356,7 +356,7 @@ class ActivateTests(Base):
         code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([(c[1][0], c[2]) for c in self.pc.calls],
-                         [("activate", "finish"), ("status", "abandon"), ("event", "ignore")])
+                         [("activate", "finish"), ("status", "abandon")])
 
     def test_a_new_flag_between_two_reads_runs_the_event_path(self) -> None:
         self.patch(HANDOVER_POLL_S=1.0)
@@ -364,7 +364,7 @@ class ActivateTests(Base):
         with mock.patch.object(time, "sleep", side_effect=lambda _s: self.flag()):
             code, _, _ = self.run_main("activate", "--sha", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["activate", "status"])
 
 
 class OfflineActivateTests(Base):
@@ -486,15 +486,14 @@ class OfflineActivateTests(Base):
         self.pc.replies[("quit",)] = lambda: (self.flag(), self.QUIT)[1]
         code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish"), ("iemmode.exe", ["event", "--signal"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["quit"], "finish")])
 
     def test_a_new_flag_during_the_offline_step_lets_it_finish_then_runs_the_event_path(self) -> None:
         self.pc.replies[("activate", SHA)] = lambda: (self.flag(), self.OFFLINE)[1]
         code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual([(c[0], c[1][0], c[2]) for c in self.pc.calls],
-                         [("iemmode.exe", "quit", "finish"), ("iemmixer-guard.exe", "activate", "finish"),
-                          ("iemmode.exe", "event", "ignore")])
+                         [("iemmode.exe", "quit", "finish"), ("iemmixer-guard.exe", "activate", "finish")])
 
     def older_bundle(self) -> None:
         """The fetched bundle built before S8 lane 5: its manifest names no
@@ -537,7 +536,7 @@ class OfflineActivateTests(Base):
         self.pc.module_result = count
         code, _, _ = self.run_main("activate", "--sha", SHA, "--offline")
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit", "event"])
+        self.assertEqual([c[1][0] for c in self.pc.calls], ["quit"])
 
 
 class DispatchTests(Base):

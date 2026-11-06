@@ -16,7 +16,7 @@ set -euo pipefail
 #   be installed from it: install-dantesync.sh, run first) and the [[people]]
 #   ids of this checkout's config/test-roster.toml (the sudo rule's
 #   {member}), and with --band-roster the band roster's ids too, each once
-#   (while 3.x serves the live gate mints a band member's token); no value is
+#   (the live gate mints a band member's token); no value is
 #   ever printed.
 # - On the box: `id -un` (the admin user, the sudo rule's; never root) and
 #   `systemctl is-active iem-server iem-engine iem-dante`: a unit of the stack

@@ -6,8 +6,8 @@ the box, beside the dev box's reads of the box's own counters, its verdict
 posted as the commit status `soak/gen3` on the box's build. Its call site is
 iempc_gen3_gate.run.
 
-Dev time, locked, a box command, only while 3.x serves (iempc's Spec and
-WHILE_3X_SERVES, as `gen3-gate hil` and `live`): the dev box's flag is the
+Dev time, locked, a box command, (iempc's Spec, as
+`gen3-gate hil` and `live`): the dev box's flag is the
 event gate. `--minutes` is one of MINUTES (10, 30, 60, 120; default 120: the
 owner sizes tests to an event of at most 2 h), each one fixed line of the
 sudo rule. No HIL job and no engine restart: the soak runs against the
@@ -690,7 +690,7 @@ def soak_run(job: Job, w: Watch, sha: str, member: str) -> None:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate soak [--minutes N]` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate soak [--minutes N]` (dev time, locked)."""
     minutes = minutes_of(ip, ctx.args)
     host = g3.gen3_host(ip, ctx.env, gate.WORDS)
     member = member_of(ip, ctx.env)

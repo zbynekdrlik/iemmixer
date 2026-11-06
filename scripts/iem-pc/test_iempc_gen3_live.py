@@ -6,7 +6,7 @@ plays the box (the HIL job, the service user's mint folder, the burst, the
 server's journal, the push count), a stand-in `npx` first on PATH plays
 Playwright (it records what it was handed, logs the run's client-error
 marker into the box's journal, waits for the bursts, writes the JSON report
-of the live specs' titles), and `iempc_gen3_tunnel.public_hash` stands in
+of the live specs' titles), and `iempc_gen3_live.public_hash` stands in
 for the band's public URL. FakeGh takes the status post. Every value is
 synthetic (P6)."""
 from __future__ import annotations
@@ -25,7 +25,6 @@ sys.path.insert(0, str(HERE))
 import iempc_gen3 as g3  # noqa: E402
 import iempc_gen3_gate as gate  # noqa: E402
 import iempc_gen3_live as live  # noqa: E402
-import iempc_gen3_tunnel as tunnel  # noqa: E402
 import live_verdict  # noqa: E402
 import test_iempc_gen3_gate as gt  # noqa: E402  (the module: its test classes run there, not here)
 from iempc_test_support import SHA, ip  # noqa: E402
@@ -134,7 +133,7 @@ class LiveBase(gt.GateBase):
         def public_hash(url: str) -> str | None:
             self.public["asked"].append(url)
             return self.public["hash"]
-        for target, name, value in ((tunnel, "public_hash", public_hash), (g3, "job_run", lambda: RUN),
+        for target, name, value in ((live, "public_hash", public_hash), (g3, "job_run", lambda: RUN),
                                     (live, "BURST_PERIOD_S", PERIOD), (live, "LOOP_S", 0.02)):
             p = mock.patch.object(target, name, value)
             p.start()
@@ -393,10 +392,6 @@ class RefusalTests(LiveBase):
         with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "bin")}):   # the stand-in ssh, no npx at all
             self.refused_before_any_call("npx is not on this box's PATH")
 
-    def test_the_spec_is_the_gate_s_and_it_runs_only_while_3x_serves(self) -> None:
-        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 2}), encoding="utf-8")
-        self.refused_before_any_call("2.x serves the band (gen3-side.json): 'gen3-gate' runs only while 3.x serves")
-
     def test_what_is_read_before_any_change_refuses_with_nothing_changed(self) -> None:
         cases = (({"FAKE_ENGINE_VERSION": "iem-engine 2.0.0-dev.50+local"}, None,
                   "no live gate: the box's iem-engine --version names no CI build"),
@@ -500,6 +495,38 @@ class PureTests(unittest.TestCase):
 
     def test_the_marker_names_the_run_and_its_attempt(self) -> None:
         self.assertEqual(live.marker(RUN), f"iemmixer-live-marker-{RUN}-1")
+
+
+class PublicHashTests(unittest.TestCase):
+    """The public URL's read (2026-10-27, live: the band's tunnel answered
+    Python's default User-Agent with 403 and curl's with 200)."""
+
+    def test_the_read_names_itself_and_reads_the_git_hash(self) -> None:
+        import http.server
+        import threading
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:   # noqa: N802 (the stdlib's name)
+                seen.append((self.path, self.headers.get("User-Agent", "")))
+                ok = not self.headers.get("User-Agent", "").startswith("Python-urllib")
+                body = b'{"git_hash": "zyxqw12"}' if ok else b"forbidden"
+                self.send_response(200 if ok else 403)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        got = live.public_hash(f"http://127.0.0.1:{server.server_port}/")
+        thread.join(5)
+        self.assertEqual(got, "zyxqw12")
+        self.assertEqual(seen[0][0], "/api/version")
+        self.assertTrue(seen[0][1].startswith("iempc"), seen[0][1])
 
 
 if __name__ == "__main__":

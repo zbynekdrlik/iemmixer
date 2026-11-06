@@ -50,11 +50,11 @@ PIN_RUN = ("sudo -n systemd-run --quiet --pipe --wait --collect --uid=iemmixer -
            "--setenv=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server pin")
 GH_VERIFY = ["attestation", "verify", "<bundle>/SHA256SUMS", "-R", "zbynekdrlik/iemmixer", "--signer-workflow",
              "zbynekdrlik/iemmixer/.github/workflows/ci.yml"]
+OTHER = "admin@198.51.100.77"   # the box that serves the band, when the tests' host is a spare
 ENGINEER_PIN = "3917"
 MEMBER_PIN = "6284"
 ENABLE = "sudo -n systemctl enable iem-engine iem-server"
 IS_ENABLED = "systemctl is-enabled iem-engine iem-server"
-CARD_NAME = "Zyxqw-Iem-Card"   # the IEM card's usual name (DANTE_IEM_NAME), invented
 # The closing line of a deploy that started the engine (phase H Task 8): the box's three gates on the build
 # it now runs, in order, with the restart budget's waits; fixed words, no host or value.
 GATES = ("deploy.sh: next, the box's three gates on this build, in this order: iempc gen3-gate soak (no engine "
@@ -494,9 +494,9 @@ class DeployTests(unittest.TestCase):
                             GIT_AUTHOR_EMAIL="tester@example.org", GIT_COMMITTER_NAME="tester",
                             GIT_COMMITTER_EMAIL="tester@example.org")
         self.env = {**self.git_env, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BOX": str(self.box),
-                    "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SERVER_WAIT_S": "3", "PC_ENV": str(self.pc_env),
-                    # iempc's state of this test only: the dev box's own side record never reaches a test.
-                    "IEMPC_STATE": str(self.tmp / "iempc-state")}
+                    "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SERVER_WAIT_S": "3", "PC_ENV": str(self.pc_env)}
+        # The tests' box serves nobody (--new-box), so the test site and --pins are there; `serving_box` is the rest.
+        self.spare = True
         # The checkout deploy.sh runs from: this one's script, units and test
         # site, committed in a repository of its own.
         self.repo = self.tmp / "checkout"
@@ -588,10 +588,11 @@ class DeployTests(unittest.TestCase):
 
     def full_args(self, sha: str | None = None, bundle: Path | None = None) -> list[str]:
         return ["--host", HOST, "--bundle", str(bundle or self.bundle), "--sha", sha or self.sha,
-                "--config", str(self.config), "--iface", "eth9"]
+                "--config", str(self.config), "--iface", "eth9", *(["--new-box"] if self.spare else [])]
 
     def back_args(self, sha: str) -> list[str]:
-        return ["--host", HOST, "--back", "--sha", sha, "--config", str(self.config), "--iface", "eth9"]
+        return ["--host", HOST, "--back", "--sha", sha, "--config", str(self.config), "--iface", "eth9",
+                *(["--new-box"] if self.spare else [])]
 
     def deploy(self, *extra: str, args: list[str] | None = None, **env: str) -> subprocess.CompletedProcess:
         argv = args if args is not None else [*self.full_args(), *extra]
@@ -675,7 +676,7 @@ class DeployTests(unittest.TestCase):
         self.pc_env.write_text("PC_SSH=tester@pc.test\n" + text, encoding="utf-8")
 
     def write_pins(self) -> None:
-        self.write_pc_env(f"GEN3_HOST={HOST}\nGEN3_ENGINEER_PIN=\"{ENGINEER_PIN}\"\n GEN3_MEMBER_PIN = {MEMBER_PIN}\n")
+        self.write_pc_env(f"GEN3_HOST={OTHER}\nGEN3_ENGINEER_PIN=\"{ENGINEER_PIN}\"\n GEN3_MEMBER_PIN = {MEMBER_PIN}\n")
 
     # What a deploy sends, in order.
 
@@ -1282,7 +1283,7 @@ class DeployTests(unittest.TestCase):
                 if text is None:
                     self.pc_env.unlink(missing_ok=True)
                 else:
-                    self.write_pc_env(f"GEN3_HOST={HOST}\n" + text)
+                    self.write_pc_env(f"GEN3_HOST={OTHER}\n" + text)
                 r = self.deploy("--pins")
                 self.assertEqual(r.returncode, 2, r.stderr)
                 self.assertIn(want, r.stderr)
@@ -1498,37 +1499,39 @@ class DeployTests(unittest.TestCase):
     def gen3_warnings(self, r: subprocess.CompletedProcess) -> list[str]:
         return [line for line in r.stderr.splitlines() if "WARNING" in line]
 
-    def test_a_deploy_to_the_host_ide_event_stops_warns_nothing(self) -> None:
+    def test_a_deploy_to_gen3_host_warns_nothing(self) -> None:
         # Read as iempc reads the env: spaces around the key and the value,
         # quotes around it, the last line of a key winning, comments skipped.
+        serving = self.serving_box()
         for text in (f"GEN3_HOST={HOST}\n", f"  GEN3_HOST = \"{HOST}\"  \n",
                      f"GEN3_HOST=other@gen3.test\n# GEN3_HOST=x@y\nGEN3_HOST={HOST}\n"):
             with self.subTest(text=text):
                 self.write_pc_env(text)
-                r = self.deploy()
+                r = self.deploy(*serving)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual(self.gen3_warnings(r), [], r.stderr)
 
     def test_a_deploy_to_another_host_than_gen3_host_warns(self) -> None:
+        serving = self.serving_box()
         self.write_pc_env("GEN3_HOST=other@gen3.test\n")
-        r = self.deploy()
+        r = self.deploy(*serving)
         self.assertEqual(r.returncode, 0, r.stderr)
         warnings = self.gen3_warnings(r)
         self.assertEqual(len(warnings), 1, r.stderr)
         self.assertIn("GEN3_HOST", warnings[0])
-        self.assertIn("ide event", warnings[0])
         # The values stay out of the line (P6: it may be pasted).
         self.assertNotIn("other@gen3.test", r.stderr)
 
     def test_an_env_without_gen3_host_warns_and_no_env_is_no_warning(self) -> None:
+        serving = self.serving_box()
         self.write_pc_env("PC_ROOT=X:\\root\n")
-        r = self.deploy()
+        r = self.deploy(*serving)
         self.assertEqual(r.returncode, 0, r.stderr)
         warnings = self.gen3_warnings(r)
         self.assertEqual(len(warnings), 1, r.stderr)
         self.assertIn("no GEN3_HOST", warnings[0])
         self.pc_env.unlink()
-        r = self.deploy()
+        r = self.deploy(*serving)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.gen3_warnings(r), [], r.stderr)
 
@@ -1571,7 +1574,7 @@ class DeployTests(unittest.TestCase):
              "--site-file is not a file"),
             (full + ["--site-file", str(self.config), "--roster-file", str(self.tmp)], "--roster-file is not a file"),
             (full + ["--pins", "--site-file", str(self.config), "--roster-file", str(self.config)],
-             "the band's PINs come with iempc gen3-data"),
+             "the band's PINs come with its data (iempc gen3-new-box)"),
             ([a for a in back if a not in ("--sha", self.sha)], "--sha is missing"),
         ]
         for argv, want in cases:
@@ -1584,18 +1587,6 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertEqual(self.gh_calls(), [])
 
-
-    def test_a_deploy_while_3x_serves_the_band_is_refused(self) -> None:
-        # Phase E (#72): the switch recorded side 3; a deploy would stop the box that plays the band.
-        state = self.tmp / "iempc-state"
-        state.mkdir()
-        (state / "gen3-side.json").write_text('{\n "side": 3,\n "at": "2026-10-27T12:00:00+00:00"\n}', encoding="utf-8")
-        r = self.deploy(IEMPC_STATE=str(state))
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("3.x serves the band", r.stderr)
-        self.assertEqual(self.calls(), [])
-        (state / "gen3-side.json").write_text('{\n "side": 2,\n "at": "2026-10-27T13:00:00+00:00"\n}', encoding="utf-8")
-        self.assertEqual(self.deploy(IEMPC_STATE=str(state)).returncode, 0)
 
     # Phase E (#72): the box on the band's site and roster from the ops repo.
 
@@ -1624,51 +1615,35 @@ class DeployTests(unittest.TestCase):
         self.assertIn("the site's back_to_reaper is not one line", r.stderr)
         self.assertEqual([c for c in self.calls() if c and c[0] == "scp"], [])
 
-    # --serving (#72, 2026-10-28): the box deployed in place while 3.x serves
-    # the band (iempc gen3-deploy builds the takeover config and runs it).
-
-    def side(self, side: int | None) -> None:
-        """iempc's side record of this test: None is no record."""
-        state = self.tmp / "iempc-state"
-        state.mkdir(exist_ok=True)
-        record = state / "gen3-side.json"
-        if side is None:
-            record.unlink(missing_ok=True)
-        else:
-            record.write_text(json.dumps({"side": side, "at": "2026-10-28T12:00:00+00:00"}, indent=1),
-                              encoding="utf-8")
+    # The box serves the band (Gen 2 ended 2026-11-01): a deploy without --new-box
+    # is the one iempc gen3-deploy runs, the device config taken as it is.
 
     def serving_box(self) -> list[str]:
-        """3.x serves the band: the side record says 3, the engine and the
-        server run and start at boot, the config is the takeover's (the
-        card's usual name). Returns a serving deploy's added arguments: the
-        band's site and roster, --serving."""
-        self.side(3)
-        self.write_pc_env(f"GEN3_HOST={HOST}\nDANTE_IEM_NAME={CARD_NAME}\n")
-        self.config.write_text(f'name = "{CARD_NAME}"\nstate_file = "/var/lib/iem-dante/takeover.toml"\n',
-                               encoding="utf-8")
+        """The box serves the band: the engine and the server run and start at
+        boot. Returns the arguments a deploy adds: the band's site and roster."""
+        self.spare = False
+        self.write_pc_env(f"GEN3_HOST={HOST}\n")
+        self.config.write_text('name = "zyxqw-serving"\nstate_file = "/var/lib/iem-dante/state.toml"\n', encoding="utf-8")
         site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
         self.set_states({"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"},
                         enabled=("iem-engine", "iem-server"))
-        return ["--site-file", str(site), "--roster-file", str(roster), "--serving"]
+        return ["--site-file", str(site), "--roster-file", str(roster)]
 
     def test_a_serving_deploy_disables_nothing_and_enables_the_engine_and_the_server_after_the_start(self) -> None:
         serving = self.serving_box()
         r = self.deploy(*serving)
         self.assertEqual(r.returncode, 0, r.stderr)
-        # No side refusal; the start without a disable, then the engine and
-        # the server enabled at boot and read back; the read back as always.
+        # The start without a disable, then the engine and the server enabled
+        # at boot and read back; the read back as always.
         self.assertEqual(self.sequence(), self.expected("a", serving=True, held=("iem-engine", "iem-server")))
         self.assertEqual(self.states(), {"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
-        self.assertIn("iem-engine and iem-server enabled at boot (3.x serves the band; the tunnel unit left as it is)",
+        self.assertIn("iem-engine and iem-server enabled at boot (the box serves the band; the tunnel unit left as it is)",
                       r.stdout)
         # Then the box's three gates on this build, the closing line.
         self.assertEqual(r.stdout.strip().splitlines()[-1], GATES)
+        # The device's identity is the given config, byte for byte.
         self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"), self.config.read_bytes())
-        # The card's name is compared on the dev box: on no ssh or scp command line, never printed.
-        self.assertNotIn(CARD_NAME, json.dumps(self.calls()))
-        self.assertNotIn(CARD_NAME, r.stdout + r.stderr)
         # The next one goes into the other slot the same way.
         self.clear_logs()
         sha2, second = self.next_build("the second build")
@@ -1678,33 +1653,34 @@ class DeployTests(unittest.TestCase):
                                                        held=("iem-engine", "iem-server")))
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
 
-    def test_serving_only_while_3x_serves_and_while_3x_serves_only_serving(self) -> None:
+    def test_no_side_record_is_read(self) -> None:
+        # The old record may still lie in iempc's state folder: nothing reads it, and no env key points at it.
         serving = self.serving_box()
-        for side in (None, 2):
-            with self.subTest(side=side):
-                self.side(side)
-                r = self.deploy(*serving)
-                self.assertEqual(r.returncode, 1, r.stderr)
-                self.assertIn("--serving deploys the box while 3.x serves the band", r.stderr)
-                self.assertIn("deploy without --serving: nothing was copied", r.stderr)
-                self.assertEqual((self.calls(), self.gh_calls()), ([], []))
-        # 3.x serves: the same deploy without --serving is the refusal it was.
-        self.side(3)
-        r = self.deploy(*serving[:-1])
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("3.x serves the band", r.stderr)
-        self.assertIn("`iempc gen3-deploy` deploys the box in place", r.stderr)
-        self.assertEqual((self.calls(), self.gh_calls()), ([], []))
+        state = self.tmp / "iempc-state"
+        state.mkdir()
+        (state / "gen3-side.json").write_text('{"side": 2}', encoding="utf-8")
+        r = self.deploy(*serving, IEMPC_STATE=str(state))
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.enabled(), ["iem-engine", "iem-server"])
+        script = (self.repo / "scripts" / "gen3" / "deploy.sh").read_text(encoding="utf-8")
+        for word in ("gen3-side", "IEMPC_STATE", "--serving", "DANTE_IEM_NAME"):
+            self.assertNotIn(word, script)
+
+    def test_the_config_s_name_is_taken_as_it_is(self) -> None:
+        # The private env holds no name to compare it with: the ops config alone is the identity.
+        serving = self.serving_box()
+        self.config.write_text('name = "zyxqw-another"\n', encoding="utf-8")
+        r = self.deploy(*serving)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"), b'name = "zyxqw-another"\n')
 
     def new_box(self) -> list[str]:
-        """3.x serves the band on another box; this host is a spare."""
-        self.side(3)
-        self.write_pc_env("GEN3_HOST=admin@198.51.100.77\n")
+        """Another box serves the band; this host is a spare."""
+        self.write_pc_env(f"GEN3_HOST={OTHER}\n")
         site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
-        return ["--site-file", str(site), "--roster-file", str(roster), "--new-box"]
+        return ["--site-file", str(site), "--roster-file", str(roster)]
 
-    def test_a_new_box_deploys_past_the_other_box_s_side_record_and_stays_disabled(self) -> None:
+    def test_a_new_box_stays_disabled(self) -> None:
         r = self.deploy(*self.new_box())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.enabled(), [])
@@ -1718,48 +1694,10 @@ class DeployTests(unittest.TestCase):
         self.assertIn("--new-box on GEN3_HOST", r.stderr)
         self.assertEqual(self.gh_calls(), [])
 
-    def test_a_new_box_needs_the_band_s_site_and_is_not_serving(self) -> None:
-        added = self.new_box()
-        self.assertEqual(self.deploy("--new-box").returncode, 2)
-        self.assertEqual(self.deploy(*added, "--serving").returncode, 2)
-
-    def test_serving_refuses_a_config_not_under_the_cards_usual_name(self) -> None:
+    def test_a_deploy_needs_the_bands_site_and_the_engine(self) -> None:
         serving = self.serving_box()
-        cases = [
-            ('name = "Zyxqw-Other"\n', "the config's name is not the IEM card's usual name"),
-            # Exactly as the takeover writes it: another case is another config.
-            ('name = "zyxqw-iem-card"\n', "the config's name is not the IEM card's usual name"),
-            ('state_file = "/var/lib/iem-dante/takeover.toml"\n', "the config's name is not the IEM card's usual name"),
-            ("name = [\n", "the config could not be read as TOML"),
-        ]
-        for text, want in cases:
-            with self.subTest(want=want, text=text):
-                self.config.write_text(text, encoding="utf-8")
-                r = self.deploy(*serving)
-                self.assertEqual(r.returncode, 1, r.stderr)
-                self.assertIn(want, r.stderr)
-                self.assertIn("nothing was copied", r.stderr)
-                self.assertEqual((self.calls(), self.gh_calls()), ([], []))
-                for name in (CARD_NAME, "Zyxqw-Other", "zyxqw-iem-card"):
-                    self.assertNotIn(name, r.stdout + r.stderr)
-        # The card's name comes from iempc's private env: none there is the command line's fault.
-        self.config.write_text(f'name = "{CARD_NAME}"\n', encoding="utf-8")
-        for text, want in ((f"GEN3_HOST={HOST}\n", "iempc's private env has no DANTE_IEM_NAME"),
-                           (None, "which is not there")):
-            with self.subTest(want=want):
-                if text is None:
-                    self.pc_env.unlink()
-                else:
-                    self.write_pc_env(text)
-                r = self.deploy(*serving)
-                self.assertEqual(r.returncode, 2, r.stderr)
-                self.assertIn(want, r.stderr)
-                self.assertEqual(self.calls(), [])
-
-    def test_serving_needs_the_bands_site_and_the_engine(self) -> None:
-        serving = self.serving_box()
-        for argv, want in (([*self.full_args(), "--serving"], "--serving needs the band's --site-file"),
-                           ([*self.full_args(), *serving, "--start", "device"], "--serving needs --start engine")):
+        for argv, want in ((self.full_args(), "a deploy needs the band's --site-file"),
+                           ([*self.full_args(), *serving, "--start", "device"], "a deploy needs --start engine")):
             with self.subTest(want=want):
                 r = self.deploy(args=argv)
                 self.assertEqual(r.returncode, 2, r.stderr)
@@ -1767,7 +1705,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     def test_a_flag_once_the_serving_stack_is_stopped_never_holds_it_down(self) -> None:
-        # "ide event" keeps the box running while 3.x serves: the stack this
+        # "ide event" leaves the box running: the stack this
         # deploy stopped starts all the same, and a flag after the start
         # stops nothing; the read back goes on.
         serving = self.serving_box()
@@ -1778,7 +1716,7 @@ class DeployTests(unittest.TestCase):
                 self.clear_logs()
                 r = self.deploy(*serving, FAKE_FLAG_ON=when)
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn("an event is on; 3.x serves the band", r.stderr)
+                self.assertIn("an event is on; the box serves the band", r.stderr)
                 self.assertIn(said, r.stderr)
                 self.assertEqual(r.stderr.count("an event is on"), 1, r.stderr)
                 remote = self.remote()
@@ -1823,7 +1761,7 @@ class DeployTests(unittest.TestCase):
                 self.assertNotIn(STOP, remote[starts[0]:])
 
     def test_every_sudo_line_a_serving_deploy_sends_is_in_the_template(self) -> None:
-        # Into a, into b, then --back to a: each with --serving.
+        # Into a, into b, then --back to a.
         serving = self.serving_box()
         sent: list[str] = []
         r = self.deploy(*serving)

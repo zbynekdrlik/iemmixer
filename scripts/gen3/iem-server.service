@@ -5,7 +5,7 @@
 # on port 80, the UI embedded, HTTPS only with the site's `tls` and a
 # certificate (#91; phase E, #72: port 80 is the band's
 # tunnel's origin, http://127.0.0.1:80 as on the PC; the box's own connector
-# reaches it while 3.x serves the band). Its data is the
+# reaches it). Its data is the
 # public synthetic test band (config/test-site.toml as iemmixer.toml and
 # config/test-roster.toml as roster.toml), which deploy.sh copies into
 # /var/lib/iemmixer/site; the server writes its secrets and the band's data

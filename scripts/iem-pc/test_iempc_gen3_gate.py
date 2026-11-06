@@ -408,16 +408,16 @@ class GateBase(Base):
     def setUp(self) -> None:
         super().setUp()
         text = ip.env_path().read_text(encoding="utf-8")
+        self.device_config = self.tmp / "ops-device.toml"
+        self.device_config.write_text(f'name = "{OURS.upper()}"\n', encoding="utf-8")   # any case: Dante names ignore it
         ip.env_path().write_text(text + f"GEN3_HOST={GEN3}\nGEN3_DANTE_IP={DANTE_IP}\n"
-                                 f"DANTE_IEM_NAME={OURS.upper()}\n", encoding="utf-8")
+                                 f"GEN3_DEVICE_CONFIG={self.device_config}\n", encoding="utf-8")
         self.patch(POLL_S=0.01)
         # A health that never comes fails in a second, not in the box's 90.
         bound = mock.patch.object(gate, "HEALTH_WAIT_S", 1.0)
         bound.start()
         self.addCleanup(bound.stop)
         ip.STATE_DIR.mkdir(parents=True, exist_ok=True)
-        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 3, "at": "2026-10-28T09:00:00+00:00"}),
-                                                    encoding="utf-8")
         self.box = self.tmp / "gen3"
         for folder in ("root/etc/systemd/system", "root/etc/iemmixer", "root/var/lib/iemmixer/site", "home"):
             (self.box / folder).mkdir(parents=True)
@@ -786,9 +786,8 @@ class ReviewTests(GateBase):
 
     def test_a_device_at_gen3_dante_ip_that_is_not_ours_gets_no_subscription(self) -> None:
         # A wrong GEN3_DANTE_IP, or an address that moved, would have the D5(b) loop change another Dante
-        # device's RX subscription. Our device answers with DANTE_IEM_NAME while 3.x serves (any case).
-        text = ip.env_path().read_text(encoding="utf-8")
-        ip.env_path().write_text(text + "DANTE_IEM_NAME=Zyxqw-Card\n", encoding="utf-8")
+        # device's RX subscription. Our device answers with the ops device config's name (any case).
+        self.device_config.write_text('name = "Zyxqw-Card"\n', encoding="utf-8")
         err = self.refused("no HIL gate: the device answering at GEN3_DANTE_IP is not our own")
         self.assertNotIn("Zyxqw-Card", err)
         self.assertEqual(self.device.rows, {})
@@ -974,7 +973,7 @@ class PreflightTests(GateBase):
     def test_missing_keys_refuse_before_any_call(self) -> None:
         text = ip.env_path().read_text(encoding="utf-8")
         for drop, words in ((f"GEN3_DANTE_IP={DANTE_IP}\n", "no GEN3_DANTE_IP in the private env"),
-                            (f"DANTE_IEM_NAME={OURS.upper()}\n", "no DANTE_IEM_NAME in the private env"),
+                            (f"GEN3_DEVICE_CONFIG={self.device_config}\n", "no GEN3_DEVICE_CONFIG in the private env"),
                             (f"GEN3_HOST={GEN3}\n", "no GEN3_HOST in the private env")):
             with self.subTest(words=words):
                 ip.env_path().write_text(text.replace(drop, ""), encoding="utf-8")
@@ -982,23 +981,24 @@ class PreflightTests(GateBase):
                 self.assertEqual((code, docs, self.calls()), (1, [], []), err)
                 self.assertIn(words, err)
 
-    def test_the_command_is_dev_time_locked_a_box_command_and_runs_only_while_3x_serves(self) -> None:
-        spec = ip.COMMANDS["gen3-gate"]
-        self.assertEqual((spec.pc, spec.dev_time, spec.locked), (False, True, True))
-        self.assertIn("gen3-gate", ip.WHILE_3X_SERVES)
-        self.assertNotIn("gen3-gate", ip.WHILE_2X_SERVES)
-        side = ip.STATE_DIR / "gen3-side.json"
-        for record in (None, {"side": 2}):
-            with self.subTest(record=record):
-                if record is None:
-                    side.unlink()
-                else:
-                    side.write_text(json.dumps(record), encoding="utf-8")
+    def test_an_ops_device_config_without_a_name_refuses_before_any_call(self) -> None:
+        for text, words in (("name = [\n", "could not be read as TOML"), ("rate = 1\n", "names no device")):
+            with self.subTest(words=words):
+                self.device_config.write_text(text, encoding="utf-8")
                 code, docs, err = self.gate_run()
                 self.assertEqual((code, docs, self.calls()), (1, [], []), err)
-                self.assertIn("2.x serves the band (gen3-side.json): 'gen3-gate' runs only while 3.x serves", err)
-        side.write_text(json.dumps({"side": 3}), encoding="utf-8")
-        self.flag()
+                self.assertIn(words, err)
+        self.device_config.unlink()
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs, self.calls()), (1, [], []), err)
+        self.assertIn("could not be read as TOML", err)
+
+    def test_the_command_is_dev_time_locked_a_box_command_and_reads_no_side_record(self) -> None:
+        spec = ip.COMMANDS["gen3-gate"]
+        self.assertEqual((spec.pc, spec.dev_time, spec.locked), (False, True, True))
+        # The old record may still lie in the state folder: it neither refuses nor allows anything.
+        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 2}), encoding="utf-8")
+        self.flag()   # the Spec's own refusal, before any call
         code, docs, err = self.gate_run()
         self.assertEqual((code, docs, self.calls()), (1, [], []), err)
         self.assertIn("'gen3-gate' runs only in dev time", err)

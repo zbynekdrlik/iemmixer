@@ -13,7 +13,7 @@ compares the lists), `server/<path>` and `engine/<name>` members. A generation
 the engine prunes while this reads is left out; a link is never followed.
 
 stdout: one JSON line {"manifest": {"<member>": "<sha256>"}, "zip": "<base64>"},
-the PC side's shape (iempc_gen3_data). It carries the band's secrets: only
+band_receive.py's manifest (iempc_gen3_data.unpack reads it). It carries the band's secrets: only
 iempc reads it, and nothing prints it. exit 0 sent, 1 refused (the reason on
 stderr, never a file's content), 2 usage."""
 from __future__ import annotations

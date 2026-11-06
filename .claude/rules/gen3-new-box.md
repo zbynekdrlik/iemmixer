@@ -11,15 +11,15 @@ paths:
 
 # A Gen 3 box from zero (#72; the cookbook)
 
-**One command:** `iempc gen3-new-box --host <admin@fresh> --bundle <gen3-bundle-<sha>> --sha <sha> [--iface <name>] [--from-backup <stamp>]` runs sections 2, 3, 5 and 6 in order; a rerun resumes. It needs sections 0 and 1 done by hand (the admin with a passwordless sudo rule of its own, which provision needs too) and `GEN3_DANTESYNC_CONFIG`, `GEN3_DANTESYNC_VERSION`, `GEN3_DANTESYNC_SHA256`, `GEN3_CLOUDFLARED_VERSION`, `GEN3_CLOUDFLARED_SHA256` in iempc's private env, beside the deploy's keys. `pump_cpu` and `io_cpu` of the device config must fit the new box first (section 4). It refuses GEN3_HOST. The result is a spare: its units stay disabled, and its device keeps the config's usual name. A band data set comes from the running box, or from `--from-backup` when that box no longer answers.
+**One command:** `iempc gen3-new-box --host <admin@fresh> --bundle <gen3-bundle-<sha>> --sha <sha> [--iface <name>] [--from-backup <stamp>]` runs sections 2, 3, 5 and 6 in order; a rerun resumes. It needs sections 0 and 1 done by hand (the admin with a passwordless sudo rule of its own, which provision needs too) and `GEN3_DANTESYNC_CONFIG`, `GEN3_DANTESYNC_VERSION`, `GEN3_DANTESYNC_SHA256`, `GEN3_CLOUDFLARED_VERSION`, `GEN3_CLOUDFLARED_SHA256` in iempc's private env, beside the deploy's keys. `pump_cpu` and `io_cpu` of the device config must fit the new box first (section 4). It refuses GEN3_HOST. The result is a spare: its units stay disabled. A band data set comes from the running box, or from `--from-backup` when that box no longer answers.
 
 **Off-box copy:** `iempc gen3-backup` (the stack keeps running) writes `~/.config/iemmixer/box-backup/<stamp>/` (0700; band.zip, manifest.json, pepper, 0600). It holds the band's secrets and stays there: never in this repo, never in the ops repo. The box needs a deploy that carries `band_send.py`, and a provision for the rule of `systemd-creds decrypt`.
 
-**Drift:** `iempc gen3-drift` compares the box with this checkout: the units, the helpers, the sudo template provision left in its stage, the device config (the takeover config while 3.x serves), the build (a commit after it that changes no crate is no drift), `verify_box.py`, the units that start at boot, the pinned dantesync and cloudflared. Exit 1 names each difference.
+**Drift:** `iempc gen3-drift` compares the box with this checkout: the units, the helpers, the sudo template provision left in its stage, the device config, the build (a commit after it that changes no crate is no drift), `verify_box.py`, the units that start at boot, the pinned dantesync and cloudflared. Exit 1 names each difference.
 
-**What it does not carry:** Dante state files (`state.toml`, `takeover.toml`) stay behind on purpose. `iempc gen3-deploy` builds the takeover config from the card.
+**What it does not carry:** the Dante state file (`state.toml`, our RX subscriptions) stays behind on purpose: to keep them, copy it from the old box with the stack stopped, before the first start under the band's name.
 
-**A spare takes the band over:** stop the old box if it still runs, set `GEN3_HOST` to the spare, run `iempc gen3-deploy` (it installs the takeover config, enables the units), then `iempc gen3-tunnel token`, then prove it (section 7).
+**A spare takes the band over:** stop the old box if it still runs, set `GEN3_HOST` to the spare, run `iempc gen3-deploy` (it installs the ops device config and enables the units), put the tunnel's token into the box's credential by hand (the value only on stdin of `sudo -n systemd-creds encrypt --name=tunnel --with-key=auto - /etc/credstore.encrypted/iemmixer-tunnel`, then `chmod 0600`), `systemctl enable --now iem-tunnel`, then prove it (section 7).
 
 Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r8169, Ubuntu 26.04) in phases D–F; the details and numbers live in `.claude/rules/gen3.md` and on #72. Real names, addresses and the ops files' contents never enter this repo (P6): they are in `iemmixer-ops` and iempc's private env. Every step is dev time only (never while `EVENT-NOW` exists).
 
@@ -81,32 +81,31 @@ D = B + P + W = 16 + 24 + 16 = 56 samples; mic to ear with the rack's 24 is 80 s
 
 ## 5. Deploy
 
-`scripts/gen3/deploy.sh --host <user@host> --bundle <CI's gen3-bundle-<sha>> --sha <sha> --config <ops device config> --iface <Dante NIC> --start engine`, plus `--site-file <ops site.toml> --roster-file <ops roster.toml>` for the band, or `--pins` for the synthetic test band. The checkout must be exactly `<sha>`, clean. Two slots; `--back` returns to the other.
+`scripts/gen3/deploy.sh --host <user@host> --bundle <CI's gen3-bundle-<sha>> --sha <sha> --config <ops device config> --iface <Dante NIC> --new-box --start engine`, plus `--site-file <ops site.toml> --roster-file <ops roster.toml>` for the band, or `--pins` for the synthetic test band. The checkout must be exactly `<sha>`, clean. Two slots; `--back` returns to the other.
 
-Once the box has been deployed (and while 3.x serves, always): `iempc gen3-deploy --bundle <gen3-bundle-<sha>> --sha <sha>` (deploy.sh alone refuses while 3.x serves; `.claude/rules/gen3.md`, "Deploy while 3.x serves").
+The box that serves the band: `iempc gen3-deploy --bundle <gen3-bundle-<sha>> --sha <sha>` (`.claude/rules/gen3.md`). Without `--new-box`, deploy.sh needs the band's site and roster and enables the units.
 
-While 3.x serves, a provision needs a short stop: it refuses a running `iem-engine` or `iem-server`. Stop both, run it, start both; its `stack` step leaves them enabled (it disables only the retired `iem-dante.service`), so a reboot still serves the band and no deploy has to follow. A change to `sudo-lines.txt` reaches the box only this way.
+A provision needs a short stop on the box that serves: it refuses a running `iem-engine` or `iem-server`. Stop both, run it, start both; its `stack` step leaves them enabled (it disables only the retired `iem-dante.service`), so a reboot still serves the band and no deploy has to follow. A change to `sudo-lines.txt` reaches the box only this way.
 
 ## 6. The band's data and URL
 
-- `iempc gen3-data --pepper` (from the PC side): the band's files and the pepper onto the box, read back by sha256.
-- `scripts/gen3/install-cloudflared.sh --host ... --version <X.Y.Z> --sha256 <deb sha256>`, then `iempc gen3-tunnel token`: the box's tunnel connector, never enabled by hand (the switch does it).
+- `iempc gen3-new-box` carries the band's files and the pepper from the running box or from a backup, read back by sha256.
+- `scripts/gen3/install-cloudflared.sh --host ... --version <X.Y.Z> --sha256 <deb sha256>`: the box's tunnel connector, installed and not enabled (the spare's takeover above does that).
 
 ## 7. Prove it (before the band)
 
-A build the box serves is proven by the box's three gates, run from the dev box in dev time while 3.x serves (each refused with `EVENT-NOW` or while 2.x serves). `deploy.sh`, so `iempc gen3-deploy` too, closes with one line naming them. Each posts a commit status on the box's build (its engine's `--version` SHA). Phase G's confirmation needs `soak/gen3`, `hil/gen3` and `live/gen3` all green on the build the box runs.
+A build the box serves is proven by the box's three gates, run from the dev box in dev time (each refused with `EVENT-NOW`). `deploy.sh`, so `iempc gen3-deploy` too, closes with one line naming them. Each posts a commit status on the box's build (its engine's `--version` SHA). Phase G's confirmation needs `soak/gen3`, `hil/gen3` and `live/gen3` all green on the build the box runs.
 
 1. `iempc gen3-gate soak [--minutes 10|30|60|120]` (default 120), right after the deploy: `iem-soakclient` on the box beside the dev box's reads of `ctl status`, health and the stack's units. No HIL job and no engine restart. It proves the engine as it serves runs an event's length clean: the pump never late, missed, overrun or re-bootstrapped, the clock ready with no holdover or re-anchor, no late RX packet, no TX hole, the listen stream complete with no reconnect (its gaps counted, not judged: the browser listen is low priority, #88). Status `soak/gen3`.
 2. `iempc gen3-gate hil`, at least ten minutes after the deploy's start. A HIL job (the engine restarted with `--test-signal --fault-injection`): the builds, health, the RX flows back, the D5(b) loop through our own device, one -30 dBFS burst on the spare outputs then silence, the alarm path's reach, then the panic (the engine's own injected RT fault, systemd's one restart, healthy again, the alarm unit not started), then the job's end. Three engine starts. Status `hil/gen3`.
 3. `iempc gen3-gate live`, at least ten minutes after the HIL gate ended (its three starts span its run, its end's restart the last). The live E2E specs in a real browser through the band's public URL, a 30 s burst every 60 s, the client-error marker, the push count. Two engine starts. Status `live/gen3`.
 
-The waits are the engine's restart budget: the unit starts it at most three times in ten minutes (`StartLimitBurst=3`), and the gates keep their own starts, `iempc gen3-deploy`'s and `gen3-switch to-3`'s in iempc's `gen3-gate.json` and refuse a run that would pass it, naming the seconds to wait (a deploy.sh run by hand is not counted). During a burst every in-ear is silent (every mix TX is written as zero), so the HIL and live gates are dev time only. Their rules: `.claude/rules/gen3.md`, the box's HIL, live and soak gates.
+The waits are the engine's restart budget: the unit starts it at most three times in ten minutes (`StartLimitBurst=3`), and the gates keep their own starts and `iempc gen3-deploy`'s in iempc's `gen3-gate.json` and refuse a run that would pass it, naming the seconds to wait (a deploy.sh run by hand is not counted). During a burst every in-ear is silent (every mix TX is written as zero), so the HIL and live gates are dev time only. Their rules: `.claude/rules/gen3.md`, the box's HIL, live and soak gates.
 
 Besides the gates, on new hardware or after a timing change:
 
 - `scripts/gen3/live_guard.py --rate 96000 --seconds <n>` as a background task for the whole session.
-- 30 minutes with the stage on and the RX mirrored (`iempc gen3-mirror`), reading `ctl status` each second: expect late / missed / overruns 0, the longest block well under one block's time (167 µs at block 16: 88 µs on the N100), every RX flow's worst `lateness` under P (13 against 24 at `arc_rx_fpp` 4).
-- The loop through the IEM card (`iempc gen3-loop --offsets 116,153 --bursts 5 --slot <spare HIL output>`, the PC in maintenance): round trips equal within a burst set, base 153 at `tx_latency_ns` 0.25 ms.
+- 30 minutes with the stage on, reading `ctl status` each second: expect late / missed / overruns 0, the longest block well under one block's time (167 µs at block 16: 88 µs on the N100), every RX flow's worst `lateness` under P (13 against 24 at `arc_rx_fpp` 4).
 - How to measure each part (RX lateness, block time, a receiver's flow latency through its ARC 0x3200, our TX send spread with `tcpdump -p --time-stamp-precision=nano`, never without `-p`): `.claude/rules/gen3.md`, "Measuring latency on the box".
 
 **Reboot and sudden loss (#72).** After the three gates: `iempc gen3-gate reboot`, then `iempc gen3-gate reset` (magic SysRq `b` under 20 Hz level writes, no sync). Each restarts the box for real and fails on a late or wide clock, a failed unit, a filesystem error, a lost state, a changed file. The first boot of a new box has no `/etc/dantesync/drift.json`: run dantesync locked for 10 minutes first (it saves every 10 minutes), else `phase` fails with about -700 us until dsync#146.

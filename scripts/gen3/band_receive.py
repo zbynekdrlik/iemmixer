@@ -6,7 +6,7 @@ as the service user, with the stack stopped:
   sudo -n -u iemmixer /usr/bin/python3 -I /opt/iemmixer/lib/band_receive.py \
       /var/lib/iemmixer/site /var/lib/iemmixer/engine < band.zip
 
-stdin is one zip (from `iempc gen3-data to-box`) whose members are
+stdin is one zip (from `iempc gen3-new-box`) whose members are
 `server/<path>` (the server's band files) and `engine/<path>` (the engine's
 saved state). Only the names below are taken; anything else (an absolute
 path, `..`, a link, a name outside the lists, a repeat) refuses the whole

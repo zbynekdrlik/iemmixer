@@ -12,7 +12,6 @@ import re
 import shutil
 import sys
 import tempfile
-import time
 import types
 import unittest
 import zipfile
@@ -220,9 +219,6 @@ class Base(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.patch(EVENT_NOW=self.tmp / "config" / "EVENT-NOW", STATE_DIR=self.tmp / "state",
                    SPIKE_STATE=self.tmp / "spike-window.json", POLL_S=0.05)
-        self.spike_log = self.tmp / "spike.log"
-        self.spike_done = self.tmp / "spike.done"
-        self.patch(SPIKE=self.write_spike(0))
         envfile = self.tmp / "iem-pc.env"
         envfile.write_text("".join(f"{k}={v}\n" for k, v in ENV.items()), encoding="utf-8")
         self.patch(env_path=lambda: envfile)
@@ -254,22 +250,6 @@ class Base(unittest.TestCase):
             yield
         finally:
             self.swap(saved)
-
-    def write_spike(self, code: int, delay: float = 0.0) -> Path:
-        """A stand-in spike_window.py: logs its arguments at start, takes
-        `delay` seconds, marks its end in spike_done, exits with `code`."""
-        p = self.tmp / "spike_window.py"
-        p.write_text(f"import sys, time\nopen({str(self.spike_log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
-                     f"time.sleep({delay})\nopen({str(self.spike_done)!r}, 'a').write('ended\\n')\n"
-                     f"print('preempted')\nsys.exit({code})\n", encoding="utf-8")
-        return p
-
-    def wait_for_spike_end(self) -> None:
-        """A spike stand-in left running ends by itself (never force-ended)."""
-        deadline = time.monotonic() + 15
-        while not self.spike_done.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertTrue(self.spike_done.exists(), "the spike stand-in never ended")
 
     def route_to_real_gh(self, *prefix: str) -> None:
         """gh calls starting with `prefix` go through the real wrapper (and a

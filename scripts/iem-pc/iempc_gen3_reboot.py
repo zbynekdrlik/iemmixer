@@ -9,7 +9,7 @@ saves, its writes kept up by `Writes`: the engineer's level over the band's
 WebSocket, 20 times a second, moved by LOAD_DB and back. `reset` puts the
 exact level back afterwards. A real power cut stays a physical step (#72).
 
-Dev time, locked, a box command, only while 3.x serves (iempc's Spec, as the
+Dev time, locked, a box command, (iempc's Spec, as the
 other gates). No owner question: the owner approved reboots and hard kills of
 the box for robustness (#72, 2026-11-01).
 
@@ -70,7 +70,7 @@ TOKEN_S = 3600
 MIX = "engineer"
 STATE = "/var/lib/iemmixer/engine/current.json"
 FILES = ("/var/lib/iemmixer/site/iemmixer.toml", "/var/lib/iemmixer/site/roster.toml",
-         "/var/lib/iem-dante/takeover.toml")
+         "/var/lib/iem-dante/state.toml")
 UNITS = ("iem-engine", "iem-server", "iem-tunnel", "iem-napi", "dantesync")
 BOOT_ID = ("cat", "/proc/sys/kernel/random/boot_id")
 REBOOT = (*gate.SUDO, "systemctl", "reboot")
@@ -330,7 +330,7 @@ def restart(box: gate.Box, kind: str) -> float:
 # ---- the command ----
 
 def run(ctx, ip, kind: str) -> int:
-    """`iempc gen3-gate reboot|reset` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate reboot|reset` (dev time, locked)."""
     host = g3.gen3_host(ip, ctx.env, gate.WORDS)
     member = ctx.env.get("LIVE_MEMBER", "")
     if kind == "reset" and not soak.ID.fullmatch(member):

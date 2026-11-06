@@ -343,7 +343,7 @@ class PreemptionTests(Base):
         self.pc.replies[("dev", "--build", SHA)] = lambda: (self.flag(), (0, OK))[1]
         code, docs, _ = self.run_main("dev", "--build", SHA)
         self.assertEqual(code, ip.PREEMPTED)
-        self.assertEqual(self.pc.calls, [("iemmode.exe", ["dev", "--build", SHA], "abandon"), ("iemmode.exe", ["event", "--signal"], "ignore")])
+        self.assertEqual(self.pc.calls, [("iemmode.exe", ["dev", "--build", SHA], "abandon")])
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual(ip.current_entry(), 0)
 
@@ -356,7 +356,7 @@ class PreemptionTests(Base):
         code, docs, _ = self.run_main("rehearse-teardown")
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(docs[0]["event"], "ide event (flag file) after a failed step")
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
+        self.assertNotIn(("iemmode.exe", ["event", "--signal"], "ignore"), self.pc.calls)
 
     def test_a_failed_step_without_the_flag_does_not(self) -> None:
         def fail():
@@ -382,13 +382,6 @@ class PreemptionTests(Base):
         code, _, err = self.run_main("fetch-bundle", "--sha", SHA)
         self.assertEqual((code, self.pc.calls), (1, []))
         self.assertIn("no green push run", err)
-
-    def test_a_failed_event_after_a_preemption_is_reported(self) -> None:
-        self.pc.replies[("probe-task",)] = lambda: (self.flag(), (0, OK))[1]
-        self.pc.replies[("event", "--signal")] = (1, OK)
-        code, _, err = self.run_main("probe-task")
-        self.assertEqual(code, 1)
-        self.assertIn("alarm the owner now", err)
 
 
 class DevTests(Base):
@@ -443,26 +436,7 @@ class LockTests(Base):
             self.assertEqual(self.run_main("event")[0], 0)
         ip.EVENT_NOW.unlink()  # "event skončil"
         self.assertEqual(self.run_main("probe-task")[0], 0)
-        self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["event", "--signal"], ["probe-task"]])
-
-
-class Gen3ServesTests(Base):
-    """#72, 2026-10-28: while 3.x serves the band, the PC's gates would test the
-    box through the band's public URL, and the Gen 3 loop and mix tests would
-    drive the band's own TX channels on the box: all refused before any call."""
-
-    def test_the_pc_gates_and_the_box_loops_are_refused_while_3x_serves(self) -> None:
-        (ip.STATE_DIR).mkdir(parents=True, exist_ok=True)
-        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 3, "at": "2026-10-28T09:00:00+00:00"}),
-                                                    encoding="utf-8")
-        for argv in (["dispatch-live", "--sha", SHA], ["dispatch-hil", "--sha", SHA],
-                     ["dispatch-soak", "--sha", SHA],
-                     ["gen3-loop", "--offsets", "116,153", "--bursts", "5", "--slot", "125"],
-                     ["gen3-mix", "--slot", "125", "--member", "member2", "--box-input", "mic2", "--bursts", "5"]):
-            code, _, err = self.run_main(*argv)
-            self.assertEqual((code, self.pc.calls), (1, []), argv)
-            self.assertIn("3.x serves the band", err, argv)
-            self.assertIn("runs only while 2.x serves", err, argv)
+        self.assertEqual([c[1] for c in self.pc.calls], [["status"], ["probe-task"]])
 
 
 class PatchTests(Base):

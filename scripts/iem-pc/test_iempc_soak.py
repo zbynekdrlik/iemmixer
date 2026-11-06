@@ -116,7 +116,7 @@ class DispatchSoakTests(SoakBase):
         code, docs, _ = self.soak()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertEqual(self.pc.calls[0], ("iemmode.exe", ["status"], "abandon"))
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
+        self.assertNotIn(("iemmode.exe", ["event", "--signal"], "ignore"), self.pc.calls)
         self.assertEqual(docs[0], {"event": "ide event (flag file)", "action": "iempc event"})
         self.assertEqual((self.gh.calls, self.soaks()), ([], []))
 
@@ -135,7 +135,7 @@ class DispatchSoakTests(SoakBase):
         code, _, err = self.soak()
         self.assertEqual(code, ip.PREEMPTED)
         self.assertIn("no green push run", err)
-        self.assertEqual(self.pc.calls[-1], ("iemmode.exe", ["event", "--signal"], "ignore"))
+        self.assertNotIn(("iemmode.exe", ["event", "--signal"], "ignore"), self.pc.calls)
         self.assertEqual((self.dispatched(), self.soaks()), ([], []))
 
     def test_not_dev_switching_or_a_hil_job_is_refused(self) -> None:

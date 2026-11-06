@@ -4,10 +4,7 @@ import { expect, type APIRequestContext, type APIResponse, type Page } from "@pl
 // The live run's site values (S7, #10; P6): every one comes from a LIVE_*
 // variable of the ops live run, read on first use, so `--list` works without
 // any of them. A refusal names the variable, never its value, and no error
-// here carries a URL (a socket URL holds a token in its query). The Gen 3
-// box's browser step (`tests/gen3/`, #72 phase C) reads the same variables
-// for the box's own server: `box()`, with a plain-HTTP origin its spec
-// allows (`allowPlainHttp`).
+// here carries a URL (a socket URL holds a token in its query).
 
 export type Who = "engineer" | "member";
 
@@ -60,8 +57,6 @@ function matching(name: string, re: RegExp, what: string, env: Env = process.env
 /** The schemes an origin may have: the live run's public host is `https:` only. */
 export type Schemes = readonly ("http:" | "https:")[];
 const PUBLIC_HOST: Schemes = ["https:"];
-/** The Gen 3 box serves its UI over plain HTTP on its LAN (#72 phase C, plan choice 4). */
-const LAN_BOX: Schemes = ["http:", "https:"];
 
 /**
  * The variable `name`'s value as a bare origin with one of `schemes`; a
@@ -121,25 +116,13 @@ export function runMarker(env: Env = process.env): string {
   return `iemmixer-live-marker-${id}-${attempt}`;
 }
 
-/** The schemes LIVE_BASE_URL may have in this process: the public host's, until `allowPlainHttp`. */
-let schemes: Schemes = PUBLIC_HOST;
 let boxCached: Box | null = null;
 let cached: Live | null = null;
-
-/**
- * The Gen 3 box's spec, at its top: LIVE_BASE_URL may be the box's plain
- * `http://` origin too (GEN3_UI_URL). Only before any value is read, so a
- * live spec, which never calls it, keeps the public host's `https://`.
- */
-export function allowPlainHttp(): void {
-  if (boxCached) throw new Error("allowPlainHttp comes before the first LIVE_* value is read");
-  schemes = LAN_BOX;
-}
 
 /** The values every spec against a server of ours reads, read and checked on the first call. */
 export function box(): Box {
   boxCached ??= {
-    baseURL: originOf("LIVE_BASE_URL", schemes),
+    baseURL: originOf("LIVE_BASE_URL", PUBLIC_HOST),
     sha: matching("LIVE_SHA", SHA, "a 40-hex SHA"),
     tokens: tokensOf("LIVE_TOKENS"),
     member: matching("LIVE_MEMBER", ID, "an id"),
