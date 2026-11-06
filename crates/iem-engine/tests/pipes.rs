@@ -849,17 +849,11 @@ fn fault_injection_releases_the_driver_and_exits() {
     let mut c = e.client();
     c.hello(Role::Control);
     assert!(c.request(1, set_mix("member7", -5.0)).error.is_none());
-    for (id, cmd) in [
-        (2, Cmd::InjectFault),
-        (3, Cmd::InjectSeh),
-        (4, Cmd::InjectPark),
-    ] {
-        assert_eq!(
-            c.request(id, cmd).error.map(|b| b.code),
-            Some(ErrCode::NotSupervisor),
-            "the controller's injection {id}"
-        );
-    }
+    assert_eq!(
+        c.request(2, Cmd::InjectFault).error.map(|b| b.code),
+        Some(ErrCode::NotSupervisor),
+        "the controller's injection"
+    );
     let mut sup = e.client();
     sup.hello(Role::Supervisor);
     assert!(sup.request(5, Cmd::InjectFault).error.is_none());

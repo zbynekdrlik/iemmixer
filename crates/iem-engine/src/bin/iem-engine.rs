@@ -51,7 +51,6 @@ fn main() -> ExitCode {
             Exit::Shutdown { .. } => 0,
             // The Dante device stopped serving: restarted by the unit.
             Exit::Backend(_) => 1,
-            Exit::Card(_) => 3,
             Exit::Fault(_) => 70,
         }),
         Ok(Command::Render(a)) => render(&a).map(|()| 0),

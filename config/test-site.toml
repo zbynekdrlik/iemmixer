@@ -9,27 +9,12 @@ lan_url = "http://10.0.0.10"
 vapid_subject = "mailto:admin@example.org"
 backup_schedule = ["13:00", "21:00"]
 backup_retention_days = 60
-# CI stand-in for S6's `iemmode event`: a command that succeeds and does nothing.
-back_to_reaper = ["true"]
-# Like every dev site before the cutover (P9): PINs change only in the
-# predecessor, so the PIN dialog gets 409 (e2e/tests/pin-freeze.spec.ts).
+# PIN changes frozen, so the PIN dialog gets 409 (e2e/tests/pin-freeze.spec.ts).
 pin_changes = false
 
-# The site's [card] table: nothing reads it since the PC's ASIO backend went
-# (#86 step B), and the server still accepts the key while the ops site has it;
-# step C drops both.
-[card]
-driver = "Test Card"
-module = "testcard.dll"
-frames = 32
-pref_key = 'Software\ASIO\Test Card'
-pref_name = "PrefBuffSize"
-pref_original = { kind = "dword", raw = "64" }
-
-# HIL's spare card outputs (S6; the owner's decision on #9, 2026-09-28): card
+# HIL's spare outputs (the owner's decision on #9, 2026-09-28): device
 # channels no mix uses, so the HIL test signal never reaches a band member.
-# The engine opens them after the topology's TX under --test-signal. It reads
-# only this key of the table.
+# The engine opens them after the topology's TX under --test-signal.
 [guard]
 hil_tx = [94, 95]
 

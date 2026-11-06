@@ -1,6 +1,5 @@
 //! Web Push to the engineer's devices: the mixer app (the PWA) on the
-//! engineer page subscribes them (`push_subscriptions.json`), and
-//! `iem-migrate band` carries the predecessor's over with its VAPID keys.
+//! engineer page subscribes them (`push_subscriptions.json`).
 //! They are the one audience, the one the predecessor's alerts reached
 //! (owner decision, #9 2026-09-28: "I added the PWA, allowed notifications
 //! and everything worked"): SOS (F20) and the technical alarms — the
@@ -373,10 +372,9 @@ mod tests {
         assert!(count_cli(&site).is_err());
     }
 
-    /// A notice never creates the runtime secrets: before the first band
-    /// import the site has none, and a JWT or VAPID key made here would stop
-    /// `iem-migrate band` from taking the predecessor's (P9; found on the
-    /// PC on 2026-09-28, when the guard's first alarm ran this).
+    /// A notice never creates the runtime secrets: the server makes them at
+    /// its start, and a JWT or VAPID key made here would stand in for
+    /// the band's.
     #[tokio::test]
     async fn a_notice_never_creates_the_secrets() {
         let dir = tempfile::tempdir().unwrap();

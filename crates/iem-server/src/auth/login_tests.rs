@@ -614,39 +614,6 @@ async fn login_still_works_while_frozen() {
         json_body(login_as(&app, "member2", ENGINEER_PIN, &[]).await).await["engineer"],
         true
     );
-    let peer = SocketAddr::from((LAN, 40000));
-    assert!(
-        verify_engineer_pin(&state, peer, &HeaderMap::new(), ENGINEER_PIN)
-            .await
-            .is_ok(),
-        "the engineer's switch PIN check too"
-    );
-}
-
-#[tokio::test]
-async fn the_engineer_pin_check_is_a_guarded_login() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = test_state(dir.path()).await;
-    let peer = SocketAddr::from((LAN, 40000));
-    let headers = HeaderMap::new();
-    assert!(
-        verify_engineer_pin(&state, peer, &headers, ENGINEER_PIN)
-            .await
-            .is_ok()
-    );
-    for _ in 0..3 {
-        let r = verify_engineer_pin(&state, peer, &headers, MEMBER_PIN)
-            .await
-            .expect_err("a member PIN is not the engineer PIN")
-            .into_response();
-        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
-    }
-    let r = verify_engineer_pin(&state, peer, &headers, ENGINEER_PIN)
-        .await
-        .expect_err("throttled after three failures")
-        .into_response();
-    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(state.login_guard.stats().lan_failures, 3);
 }
 
 /// The test roster with `active` playing, minus the people in `gone` (who

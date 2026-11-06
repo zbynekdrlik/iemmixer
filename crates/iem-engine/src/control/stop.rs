@@ -75,15 +75,6 @@ impl Control {
         Exit::Fault(why)
     }
 
-    /// The backend refused the card: save, stop without a fade (the card may
-    /// be in a wrong state), exit 3 — the guard never respawns after it.
-    pub(super) fn card(&mut self, why: String) -> Exit {
-        error!("the card is refused: {why}");
-        self.save();
-        self.release("card refused");
-        Exit::Card(why)
-    }
-
     /// The backend ended by itself (the Dante device stopped serving: its
     /// flows are gone, so nothing is left to fade): save, release, exit 1,
     /// which the unit restarts.

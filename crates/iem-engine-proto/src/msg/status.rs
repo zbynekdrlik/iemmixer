@@ -50,8 +50,6 @@ pub struct Status {
     pub parked: bool,
     /// Started with `--hold` and not armed yet: every output is silent.
     pub held: bool,
-    /// Locking the real-time memory failed (logged, never fatal).
-    pub lock_failed: bool,
     /// S6, additive: HIL's spare card outputs (the engine opens the site's
     /// `[guard] hil_tx` under the test-signal flag), in that order; empty
     /// otherwise. HIL v1 reads them to prove its test signal reached them,

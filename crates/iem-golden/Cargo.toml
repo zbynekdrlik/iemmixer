@@ -1,0 +1,17 @@
+[package]
+name = "iem-golden"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Test helpers for iemmixer's DSP baseline: the reader of goldens/s1b and the limiter's stimulus (dev-dependency only)"
+
+[dependencies]
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+sha2 = "0.10"
+tempfile = "3"

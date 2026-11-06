@@ -18,7 +18,7 @@ const OK_LABEL = "Vonkajší prístup: OK";
 /** The server pushes `TunnelStatus` when the page's socket opens. */
 const FRAME_MS = 10_000;
 
-type TunnelStatus = { state?: unknown; ready_connections?: unknown; since_secs?: unknown; last_restart_ok?: unknown };
+type TunnelStatus = { state?: unknown; ready_connections?: unknown; since_secs?: unknown };
 
 /**
  * GET /api/tunnel through the public host, as `who`; it must answer 200 with
@@ -83,7 +83,6 @@ test.describe("the tunnel status on the real PC, engineer (S7)", () => {
     const status = await tunnelStatus(request, "engineer");
     expectOk(status, "/api/tunnel");
     expect(typeof status.since_secs, "since_secs is part of the status").toBe("number");
-    expect("last_restart_ok" in status, "last_restart_ok is part of the status").toBe(true);
 
     await openLive(page, "engineer");
     const indicator = page.getByTestId("tunnel-status");

@@ -77,8 +77,6 @@ pub enum Effect {
     Imported {
         baseline: bool,
     },
-    /// HIL's forced reopen: the backend reopens the card.
-    Reopen,
 }
 
 #[derive(Debug, Clone, PartialEq)]

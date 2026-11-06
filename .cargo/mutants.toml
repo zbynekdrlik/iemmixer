@@ -44,17 +44,15 @@ exclude_re = [
   "iem-server/src/console\\.rs.*\\b(spawn_tasks|meter_task|janitor_task)\\b",
   # Test-only constructors.
   "new_for_test",
-  # Tunnel watchdog loop and the restart it only logs.
+  # Tunnel watchdog loop.
   "spawn_tunnel_watch",
-  "restart_service_blocking",
   # Browser-only fetches and context accessors in the UI; covered by
   # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
-  # e2e/tests/engineer.spec.ts (the switch; its messages are the tested
-  # switch_error_message) and e2e/tests/pin-freeze.spec.ts (the PIN change;
+  # and e2e/tests/pin-freeze.spec.ts (the PIN change;
   # its messages are the tested change_pin_error) and e2e/tests/lineups.spec.ts
   # (the band's read and switch, #58; their answers are the tested
   # lineup_answer and switch_answer).
-  "iem-ui/src/api\\.rs.*replace (login|get_site_links|back_to_reaper|change_pin|get_lineup|switch_lineup) ",
+  "iem-ui/src/api\\.rs.*replace (login|get_site_links|change_pin|get_lineup|switch_lineup) ",
   # The token check's browser-only fetch; its verdict on the answer is the
   # tested token_refused, and e2e/tests/header.spec.ts drives it (502 while
   # the server is gone, 200 after the reconnect).
@@ -165,30 +163,12 @@ exclude_re = [
   "iem-engine/src/rt/render\\.rs.*replace > with >= in Processor::render_mixes",
   # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  # anchor 928: if budget > 0
-  "iem-engine/src/rt\\.rs:928:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 913: if budget > 0
+  "iem-engine/src/rt\\.rs:913:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control/stop\\.rs.*replace < with <= in Control::fade_out",
   # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
   "iem-engine/src/control\\.rs.*delete ! in Control::tick",
-  # Equivalent (S4). The synthetic generator draws k/2^53; a draw equal to a
-  # threshold (0.2, 0.4, …) is a 2^-53 event, so `>` and `>=` pick alike.
-  "iem-rpp/src/sitegen\\.rs.*replace > with >= in (random_eq|sample_state)$",
-  # v = 0: 20·log10(0) = −∞, floored by max(DB_OFF) to the else branch's DB_OFF.
-  "iem-rpp/src/import\\.rs.*replace > with >= in lin_to_db$",
-  # At i == len the byte lookup falls back to a space (skipped) or ends the
-  # quoted token at len anyway: both loops end with the same tokens.
-  # anchor 73: while i < bytes.len() {
-  # anchor 82: while i < bytes.len() && bytes.get(i) != Some(&c) {
-  "iem-rpp/src/read\\.rs:(73|82):.*replace < with <= in raw_tokens$",
-  # A time equal to an era's first_seen lies inside that era's window, which
-  # the branch before already returned.
-  "iem-rpp/src/aliases\\.rs.*replace > with >= in Eras::candidates$",
-  # `flags & !1` has bit 0 clear, so `| muted` and `^ muted` are the same.
-  "iem-rpp/src/export\\.rs.*replace \\| with \\^ in export$",
-  # Unobservable (#20): which parent directory commit fsyncs (result dropped); durability shows only across a power loss.
-  # anchor 222: if let Some(parent) = self.target.parent().filter(|p| !p.as_os_str().is_empty()) {
-  "iem-migrate/src/stage\\.rs:222:.*delete ! in Stage::commit$",
   # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
   # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.

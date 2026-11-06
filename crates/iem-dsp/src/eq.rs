@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// Independent reference: ReaEQ's RBJ biquad as S1b measured it
-    /// (scripts/golden/analyze.py `rbj`, `alpha_oct`, `alpha_shelf`), direct form I.
+    /// (`goldens/s1b/README.md` has its formulas), direct form I.
     fn rbj_ir(b: &Band, fs: f64, n: usize) -> Vec<f64> {
         let w0 = 2.0 * PI * b.freq_hz / fs;
         let c = w0.cos();

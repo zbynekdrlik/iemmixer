@@ -108,8 +108,6 @@ pub fn api_routes(_state: AppState) -> Router<AppState> {
         )
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
-        // The engineer's "Back to REAPER" (§4.3)
-        .route("/api/mode/event", post(crate::console::back_to_reaper))
         // The mixer page's WebSocket
         .route("/ws/{page}", get(crate::mixer_ws::ws_mixer))
         .merge(snapshot_routes::snapshot_routes())

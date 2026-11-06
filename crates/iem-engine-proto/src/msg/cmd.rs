@@ -82,16 +82,6 @@ pub enum Cmd {
     /// it restarts, after its HIL job too, and only the guard allows an
     /// injection, inside a job (review of PR #40, #35).
     InjectFault,
-    /// Owner-approved SEH test (design §10): a structured exception on the
-    /// RT thread, under the fault-injection flag. Supervisor only, like
-    /// `InjectFault`.
-    InjectSeh,
-    /// The parked-engine test (design §10 test #2, #35): the SEH test's
-    /// exception under a test hold, so the backend keeps the driver and the
-    /// SEH filter parks the RT thread; the engine keeps running and reports
-    /// `parked`. Under the fault-injection flag, supervisor only, like
-    /// `InjectSeh`.
-    InjectPark,
     Ping,
     /// The supervisor lets an engine started with `--hold` sound (S6 design
     /// note §4): the outputs fade in over 500 ms.
@@ -118,15 +108,10 @@ pub enum Cmd {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         listen: bool,
     },
-    /// HIL's forced reopen of the driver (S6 design note §7): the backend
-    /// stops, releases and opens the card again (its reset budget applies;
-    /// the outputs fade in again). Supervisor only, under the
-    /// fault-injection flag.
-    ForceReopen,
 }
 
 /// Every `op` tag, for telling an unknown command from a malformed one.
-pub const OPS: [&str; 25] = [
+pub const OPS: [&str; 22] = [
     "set_input",
     "set_mix",
     "set_level",
@@ -146,12 +131,9 @@ pub const OPS: [&str; 25] = [
     "save_now",
     "shutdown",
     "inject_fault",
-    "inject_seh",
-    "inject_park",
     "ping",
     "arm",
     "hil_test_signal",
-    "force_reopen",
 ];
 
 impl Cmd {
@@ -161,17 +143,12 @@ impl Cmd {
     }
 
     /// Commands only the supervisor may send (S6 design note §4): `Arm`,
-    /// the HIL signal, the forced reopen and the fault injections (review
-    /// of PR #40, #35); anyone else gets `NotSupervisor`.
+    /// the HIL signal and the fault injection (review of PR #40, #35);
+    /// anyone else gets `NotSupervisor`.
     pub fn is_supervisor(&self) -> bool {
         matches!(
             self,
-            Self::Arm
-                | Self::HilTestSignal { .. }
-                | Self::ForceReopen
-                | Self::InjectFault
-                | Self::InjectSeh
-                | Self::InjectPark
+            Self::Arm | Self::HilTestSignal { .. } | Self::InjectFault
         )
     }
 

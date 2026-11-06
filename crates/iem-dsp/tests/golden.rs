@@ -8,7 +8,7 @@ use std::f64::consts::PI;
 
 use iem_dsp::eq::{Band, BandKind, EqParams, Equalizer, response_db};
 use iem_dsp::pan::{gains, mono_downmix, send_gains};
-use iem_rpp::golden::{Goldens, s1b_dir};
+use iem_golden::golden::{Goldens, s1b_dir};
 use serde_json::Value;
 
 fn goldens() -> Goldens {

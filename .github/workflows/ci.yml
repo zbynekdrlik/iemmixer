@@ -33,16 +33,8 @@ jobs:
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
-      - name: Golden tooling self-tests (numpy venv)
-        run: |
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/gvenv"
-          "$RUNNER_TEMP/gvenv/bin/pip" install --quiet numpy==2.4.6
-          "$RUNNER_TEMP/gvenv/bin/python" -m unittest discover -s scripts/golden -p 'test_*.py' -v
       - name: Leptos disposal safety
         run: python3 scripts/check_disposal_safety.py
-      - name: Gen 1 test parity manifest
-        run: python3 scripts/check_parity_manifest.py
       - name: Version consistency
         run: python3 scripts/check_version.py
       - name: Mutation exclusion line anchors
@@ -100,14 +92,14 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
       - name: UI unit tests (native)
         run: cargo test --locked -p iem-ui --lib
-      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate, iem-soakclient, iem-dante-dev) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-golden, iem-dsp, iem-limiter-mga, engine crates, iem-soakclient, iem-dante-dev) against the floor
         # Runs after a failed UI test step too (the job still fails): one CI
         # cycle reports every failing test.
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo llvm-cov --locked --no-fail-fast --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-soakclient --package iem-dante-dev --all-features \
+          cargo llvm-cov --locked --no-fail-fast --package iem-core --package iem-server --package iem-golden \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-soakclient --package iem-dante-dev --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -175,56 +167,6 @@ jobs:
         run: cargo +nightly-2026-09-20 test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p iem-engine --test rtsan -- --nocapture
       - name: CPU benchmark of process() at B = 32 (typical p50 <= 25 %, worst p50 <= 100 % of 333 us; tails reported)
         run: cargo run --locked --release -p iem-engine --example bench
-
-  golden-bundle:
-    name: golden-bundle
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-    needs: [test]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Generate the golden bundle
-        run: cargo run --locked --release -p iem-rpp --bin iem-rpp-gen -- --out "$RUNNER_TEMP/golden-bundle"
-      - name: Check the bundle (hashes, plug-in allowlist, job-relative paths)
-        run: python3 scripts/golden/check_bundle.py "$RUNNER_TEMP/golden-bundle"
-      - name: Upload (dev pushes only — the only bundle that may reach the PC, P5)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: golden-bundle-${{ github.sha }}
-          path: ${{ runner.temp }}/golden-bundle
-          retention-days: 14
-          if-no-files-found: error
-
-  migrate-bin:
-    name: migrate-bin
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-    needs: [test]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Placeholder UI dist (rust-embed needs the folder)
-        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
-      - name: Build the migration CLI (Linux, for private dry runs on the dev box, S4)
-        run: cargo build --locked --release -p iem-migrate
-      - name: Upload (dev pushes only)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: iem-migrate-linux-${{ github.sha }}
-          path: target/release/iem-migrate
-          retention-days: 14
-          if-no-files-found: error
 
   gen3-bin:
     name: gen3-bin
@@ -734,8 +676,8 @@ jobs:
           count=0
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
-              --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-soakclient --package iem-dante-dev > "$RUNNER_TEMP/mutants.txt"
+              --package iem-core --package iem-server --package iem-ui --package iem-golden \
+              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-soakclient --package iem-dante-dev > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -768,7 +710,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate -p iem-soakclient -p iem-dante-dev --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-golden -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-soakclient -p iem-dante-dev --all-features --all-targets
       - name: Unmutated tests under the mutants profile (every test's duration; the shards skip the baseline)
         env:
           # A test that fails or times out here unmutated would make every
@@ -779,7 +721,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=()
-          for p in iem-core iem-server iem-ui iem-rpp iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-migrate iem-soakclient iem-dante-dev; do
+          for p in iem-core iem-server iem-ui iem-golden iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-soakclient iem-dante-dev; do
             echo "::group::$p"
             cargo nextest run --locked --cargo-profile mutants --no-fail-fast -p "$p" --all-features --all-targets || failed+=("$p")
             echo "::endgroup::"
@@ -817,7 +759,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate -p iem-soakclient -p iem-dante-dev --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-golden -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-soakclient -p iem-dante-dev --all-features --all-targets
       - name: Diff-scoped mutants
         env:
           # .config/nextest.toml: stop at the first failing test (fail fast on hangs).
@@ -829,8 +771,8 @@ jobs:
             echo "No Rust changes against ${{ github.base_ref }}: no mutants to test."
             exit 0
           fi
-          packages=(--package iem-core --package iem-server --package iem-ui --package iem-rpp
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-soakclient --package iem-dante-dev)
+          packages=(--package iem-core --package iem-server --package iem-ui --package iem-golden
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-soakclient --package iem-dante-dev)
           # --timeout: with --baseline=skip cargo-mutants has no measured test time
           # and would allow 300 s per mutant; the tests take ~6 s.
           status=0

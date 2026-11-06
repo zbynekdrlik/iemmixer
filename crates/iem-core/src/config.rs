@@ -1,23 +1,12 @@
 //! The server's part of the site file (`site.toml`): who the members are and
 //! which engine mix each hears, how the engine's inputs are shown, and the
 //! web, push, backup and tunnel settings (S5 design note §3). The engine
-//! reads the `[engine]` and `[card]` tables itself, the guard `[guard]`
-//! (S6); the server ignores them, and the retired `[activity]` (#38).
+//! reads the `[engine]` table and `[guard] hil_tx` itself; the server only
+//! accepts them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
-use subtle::ConstantTimeEq;
-
-/// Constant-time string comparison to prevent timing attacks on PIN verification.
-/// Returns true if both strings are equal, false otherwise.
-#[inline]
-pub fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
 
 /// The UI's channel categories (the Mics, Stems and Tech tabs, F4). Inputs
 /// of an engine group are always `stems`.
@@ -166,19 +155,6 @@ pub struct Config {
     #[serde(default)]
     pub inputs: Vec<SiteInputMeta>,
 
-    /// Command line of the engineer's "Back to REAPER" switch (§4.3; S6
-    /// provides `iemmode event`): `POST /api/mode/event`, the button in the
-    /// engineer's console. Empty: no switch, no button.
-    #[serde(default)]
-    pub back_to_reaper: Vec<String>,
-
-    /// The retired `[activity]` table: the band-activity alarm read it until
-    /// the owner's decision of 2026-10-06 (#38: no input level stands for
-    /// the band playing). Every site written before has it, so it is still
-    /// accepted, whatever it holds, read by nobody and never written back.
-    #[serde(default, skip_serializing)]
-    pub activity: Option<serde::de::IgnoredAny>,
-
     /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
     /// the predecessor is the only place a PIN changes and every entry into
     /// `dev` brings its PINs over, so the guard writes `false` into every
@@ -259,11 +235,6 @@ pub struct Config {
     /// (`roster::engine_facts`).
     #[serde(default, skip_serializing)]
     pub engine: Option<toml::Table>,
-
-    /// The old `[card]` table: read by nothing, accepted while the ops site
-    /// has it (#86 step C drops it).
-    #[serde(default, skip_serializing)]
-    pub card: Option<serde::de::IgnoredAny>,
 
     /// The `[guard]` table: `iem-engine` reads its `hil_tx`.
     #[serde(default, skip_serializing)]
@@ -346,8 +317,6 @@ impl Default for Config {
             engine_pipe: default_engine_pipe(),
             members: Vec::new(),
             inputs: Vec::new(),
-            back_to_reaper: Vec::new(),
-            activity: None,
             pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
@@ -365,7 +334,6 @@ impl Default for Config {
             backup_retention_days: default_backup_retention_days(),
             tunnel_ready_url: default_tunnel_ready_url(),
             engine: None,
-            card: None,
             guard: None,
         }
     }
@@ -519,25 +487,6 @@ impl Config {
             public_host: self.https_domain.clone(),
             certificate: None,
         }
-    }
-
-    /// URL the tray's "Copy URL" shares: the public host over HTTPS, else the
-    /// LAN URL, else none.
-    pub fn share_url(&self) -> Option<String> {
-        self.https_domain
-            .as_ref()
-            .map(|domain| format!("https://{domain}"))
-            .or_else(|| self.lan_url.clone())
-    }
-
-    /// URL the tray's "Open Mixer" opens on the PC: the local server on the
-    /// site's port, never the LAN URL. The tray runs no server of its own
-    /// (F27): `iem-server` serves it. Loopback always reaches it (the HTTPS
-    /// redirect applies to the public host only), and its origin is a secure
-    /// context, so Copy URL's `navigator.clipboard` works in the same window;
-    /// a plain-http LAN address has no clipboard API.
-    pub fn mixer_url(&self) -> String {
-        format!("http://localhost:{}", self.port)
     }
 }
 
@@ -791,12 +740,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_pipe_and_the_switch_have_defaults() {
+    fn engine_pipe_has_a_default() {
         let config: Config = toml::from_str("port = 81\n").unwrap();
         assert_eq!(config.engine_pipe, "iemmixer-engine");
         assert_eq!(Config::default().engine_pipe, "iemmixer-engine");
-        assert!(config.back_to_reaper.is_empty());
-        assert!(config.activity.is_none() && Config::default().activity.is_none());
     }
 
     #[test]
@@ -878,8 +825,6 @@ mod tests {
         assert_eq!(site.https_domain.as_deref(), Some("mixer.example.org"));
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(Config::default().engine.is_none());
-        assert!(site.card.is_some(), "the [card] table is accepted");
-        assert!(Config::default().card.is_none());
         assert_eq!(
             site.member("engineer").map(|m| m.mix.as_str()),
             Some("engineer")
@@ -889,7 +834,6 @@ mod tests {
             Some("Member3")
         );
         assert!(site.member("translator").is_none());
-        assert!(!site.back_to_reaper.is_empty());
         assert!(!site.pin_changes, "the test site is a dev site: frozen");
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
@@ -898,58 +842,68 @@ mod tests {
         assert_eq!(example.problems(), Vec::<String>::new());
     }
 
-    /// The PC's one site file carries the guard's `[guard]` and the
-    /// engine's `[card]` beside the server's tables (S6): the server ignores
-    /// both, so a guard-started `iem-server` loads the same file.
+    /// The site file carries `[engine]` and `[guard] hil_tx` for the engine
+    /// beside the server's tables: the server accepts both tables and never
+    /// writes them back.
     #[test]
-    fn a_site_with_the_guard_and_card_tables_loads() {
-        // The test site carries the engine's key of `[guard]` (hil_tx, S6);
-        // the guard's own keys join that table.
-        let site_text = include_str!("../../../config/test-site.toml");
-        assert!(site_text.contains("\n[guard]"), "the test site's [guard]");
-        let text = site_text.replacen(
-            "\n[guard]",
-            "\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nstage_tracks = [1, 2, 3]\non_pref_fail = \"start_reaper_with_alarm\"",
-            1,
+    fn a_site_with_the_engine_and_guard_tables_loads() {
+        let text = include_str!("../../../config/test-site.toml");
+        assert!(
+            text.contains(
+                "
+[guard]"
+            ),
+            "the test site's [guard]"
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
-        std::fs::write(&path, &text).unwrap();
-        let site = Config::load(&path).expect("a site with [guard] and [card] loads");
-        assert!(site.card.is_some(), "the [card] table is accepted");
+        std::fs::write(&path, text).unwrap();
+        let site = Config::load(&path).expect("a site with [guard] and [engine] loads");
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(site.guard.is_some(), "the [guard] table is accepted");
         assert_eq!(site.members.len(), 10);
-        // Never written back: the tables belong to the engine and the guard.
         let written = serde_json::to_string(&site).unwrap();
-        for table in ["\"guard\"", "\"card\"", "\"engine\""] {
+        for table in ["\"guard\"", "\"engine\""] {
             assert!(!written.contains(table), "{table} in {written}");
         }
-        // Another unknown table is still refused.
-        let other = format!("{text}\n[nonsense]\nx = 1\n");
-        std::fs::write(&path, other).unwrap();
-        assert!(matches!(Config::load(&path), Err(ConfigError::Parse(_))));
     }
 
-    /// #38 (owner, 2026-10-06): the band-activity alarm is gone and nothing
-    /// reads `[activity]` any more. Every site written before has the table
-    /// (the PC's private one too): it still loads, whatever the table holds,
-    /// and is never written back.
+    /// The keys the PC's site carried are errors now, like any unknown key:
+    /// `iem-server check-site` refuses them before a deploy stops anything.
     #[test]
-    fn a_site_with_the_retired_activity_table_loads() {
+    fn the_retired_site_keys_and_any_other_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
-        for table in [
-            // The shape every site had: the stage inputs and the thresholds.
-            "[activity]\ninputs = [\"mic1\", \"mic2\"]\nthreshold_dbfs = -50.0\nwindow_s = 300\nsustain_s = 120\n",
-            // Values and keys the alarm refused are no problem of the site's.
-            "[activity]\ninputs = [\"Stage Mic\"]\nthreshold_dbfs = 6.0\nwindow_s = 0\nsustain_s = 0\nwatch = \"all\"\n",
+        for (key, text) in [
+            (
+                "back_to_reaper",
+                "back_to_reaper = [\"x\"]
+",
+            ),
+            (
+                "card",
+                "[card]
+driver = \"x\"
+",
+            ),
+            (
+                "activity",
+                "[activity]
+inputs = [\"x\"]
+",
+            ),
+            (
+                "nonsense",
+                "[nonsense]
+x = 1
+",
+            ),
         ] {
-            std::fs::write(&path, format!("port = 8081\n{table}")).unwrap();
-            let site = Config::load(&path).unwrap_or_else(|e| panic!("{table}: {e:?}"));
-            assert_eq!(site.port, 8081);
-            let written = serde_json::to_string(&site).unwrap();
-            assert!(!written.contains("activity"), "{written}");
+            std::fs::write(&path, text).unwrap();
+            match Config::load(&path) {
+                Err(ConfigError::Parse(e)) => assert!(e.contains(key), "{key}: {e}"),
+                other => panic!("{key}: {other:?}"),
+            }
         }
     }
 
@@ -1029,54 +983,10 @@ mod tests {
     }
 
     #[test]
-    fn test_share_url_prefers_the_public_host_then_the_lan_url() {
-        let both = Config {
-            lan_url: Some("http://10.0.0.10".to_string()),
-            https_domain: Some("mixer.example.org".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(
-            both.share_url().as_deref(),
-            Some("https://mixer.example.org")
-        );
-        let lan_only = Config {
-            lan_url: Some("http://10.0.0.10".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
-        assert_eq!(Config::default().share_url(), None);
-    }
-
-    #[test]
-    fn test_mixer_url_is_the_local_server_on_the_site_port() {
-        let both = Config {
-            lan_url: Some("http://10.0.0.10".to_string()),
-            https_domain: Some("mixer.example.org".to_string()),
-            port: 8080,
-            ..Config::default()
-        };
-        assert_eq!(both.mixer_url(), "http://localhost:8080");
-        let https_lan = Config {
-            lan_url: Some("https://10.0.0.10".to_string()),
-            port: 8081,
-            ..Config::default()
-        };
-        assert_eq!(https_lan.mixer_url(), "http://localhost:8081");
-        assert_eq!(Config::default().mixer_url(), "http://localhost:80");
-    }
-
-    #[test]
     fn test_plaintext_pins_are_rejected_in_the_site_file() {
         for text in ["engineer_pin = \"2468\"\n", "[pins]\nmember1 = \"2468\"\n"] {
             assert!(toml::from_str::<Config>(text).is_err(), "{text}");
         }
-    }
-
-    #[test]
-    fn constant_time_eq_compares_whole_strings() {
-        assert!(constant_time_eq("1234", "1234"));
-        assert!(!constant_time_eq("1234", "1235"));
-        assert!(!constant_time_eq("123", "1234"));
     }
 
     /// The browser's `applicationServerKey`: the uncompressed SEC1 point of

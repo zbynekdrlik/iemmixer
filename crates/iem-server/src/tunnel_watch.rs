@@ -4,17 +4,16 @@
 //! (UDP 7844), or a cloudflared upgrade that drops `--protocol http2` from the
 //! service command line, leaves the service RUNNING with zero edge
 //! connections: the public URL answers 530 and nobody at the event can tell
-//! why. This module runs INSIDE iem-server (no extra service on any box):
+//! why. This module runs INSIDE iem-server (no extra service on any box); it
+//! detects and reports, and never touches the tunnel (the server's user holds
+//! no right over `iem-tunnel.service`, whose own unit restarts cloudflared
+//! when it ends):
 //!
 //! 1. every [`POLL_INTERVAL`] it reads cloudflared's local readiness endpoint
 //!    (`Config::tunnel_ready_url`, default `http://127.0.0.1:20241/ready`);
 //! 2. the ready-connection count feeds the pure [`TunnelWatch`] state machine
-//!    (no I/O, time injected) which decides `Ok` / `Down` / `Restarting` and
-//!    whether the service must be restarted;
-//! 3. after [`DOWN_BEFORE_RESTART`] of continuous zero connections a restart
-//!    is due, at most once per [`RESTART_COOLDOWN`]
-//!    ([`restart_service_blocking`] only logs it on the box);
-//! 4. every change is broadcast to all WebSocket clients as
+//!    (no I/O, time injected) which decides `Ok` / `Down`;
+//! 3. every change is logged and broadcast to all WebSocket clients as
 //!    [`ServerMsg::TunnelStatus`]; the same status is served at `GET /api/tunnel`.
 
 use std::time::{Duration, Instant};
@@ -27,159 +26,57 @@ use crate::AppState;
 
 /// How often cloudflared's `/ready` endpoint is polled.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// Continuous zero-connection time before the service is restarted.
-pub const DOWN_BEFORE_RESTART: Duration = Duration::from_secs(120);
-/// Minimum time between two service restarts.
-pub const RESTART_COOLDOWN: Duration = Duration::from_secs(600);
-/// How long the state stays `Restarting` after a restart without recovery
-/// before it falls back to `Down`.
-pub const RESTART_GRACE: Duration = Duration::from_secs(60);
 /// Per-request timeout for the `/ready` poll.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
-/// The tunnel's service name, for the logs.
-pub const SERVICE_NAME: &str = "cloudflared";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// At least one ready connection since `since`.
-    Ok { since: Instant },
-    /// Zero ready connections continuously since `since`.
-    Down { since: Instant },
-    /// Down since `since`; the service was restarted at `restarted_at`.
-    Restarting {
-        since: Instant,
-        restarted_at: Instant,
-    },
-}
-
-/// Outcome of one observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Decision {
-    /// The caller must restart the cloudflared service now.
-    pub should_restart: bool,
-    /// State or ready-connection count changed — broadcast the new status.
-    pub changed: bool,
-}
 
 /// Pure tunnel state machine: no I/O, the caller injects `now`.
 #[derive(Debug, Clone)]
 pub struct TunnelWatch {
-    phase: Phase,
+    state: TunnelState,
+    /// When the current state began.
+    since: Instant,
     ready_connections: u32,
-    last_restart: Option<Instant>,
-    last_restart_ok: Option<bool>,
-    restart_count: u32,
 }
 
 impl TunnelWatch {
     /// Start optimistic (`Ok`, 0 connections); the first poll runs immediately.
     pub fn new(now: Instant) -> Self {
         Self {
-            phase: Phase::Ok { since: now },
+            state: TunnelState::Ok,
+            since: now,
             ready_connections: 0,
-            last_restart: None,
-            last_restart_ok: None,
-            restart_count: 0,
         }
     }
 
     /// Current public state.
     pub fn state(&self) -> TunnelState {
-        match self.phase {
-            Phase::Ok { .. } => TunnelState::Ok,
-            Phase::Down { .. } => TunnelState::Down,
-            Phase::Restarting { .. } => TunnelState::Restarting,
-        }
-    }
-
-    /// How many restarts this watchdog has requested since the app started.
-    pub fn restart_count(&self) -> u32 {
-        self.restart_count
+        self.state
     }
 
     /// Feed one poll result (`ready` = ready edge connections; fetch/parse
-    /// failures count as 0) observed at `now`.
-    pub fn observe(&mut self, ready: u32, now: Instant) -> Decision {
-        let before = (self.state(), self.ready_connections);
-        let mut should_restart = false;
-        self.phase = if ready > 0 {
-            match self.phase {
-                Phase::Ok { since } => Phase::Ok { since },
-                Phase::Down { .. } | Phase::Restarting { .. } => Phase::Ok { since: now },
-            }
+    /// failures count as 0) observed at `now`. Returns whether the state or
+    /// the ready-connection count changed, so the new status is broadcast.
+    pub fn observe(&mut self, ready: u32, now: Instant) -> bool {
+        let before = (self.state, self.ready_connections);
+        let state = if ready > 0 {
+            TunnelState::Ok
         } else {
-            match self.phase {
-                Phase::Ok { .. } => {
-                    // A new outage: a previous outage's repair result is stale.
-                    self.last_restart_ok = None;
-                    Phase::Down { since: now }
-                }
-                Phase::Down { since } => {
-                    if self.restart_due(since, now) {
-                        should_restart = true;
-                        self.last_restart = Some(now);
-                        self.last_restart_ok = None;
-                        self.restart_count += 1;
-                        Phase::Restarting {
-                            since,
-                            restarted_at: now,
-                        }
-                    } else {
-                        Phase::Down { since }
-                    }
-                }
-                Phase::Restarting {
-                    since,
-                    restarted_at,
-                } => {
-                    if now.saturating_duration_since(restarted_at) >= RESTART_GRACE {
-                        Phase::Down { since }
-                    } else {
-                        Phase::Restarting {
-                            since,
-                            restarted_at,
-                        }
-                    }
-                }
-            }
+            TunnelState::Down
         };
-        self.ready_connections = ready;
-        Decision {
-            should_restart,
-            changed: before != (self.state(), self.ready_connections),
+        if state != self.state {
+            self.state = state;
+            self.since = now;
         }
-    }
-
-    /// Record the outcome of the restart requested by the last `observe`.
-    /// Returns whether the published status changed.
-    pub fn record_restart_result(&mut self, ok: bool) -> bool {
-        let changed = self.last_restart_ok != Some(ok);
-        self.last_restart_ok = Some(ok);
-        changed
-    }
-
-    /// Down long enough AND outside the cooldown of the previous restart.
-    fn restart_due(&self, down_since: Instant, now: Instant) -> bool {
-        let down_long_enough = now.saturating_duration_since(down_since) >= DOWN_BEFORE_RESTART;
-        let cooled_down = self
-            .last_restart
-            .is_none_or(|at| now.saturating_duration_since(at) >= RESTART_COOLDOWN);
-        down_long_enough && cooled_down
+        self.ready_connections = ready;
+        before != (self.state, self.ready_connections)
     }
 
     /// Status snapshot for clients, relative to `now`.
     pub fn status(&self, now: Instant) -> TunnelStatusInfo {
-        let since = match self.phase {
-            Phase::Ok { since } | Phase::Down { since } | Phase::Restarting { since, .. } => since,
-        };
         TunnelStatusInfo {
-            state: self.state(),
+            state: self.state,
             ready_connections: self.ready_connections,
-            since_secs: now.saturating_duration_since(since).as_secs(),
-            last_restart_secs_ago: self
-                .last_restart
-                .map(|at| now.saturating_duration_since(at).as_secs()),
-            last_restart_ok: self.last_restart_ok,
+            since_secs: now.saturating_duration_since(self.since).as_secs(),
         }
     }
 }
@@ -220,8 +117,8 @@ pub async fn fetch_ready(client: &reqwest::Client, url: &str) -> Result<u32, Str
 }
 
 /// One watchdog cycle: poll `/ready`, advance the state machine, log and
-/// broadcast changes. Returns the decision; the caller performs the restart.
-pub async fn watch_tick(state: &AppState, now: Instant) -> Decision {
+/// broadcast changes. Returns whether anything changed.
+pub async fn watch_tick(state: &AppState, now: Instant) -> bool {
     let url = state.config.read().await.tunnel_ready_url.clone();
     let ready = match fetch_ready(&state.http_client, &url).await {
         Ok(n) => {
@@ -238,15 +135,15 @@ pub async fn watch_tick(state: &AppState, now: Instant) -> Decision {
         }
     };
 
-    let (prev, decision, next, restart_count) = {
+    let (prev, changed, next) = {
         let mut watch = state.tunnel_watch.write().await;
         let prev = watch.status(now);
-        let decision = watch.observe(ready, now);
-        (prev, decision, watch.status(now), watch.restart_count())
+        let changed = watch.observe(ready, now);
+        (prev, changed, watch.status(now))
     };
-    log_transition(&prev, &next, decision, restart_count);
+    log_transition(&prev, &next, changed);
 
-    if decision.changed {
+    if changed {
         // Err only means no WebSocket client is connected right now; the
         // status is also sent on connect and served at /api/tunnel.
         let receivers = state
@@ -255,84 +152,27 @@ pub async fn watch_tick(state: &AppState, now: Instant) -> Decision {
             .unwrap_or(0);
         tracing::debug!(receivers, state = ?next.state, "tunnel status broadcast");
     }
-    decision
+    changed
 }
 
-fn log_transition(
-    prev: &TunnelStatusInfo,
-    next: &TunnelStatusInfo,
-    decision: Decision,
-    restart_count: u32,
-) {
+fn log_transition(prev: &TunnelStatusInfo, next: &TunnelStatusInfo, changed: bool) {
     match (prev.state, next.state) {
         (TunnelState::Ok, TunnelState::Down) => tracing::warn!(
             ready_connections = next.ready_connections,
-            restart_after_secs = DOWN_BEFORE_RESTART.as_secs(),
             "tunnel DOWN — cloudflared reports 0 ready edge connections"
         ),
-        (TunnelState::Down, TunnelState::Restarting) => tracing::warn!(
-            down_for_secs = next.since_secs,
-            restart_count,
-            service = SERVICE_NAME,
-            "tunnel down too long — restarting cloudflared service"
-        ),
-        (TunnelState::Restarting, TunnelState::Down) => tracing::warn!(
-            down_for_secs = next.since_secs,
-            last_restart_secs_ago = ?next.last_restart_secs_ago,
-            cooldown_secs = RESTART_COOLDOWN.as_secs(),
-            "tunnel still down after cloudflared restart — next restart after cooldown"
-        ),
-        (TunnelState::Down | TunnelState::Restarting, TunnelState::Ok) => tracing::info!(
+        (TunnelState::Down, TunnelState::Ok) => tracing::info!(
             ready_connections = next.ready_connections,
             down_for_secs = prev.since_secs,
-            restart_count,
             "tunnel RECOVERED"
         ),
-        (TunnelState::Ok, TunnelState::Ok) if decision.changed => tracing::info!(
+        (TunnelState::Ok, TunnelState::Ok) if changed => tracing::info!(
             from = prev.ready_connections,
             to = next.ready_connections,
             "tunnel ready connections changed"
         ),
         _ => {}
     }
-}
-
-/// Store the restart outcome and broadcast the status if it changed
-/// (the engineer indicator shows a failed repair).
-pub async fn record_restart(state: &AppState, ok: bool, now: Instant) {
-    let (changed, status) = {
-        let mut watch = state.tunnel_watch.write().await;
-        let changed = watch.record_restart_result(ok);
-        (changed, watch.status(now))
-    };
-    if ok {
-        tracing::info!(
-            last_restart_secs_ago = ?status.last_restart_secs_ago,
-            state = ?status.state,
-            "cloudflared restart finished OK"
-        );
-    } else {
-        tracing::error!(service = SERVICE_NAME, "cloudflared restart FAILED");
-    }
-    if changed {
-        let receivers = state
-            .event_tx
-            .send((crate::To::All, ServerMsg::TunnelStatus(status)))
-            .unwrap_or(0);
-        tracing::debug!(receivers, ok, "tunnel restart result broadcast");
-    }
-}
-
-/// The restart the state machine asks for: `false`, logged. On the box the
-/// server's user holds no right over `iem-tunnel.service`, whose own unit
-/// restarts cloudflared when it ends; a RUNNING tunnel with no connections
-/// stays visible as `Down` with a failed repair.
-pub fn restart_service_blocking(service: &str) -> bool {
-    tracing::warn!(
-        service,
-        "tunnel watchdog: a restart is due, but this server has no right to restart the service: skipped"
-    );
-    false
 }
 
 /// Spawn the watchdog loop (started from `start_server`).
@@ -342,25 +182,13 @@ pub fn spawn_tunnel_watch(state: AppState) -> tokio::task::JoinHandle<()> {
         tracing::info!(
             url = %url,
             poll_secs = POLL_INTERVAL.as_secs(),
-            restart_after_secs = DOWN_BEFORE_RESTART.as_secs(),
-            cooldown_secs = RESTART_COOLDOWN.as_secs(),
-            service = SERVICE_NAME,
             "tunnel watchdog started"
         );
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            let decision = watch_tick(&state, Instant::now()).await;
-            if decision.should_restart {
-                let restart =
-                    tokio::task::spawn_blocking(|| restart_service_blocking(SERVICE_NAME));
-                let ok = restart.await.unwrap_or_else(|e| {
-                    tracing::error!(error = ?e, "cloudflared restart task panicked");
-                    false
-                });
-                record_restart(&state, ok, Instant::now()).await;
-            }
+            watch_tick(&state, Instant::now()).await;
         }
     })
 }

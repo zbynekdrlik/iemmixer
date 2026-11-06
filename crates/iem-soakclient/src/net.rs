@@ -6,11 +6,10 @@
 //! bounds); the clock sleeps on a condition variable. No thread polls.
 //!
 //! Nothing is sent to a server before it names `--expect-build` in
-//! `/api/version`: after "ide event" the predecessor app answers at the
-//! band's usual address and takes the client's token (the PIN login's, or
-//! one the client signed: `iem-migrate band` copies the predecessor's JWT
-//! secret), and a `ListenStart` there would mute every other member's send
-//! to the engineer's mix. A secret file is read before any request.
+//! `/api/version`: another build at the band's usual address would take the
+//! client's token (the PIN login's, or one the client signed), and a
+//! `ListenStart` there would mute every other member's send to the
+//! engineer's mix. A secret file is read before any request.
 //!
 //! Each socket is opened once and never again (#10): by a second open the
 //! address may have changed hands since the check. A socket that cannot be

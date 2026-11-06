@@ -1,4 +1,4 @@
-//! `iem-server`: the standalone mixer server (CI E2E and the PC), PIN
+//! `iem-server`: the standalone mixer server (the box and CI E2E), PIN
 //! provisioning and alarms without a running server.
 //!
 //!   iem-server                      run the server
@@ -13,14 +13,16 @@
 //!                                   (removes: the ids it takes out of the roster
 //!                                   applied last, null before one), exit 0 when
 //!                                   it can be installed, 1 when not
+//!   iem-server check-site           load the site file as the server's start does:
+//!                                   exit 0 when it loads, 1 with the reason on
+//!                                   stderr when not (a deploy runs it before it
+//!                                   stops anything)
 //!   iem-server cloudflare set-token refuses and names the systemd credential
 //!                                   that holds the ACME keeper's token (#91)
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
-//! site's `engine_pipe`. `IEMMIXER_MODE`, the guard's mode (`dev` or `live`,
-//! set by the guard when it starts the server), is only logged as given: no
-//! server behaviour depends on it (#38).
+//! site's `engine_pipe`.
 //! SIGTERM or SIGINT stop the server
 //! gracefully: open requests get up to 5 s, then it exits 0.
 
@@ -34,7 +36,7 @@ use iem_server::ServerConfig;
 use iem_server::notify::Audience;
 use iem_server::provision::{self, PinTarget, ProvisionError};
 
-const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file> | cloudflare set-token]   (a PIN or a token is read from stdin)";
+const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file> | check-site | cloudflare set-token]   (a PIN or a token is read from stdin)";
 
 fn config_path() -> PathBuf {
     PathBuf::from(std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string()))
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
         },
         ["notify", "--count", "alarm"] => count_command(),
         ["roster", "check", file] => roster_check(file),
+        ["check-site"] => check_site(),
         ["cloudflare", "set-token"] => set_token_command(),
         _ => usage(),
     }
@@ -79,6 +82,19 @@ fn roster_check(file: &str) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Exit 0 when the site file loads as the server's start loads it, 1 with
+/// the reason on stderr when not.
+fn check_site() -> ExitCode {
+    let path = config_path();
+    match Config::load(&path) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("iem-server: site file {}: {e}", path.display());
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -168,15 +184,11 @@ fn run_server() -> anyhow::Result<()> {
     if let Ok(pipe) = std::env::var("IEMMIXER_ENGINE_PIPE") {
         config.engine_pipe = pipe;
     }
-    // The guard's mode, logged as given in its Debug form (`Some("live")`,
-    // `None` when unset), so a stray character stays escaped.
-    let mode = std::env::var("IEMMIXER_MODE").ok();
     tracing::info!(
         path = %path.display(),
         members = config.members.len(),
         inputs = config.inputs.len(),
         engine_pipe = %config.engine_pipe,
-        ?mode,
         "site config loaded"
     );
     let port = match std::env::var("PORT") {

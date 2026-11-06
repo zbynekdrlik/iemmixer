@@ -149,44 +149,6 @@ pub(crate) fn subject_gone() -> (StatusCode, Json<ApiError>) {
     (StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized()))
 }
 
-/// Checks the engineer PIN like a login (admission before hashing, the
-/// hashing gate, failure budgets); the "Back to REAPER" switch needs it.
-pub async fn verify_engineer_pin(
-    state: &AppState,
-    peer: SocketAddr,
-    headers: &HeaderMap,
-    pin: &str,
-) -> Result<(), Rejection> {
-    let client = state.login_guard.client(peer.ip(), headers);
-    let now = Instant::now();
-    if let Err(wait) = state.login_guard.check(&client, ENGINEER_ID, now) {
-        return Err(Rejection::from(too_many_attempts(wait)));
-    }
-    let hash = state
-        .pin_store
-        .read()
-        .await
-        .engineer_hash()
-        .map(str::to_owned);
-    let pin = pin.to_string();
-    let ok = with_hasher(state, move |hasher| {
-        hasher.verify_optional(&pin, hash.as_deref())
-    })
-    .await?;
-    if ok {
-        state.login_guard.record_success(&client, ENGINEER_ID);
-        Ok(())
-    } else {
-        record_failure(state, &client, ENGINEER_ID, now);
-        tracing::warn!(origin = ?client.origin, "engineer PIN check failed");
-        Err(Rejection::from(error_response(
-            StatusCode::UNAUTHORIZED,
-            "INVALID_PIN",
-            "Invalid PIN",
-        )))
-    }
-}
-
 fn record_failure(state: &AppState, client: &ClientKey, member: &str, now: Instant) {
     if state.login_guard.record_failure(client, member, now)
         == FailureEffect::EngineerBudgetExhausted

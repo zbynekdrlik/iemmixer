@@ -50,7 +50,6 @@ impl Control {
             resets: st.resets,
             parked: st.parked,
             held: self.held,
-            lock_failed: self.driver.as_ref().is_some_and(|d| d.lock_failed()),
             hil: self
                 .core
                 .hil()

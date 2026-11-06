@@ -577,19 +577,6 @@ impl Processor {
         panic!("fault injection: panic on the RT thread");
     }
 
-    /// The owner-approved crash test (`--fault-injection` only, design §10):
-    /// an abort on the RT thread that `catch_unwind` cannot catch. It never
-    /// returns: `tests/pipes.rs` runs it in the binary (SIGABRT).
-    fn inject_seh() {
-        std::process::abort();
-    }
-
-    /// The parked-engine test (`--fault-injection` only, design §10 test #2,
-    /// #35): aborts like `inject_seh`; `tests/pipes.rs` runs it in the binary.
-    fn inject_park() {
-        std::process::abort();
-    }
-
     fn apply(&mut self, op: RtOp) {
         let sr = self.sr;
         match op {
@@ -717,8 +704,6 @@ impl Processor {
                 self.fading_out = true;
             }
             RtOp::Panic => Self::inject_fault(),
-            RtOp::Seh => Self::inject_seh(),
-            RtOp::Park => Self::inject_park(),
             RtOp::Arm => {
                 if !self.armed {
                     self.armed = true;

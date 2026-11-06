@@ -20,19 +20,16 @@ fn status_at(w: &TunnelWatch, now: Instant) -> TunnelStatusInfo {
 // ---------------------------------------------------------------
 
 #[test]
-fn new_watch_is_ok_with_no_connections_and_no_restart() {
+fn new_watch_is_ok_with_no_connections() {
     let t0 = Instant::now();
     let w = TunnelWatch::new(t0);
     assert_eq!(w.state(), TunnelState::Ok);
-    assert_eq!(w.restart_count(), 0);
     assert_eq!(
         status_at(&w, t0 + secs(7)),
         TunnelStatusInfo {
             state: TunnelState::Ok,
             ready_connections: 0,
             since_secs: 7,
-            last_restart_secs_ago: None,
-            last_restart_ok: None,
         }
     );
 }
@@ -41,27 +38,11 @@ fn new_watch_is_ok_with_no_connections_and_no_restart() {
 fn positive_poll_keeps_ok_and_reports_count_change() {
     let t0 = Instant::now();
     let mut w = TunnelWatch::new(t0);
-    let d = w.observe(4, t0 + secs(1));
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: false,
-            changed: true
-        }
-    );
+    assert!(w.observe(4, t0 + secs(1)));
     // Same count again → nothing changed.
-    let d = w.observe(4, t0 + secs(31));
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: false,
-            changed: false
-        }
-    );
+    assert!(!w.observe(4, t0 + secs(31)));
     // Different positive count → changed, still Ok, `since` preserved.
-    let d = w.observe(2, t0 + secs(61));
-    assert!(d.changed);
-    assert!(!d.should_restart);
+    assert!(w.observe(2, t0 + secs(61)));
     let st = status_at(&w, t0 + secs(61));
     assert_eq!(st.state, TunnelState::Ok);
     assert_eq!(st.ready_connections, 2);
@@ -79,18 +60,11 @@ fn single_connection_counts_as_ok() {
 }
 
 #[test]
-fn zero_poll_goes_down_immediately_without_restart() {
+fn zero_poll_goes_down_immediately() {
     let t0 = Instant::now();
     let mut w = TunnelWatch::new(t0);
     w.observe(4, t0);
-    let d = w.observe(0, t0 + secs(30));
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: false,
-            changed: true
-        }
-    );
+    assert!(w.observe(0, t0 + secs(30)));
     let st = status_at(&w, t0 + secs(40));
     assert_eq!(st.state, TunnelState::Down);
     assert_eq!(st.ready_connections, 0);
@@ -98,178 +72,28 @@ fn zero_poll_goes_down_immediately_without_restart() {
 }
 
 #[test]
-fn no_restart_before_120s_of_zeros() {
+fn a_long_outage_stays_down_keeping_its_start_and_does_not_change() {
     let t0 = Instant::now();
     let mut w = TunnelWatch::new(t0);
-    for t in [0, 30, 60, 90, 119] {
-        let d = w.observe(0, t0 + secs(t));
-        assert!(!d.should_restart, "restart too early at {t}s");
-        assert_eq!(w.state(), TunnelState::Down);
+    assert!(w.observe(0, t0));
+    for t in (30..=3600).step_by(30) {
+        assert!(!w.observe(0, t0 + secs(t)), "unchanged at {t}s");
     }
-    // Unchanged Down poll is not a change.
-    assert!(!w.observe(0, t0 + secs(119)).changed);
-    assert_eq!(w.restart_count(), 0);
+    let st = status_at(&w, t0 + secs(3600));
+    assert_eq!(st.state, TunnelState::Down);
+    assert_eq!(st.since_secs, 3600);
 }
 
 #[test]
-fn exactly_one_restart_at_120s() {
+fn recovery_goes_ok_and_restarts_since() {
     let t0 = Instant::now();
     let mut w = TunnelWatch::new(t0);
     w.observe(0, t0);
-    let d = w.observe(0, t0 + secs(120));
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: true,
-            changed: true
-        }
-    );
-    assert_eq!(w.state(), TunnelState::Restarting);
-    assert_eq!(w.restart_count(), 1);
-    let st = status_at(&w, t0 + secs(125));
-    assert_eq!(st.since_secs, 125, "since = when the tunnel went down");
-    assert_eq!(st.last_restart_secs_ago, Some(5));
-    // Following polls inside the grace window do not restart again.
-    for t in [150, 179] {
-        let d = w.observe(0, t0 + secs(t));
-        assert!(!d.should_restart);
-        assert!(!d.changed);
-        assert_eq!(w.state(), TunnelState::Restarting);
-    }
-    assert_eq!(w.restart_count(), 1);
-}
-
-#[test]
-fn restarting_falls_back_to_down_after_grace_keeping_down_since() {
-    let t0 = Instant::now();
-    let mut w = TunnelWatch::new(t0);
-    w.observe(0, t0);
-    w.observe(0, t0 + secs(120)); // restart
-    let d = w.observe(0, t0 + secs(180)); // grace (60 s) elapsed
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: false,
-            changed: true
-        }
-    );
-    assert_eq!(w.state(), TunnelState::Down);
-    assert_eq!(status_at(&w, t0 + secs(180)).since_secs, 180);
-}
-
-#[test]
-fn cooldown_blocks_second_restart_within_10_min() {
-    let t0 = Instant::now();
-    let mut w = TunnelWatch::new(t0);
-    w.observe(0, t0);
-    assert!(w.observe(0, t0 + secs(120)).should_restart);
-    for t in (150..=719).step_by(30).chain([719]) {
-        let d = w.observe(0, t0 + secs(t));
-        assert!(!d.should_restart, "second restart inside cooldown at {t}s");
-    }
-    assert_eq!(w.restart_count(), 1);
-    // 600 s after the first restart (t=720) the next one is allowed.
-    let d = w.observe(0, t0 + secs(720));
-    assert!(d.should_restart);
-    assert!(d.changed);
-    assert_eq!(w.state(), TunnelState::Restarting);
-    assert_eq!(w.restart_count(), 2);
-    assert_eq!(status_at(&w, t0 + secs(720)).last_restart_secs_ago, Some(0));
-}
-
-#[test]
-fn new_outage_after_recovery_still_respects_cooldown() {
-    let t0 = Instant::now();
-    let mut w = TunnelWatch::new(t0);
-    w.observe(0, t0);
-    assert!(w.observe(0, t0 + secs(120)).should_restart);
-    // Recovered.
-    let d = w.observe(4, t0 + secs(150));
-    assert!(d.changed);
-    assert_eq!(w.state(), TunnelState::Ok);
-    assert_eq!(status_at(&w, t0 + secs(150)).since_secs, 0);
-    // Down again at 300 s; 120 s later (420 s) the cooldown (until 720 s) still blocks.
-    w.observe(0, t0 + secs(300));
-    assert_eq!(
-        status_at(&w, t0 + secs(300)).since_secs,
-        0,
-        "new outage resets since"
-    );
-    assert!(!w.observe(0, t0 + secs(420)).should_restart);
-    assert!(!w.observe(0, t0 + secs(690)).should_restart);
-    // Cooldown over → restart.
-    assert!(w.observe(0, t0 + secs(720)).should_restart);
-    assert_eq!(w.restart_count(), 2);
-}
-
-#[test]
-fn recovery_during_restarting_goes_ok_and_resets() {
-    let t0 = Instant::now();
-    let mut w = TunnelWatch::new(t0);
-    w.observe(0, t0);
-    w.observe(0, t0 + secs(120));
-    let d = w.observe(3, t0 + secs(130));
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: false,
-            changed: true
-        }
-    );
+    assert!(w.observe(3, t0 + secs(130)));
     let st = status_at(&w, t0 + secs(140));
     assert_eq!(st.state, TunnelState::Ok);
     assert_eq!(st.ready_connections, 3);
     assert_eq!(st.since_secs, 10);
-    assert_eq!(st.last_restart_secs_ago, Some(20));
-    // A fresh outage needs another full 120 s before a restart check.
-    w.observe(0, t0 + secs(800));
-    assert!(!w.observe(0, t0 + secs(919)).should_restart);
-    assert!(w.observe(0, t0 + secs(920)).should_restart);
-}
-
-#[test]
-fn restart_result_is_recorded_and_reset_by_the_next_restart() {
-    let t0 = Instant::now();
-    let mut w = TunnelWatch::new(t0);
-    w.observe(0, t0);
-    assert!(w.observe(0, t0 + secs(120)).should_restart);
-    assert_eq!(w.status(t0 + secs(121)).last_restart_ok, None);
-    assert!(
-        w.record_restart_result(false),
-        "None -> Some(false) is a change"
-    );
-    assert!(
-        !w.record_restart_result(false),
-        "same result is not a change"
-    );
-    assert_eq!(w.status(t0 + secs(125)).last_restart_ok, Some(false));
-    assert!(w.record_restart_result(true));
-    assert_eq!(w.status(t0 + secs(126)).last_restart_ok, Some(true));
-    // The next restart starts pending again.
-    w.observe(0, t0 + secs(180));
-    assert!(w.observe(0, t0 + secs(720)).should_restart);
-    assert_eq!(w.status(t0 + secs(720)).last_restart_ok, None);
-}
-
-#[test]
-fn new_outage_clears_the_previous_restart_outcome() {
-    let t0 = Instant::now();
-    let mut w = TunnelWatch::new(t0);
-    w.observe(0, t0);
-    assert!(w.observe(0, t0 + secs(120)).should_restart);
-    w.record_restart_result(false);
-    // Still down after the grace: the failure stays visible.
-    w.observe(0, t0 + secs(180));
-    assert_eq!(w.status(t0 + secs(180)).last_restart_ok, Some(false));
-    // Recovery keeps it for diagnostics…
-    w.observe(4, t0 + secs(200));
-    assert_eq!(w.status(t0 + secs(200)).last_restart_ok, Some(false));
-    // …but a NEW outage starts without a stale "repair failed".
-    w.observe(0, t0 + secs(900));
-    let st = w.status(t0 + secs(900));
-    assert_eq!(st.state, TunnelState::Down);
-    assert_eq!(st.last_restart_ok, None);
-    assert_eq!(st.last_restart_secs_ago, Some(780));
 }
 
 // ---------------------------------------------------------------
@@ -390,28 +214,19 @@ async fn tick_healthy_broadcasts_once_per_change() {
     let mut rx = state.event_tx.subscribe();
     let t0 = Instant::now();
 
-    let d = watch_tick(&state, t0).await;
-    assert_eq!(
-        d,
-        Decision {
-            should_restart: false,
-            changed: true
-        }
-    );
+    assert!(watch_tick(&state, t0).await);
     let (to, msg) = rx.try_recv().expect("first poll must broadcast");
     assert_eq!(to, crate::To::All, "tunnel status goes to every client");
     match msg {
         ServerMsg::TunnelStatus(info) => {
             assert_eq!(info.state, TunnelState::Ok);
             assert_eq!(info.ready_connections, 4);
-            assert_eq!(info.last_restart_secs_ago, None);
         }
         other => panic!("expected TunnelStatus, got {other:?}"),
     }
 
     // Unchanged poll: no broadcast.
-    let d = watch_tick(&state, t0 + POLL_INTERVAL).await;
-    assert!(!d.changed);
+    assert!(!watch_tick(&state, t0 + POLL_INTERVAL).await);
     assert!(
         rx.try_recv().is_err(),
         "unchanged status must not broadcast"
@@ -433,16 +248,15 @@ async fn tick_healthy_broadcasts_once_per_change() {
 
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn tick_outage_restart_and_recovery_sequence() {
+async fn tick_outage_and_recovery_sequence() {
     let ready = Arc::new(AtomicU32::new(0));
     let base = fake_cloudflared(ready.clone()).await;
     let (state, _dir) = test_state(format!("{base}/ready"));
     let mut rx = state.event_tx.subscribe();
     let t0 = Instant::now();
 
-    // 0 connections → Down, broadcast, no restart yet.
-    let d = watch_tick(&state, t0).await;
-    assert!(d.changed && !d.should_restart);
+    // 0 connections → Down, broadcast.
+    assert!(watch_tick(&state, t0).await);
     match rx.try_recv().unwrap().1 {
         ServerMsg::TunnelStatus(info) => assert_eq!(info.state, TunnelState::Down),
         other => panic!("expected TunnelStatus, got {other:?}"),
@@ -450,28 +264,13 @@ async fn tick_outage_restart_and_recovery_sequence() {
     assert!(logs_contain("tunnel DOWN"));
     assert!(logs_contain("HTTP 503"));
 
-    // 120 s later → restart requested, Restarting broadcast.
-    let d = watch_tick(&state, t0 + DOWN_BEFORE_RESTART).await;
-    assert!(d.should_restart && d.changed);
-    match rx.try_recv().unwrap().1 {
-        ServerMsg::TunnelStatus(info) => {
-            assert_eq!(info.state, TunnelState::Restarting);
-            assert_eq!(info.last_restart_secs_ago, Some(0));
-        }
-        other => panic!("expected TunnelStatus, got {other:?}"),
-    }
-    assert!(logs_contain("restarting cloudflared service"));
-
-    // Grace over, still 0 → back to Down.
-    let d = watch_tick(&state, t0 + DOWN_BEFORE_RESTART + RESTART_GRACE).await;
-    assert!(d.changed && !d.should_restart);
-    assert!(logs_contain("still down after cloudflared restart"));
-    assert_eq!(state.tunnel_watch.read().await.state(), TunnelState::Down);
+    // Still 0 → nothing to say.
+    assert!(!watch_tick(&state, t0 + secs(120)).await);
+    assert!(rx.try_recv().is_err());
 
     // cloudflared reconnects → Ok.
     ready.store(4, Ordering::SeqCst);
-    let d = watch_tick(&state, t0 + secs(200)).await;
-    assert!(d.changed && !d.should_restart);
+    assert!(watch_tick(&state, t0 + secs(200)).await);
     assert_eq!(state.tunnel_watch.read().await.state(), TunnelState::Ok);
     assert!(logs_contain("tunnel RECOVERED"));
     assert!(logs_contain("down_for_secs=200"));
@@ -479,45 +278,9 @@ async fn tick_outage_restart_and_recovery_sequence() {
 }
 
 #[tokio::test]
-#[tracing_test::traced_test]
-async fn record_restart_broadcasts_only_changes_and_logs_outcome() {
-    let (state, _dir) = test_state(closed_port_url());
-    let t0 = Instant::now();
-    {
-        let mut w = state.tunnel_watch.write().await;
-        w.observe(0, t0);
-        assert!(w.observe(0, t0 + DOWN_BEFORE_RESTART).should_restart);
-    }
-    let mut rx = state.event_tx.subscribe();
-
-    record_restart(&state, false, t0 + secs(125)).await;
-    match rx.try_recv().expect("failed restart must broadcast").1 {
-        ServerMsg::TunnelStatus(info) => {
-            assert_eq!(info.state, TunnelState::Restarting);
-            assert_eq!(info.last_restart_ok, Some(false));
-            assert_eq!(info.last_restart_secs_ago, Some(5));
-        }
-        other => panic!("expected TunnelStatus, got {other:?}"),
-    }
-    assert!(logs_contain("cloudflared restart FAILED"));
-
-    // Same outcome again → no broadcast.
-    record_restart(&state, false, t0 + secs(126)).await;
-    assert!(rx.try_recv().is_err());
-
-    record_restart(&state, true, t0 + secs(127)).await;
-    match rx.try_recv().expect("changed outcome must broadcast").1 {
-        ServerMsg::TunnelStatus(info) => assert_eq!(info.last_restart_ok, Some(true)),
-        other => panic!("expected TunnelStatus, got {other:?}"),
-    }
-    assert!(logs_contain("cloudflared restart finished OK"));
-}
-
-#[tokio::test]
 async fn tick_unreachable_endpoint_counts_as_zero() {
     let (state, _dir) = test_state(closed_port_url());
-    let d = watch_tick(&state, Instant::now()).await;
-    assert!(d.changed);
+    assert!(watch_tick(&state, Instant::now()).await);
     let st = state.tunnel_watch.read().await.status(Instant::now());
     assert_eq!(st.state, TunnelState::Down);
     assert_eq!(st.ready_connections, 0);

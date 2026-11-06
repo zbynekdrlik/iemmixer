@@ -114,13 +114,6 @@ pub struct Loaded {
     /// Why the state loaded may be older than one the directory holds
     /// (the engine raises each as an alarm, #32).
     pub alarms: Vec<String>,
-    /// The alarms among them that leave the live state in doubt: a state
-    /// file that could not be read, a `save.tmp` loaded without a
-    /// comparison, the revision continued above a file passed over. A
-    /// writer that replaces the live state (`iem-migrate import`) refuses
-    /// on these; an older `save.tmp` (its save moves it aside) or an orphan
-    /// above the state loaded is no such doubt (#32 F3-r4 6).
-    pub doubts: Vec<String>,
     /// What the chain found at `current.json` (the boot's recovery acts on
     /// it, #32).
     pub current_json: FileState,
@@ -329,9 +322,8 @@ impl Store {
         &self.dir
     }
 
-    /// Takes the state directory for this engine (or `iem-migrate import`),
-    /// before anything in it is read or written: the boot recovery moves
-    /// files, so a second engine, or an import while an engine runs, gets a
+    /// Takes the state directory for this engine, before anything in it is
+    /// read or written: the boot recovery moves files, so a second engine gets a
     /// `WouldBlock` error at once and stops before it touches a state file
     /// (#32 P5). The lock is an OS file lock on `engine.lock`, released
     /// with the lock or the process.

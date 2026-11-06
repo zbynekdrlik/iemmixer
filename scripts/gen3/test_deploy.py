@@ -324,6 +324,14 @@ def run(line):
                 digest = "f" * 64
             print(digest + "  " + path)
         return 0
+    check_site = line.split()
+    if check_site[-1] == "check-site" and check_site[0].startswith("IEMMIXER_CONFIG="):
+        site = open(os.path.join(box, "home", check_site[0].split("=", 1)[1]), encoding="utf-8").read()
+        if "back_to_reaper" in site or os.environ.get("FAKE_SERVER_REFUSES_SITE"):
+            return err("iem-server: site file iemmixer.toml: unknown field `back_to_reaper`", 1)
+        return 0
+    if "/iem-engine" in check_site[0] and check_site[1:2] == ["check-site"]:
+        return err("the engine refuses the site", 1) if os.environ.get("FAKE_ENGINE_REFUSES_SITE") else 0
     if line == "/opt/iemmixer/bin/iem-engine --version":
         print(os.environ.get("FAKE_ENGINE_VERSION") or version("iem-engine"))
         return 0
@@ -724,7 +732,9 @@ class DeployTests(unittest.TestCase):
             out += [f"cat {slot}/BUILD", f"cat {slot}/SHA256SUMS", f"cd {slot} && {CHECK}"]
         out += [f"mkdir -p {STAGE}", "scp"]
         if not back:
-            out += [f"cd {STAGE} && {CHECK}", self.fill(target), f"cd {slot} && {CHECK}"]
+            out += [f"cd {STAGE} && {CHECK}", self.fill(target), f"cd {slot} && {CHECK}",
+                    f"IEMMIXER_CONFIG={STAGE}/iemmixer.toml {slot}/iem-server check-site",
+                    f"{slot}/iem-engine check-site --site {STAGE}/iemmixer.toml"]
         out += [STOP, "systemctl is-active iem-server iem-engine iem-dante", self.switch(target, phase_c),
                 self.INSTALL]
         if people is not None:
@@ -1327,7 +1337,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("an event is on", r.stderr)
         self.assertIn("the stack was not stopped", r.stderr)
-        self.assertEqual(self.kinds()[-1], f"cd /opt/iemmixer/slot-a/bin && {CHECK}")
+        self.assertEqual(self.kinds()[-1], f"/opt/iemmixer/slot-a/bin/iem-engine check-site --site {STAGE}/iemmixer.toml")
         self.assertNotIn(STOP, self.remote())
         self.assertIsNone(self.link())
 
@@ -1597,10 +1607,9 @@ class DeployTests(unittest.TestCase):
         (ops / "roster.toml").write_text("[[people]]\nid = 'zyxqw'\n", encoding="utf-8")
         return ops / "site.toml", ops / "roster.toml"
 
-    def test_the_bands_site_goes_without_back_to_reaper_and_its_roster_as_given(self) -> None:
-        body = "".join(line for line in TEST_SITE.read_text(encoding="utf-8").splitlines(keepends=True)
-                       if not line.startswith("back_to_reaper"))
-        site, roster = self.site_files('back_to_reaper = ["iemmode.exe", "event"]\n' + body)
+    def test_the_bands_site_and_roster_go_as_given(self) -> None:
+        body = TEST_SITE.read_text(encoding="utf-8")
+        site, roster = self.site_files(body)
         r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.installed("/var/lib/iemmixer/site/iemmixer.toml").decode(), body)
@@ -1608,12 +1617,33 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn("pin", " ".join(" ".join(c) for c in self.calls() if c and c[0] == "ssh").replace(
             "pin_changes", ""))
 
-    def test_a_back_to_reaper_on_more_lines_is_refused_before_anything_is_copied(self) -> None:
-        site, roster = self.site_files('back_to_reaper = [\n  "iemmode.exe",\n  "event",\n]\n')
+    def test_a_site_the_new_build_refuses_stops_the_deploy_before_the_stop(self) -> None:
+        body = TEST_SITE.read_text(encoding="utf-8")
+        site, roster = self.site_files('back_to_reaper = ["x"]\n' + body)
         r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("the site's back_to_reaper is not one line", r.stderr)
-        self.assertEqual([c for c in self.calls() if c and c[0] == "scp"], [])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("unknown field `back_to_reaper`", r.stderr)
+        self.assertIn("the new build's server refuses this site file", r.stderr)
+        self.assertIn("the stack was not stopped", r.stderr)
+        self.assertNotIn(STOP, self.remote())
+
+    def test_a_site_the_new_engine_refuses_stops_the_deploy_before_the_stop(self) -> None:
+        site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
+        r = self.deploy("--site-file", str(site), "--roster-file", str(roster), FAKE_ENGINE_REFUSES_SITE="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("the new build's engine refuses this site file", r.stderr)
+        self.assertNotIn(STOP, self.remote())
+
+    def test_a_good_deploy_checks_the_site_with_the_new_slot_before_the_stop(self) -> None:
+        site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
+        r = self.deploy("--site-file", str(site), "--roster-file", str(roster))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        remote = self.remote()
+        checks = [i for i, c in enumerate(remote) if "check-site" in c]
+        self.assertEqual(len(checks), 2, remote)
+        self.assertIn("/opt/iemmixer/slot-a/bin/iem-server check-site", remote[checks[0]])
+        self.assertIn("/opt/iemmixer/slot-a/bin/iem-engine check-site", remote[checks[1]])
+        self.assertLess(checks[1], remote.index(STOP))
 
     # The box serves the band (Gen 2 ended 2026-11-01): a deploy without --new-box
     # is the one iempc gen3-deploy runs, the device config taken as it is.

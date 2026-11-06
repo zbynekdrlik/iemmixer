@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use iem_engine_proto::{ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Role, parse_client};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::Control;
 use crate::MAX_CMDS_PER_BLOCK;
@@ -101,13 +101,6 @@ impl Control {
             }
             Effect::Save => self.save(),
             Effect::Shutdown => self.shutdown = true,
-            Effect::Reopen => {
-                if self.driver.as_ref().is_some_and(|d| d.force_reopen()) {
-                    info!("a forced reopen of the card was asked for");
-                } else {
-                    warn!("a forced reopen was asked for, but the backend has no card");
-                }
-            }
             Effect::Imported { baseline } => {
                 let state = self.state_msg();
                 self.broadcast(&state);

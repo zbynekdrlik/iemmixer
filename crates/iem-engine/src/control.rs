@@ -54,20 +54,9 @@ pub trait Driver: Send {
     /// it stayed held (a callback stuck in the stream, or the parked-engine
     /// test's hold; #35). A backend without a card releases.
     fn stop(self: Box<Self>) -> StopOutcome;
-    /// Every control tick (never the RT thread): the backend's timed work.
-    fn tick(&mut self, _now: Instant) {}
     /// The backend's own reason to end the run, if any.
     fn ending(&self) -> Option<Ending> {
         None
-    }
-    /// Locking the real-time memory failed (logged by the backend).
-    fn lock_failed(&self) -> bool {
-        false
-    }
-    /// HIL's forced reopen (`Cmd::ForceReopen`): whether the backend took it
-    /// (no backend reopens today).
-    fn force_reopen(&self) -> bool {
-        false
     }
     /// The stream's histograms since it opened (S7 design note §3), read once
     /// a second for `Status`; none from a backend without them.
@@ -79,12 +68,8 @@ pub trait Driver: Send {
 /// Why a backend ends the run (S6 design note §3, §4; Gen 3 phase C).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
-    /// The session ends: save, fade out, release (the shutdown path).
-    Session,
-    /// The card must be refused (exit 3).
-    Card(String),
     /// A stop was asked (SIGTERM or SIGINT; the Dante backend reports them,
-    /// the unit's stop): the shutdown path, as the session's end.
+    /// the unit's stop): save, fade out, release (the shutdown path).
     Stop,
     /// The backend ended by itself (the Dante device's serving failed):
     /// save, release without a fade, [`Exit::Backend`] (exit 1, restarted).
@@ -106,8 +91,6 @@ pub enum Exit {
         faded: bool,
     },
     Fault(String),
-    /// The backend refused the card while running (exit 3).
-    Card(String),
     /// The backend ended by itself while running (exit 1): the Dante
     /// device stopped serving.
     Backend(String),
@@ -237,9 +220,6 @@ impl Control {
 
     fn tick(&mut self, now: Instant) -> Option<Exit> {
         self.flush_rt();
-        if let Some(d) = self.driver.as_mut() {
-            d.tick(now);
-        }
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
             // The last `Status` first (S7 HIL v2): it carries the faulting
@@ -249,12 +229,7 @@ impl Control {
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
         }
         match self.driver.as_ref().and_then(|d| d.ending()) {
-            Some(Ending::Card(why)) => return Some(self.card(why)),
             Some(Ending::Backend(why)) => return Some(self.backend_ended(why)),
-            Some(Ending::Session) => {
-                info!("the session ends");
-                self.shutdown = true;
-            }
             Some(Ending::Stop) => {
                 info!("a stop was asked (SIGTERM or SIGINT)");
                 self.shutdown = true;

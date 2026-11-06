@@ -380,7 +380,6 @@ fn batches_are_atomic_and_bounded() {
         Cmd::SaveNow,
         Cmd::GetState,
         Cmd::InjectFault,
-        Cmd::ForceReopen,
         Cmd::ImportState {
             state: MixState::default(),
             baseline: false,

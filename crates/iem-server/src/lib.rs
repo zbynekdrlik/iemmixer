@@ -12,7 +12,6 @@ pub mod backup;
 pub mod backup_daemon;
 pub mod backup_routes;
 pub mod backup_store;
-pub mod band_import;
 pub mod band_store;
 pub mod cf_token;
 #[cfg(feature = "tls")]
@@ -305,11 +304,6 @@ impl AppState {
             ?host,
             "CF-Connecting-IP is trusted from loopback and these host addresses"
         );
-        if config.activity.is_some() {
-            tracing::info!(
-                "site: the [activity] table is no longer read (the band-activity alarm was removed, #38); it can go"
-            );
-        }
         let (event_tx, _) = broadcast::channel(256);
         let (meters_tx, _) = broadcast::channel(16);
         let (lineup_tx, _) = broadcast::channel(16);
@@ -849,9 +843,8 @@ where
     {
         let config = state.config.read().await;
         if config.tls {
-            // Next to the site file: `iem-migrate band` writes them into the
-            // server's config directory (S6 design note §6); with `[acme]`
-            // the keeper writes them there too (#91).
+            // Next to the site file, in the server's config directory; with
+            // `[acme]` the keeper writes them there (#91).
             let files = tls_cert::CertFiles::new(
                 &server_config.config_dir,
                 &config.tls_cert,
@@ -1132,14 +1125,6 @@ async fn detect_public_ip(client: &reqwest::Client) -> Option<String> {
         }
     }
     None
-}
-
-/// Get the local network URL for remote access
-pub fn get_remote_url(port: u16) -> String {
-    let ip = local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "localhost".to_string());
-    format!("http://{}:{}", ip, port)
 }
 
 #[cfg(all(test, feature = "tls"))]

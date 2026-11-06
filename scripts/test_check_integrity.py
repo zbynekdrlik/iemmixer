@@ -57,9 +57,9 @@ class IntegrityTests(unittest.TestCase):
     def test_force_kill_in_a_powershell_module_is_found(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / "scripts" / "golden").mkdir(parents=True)
-            (root / "scripts" / "golden" / "M.psm1").write_text("function X { Stop-Process -Id 1 }\n", encoding="utf-8")
-            self.assertEqual(ci.violations(root), ["scripts/golden/M.psm1:1: force-kill command (program spec I8)"])
+            (root / "scripts" / "gen3").mkdir(parents=True)
+            (root / "scripts" / "gen3" / "M.psm1").write_text("function X { Stop-Process -Id 1 }\n", encoding="utf-8")
+            self.assertEqual(ci.violations(root), ["scripts/gen3/M.psm1:1: force-kill command (program spec I8)"])
 
     def test_force_kill_words_in_comments_are_refused(self) -> None:
         # The S6 crates, the PC scripts and the workflows: prose included.

@@ -80,8 +80,6 @@ fn every_cmd() -> Vec<Cmd> {
         Cmd::SaveNow,
         Cmd::Shutdown,
         Cmd::InjectFault,
-        Cmd::InjectSeh,
-        Cmd::InjectPark,
         Cmd::Ping,
         Cmd::Arm,
         Cmd::HilTestSignal {
@@ -92,7 +90,6 @@ fn every_cmd() -> Vec<Cmd> {
             card_tx: vec![72],
             listen: false,
         },
-        Cmd::ForceReopen,
     ]
 }
 
@@ -158,7 +155,6 @@ fn the_stream_figures_in_status_are_additive() {
         resets: 1,
         parked: true,
         held: true,
-        lock_failed: true,
         ..Status::default()
     };
     let json = serde_json::to_value(&status).unwrap();
@@ -168,7 +164,6 @@ fn the_stream_figures_in_status_are_additive() {
     assert_eq!(json["resets"], 1);
     assert_eq!(json["parked"], true);
     assert_eq!(json["held"], true);
-    assert_eq!(json["lock_failed"], true);
     assert_eq!(
         serde_json::from_value::<Status>(json.clone()).unwrap(),
         status
@@ -621,14 +616,7 @@ fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change
     // #35): the controller is told `NotSupervisor`.
     assert_eq!(
         ops_where(Cmd::is_supervisor),
-        [
-            "inject_fault",
-            "inject_seh",
-            "inject_park",
-            "arm",
-            "hil_test_signal",
-            "force_reopen"
-        ]
+        ["inject_fault", "arm", "hil_test_signal"]
     );
     assert_eq!(
         ops_where(Cmd::supervisor_may),
@@ -640,12 +628,9 @@ fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change
             "save_now",
             "shutdown",
             "inject_fault",
-            "inject_seh",
-            "inject_park",
             "ping",
             "arm",
-            "hil_test_signal",
-            "force_reopen"
+            "hil_test_signal"
         ]
     );
 }

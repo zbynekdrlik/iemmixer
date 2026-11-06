@@ -166,7 +166,7 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
         dbfs: -40.0,
         ttl_s: 1.0,
     };
-    let supervisor: [(u64, Cmd, Option<ErrCode>); 11] = [
+    let supervisor: [(u64, Cmd, Option<ErrCode>); 10] = [
         (12, Cmd::Ping, None),
         (13, Cmd::GetState, None),
         (14, Cmd::GetTopology, None),
@@ -177,7 +177,6 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
         // Fault injection reaches the core, which refuses it without
         // the flag: never `NotController`.
         (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
-        (22, Cmd::InjectPark, Some(ErrCode::Forbidden)),
         (19, set_mix(), Some(ErrCode::NotController)),
         (
             20,
@@ -207,11 +206,9 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
     r.c.handle(request_from(1, 31, hil()));
     r.c.handle(request_from(1, 32, set_mix()));
     r.c.handle(request_from(1, 33, Cmd::InjectFault));
-    r.c.handle(request_from(1, 34, Cmd::InjectSeh));
-    r.c.handle(request_from(1, 35, Cmd::InjectPark));
     r.c.handle(request_from(3, 40, Cmd::Arm));
     r.c.handle(request_from(3, 41, hil()));
-    r.c.handle(request_from(3, 42, Cmd::InjectPark));
+    r.c.handle(request_from(3, 42, Cmd::InjectFault));
     // The supervisor reads the meters like everyone.
     r.meters.input_buffer_mut().seq = 5;
     r.meters.publish();
@@ -245,14 +242,7 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
         )
     );
     // Refused for its role before the core reads the flag.
-    assert_eq!(
-        (ctl[&33], ctl[&34], ctl[&35]),
-        (
-            Some(ErrCode::NotSupervisor),
-            Some(ErrCode::NotSupervisor),
-            Some(ErrCode::NotSupervisor)
-        )
-    );
+    assert_eq!(ctl[&33], Some(ErrCode::NotSupervisor));
     let obs = codes(&obs_got.join().unwrap());
     assert_eq!(
         (obs[&40], obs[&41], obs[&42]),
@@ -262,44 +252,6 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
             Some(ErrCode::NotController)
         )
     );
-}
-
-/// HIL's forced reopen (S6 design note §7): the supervisor's, under
-/// the fault-injection flag, reaches the backend; the controller's is
-/// refused, and so is one without the flag.
-#[test]
-fn a_forced_reopen_reaches_the_backend_from_the_supervisor_only() {
-    for (fault_injection, reopens, sup_code) in
-        [(true, REOPEN, None), (false, 0, Some(ErrCode::Forbidden))]
-    {
-        let mut r = rig_with(
-            crate::core::Flags {
-                test_signal: false,
-                fault_injection,
-            },
-            false,
-        );
-        let (d, count) = scripted(None, false);
-        r.c.driver = Some(d);
-        let (ctl, ctl_client) = peer_named(r.dir.path(), "ctl");
-        let (sup, sup_client) = peer_named(r.dir.path(), "sup");
-        let (ctl_got, sup_got) = (reader(ctl_client), reader(sup_client));
-        r.c.handle(CtlMsg::Connected { id: 1, conn: ctl });
-        r.c.handle(CtlMsg::Connected { id: 2, conn: sup });
-        r.c.handle(hello_as(1, Role::Control));
-        r.c.handle(hello_as(2, Role::Supervisor));
-        r.c.handle(request_from(1, 7, Cmd::ForceReopen));
-        assert_eq!(count.load(Ordering::Relaxed), 0, "the controller's");
-        r.c.handle(request_from(2, 8, Cmd::ForceReopen));
-        assert_eq!(count.load(Ordering::Relaxed), reopens);
-        drop(r);
-        let ctl = codes(&ctl_got.join().unwrap());
-        assert_eq!(ctl[&7], Some(ErrCode::NotSupervisor));
-        let sup = codes(&sup_got.join().unwrap());
-        assert_eq!(sup[&8], sup_code, "fault injection {fault_injection}");
-    }
-    // NullRt has no card: the request is answered, nothing reopens.
-    assert!(!Idle.force_reopen());
 }
 
 #[test]

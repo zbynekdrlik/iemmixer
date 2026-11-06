@@ -1,6 +1,5 @@
 //! The `iem-engine` binary through its command line (split from
-//! `pipes.rs`, #32): run and shut down, the crash and parked-engine tests'
-//! abort, the offline render and `check-site`.
+//! `pipes.rs`, #32): run and shut down, the offline render and `check-site`.
 
 use super::*;
 use iem_audio_io::{Planar, wav};
@@ -85,75 +84,6 @@ fn the_binary_refuses_a_dante_device_it_cannot_set_up_as_usage() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-}
-
-/// The owner-approved crash test (design §10 test #4): with
-/// `--fault-injection`, `InjectSeh` reaches the RT thread, whose
-/// `inject_seh` aborts the process (nothing can catch it).
-#[test]
-fn inject_seh_aborts_the_binary() {
-    aborts_the_binary(Cmd::InjectSeh);
-}
-
-/// The parked-engine test (design §10 test #2, #35): with
-/// `--fault-injection`, `InjectPark` reaches the RT thread, whose
-/// `inject_park` aborts the process like `inject_seh`.
-#[test]
-fn inject_park_aborts_the_binary() {
-    aborts_the_binary(Cmd::InjectPark);
-}
-
-/// The binary with `--fault-injection` ends by SIGABRT after `cmd`, not by a
-/// clean exit or a caught panic. Should it keep running, the test asks it to
-/// shut down (never a forced end) before it fails.
-fn aborts_the_binary(cmd: Cmd) {
-    use std::os::unix::process::ExitStatusExt;
-    /// SIGABRT on Linux and macOS.
-    const SIGABRT: i32 = 6;
-    let exited = |child: &mut std::process::Child| {
-        let start = Instant::now();
-        loop {
-            if let Some(s) = child.try_wait().unwrap() {
-                return Some(s);
-            }
-            if start.elapsed() >= WAIT {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let pipe = pipe_name(&dir);
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
-        .args(["run", "--site"])
-        .arg(common::site_path())
-        .arg("--state-dir")
-        .arg(dir.path().join("state"))
-        .args(["--pipe", &pipe, "--fault-injection"])
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    // The injections are the supervisor's alone (review of PR #40, #35).
-    let mut c = Client::new(&pipe);
-    c.hello(Role::Supervisor);
-    let what = format!("{cmd:?}");
-    // Not `request`: the process may end before its reply is written.
-    c.send(&ClientMsg::Request {
-        id: 1,
-        origin: None,
-        cmd,
-    });
-    let Some(status) = exited(&mut child) else {
-        c.send(&ClientMsg::Request {
-            id: 2,
-            origin: None,
-            cmd: Cmd::Shutdown,
-        });
-        let after = exited(&mut child);
-        panic!("{what} did not end the engine within {WAIT:?} (after Shutdown: {after:?})");
-    };
-    assert_eq!(status.signal(), Some(SIGABRT), "{status:?}");
-    assert_eq!(status.code(), None, "{status:?}");
 }
 
 /// #32 minor-4: a state directory another process holds past the engine's

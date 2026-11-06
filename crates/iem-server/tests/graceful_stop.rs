@@ -250,9 +250,7 @@ fn start_https() -> (Server, u16) {
 }
 
 /// The certificate lives next to the site file, in the server's config
-/// directory (S6 design note §6: `iem-migrate band` writes it into the band
-/// directory, the folder of the guard's `server_config`), whatever the
-/// platform's config directory holds.
+/// directory, whatever the platform's config directory holds.
 #[cfg(feature = "tls")]
 #[test]
 fn the_certificate_next_to_the_site_serves_https() {

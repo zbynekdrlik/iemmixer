@@ -213,26 +213,6 @@ impl Core {
                     ..Partial::default()
                 })
             }
-            Cmd::InjectSeh => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Seh],
-                    ..Partial::default()
-                })
-            }
-            // The parked-engine test (design §10 test #2, #35): the SEH
-            // test's exception under the backend's test hold.
-            Cmd::InjectPark => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Park],
-                    ..Partial::default()
-                })
-            }
-            Cmd::ForceReopen => {
-                self.need_fault_injection()?;
-                Ok(Partial::effect(Effect::Reopen))
-            }
             Cmd::Batch { .. } => Err(CmdError::new(ErrCode::BadRequest, "nested batch")),
             Cmd::ImportState { state, baseline } => {
                 self.s = reconcile(&self.topo, state).0;
@@ -269,8 +249,7 @@ impl Core {
         }
     }
 
-    /// Fault injection and HIL's forced reopen run only under the
-    /// `--fault-injection` launch flag.
+    /// Fault injection runs only under the `--fault-injection` launch flag.
     fn need_fault_injection(&self) -> Result<(), CmdError> {
         if self.flags.fault_injection {
             Ok(())

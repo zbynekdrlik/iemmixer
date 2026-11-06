@@ -1,30 +1,5 @@
-//! Deterministic stimuli. Everything except the log sweep uses IEEE basic
-//! operations only (no libm), so S2 regenerates it bit-identically.
-
-use std::f64::consts::PI;
-
-pub fn impulse(len: usize, at: usize, amp: f64) -> Vec<f64> {
-    let mut v = vec![0.0; len];
-    if let Some(x) = v.get_mut(at) {
-        *x = amp;
-    }
-    v
-}
-
-/// Exponential sweep f1 → f2 over `secs` (stored in the bundle; not regenerated).
-pub fn log_sweep(rate: u32, f1: f64, f2: f64, secs: f64, amp: f64) -> Vec<f64> {
-    let fs = f64::from(rate);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let n = (fs * secs).round() as usize;
-    let k = (f2 / f1).ln();
-    (0..n)
-        .map(|i| {
-            #[allow(clippy::cast_precision_loss)]
-            let t = i as f64 / fs;
-            amp * (2.0 * PI * f1 * secs / k * ((t / secs * k).exp() - 1.0)).sin()
-        })
-        .collect()
-}
+//! The limiter goldens' deterministic stimulus: IEEE basic operations only
+//! (no libm), so a test regenerates it bit-identically.
 
 struct XorShift(u64);
 
@@ -92,12 +67,6 @@ mod tests {
     }
 
     #[test]
-    fn impulse_places_one_sample() {
-        assert_eq!(impulse(4, 2, 0.5), vec![0.0, 0.0, 0.5, 0.0]);
-        assert_eq!(impulse(2, 5, 0.5), vec![0.0, 0.0]);
-    }
-
-    #[test]
     fn hot_material_matches_the_reference_checksum() {
         // Independent Python implementation, 2026-09-26 (seed 27).
         assert_eq!(
@@ -122,29 +91,5 @@ mod tests {
         assert!(l[9_600..19_200].iter().any(|x| x.abs() > 1.9));
         assert!(r[86_400..].iter().any(|x| x.abs() > 3.9));
         assert!(l.iter().chain(&r).all(|x| x.abs() <= 4.0));
-    }
-
-    #[test]
-    fn log_sweep_has_the_requested_length_and_bound() {
-        let s = log_sweep(96_000, 20.0, 20_000.0, 2.0, 0.25);
-        assert_eq!(s.len(), 192_000);
-        assert!(s.iter().all(|x| x.abs() <= 0.25));
-        assert!(s.iter().any(|x| x.abs() > 0.249));
-    }
-
-    #[test]
-    fn log_sweep_matches_reference_samples() {
-        // Independent Python implementation (math.exp / math.sin), 2026-09-26.
-        // The tolerance absorbs libm differences; the phase reaches ~3.6e4 rad.
-        let s = log_sweep(96_000, 20.0, 20_000.0, 2.0, 0.25);
-        assert_eq!(s[0], 0.0);
-        for (i, want) in [
-            (1, 0.00032725502822692816),
-            (1000, 0.24295480664072464),
-            (96_000, 0.22343312830799963),
-            (191_999, -0.13943979608114962),
-        ] {
-            assert!((s[i] - want).abs() < 1e-9, "sample {i}: {}", s[i]);
-        }
     }
 }

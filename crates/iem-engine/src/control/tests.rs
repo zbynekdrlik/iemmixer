@@ -234,7 +234,6 @@ fn status_carries_the_measured_period_the_stream_counters_and_the_hold() {
     assert_eq!((s.frames, s.missed, s.overruns, s.resets), (32, 2, 3, 4));
     assert!(s.parked, "parked");
     assert!(s.held, "held until Arm");
-    assert!(!s.lock_failed);
     let s = rig().c.status_msg(&StreamStats {
         frames: 64,
         ..StreamStats::default()
@@ -275,12 +274,9 @@ fn status_carries_the_hil_outputs_peaks_since_the_previous_status() {
     assert!(quiet.c.hil_peaks.is_empty());
 }
 
-/// A backend with scripted hooks: its ticks and forced reopens counted,
-/// an ending, a lock failure.
+/// A backend with a scripted ending.
 struct Scripted {
-    ticks: Arc<AtomicU64>,
     ending: Option<Ending>,
-    lock_failed: bool,
 }
 
 impl Driver for Scripted {
@@ -295,37 +291,13 @@ impl Driver for Scripted {
         StopOutcome::Released
     }
 
-    fn tick(&mut self, _now: Instant) {
-        self.ticks.fetch_add(1, Ordering::Relaxed);
-    }
-
     fn ending(&self) -> Option<Ending> {
         self.ending.clone()
     }
-
-    fn lock_failed(&self) -> bool {
-        self.lock_failed
-    }
-
-    /// Counted with the ticks, [`REOPEN`] apiece, so one counter shows
-    /// both.
-    fn force_reopen(&self) -> bool {
-        self.ticks.fetch_add(REOPEN, Ordering::Relaxed);
-        true
-    }
 }
 
-/// What one forced reopen adds to a scripted backend's counter.
-const REOPEN: u64 = 1 << 32;
-
-fn scripted(ending: Option<Ending>, lock_failed: bool) -> (Box<dyn Driver>, Arc<AtomicU64>) {
-    let ticks = Arc::new(AtomicU64::new(0));
-    let d = Scripted {
-        ticks: Arc::clone(&ticks),
-        ending,
-        lock_failed,
-    };
-    (Box::new(d), ticks)
+fn scripted(ending: Option<Ending>) -> Box<dyn Driver> {
+    Box::new(Scripted { ending })
 }
 
 /// A running backend with stream histograms (S7).
@@ -376,65 +348,12 @@ fn status_carries_both_histograms_and_their_top() {
 }
 
 #[test]
-fn the_backend_is_ticked_and_its_lock_failure_is_reported() {
+fn a_backend_without_an_ending_keeps_the_run_going() {
     let mut r = rig();
-    let (d, ticks) = scripted(None, true);
-    r.c.driver = Some(d);
+    r.c.driver = Some(scripted(None));
     assert!(r.c.tick(Instant::now()).is_none());
     assert!(r.c.tick(Instant::now()).is_none());
-    assert_eq!(ticks.load(Ordering::Relaxed), 2);
-    assert!(r.c.status_msg(&StreamStats::default()).lock_failed);
-    // NullRt (and any backend that does not say otherwise) locks nothing.
-    assert!(!rig().c.status_msg(&StreamStats::default()).lock_failed);
-    assert!(!Idle.lock_failed());
     assert_eq!(Idle.ending(), None);
-}
-
-#[test]
-fn a_session_end_takes_the_shutdown_path() {
-    let mut r = rig();
-    r.status.faded_out.store(true, Ordering::Release);
-    r.c.driver = Some(scripted(Some(Ending::Session), false).0);
-    assert_eq!(
-        r.c.tick(Instant::now()),
-        Some(Exit::Shutdown { faded: true })
-    );
-    assert!(r.dir.path().join("state/current.json").exists(), "saved");
-    assert!(r.c.driver.is_none(), "released");
-    // The shutdown's fade is asked where the refused card's "no fade" check
-    // looks: on the RT ring or waiting in `pending` (already faded, the wait
-    // loop never flushes it).
-    let mut asked = Vec::new();
-    while let Ok(cmd) = r.ring.pop() {
-        asked.push(cmd.op);
-    }
-    asked.extend(r.c.pending.iter().flatten().copied());
-    assert!(
-        asked
-            .iter()
-            .any(|op| matches!(op, crate::cmd::RtOp::FadeOut)),
-        "the fade was not asked"
-    );
-}
-
-#[test]
-fn a_card_refused_while_running_ends_with_exit_3_and_no_fade() {
-    let mut r = rig();
-    let why = "the preferred buffer was not restored";
-    r.c.driver = Some(scripted(Some(Ending::Card(why.into())), false).0);
-    assert_eq!(r.c.tick(Instant::now()), Some(Exit::Card(why.into())));
-    // No fade was asked of the callback, neither sent nor waiting: read
-    // from the ring, not timed (the state save's file I/O took 538 ms on a
-    // hosted Windows runner, main run 38532263136).
-    let fade = |op: &crate::cmd::RtOp| matches!(op, crate::cmd::RtOp::FadeOut);
-    let mut sent = Vec::new();
-    while let Ok(cmd) = r.ring.pop() {
-        sent.push(cmd.op);
-    }
-    assert!(!sent.iter().any(fade), "a fade was sent");
-    assert!(!r.c.pending.iter().flatten().any(fade), "a fade waits");
-    assert!(r.dir.path().join("state/current.json").exists(), "saved");
-    assert!(r.c.driver.is_none(), "released");
 }
 
 /// The fade-outs asked of the callback, sent or still waiting.
@@ -453,7 +372,7 @@ fn fades_asked(r: &mut Rig) -> usize {
 fn a_stop_ending_saves_fades_and_exits_shutdown() {
     let mut r = rig();
     r.status.faded_out.store(true, Ordering::Release);
-    r.c.driver = Some(scripted(Some(Ending::Stop), false).0);
+    r.c.driver = Some(scripted(Some(Ending::Stop)));
     assert_eq!(
         r.c.tick(Instant::now()),
         Some(Exit::Shutdown { faded: true })
@@ -469,7 +388,7 @@ fn a_stop_ending_saves_fades_and_exits_shutdown() {
 fn a_backend_ending_saves_and_exits_backend() {
     let mut r = rig();
     let why = "flow control on UDP 4455 ended";
-    r.c.driver = Some(scripted(Some(Ending::Backend(why.into())), false).0);
+    r.c.driver = Some(scripted(Some(Ending::Backend(why.into()))));
     assert_eq!(r.c.tick(Instant::now()), Some(Exit::Backend(why.into())));
     assert!(r.dir.path().join("state/current.json").exists(), "saved");
     assert!(r.c.driver.is_none(), "released");

@@ -298,26 +298,6 @@ pub async fn batch_mute_all(member: &str) -> Result<(), String> {
     }
 }
 
-/// "Back to REAPER" (§4.3): the engineer's switch in the console, confirmed
-/// with the engineer PIN; the server starts the site's switch command (202).
-pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
-    let token = crate::auth::get_token().ok_or("Not authenticated")?;
-    let resp = Request::post(&format!("{}/mode/event", API_BASE))
-        .header("Authorization", &format!("Bearer {}", token))
-        .json(&serde_json::json!({ "pin": pin }))
-        .map_err(|e| format!("Request error: {}", e))?
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {}", e))?;
-    if resp.ok() {
-        Ok(())
-    } else {
-        Err(crate::components::back_to_reaper::switch_error_message(
-            resp.status(),
-        ))
-    }
-}
-
 /// What a band switch came to (#58).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Switched {

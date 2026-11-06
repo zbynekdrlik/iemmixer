@@ -17,7 +17,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CRATES = ["iem-core", "iem-server", "iem-ui", "iem-rpp", "iem-dsp", "iem-limiter-mga", "iem-engine-proto", "iem-audio-io", "iem-engine", "iem-migrate", "iem-soakclient", "iem-dante-dev"]
+CRATES = ["iem-core", "iem-server", "iem-ui", "iem-golden", "iem-dsp", "iem-limiter-mga", "iem-engine-proto", "iem-audio-io", "iem-engine", "iem-soakclient", "iem-dante-dev"]
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
 
 

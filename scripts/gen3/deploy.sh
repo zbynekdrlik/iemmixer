@@ -73,8 +73,8 @@ set -euo pipefail
 #   /opt/iemmixer/lib, root's, 0755; #72) with its sender (band_send.py, the
 #   same way), and this checkout's public test
 #   site and roster, or with --site-file and --roster-file the band's from
-#   the ops repo (phase E: the site's one-line back_to_reaper left out, no
-#   --pins: the band's PINs come with its data, `iempc gen3-new-box`), go by scp into
+#   the ops repo (no --pins: the band's PINs come with its data,
+#   `iempc gen3-new-box`), go by scp into
 #   ~/.cache/iem-gen3-deploy on the box (overwritten, never deleted); `sudo -n
 #   install` puts the units, the config and the env in place, makes
 #   /var/lib/iemmixer/site the service user's (0700) and puts the site and the
@@ -84,6 +84,9 @@ set -euo pipefail
 #   `systemd-run` as the service user with the PIN pepper's systemd credential,
 #   each PIN (GEN3_ENGINEER_PIN, GEN3_MEMBER_PIN of the private env, 4 digits
 #   each) only on that ssh's stdin: never on a command line, never printed.
+# - Before the stop, the new slot's `iem-server check-site` and `iem-engine
+#   check-site` read the staged site (no sudo, read only): a site the new
+#   build refuses stops the deploy with the stack still serving.
 # - A HIL job a dead `iempc gen3-gate` run left (#72 phase H: the runtime
 #   drop-in /run/systemd/system/iem-engine.service.d/iem-hil.conf, which
 #   starts the engine with its HIL test flag) is ended before the start: the
@@ -462,19 +465,7 @@ fi
 
 printf 'IEM_DANTE_IFACE=%s\n' "$iface" > "$work/iem-dante.env"
 cp -- "$config" "$work/dante-device.toml"
-if [ -n "$site_file" ]; then
-  # The engineer's "Back to REAPER" ran iemmode on the PC: the box has none,
-  # so the band's one-line back_to_reaper is left out of the box's copy
-  # (phase E, #72).
-  reaper_lines="$(grep -c '^back_to_reaper' -- "$test_site" || true)"
-  if [ "$reaper_lines" != 0 ]; then
-    [ "$reaper_lines" = 1 ] && grep '^back_to_reaper' -- "$test_site" | grep -q ']' ||
-      die "the site's back_to_reaper is not one line: write it on one line, or leave it out"
-  fi
-  grep -v '^back_to_reaper[[:space:]]*=' -- "$test_site" > "$work/iemmixer.toml" || true
-else
-  cp -- "$test_site" "$work/iemmixer.toml"
-fi
+cp -- "$test_site" "$work/iemmixer.toml"
 cp -- "$test_roster" "$work/roster.toml"
 for unit in "${UNITS[@]}" "$RECEIVER" "$SENDER"; do
   cp -- "$here/$unit" "$work/$unit"
@@ -508,7 +499,14 @@ if [ "$back" = 0 ]; then
   on_box "$fill" || die "slot-$target could not be filled: the stack was not stopped"
   on_box "cd $slot && sha256sum --check --strict --quiet SHA256SUMS" ||
     die "slot-$target's SHA256SUMS does not hold on the box: the stack was not stopped"
-  echo "deploy.sh: slot-$target holds the bundle, its sums hold; the stack was not stopped"
+  # The new build reads the site it will serve, while the old one still
+  # serves: a key this build no longer knows stops the deploy here, never after
+  # the stop (the server's site file refuses unknown keys).
+  on_box "IEMMIXER_CONFIG=$STAGE/iemmixer.toml $slot/iem-server check-site" ||
+    die "the new build's server refuses this site file (the reason above; the ops repo's site must lose such a key first): the stack was not stopped"
+  on_box "$slot/iem-engine check-site --site $STAGE/iemmixer.toml" > /dev/null ||
+    die "the new build's engine refuses this site file (the reason above): the stack was not stopped"
+  echo "deploy.sh: slot-$target holds the bundle, its sums hold, it takes the site; the stack was not stopped"
   refuse_event "slot-$target holds the bundle; the stack was not stopped"
 else
   refuse_event "copied to ~/$STAGE; the stack was not stopped"
