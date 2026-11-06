@@ -898,7 +898,8 @@ mod tests {
         match Config::load(&path) {
             Err(ConfigError::Parse(e)) => {
                 assert!(e.starts_with("line 2: "), "{e}");
-                assert!(e.contains("invalid type"), "{e}");
+                // Only the value goes: the parser's words after it stay.
+                assert!(e.contains("invalid type: string \"…\", expected "), "{e}");
                 assert!(!e.contains("zyxqw"), "{e}");
             }
             other => panic!("{other:?}"),

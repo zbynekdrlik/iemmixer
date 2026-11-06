@@ -96,18 +96,13 @@ impl<P: Process + 'static> NullRt<P> {
             frames: self.frames,
             callbacks: s.callbacks.load(Ordering::Acquire),
             late: s.late.load(Ordering::Acquire),
-            // No card: no missed periods, overruns or resets.
-            missed: 0,
-            overruns: 0,
-            resets: 0,
             faulted: s.faulted.load(Ordering::Acquire),
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
-            // No card: no reopen.
-            last_reopen_us: 0,
             // Read after `faulted`, which is stored after it.
             fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
+            // No card: no missed periods, overruns, resets or reopen.
             ..StreamStats::default()
         }
     }

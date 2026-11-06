@@ -302,6 +302,19 @@ fn a_site_parse_error_names_the_line_and_no_value() {
     assert!(!e.contains("zyxqw"), "{e}");
 }
 
+/// Only the value goes: the parser's words after it stay.
+#[test]
+fn a_wrongly_typed_site_value_is_blanked_and_the_reason_stays() {
+    let e = crate::site::parse_hil_tx("[guard]\nhil_tx = \"zyxqw\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("line 2: invalid type: string \"…\", expected "),
+        "{e}"
+    );
+    assert!(!e.contains("zyxqw"), "{e}");
+}
+
 #[test]
 fn check_site_names_the_topology() {
     let summary = check_site(&crate::test_support::test_site_path()).unwrap();
