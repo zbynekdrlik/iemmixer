@@ -206,6 +206,33 @@ mod tests {
         assert!(!text.contains("\"2468\"") && !text.contains("\"1357\""));
     }
 
+    /// The hashes are a secret like the others: a change through the web
+    /// leaves the file owner-only, also when it was not before.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_store_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PIN_HASHES_FILE);
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store
+            .set_member_hash("member1", hasher().hash("1357"))
+            .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(
+            hasher().verify(
+                "1357",
+                PinStore::load(dir.path())
+                    .unwrap()
+                    .member_hash("member1")
+                    .unwrap()
+            )
+        );
+    }
+
     #[test]
     fn a_plaintext_value_is_a_load_error() {
         let dir = tempfile::tempdir().unwrap();
