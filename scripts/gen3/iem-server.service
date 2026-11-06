@@ -1,6 +1,4 @@
-# iemmixer's server and UI on the Gen 3 box (#72 phase C, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md Task 6,
-# choice 4), installed by scripts/gen3/deploy.sh; rules in .claude/rules/gen3.md.
+# iemmixer's server and UI on the Gen 3 box (#72 phase C), installed by scripts/gen3/deploy.sh; rules in .claude/rules/gen3.md.
 # The build of CI's gen3-bin job (features standalone,tls,audio): plain HTTP
 # on port 80, the UI embedded, HTTPS only with the site's `tls` and a
 # certificate (#91; phase E, #72: port 80 is the band's
@@ -10,8 +8,7 @@
 # config/test-roster.toml as roster.toml), which deploy.sh copies into
 # /var/lib/iemmixer/site; the server writes its secrets and the band's data
 # beside them.
-# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
-# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# Phase D: it runs as the service user `iemmixer` (a system
 # user without login or home, not site data), the engine's user, who owns the
 # site folder and the engine's pipes; its PIN pepper is the box's systemd
 # credential (made on the box by provision, root-only, never in clear on

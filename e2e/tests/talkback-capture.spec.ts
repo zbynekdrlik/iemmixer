@@ -8,7 +8,7 @@ import { TALK_INIT, TALK_TONE } from "./live/support/audio";
 import { dbOf, median, spread } from "./live/support/series";
 import { toneWav } from "./support/wav";
 
-// The live talkback spec's settling (S7, #10), checked in the mock E2E job:
+// The live talkback spec's settling (#10), checked in the mock E2E job:
 // the page's own talkback.js and its worklet capture Chromium's fake
 // microphone playing the live spec's tone, with the page's constraints (AGC
 // and noise suppression), and TALK_INIT measures the frames the page hands

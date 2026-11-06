@@ -3,7 +3,7 @@
 # shellcheck disable=SC2029
 set -euo pipefail
 # Puts dantesync on the Gen 3 box as its system clock's owner, a follower of
-# the band's audio grandmaster, and reads it back (#72 phase B, plan Task 2;
+# the band's audio grandmaster, and reads it back (#72 phase B;
 # .claude/rules/gen3.md). The engine's in-process PTP follower shares UDP
 # 319/320 with it and takes its time from UDP 31900 as the fallback.
 #

@@ -7,7 +7,7 @@ paths:
   - "scripts/iem-pc/test_iempc_gen3_soak.py"
 ---
 
-# Soak on the Gen 3 box: harness and verdict, `iempc gen3-gate soak` (S7, #10; #72 phase H)
+# Soak on the Gen 3 box: harness and verdict, `iempc gen3-gate soak` (#10; #72 phase H)
 
 The gate is `scripts/iem-pc/iempc_gen3_soak.py` (`.claude/rules/gen3.md`, "The box's soak gate"): `iem-soakclient` on the box, judged by `soak_verdict.box_check`. CI's e2e step runs the client too, judged by `soak_verdict.py harness`. Both are the checks below.
 

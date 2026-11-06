@@ -9,7 +9,7 @@ paths:
   - "scripts/iem-pc/test_iempc_gen3_live.py"
 ---
 
-# Live E2E on the Gen 3 box: `iempc gen3-gate live` (S7, #10; #72 phase H)
+# Live E2E on the Gen 3 box: `iempc gen3-gate live` (#10; #72 phase H)
 
 The gate is `scripts/iem-pc/iempc_gen3_live.py`, its refusals and its run in `.claude/rules/gen3.md` (the box's live gate), its verdict `live_verdict.py`. The #10 comments of 2026-10-08 hold the lanes' decisions.
 

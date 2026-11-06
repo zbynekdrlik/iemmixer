@@ -1,4 +1,4 @@
-//! Roster mode (#58 design §5, §6): the roster the server runs on and its
+//! Roster mode (#58 design §5): the roster the server runs on and its
 //! active lineup. `AppState.roster` holds `None` in legacy mode (no
 //! `roster.toml`), where the site's `[[members]]` are the members as before.
 //! In roster mode the members are the active lineup's people on their sets,

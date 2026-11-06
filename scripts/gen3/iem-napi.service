@@ -1,6 +1,4 @@
-# The Gen 3 box's Dante interface's packet priority (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md choice 1, Task 9's
-# napi step); rules in .claude/rules/gen3.md. Installed and enabled by
+# The Gen 3 box's Dante interface's packet priority (#72 phase D); rules in .claude/rules/gen3.md. Installed and enabled by
 # scripts/gen3/provision-root.sh with its helper
 # /usr/local/lib/iemmixer/napi-priority (scripts/gen3/napi-priority): threaded
 # NAPI on the Dante interface, its NAPI threads SCHED_FIFO 60 on core 0 and

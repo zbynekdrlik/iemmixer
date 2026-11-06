@@ -98,7 +98,7 @@ pub enum Cmd {
         dbfs: f64,
         ttl_s: f64,
         card_tx: Vec<u16>,
-        /// S7, additive (design note §6): the listen probe. While the signal
+        /// Additive: the listen probe. While the signal
         /// runs, the listen taps keep their silent frames and the probe streams
         /// (`media::stream::ENGINEER_PROBE`, `MEMBER_PROBE`) carry the spare
         /// outputs' sine, for the server's `&hil=1` listeners only. Every mix's

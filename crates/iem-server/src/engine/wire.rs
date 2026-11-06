@@ -1,5 +1,4 @@
-//! The engine's pipes from the server's side (program spec §2.3; S3 design
-//! note §3.6): names, and async framing — control frames are a `u32` LE length
+//! The engine's pipes from the server's side: names, and async framing — control frames are a `u32` LE length
 //! and that much JSON (≤ `MAX_FRAME`), media frames a 20-byte header and f32
 //! LE samples (`iem_engine_proto::media`).
 

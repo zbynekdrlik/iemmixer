@@ -1,11 +1,11 @@
-//! Login protection (program spec §5.3). Pure admission logic with the clock
+//! Login protection. Pure admission logic with the clock
 //! injected, plus a bounded gate for argon2id work:
 //!
 //! - budgets count failures only, separately for LAN and tunnel clients;
 //! - `CF-Connecting-IP` is trusted only from a peer that is this host
 //!   (loopback, or one of its own addresses read at start): the tunnel
 //!   connector runs on the same PC, whichever of its addresses its origin
-//!   targets (design note §6). From any other peer the header is ignored;
+//!   targets. From any other peer the header is ignored;
 //!   an IPv6 client is keyed by its /64, so it cannot rotate addresses
 //!   within its prefix to reset its budgets;
 //! - per (client, member): three free failures, then 1, 2, 4 … s;

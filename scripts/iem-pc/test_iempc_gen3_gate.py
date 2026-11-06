@@ -1,6 +1,5 @@
 """Tests for scripts/iem-pc/iempc_gen3_gate.py, `iempc gen3-gate hil` (#72
-phase H, plan docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md
-Tasks 2, 4 and 6): the Gen 3 box's HIL job and checks, its verdict and the
+phase H): the Gen 3 box's HIL job and checks, its verdict and the
 `hil/gen3` status. No box and no device exist in CI: a stand-in `ssh` first
 on PATH plays the box (its root and the admin's home in a temporary folder,
 systemd's view of the engine's unit and drop-in, the engine's supervisor

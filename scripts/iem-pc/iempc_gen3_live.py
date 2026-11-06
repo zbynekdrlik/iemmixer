@@ -1,5 +1,4 @@
-"""`iempc gen3-gate live` (#72 phase H, plan
-docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Task 5): the live
+"""`iempc gen3-gate live` (#72 phase H): the live
 E2E on the Gen 3 box that serves the band, driven from the dev box over ssh
 (.claude/rules/live.md), its
 verdict posted as the commit status `live/gen3` on the box's build. Its call

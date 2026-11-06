@@ -1,5 +1,4 @@
-"""`iempc gen3-gate soak` (#72 phase H, plan
-docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Task 7): the soak
+"""`iempc gen3-gate soak` (#72 phase H): the soak
 on the Gen 3 box that serves the band (.claude/rules/soak.md), driven from
 the dev box over ssh: `iem-soakclient` on
 the box, beside the dev box's reads of the box's own counters, its verdict

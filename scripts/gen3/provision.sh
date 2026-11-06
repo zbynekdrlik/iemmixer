@@ -2,8 +2,7 @@
 # The remote commands name this script's own constant paths, expanded here on purpose.
 # shellcheck disable=SC2029
 set -euo pipefail
-# Provisions the Gen 3 box from the dev box, then checks it (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9, choice 1;
+# Provisions the Gen 3 box from the dev box, then checks it (#72 phase D;
 # .claude/rules/gen3.md):
 #
 #   provision.sh --host <user@host> --ntp-from <iemmixer-ops/site/gen3-dantesync.json>

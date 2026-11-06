@@ -3,7 +3,7 @@ import type { APIRequestContext } from "@playwright/test";
 import { expectBuild, live } from "./env";
 import { OPEN_MS, Wire, liveSocket } from "./socket";
 
-// The bursts (S7, #10): while the browser job runs, the gate fires the HIL test
+// The bursts (#10): while the browser job runs, the gate fires the HIL test
 // signal with the listen probe in bursts of 30 s every 60 s. The server tells
 // a `&hil=1` listen socket a burst's edges with `AudioStatus` `probe` (its
 // first probe frame) and `listening` (the first own frame after it). The live

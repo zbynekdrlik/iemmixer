@@ -4,8 +4,7 @@
 set -euo pipefail
 # Puts a CI Gen 3 bundle on the Gen 3 box into one of two slots and starts the
 # stack from it: the engine with our Dante device inside it and the server, or
-# the standalone device (#72 phase C, plan Task 6; phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 7, choice 6;
+# the standalone device (#72 phase C; phase D;
 # .claude/rules/gen3.md):
 #
 #   deploy.sh --host <user@host> --bundle <the downloaded gen3-bundle-<sha>>
@@ -108,7 +107,7 @@ set -euo pipefail
 #   until it exits 0 (healthy), at most GEN3_SERVER_WAIT_S (30) tries; its last
 #   line is printed, and a stack not healthy in time fails the deploy.
 # - Every `sudo -n` line this script sends is a line of sudo-lines.txt (with
-#   its placeholders), the template plan Task 9's provision turns into the
+#   its placeholders), the template provision turns into the
 #   box's sudoers file (test_deploy.py checks it).
 #
 # Any failure stops the script: exit 1, 2 for its command line. Site values
@@ -138,8 +137,7 @@ SENDER=band_send.py
 LIBDIR=/opt/iemmixer/lib
 # iempc gen3-gate's HIL job (phase H): the engine's ExecStart with its test flag.
 HIL_DROPIN=/run/systemd/system/iem-engine.service.d/iem-hil.conf
-# The stack's stop, exactly as the live guard runs it (plan
-# Task 7) and as the box's sudoers rule allows it.
+# The stack's stop, exactly as the live guard runs it and as the box's sudoers rule allows it.
 STOP="systemctl stop iem-server iem-engine iem-dante"
 # The PIN commands: the server's own binary as the service user, with the
 # pepper's systemd credential and the site, the PIN on stdin (`--pipe`).

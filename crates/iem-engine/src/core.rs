@@ -1,5 +1,4 @@
-//! The control core (program spec I6, §2.3, X2, X3, X13; S3 design note §3.3;
-//! the model of the #20 design note §3):
+//! The control core (program spec I6):
 //! the single writer of the mix state. `apply` is pure — no threads, no I/O —
 //! and turns one request into the new revision, the changed entities and one
 //! group of RT commands. Every field is capped here, whoever sent it.

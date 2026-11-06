@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Engine dependency allowlist (program spec §5.2, S3 design note §2).
+"""Engine dependency allowlist.
 
 Every crate the `iem-engine` binary is built from — its normal and build
 dependencies, transitively, on the Linux target — must be named in

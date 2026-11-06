@@ -1,7 +1,6 @@
 name: fuzz-nightly
 
-# The nightly shard of the engine's coverage-guided fuzzing (program spec
-# 5.2; S3 design note 4): 30 minutes of the request parser and control core.
+# The nightly shard of the engine's coverage-guided fuzzing: 30 minutes of the request parser and control core.
 # Per-push runs are 60 s in ci.yml's fuzz job.
 
 on:

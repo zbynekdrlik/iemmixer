@@ -1,4 +1,4 @@
-//! Engine start-up and the offline renderer (design note §1, §3.7): load the
+//! Engine start-up and the offline renderer: load the
 //! site and the state, start the backend (NullRt, or our own Dante device,
 //! Gen 3 phase C), open the pipes, run the control loop; or render a WAV file
 //! through the processor with `Offline`; or check a site

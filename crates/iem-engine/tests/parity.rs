@@ -1,7 +1,7 @@
-//! Parity of the linear mix (program spec §3.5; #20 design note §3, §8):
+//! Parity of the linear mix (#20):
 //!
 //! - the impulse oracle: an independent reference model, written from the
-//!   design note's model (A2–A10, and #58 design §8 for peers) over the
+//!   the model (and #58 design §8 for peers) over the
 //!   declarative site (not the engine's topology code), gives the gain from
 //!   every RX channel to every TX channel; the engine's `Offline` output of
 //!   staggered impulses equals it within 1e-12 and is exactly zero elsewhere;
@@ -55,7 +55,7 @@ impl Rng {
 }
 
 // ---------------------------------------------------------------------------
-// The reference model (design note §3), independent of the engine's code.
+// The reference model, independent of the engine's code.
 
 /// A stereo signal as gains from each RX channel: rows L and R.
 #[derive(Clone)]
@@ -759,7 +759,7 @@ fn outputs_do_not_depend_on_the_block_size() {
 /// The HIL schedule: 30 random mix commands, a HIL signal on one spare
 /// output (1 003) stopped inside a block (6 011), and one on both spare
 /// outputs that runs to its end (12 007, 0.02 s). With `listen` both signals
-/// carry the listen probe (S7), and both listen slots are listened from 50.
+/// carry the listen probe, and both listen slots are listened from 50.
 fn hil_schedule(
     topo: &Arc<Topology>,
     state: &MixState,
@@ -874,7 +874,7 @@ fn drain(c: &mut rtrb::Consumer<f32>, into: &mut Vec<f32>) {
     into.extend(got);
 }
 
-/// The listen probe (S7, #10; the owner's rule of #9 2026-09-28) on the HIL
+/// The listen probe (#10; the owner's rule of #9 2026-09-28) on the HIL
 /// schedule with `listen` and both listen slots listened: at 32/64/97/256
 /// every mix's TX is exactly 0.0 inside each signal, both listen taps carry
 /// exactly 0.0 there (their cadence kept), the probe taps carry the masked

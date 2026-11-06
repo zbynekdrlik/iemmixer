@@ -1,4 +1,4 @@
-//! The roster (#58 design §5, §6): the people, and the lineups ("bands")
+//! The roster (#58 design §5): the people, and the lineups ("bands")
 //! that place them on the site's sets, name the inputs whose owner or label
 //! depends on the band, and name their leaders. A private `roster.toml`
 //! beside the site file holds it (P6: this repository has only the synthetic
@@ -68,7 +68,7 @@ pub struct Person {
     pub name: String,
     /// At the migration from the legacy layout (once): the former member id
     /// whose presets, history and pins/hides this person gets (never its PIN
-    /// or photo), for a person who used that login until now (§9, §11).
+    /// or photo), for a person who used that login until now (§9).
     #[serde(default)]
     pub takes_over: Option<String>,
 }
@@ -511,7 +511,7 @@ impl Roster {
     }
 
     /// Whether `person` leads any lineup (a leader may switch the band from
-    /// any of them, §7).
+    /// any of them).
     pub fn leads_any(&self, person: &str) -> bool {
         self.lineups.iter().any(|l| l.leads(person))
     }

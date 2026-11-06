@@ -1,5 +1,5 @@
 //! Randomised requests and command groups (S0/S2 hand-off: the engine caps
-//! every field from any sender; design note §4). `IEM_FUZZ_ITERS` and
+//! every field from any sender). `IEM_FUZZ_ITERS` and
 //! `IEM_FUZZ_SEED` scale and seed the run (the `fuzz` CI job raises them);
 //! the coverage-guided target lives in `fuzz/`.
 

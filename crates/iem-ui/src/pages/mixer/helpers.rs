@@ -70,7 +70,7 @@ pub(super) enum MuteClick {
     Toggle(bool),
     /// The channel is silenced by a solo on another channel: its own mute
     /// changes (sent, and restored when the solo ends) but it stays silent
-    /// until then (S5 design note §9).
+    /// until then.
     Masked(bool),
 }
 

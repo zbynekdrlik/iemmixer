@@ -1,4 +1,4 @@
-//! The requests (design note §3.3): a frame's checks by role, the core's
+//! The requests: a frame's checks by role, the core's
 //! answer and its effect, and the RT commands it queues.
 
 use std::time::{Duration, Instant};

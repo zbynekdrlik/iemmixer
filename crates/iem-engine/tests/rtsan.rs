@@ -1,4 +1,4 @@
-//! I7 under RealtimeSanitizer (design note §3.8). The `engine` CI job builds
+//! I7 under RealtimeSanitizer. The `engine` CI job builds
 //! this test with a pinned nightly, `-Zsanitizer=realtime`, `-Zbuild-std` and
 //! `--cfg iem_rtsan`; `Processor::process` then carries
 //! `#[sanitize(realtime = "nonblocking")]` and any allocation, lock or
@@ -37,12 +37,12 @@ fn process_is_realtime_safe() {
         common::BLOCK as u64,
         "the loopback probe measured"
     );
-    // The listen probe ran under the sanitizer (S7), into both probe rings.
+    // The listen probe ran under the sanitizer, into both probe rings.
     assert!(
         s.handles.probes.iter().all(|c| c.slots() > 0),
         "the probe path ran"
     );
-    // The backends' histogram records ran under the sanitizer too (S7).
+    // The backends' histogram records ran under the sanitizer too.
     let h = s.hists.snapshot();
     let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
     assert_eq!(

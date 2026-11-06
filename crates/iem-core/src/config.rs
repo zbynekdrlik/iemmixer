@@ -1,6 +1,6 @@
 //! The server's part of the site file (`site.toml`): who the members are and
 //! which engine mix each hears, how the engine's inputs are shown, and the
-//! web, push, backup and tunnel settings (S5 design note §3). The engine
+//! web, push, backup and tunnel settings. The engine
 //! reads the `[engine]` table and `[guard] hil_tx` itself; the server only
 //! accepts them.
 
@@ -256,7 +256,7 @@ pub struct Config {
 
 /// A member of the band (or the engineer): the id is the URL, the login
 /// tile and the JWT subject — the predecessor's ids, so nobody logs in
-/// again (P9); `mix` is the engine mix this person hears.
+/// again; `mix` is the engine mix this person hears.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SiteMember {

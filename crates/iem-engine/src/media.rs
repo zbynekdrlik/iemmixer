@@ -1,4 +1,4 @@
-//! The media path's pure parts (X3–X5; design note §3.4): listen taps from the
+//! The media path's pure parts (X3–X5): listen taps from the
 //! RT thread's 96 kHz rings into 20 ms 48 kHz frames, and talkback frames
 //! from the server into the RT thread's 96 kHz ring. The media thread
 //! (`control`) drives them; nothing here runs on the RT thread.

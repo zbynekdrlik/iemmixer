@@ -1,5 +1,4 @@
-//! The engineer's surfaces and the server's background jobs (S5 design note
-//! §6): the F29 console (inputs, limiter counters, member-less pages, login
+//! The engineer's surfaces and the server's background jobs: the F29 console (inputs, limiter counters, member-less pages, login
 //! failures), SOS alerts (F20), and the
 //! tasks that merge meters, clear solos after the last connection left (X2)
 //! and end silent talk locks (X6).

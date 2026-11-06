@@ -1,4 +1,4 @@
-//! Saving the state (design note §3.6): the scheduled save, the
+//! Saving the state: the scheduled save, the
 //! baseline, and their alarms.
 
 use std::time::{SystemTime, UNIX_EPOCH};

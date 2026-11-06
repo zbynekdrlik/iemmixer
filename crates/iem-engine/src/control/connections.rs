@@ -1,4 +1,4 @@
-//! The connections (design note §3.3): hello and roles, replies, the
+//! The connections: hello and roles, replies, the
 //! broadcasts, and the alarms replayed to each new connection.
 
 use std::io::Write;

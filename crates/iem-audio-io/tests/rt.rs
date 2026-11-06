@@ -1,5 +1,5 @@
 //! I7 for the callback's bookkeeping: its telemetry and recording the stream
-//! histograms (S7) neither allocate nor free. Its own binary, so
+//! histograms neither allocate nor free. Its own binary, so
 //! only these tests run on the allocation detector. `assert_no_alloc` runs in
 //! warn mode (the per-thread violation count must stay zero); the first test
 //! proves the detector sees an allocation.
@@ -53,7 +53,7 @@ fn callback_telemetry_and_the_gap_scan_do_not_allocate() {
     assert_eq!(violations, 0, "the callback telemetry allocated");
 }
 
-/// I7 (S7 design note §3): the backends record every callback's interval and
+/// I7: the backends record every callback's interval and
 /// time into the stream histograms; neither allocates nor frees, overflow
 /// included. Built outside the detector: the arrays are the stream's.
 #[test]

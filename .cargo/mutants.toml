@@ -13,7 +13,7 @@ profile = "mutants"
 test_tool = "nextest"
 
 exclude_globs = [
-  # The soak client's binary (S7): argv, env and file glue; the
+  # The soak client's binary: argv, env and file glue; the
   # decisions are in lib.rs (parse_args, pin_from, credential, read_secret,
   # engineer_token, origin, Gaps, write_summary), net.rs (run), tally.rs and
   # mint.rs (the token subcommand), mutated; CI runs the binary (tests/fake_server/ checks its exit codes,
@@ -30,7 +30,7 @@ exclude_re = [
   # WS client; the Playwright suite covers them (whole-body replacements only).
   "replace start_server -> ",
   "replace run_server -> ",
-  # WebSocket upgrades and per-connection loops (S5): socket reads, writes and
+  # WebSocket upgrades and per-connection loops: socket reads, writes and
   # timers; the message logic is in tested functions (view::command,
   # updates_for, own_echo, addressed, alert_catchup, slot_of, TalkLock, the
   # talkback decoder; the listen probe's asks_for_probe, feeds, Feeds::next
@@ -57,7 +57,7 @@ exclude_re = [
   # tested token_refused, and e2e/tests/header.spec.ts drives it (502 while
   # the server is gone, 200 after the reconnect).
   "iem-ui/src/api\\.rs.*\\bverify_token_valid\\b",
-  # Leptos component bodies (S5): a PascalCase function is a component; its
+  # Leptos component bodies: a PascalCase function is a component; its
   # body is DOM event closures and effects that native tests cannot mount. The
   # E2E suites drive them; their pure logic lives in tested helpers.
   "iem-ui/src/.* in [A-Z][A-Za-z]*$",
@@ -105,14 +105,14 @@ exclude_re = [
   "iem-ui/src/pages/mixer/helpers\\.rs.*ws_send",
   # Push subscription through the service worker's PushManager.
   "iem-ui/src/pages/mixer/push\\.rs.*subscribe_to_push",
-  # Engine (S3): effects with no observable outcome through the engine's API.
+  # Engine: effects with no observable outcome through the engine's API.
   # The fsync of a file and of the state directory (persist/files.rs, the
   # file system behind the #32 seam): durability shows only across a power
   # loss; the tests' fault seam fails them to prove the protocol instead.
   # `pause` is the real 200 ms wait between read tries: only time shows it,
   # and the fault seam counts the pauses to test the retry.
   "iem-engine/src/persist/files\\.rs.*\\b(sync_file|sync_dir|pause)\\b",
-  # `iem-dante-dev health`'s glue (#72 phase D, plan Task 6; ported from
+  # `iem-dante-dev health`'s glue (#72 phase D; ported from
   # dstack fdfc321 with the health): `check` reads the box's own
   # systemd units and CLOCK_MONOTONIC and sleeps the second between the two
   # control-socket reads, `systemctl_show` runs the box's systemctl: a test
@@ -126,13 +126,13 @@ exclude_re = [
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream).
   "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
-  # The engine's Dante backend (#72 phase C, plan Task 3; Linux), its glue.
+  # The engine's Dante backend (#72 phase C; Linux), its glue.
   # `start` sets up, starts and wires the real
   # device (`iem_dante::host::prepare` and `Prepared::start`), which needs
   # an interface with a usable MAC and binds the Dante ports and the mDNS
   # daemon on it: the unit tests never have one (loopback's all-zero MAC is
   # a Setup refusal) and must not announce on the build machine's network;
-  # the box's live runs (plan Tasks 9 to 11) run it. `<impl Device for
+  # the box's live runs run it. `<impl Device for
   # Host>` only forwards to `Host::ended` and `Host::stop`, mutated and
   # tested in dstack's host/tests.rs. Every decision stays mutated:
   # `check`, `timing`, `options`, `host_error`, `join_within` and the
@@ -146,7 +146,7 @@ exclude_re = [
   # tested: stop_ends_the_pump_before_the_device; join_within itself stays
   # mutated).
   "iem-engine/src/dante\\.rs.*delete ! in <impl Driver for DanteDriver>::stop$",
-  # Equivalent `>` → `>=` (S2): at equality both branches give the same
+  # Equivalent `>` → `>=`: at equality both branches give the same
   # result, so no input can tell them apart.
   # |x| equal to the running peak: assigning the same value changes nothing.
   "iem-dsp/src/meter\\.rs.*replace > with >= in PeakMeter<CH>::observe",
@@ -158,27 +158,27 @@ exclude_re = [
   "iem-dsp/src/eq\\.rs.*replace > with >= in gain_key",
   # GR meter ±0: 20·log10(0) = −∞, floored by max(−150) to the else branch's −150.
   "iem-limiter-mga/src/lib\\.rs.*replace > with >= in Limiter::gr_db",
-  # Equivalent (S3). `trips > 0` only skips adding zero trips to the counters.
+  # Equivalent. `trips > 0` only skips adding zero trips to the counters.
   "iem-engine/src/rt/render\\.rs.*replace > with >= in Processor::render_mixes",
-  # Equivalent (S3). With the budget spent, `budget >= 0` also cuts the segment at the
+  # Equivalent. With the budget spent, `budget >= 0` also cuts the segment at the
   # waiting command; rendering in two pieces is bit-identical (block-size invariance tests).
-  # anchor 913: if budget > 0
-  "iem-engine/src/rt\\.rs:913:.*replace > with >= in <impl Process for Processor>::process",
+  # anchor 912: if budget > 0
+  "iem-engine/src/rt\\.rs:912:.*replace > with >= in <impl Process for Processor>::process",
   # The fade wait's `elapsed < FADE_WAIT`: differs only at the exact nanosecond.
   "iem-engine/src/control/stop\\.rs.*replace < with <= in Control::fade_out",
-  # Unobservable (S3): the `!` only decides whether "solos cleared" is logged.
+  # Unobservable: the `!` only decides whether "solos cleared" is logged.
   "iem-engine/src/control\\.rs.*delete ! in Control::tick",
-  # Equivalent (S5). At exactly −60 dB both branches of the fader domain give −60.
+  # Equivalent. At exactly −60 dB both branches of the fader domain give −60.
   "iem-server/src/view\\.rs.*replace > with >= in ui_db$",
-  # Equivalent (S5). p = ±0 rounds to 0 % and is "C" before the side is chosen.
+  # Equivalent. p = ±0 rounds to 0 % and is "C" before the side is chosen.
   # anchor 143: } else if p < 0.0 {
   "iem-server/src/backup\\.rs:143:.*replace < with <= in pan$",
-  # Unobservable (S5): the frame age `< 2 s` differs only at the exact nanosecond.
+  # Unobservable: the frame age `< 2 s` differs only at the exact nanosecond.
   "iem-server/src/engine/media\\.rs.*replace < with <= in MediaLink::diagnostics$",
-  # Unobservable (S5): Listen commands on the mixer socket are ignored either
+  # Unobservable: Listen commands on the mixer socket are ignored either
   # way; without the arm the default one refuses them and only logs a warning.
   "iem-server/src/mixer_ws\\.rs.*delete match arm ClientMsg::ListenStart.* in handle$",
-  # Unobservable (S5): the pruned count only decides whether it is logged.
+  # Unobservable: the pruned count only decides whether it is logged.
   "iem-server/src/backup_daemon\\.rs.*replace > with (==|<|>=) in run$",
   # The backup daemon's endless 30 s loop on the wall clock (whole-body
   # replacement only); its steps are tested functions (due, settle,
@@ -196,6 +196,6 @@ exclude_re = [
   # `if !(1..=MAX_BLOCK).contains(&cfg.block)`, which is NOT equivalent and IS
   # killed by `run_refuses_a_bad_block_and_a_bad_site`, and `delete ! in
   # run_hil` is killed too — both must stay mutated.
-  # anchor 554: if !hil.is_empty() {
-  "iem-engine/src/engine\\.rs:554:.*delete ! in run$",
+  # anchor 551: if !hil.is_empty() {
+  "iem-engine/src/engine\\.rs:551:.*delete ! in run$",
 ]

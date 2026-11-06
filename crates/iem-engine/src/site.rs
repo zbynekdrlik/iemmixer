@@ -1,5 +1,4 @@
-//! The engine's part of `site.toml` (program spec I4, §3.1; #20 design note
-//! §4): the `[engine]` table of inputs, groups and mixes, and `[guard]
+//! The engine's part of `site.toml` (program spec I4): the `[engine]` table of inputs, groups and mixes, and `[guard]
 //! hil_tx`. Everything else in the file belongs to the server and is ignored
 //! here; inside `[engine]` unknown keys are errors.
 

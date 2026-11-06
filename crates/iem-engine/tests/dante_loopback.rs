@@ -1,6 +1,5 @@
 //! A mix through our own Dante device on loopback, bit for bit (Gen 3
-//! phase C, plan `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`
-//! Task 4): the engine's real `Processor` inside the device's pump
+//! phase C): the engine's real `Processor` inside the device's pump
 //! (`iem_dante::stream::Pump`) on the channels `iem_engine::dante::check`
 //! maps, the device's TX and RX on 127.0.0.1, our own flow-control server
 //! granting our own RX one flow of our own TX (the self-loop: RX 1 and RX 2

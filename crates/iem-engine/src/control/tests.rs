@@ -294,7 +294,7 @@ fn scripted(ending: Option<Ending>) -> Box<dyn Driver> {
     Box::new(Scripted { ending })
 }
 
-/// A running backend with stream histograms (S7).
+/// A running backend with stream histograms.
 struct Measured(HistSnapshot);
 
 impl Driver for Measured {
@@ -313,7 +313,7 @@ impl Driver for Measured {
 }
 
 /// `Status` carries the stream's two histograms and their overflow
-/// bucket (S7 design note §3); a backend without them, or no backend,
+/// bucket; a backend without them, or no backend,
 /// none and 0.
 #[test]
 fn status_carries_both_histograms_and_their_top() {
@@ -435,6 +435,6 @@ mod peers;
 #[cfg(unix)]
 mod supervise;
 
-/// S7 HIL v2 (#10, plan Task 28): the reopen's time and the faulting
+/// S7 HIL v2 (#10): the reopen's time and the faulting
 /// callback's time in `Status`.
 mod s7;

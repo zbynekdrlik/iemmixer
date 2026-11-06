@@ -1,4 +1,4 @@
-//! Band data files, schema 3 (#20 design note §7):
+//! Band data files, schema 3:
 //! presets, snapshots and customizations keyed by the engine's stable ids
 //! instead of REAPER track indices. The server reads and writes them. Schema 3: sources
 //! are inputs or heard mixes, group faders are keyed by group.

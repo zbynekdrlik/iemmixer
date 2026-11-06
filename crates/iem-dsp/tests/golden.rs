@@ -1,4 +1,4 @@
-//! S1b golden parity (program spec §3.5): every ReaEQ vector (matrix, edges,
+//! S1b golden parity: every ReaEQ vector (matrix, edges,
 //! site EQs) ≤ 1e-9, the response ≤ 0.01 dB over 20 Hz–20 kHz, the measured pan
 //! table and the pan-dependent renders, and the mono downmix law. Each test
 //! prints `golden <category>: max …` lines for the CI parity report.

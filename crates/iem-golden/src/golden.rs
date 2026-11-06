@@ -1,4 +1,4 @@
-//! Reader for the committed S1b goldens (`goldens/s1b`, S2 design note §5):
+//! Reader for the committed S1b goldens (`goldens/s1b`):
 //! `index.json` maps file → case → `{offset, shape, …metadata}`, where the
 //! offset counts f64 values inside `<file>.f64` (float64 little-endian), and
 //! `laws.json` holds the measured laws. The S2 DSP and limiter tests read it.

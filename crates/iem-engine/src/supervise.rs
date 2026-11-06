@@ -1,5 +1,4 @@
-//! `iem-engine supervise` (Gen 3 phase H, #72; plan
-//! `docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md` Task 3): a
+//! `iem-engine supervise` (Gen 3 phase H, #72): a
 //! supervisor client of the engine's control pipe for the Gen 3 box:
 //! `test-signal <input> <dbfs> <seconds> [--listen]` sends
 //! `HilTestSignal` (every mix TX written as zero while it runs, the sine

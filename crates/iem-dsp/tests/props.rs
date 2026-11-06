@@ -1,4 +1,4 @@
-//! Properties under random input (the S2 fuzz harness, design note §4):
+//! Properties under random input (the S2 fuzz harness):
 //! block-size invariance (§3.5: 32/64/97/256 with changes at identical sample
 //! indices) and a seeded fuzz of parameters, values and block splits. The
 //! `fuzz` CI job raises `IEM_FUZZ_ITERS` and seeds `IEM_FUZZ_SEED` per run.

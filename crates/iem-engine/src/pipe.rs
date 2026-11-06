@@ -1,4 +1,4 @@
-//! Local-socket plumbing (program spec §2.3, I1; design note §3.6): names,
+//! Local-socket plumbing (I1): names,
 //! listeners, and connections shared between one reader thread and the
 //! writing control or media thread, over Unix socket files.
 //!

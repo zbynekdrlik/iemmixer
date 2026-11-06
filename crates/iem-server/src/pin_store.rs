@@ -1,4 +1,4 @@
-//! Argon2id PIN hashes (program spec §5.3): `<secrets>/pin_hashes.json`.
+//! Argon2id PIN hashes: `<secrets>/pin_hashes.json`.
 //! Never plaintext: every stored value must be an argon2id PHC string, and a
 //! file that holds anything else is a load error instead of being ignored.
 

@@ -1,4 +1,4 @@
-//! The iemmixer server (program spec §2.1; S5 design note): serves the web
+//! The iemmixer server: serves the web
 //! UI, authenticates the band (PIN → JWT), and is the engine's controller —
 //! an engine client over the control and media pipes, a mirror of the
 //! engine's state behind the UI, Opus for Listen and Talkback, and the
@@ -227,7 +227,7 @@ pub struct AppState {
     pub pin_store: Arc<RwLock<pin_store::PinStore>>,
     /// argon2id hasher keyed with the pepper (`<config dir>/secrets/`)
     pub pin_hasher: pin_hash::PinHasher,
-    /// Login failure budgets (program spec §5.3)
+    /// Login failure budgets
     pub login_guard: Arc<login_guard::LoginGuard>,
     /// Bounded concurrency for argon2id work
     pub hash_gate: Arc<login_guard::HashGate>,
@@ -298,7 +298,7 @@ impl AppState {
             .as_ref()
             .map(|_| roster_watch::Unsettled::new(roster_watch::applied_base(config_dir)));
         // The tunnel connector runs on this PC: CF-Connecting-IP counts only
-        // from loopback and this host's own addresses (design note §6).
+        // from loopback and this host's own addresses.
         let host = login_guard::HostAddrs::read();
         tracing::info!(
             ?host,

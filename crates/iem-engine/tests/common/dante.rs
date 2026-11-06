@@ -1,5 +1,5 @@
 //! The worst-case scenario driven through the Dante backend's pump (Gen 3
-//! phase C, plan Task 3; Linux): the real `Processor` of `scenario()` inside
+//! phase C; Linux): the real `Processor` of `scenario()` inside
 //! `iem_dante::stream::Pump`, its inputs read from the device's RX rings
 //! (hot topology inputs; the D5(b) loopback returns fed one block later from
 //! the spare outputs' engine rings, so the round-trip probe measures), its

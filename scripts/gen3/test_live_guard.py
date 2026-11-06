@@ -1,9 +1,7 @@
-"""Tests for scripts/gen3/live_guard.py (#72 phase B, plan Task 8 Steps 1
-and 3): the decisions on synthetic status reads, and the guard itself
+"""Tests for scripts/gen3/live_guard.py (#72 phase B): the decisions on synthetic status reads, and the guard itself
 against a stand-in `ssh` first on PATH that plays the box (its status reads
 from a scripted list, the stop) on a clock that moves only when the guard
-sleeps; from #72 phase D (plan
-docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Tasks 3 and 8) the
+sleeps; from #72 phase D the
 packets' judge, its summary in the end's line and the clock's counts in the
 lines. Every value is synthetic (P6)."""
 from __future__ import annotations

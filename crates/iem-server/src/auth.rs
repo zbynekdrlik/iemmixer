@@ -1,6 +1,6 @@
 //! Authentication: PIN login → JWT, PIN changes, token checks.
 //!
-//! Login protection (program spec §5.3): admission by `LoginGuard` before any
+//! Login protection: admission by `LoginGuard` before any
 //! hashing, a bounded hashing gate, argon2id verification of PIN hashes,
 //! failure-only budgets, never a lockout.
 

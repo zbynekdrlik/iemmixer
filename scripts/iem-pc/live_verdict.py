@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The live verdict (S7 design note §6; plan Task 22). Pure, stdlib only.
+"""The live verdict. Pure, stdlib only.
 
 `report` reads the run's record directory and prints one JSON object,
 `{"conclusion", "summary", "first_failure", "numbers"}`; `iempc gen3-gate live`

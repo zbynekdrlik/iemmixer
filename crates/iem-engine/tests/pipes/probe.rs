@@ -1,4 +1,4 @@
-//! The listen probe through the pipes (S7 design note §6, #10): NullRt under
+//! The listen probe through the pipes (#10): NullRt under
 //! `--test-signal` on the test site (`[guard] hil_tx` 94/95). While a HIL
 //! signal with `listen` runs, the media pipe carries the probe streams 2 and
 //! 3 at the signal's level and the listen streams 0 and 1 only silence (the

@@ -1,5 +1,4 @@
-# The Gen 3 box's sudo rule (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Tasks 7-9; rules in
+# The Gen 3 box's sudo rule (#72 phase D; rules in
 # .claude/rules/gen3.md): one line per command a Gen 3 tool sends through
 # `sudo -n`, written `<runas> | <command exactly as sent>`, the command being
 # what follows `sudo -n` (`root`) or `sudo -n -u <runas>`. Placeholders:
@@ -109,7 +108,7 @@ root | find -P /var/lib/iemmixer /var/lib/iem-dante -not -user iemmixer -print -
 root | cat /sys/module/drm_kms_helper/parameters/poll
 root | cat /boot/grub/grub.cfg
 
-# Dev time by hand (plan Live 3): the engine's restart, the box's graceful
+# Dev time by hand: the engine's restart, the box's graceful
 # reboot.
 root | systemctl restart iem-engine
 root | systemctl reboot

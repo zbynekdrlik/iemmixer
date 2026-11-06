@@ -3,7 +3,7 @@ import { test, expect, type Page } from "./support/live";
 import type { Relay } from "./support/relay";
 import { apiGet, expectBuild, live, openLive, type Who } from "./support/env";
 
-// The tunnel status on the real PC (S7, #10; rows 735 and 736, reaperiem#202):
+// The tunnel status on the real PC (#10; rows 735 and 736, reaperiem#202):
 // the page comes through the band's public host, so through the real
 // cloudflared, and the server polls cloudflared's /ready. While the tunnel
 // is Ok, the engineer's header shows the indicator „Vonkajší prístup: OK"

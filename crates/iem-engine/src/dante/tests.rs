@@ -1,4 +1,4 @@
-//! The Dante backend's decisions (Gen 3 phase C, plan Task 3): the channel
+//! The Dante backend's decisions (Gen 3 phase C): the channel
 //! map and its refusals, the timing, the device's options and errors, and
 //! the driver over a fake device and a stand-in pump thread.
 

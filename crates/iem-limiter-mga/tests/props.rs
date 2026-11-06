@@ -1,6 +1,6 @@
 // Part of iem-limiter-mga (GPL-3.0-or-later); see ../src/lib.rs.
 
-//! Fuzz harness (S2 design note §4): random material, limits, toggles and block
+//! Fuzz harness: random material, limits, toggles and block
 //! splits, with hostile values. Properties: never a panic; the limiter never
 //! amplifies; while enabled the output stays under the limit; after a
 //! non-finite input a node reset restores bounded output. The `fuzz` CI job

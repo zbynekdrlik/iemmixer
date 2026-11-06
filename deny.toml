@@ -24,12 +24,12 @@ unused-allowed-license = "allow"
 crate = "aws-lc-sys"
 allow = ["OpenSSL"]
 
-# D1(a): the MGA JS Limiter port is GPL-3.0-or-later; only the engine links it (S3)
+# D1(a): the MGA JS Limiter port is GPL-3.0-or-later; only the engine links it
 [[licenses.exceptions]]
 crate = "iem-limiter-mga"
 allow = ["GPL-3.0-or-later"]
 
-# D1(a): the engine links the limiter, so the engine binary is GPL (S3)
+# D1(a): the engine links the limiter, so the engine binary is GPL
 [[licenses.exceptions]]
 crate = "iem-engine"
 allow = ["GPL-3.0-or-later"]

@@ -1,7 +1,7 @@
 import { test, expect } from "./support/live";
 import { expectBuild, live, openStart, runMarker } from "./support/env";
 
-// The client error report on the real PC (S7, #10; row 555, F25): the start
+// The client error report on the real PC (#10; row 555, F25): the start
 // page posts a panic report as the UI's panic hook does, from the page and
 // through the band's public host, with this run's marker
 // `iemmixer-live-marker-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>` as its

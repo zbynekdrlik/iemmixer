@@ -1,4 +1,4 @@
-//! The server against the real engine (S5 design note §7): `iem-engine` on
+//! The server against the real engine: `iem-engine` on
 //! NullRt with the test site, driven through the server's own client, view
 //! and routes. Every wait is bounded (5 s).
 

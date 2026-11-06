@@ -1,4 +1,4 @@
-//! The UI's view of the engine (S5 design note §5, §6): channels of a mixer
+//! The UI's view of the engine: channels of a mixer
 //! page from the mirror, the UI updates a change produces for a page, and
 //! the engine commands a UI command becomes — with the server's permissions
 //! (the engine does no authorisation, it only caps values). Pure: no I/O.

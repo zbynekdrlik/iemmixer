@@ -1,4 +1,4 @@
-//! The engine through its pipes (design note §3.6, §3.7): an in-process
+//! The engine through its pipes: an in-process
 //! engine on NullRt at B = 32 with a temporary state directory, and the
 //! `iem-engine` binary. Every read has a 5 s timeout; every wait is bounded.
 //!
@@ -450,7 +450,7 @@ fn meters_and_status_flow() {
         s.process_max_us
     );
     assert_eq!(s.cmd_backlog, 0);
-    // NullRt's stream histograms (S7): two periods at 32 samples, every
+    // NullRt's stream histograms: two periods at 32 samples, every
     // callback's time counted before its callback was.
     let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
     assert_eq!(s.hist_top_us, 667);
@@ -869,7 +869,7 @@ fn fault_injection_releases_the_driver_and_exits() {
     assert_eq!(iem_engine::persist::decode(&saved).unwrap().rev, 1);
 }
 
-/// HIL v2 (S7, #10): the last `Status` before a fault's `DriverReleased`
+/// HIL v2 (#10): the last `Status` before a fault's `DriverReleased`
 /// carries the fault and the faulting callback's own time (NullRt: its
 /// `process()` up to the caught panic), so a supervisor reads it before the
 /// engine ends.
@@ -944,6 +944,6 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
 #[path = "pipes/binary.rs"]
 mod binary;
 
-/// The listen probe on the media pipe (S7).
+/// The listen probe on the media pipe.
 #[path = "pipes/probe.rs"]
 mod probe;

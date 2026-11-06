@@ -1,7 +1,6 @@
-//! The engine ↔ server protocol (S3; program spec §2.3, §2.4, I6; design note
-//! `docs/superpowers/specs/2026-09-26-s3-engine-core-design.md` §3.3, §3.6):
+//! The engine ↔ server protocol (program spec I6):
 //!
-//! - [`ids`]: stable string ids of inputs, groups and mixes (#20 design note);
+//! - [`ids`]: stable string ids of inputs, groups and mixes;
 //! - [`state`]: the persisted mix state and the transient engine state;
 //! - [`msg`]: commands, replies and events, protocol N/N−1 negotiation;
 //! - [`frame`]: the control pipe's length-prefixed JSON frames;

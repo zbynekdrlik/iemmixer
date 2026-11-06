@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { toneOf, type Tone } from "./tone";
 
-// What the page plays and what it sends, read in the page (S7, #10). The init
+// What the page plays and what it sends, read in the page (#10). The init
 // scripts run in the page before its own code (`page.addInitScript`): they
 // may use no import or module constant, because Playwright's transpiler
 // rewrites such references into names that do not exist in the page.

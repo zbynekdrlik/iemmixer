@@ -1,4 +1,4 @@
-//! `/ws/talkback` — the engineer's push-to-talk audio (F18; X5, X6, §5.3):
+//! `/ws/talkback` — the engineer's push-to-talk audio (F18; X5, X6):
 //! the socket binds to the talk id the mixer session holds (`&talk=<id>` at
 //! the upgrade, while the unbound lock lives: 2 s from acquiring, #63;
 //! `TalkLock::bind` logs the outcome); its Opus frames are decoded and

@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 iemmixer contributors.
 
-//! The box's health (Gen 3 phase D, plan
-//! `docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md` Task 6,
-//! choice 4): `iem-dante-dev health [--socket <path>] [--server-port <n>]`
+//! The box's health (Gen 3 phase D): `iem-dante-dev health [--socket <path>] [--server-port <n>]`
 //! prints one JSON line of numbers and fixed words and exits 0 healthy, 1
 //! degraded or failed, 3 stopped (2 for the command line). A command, not a
 //! port: it is in the bundle, versioned with it; the dev box reads it over

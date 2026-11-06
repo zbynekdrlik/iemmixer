@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { expect, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 
-// The live run's site values (S7, #10; P6): every one comes from a LIVE_*
+// The live run's site values (#10; P6): every one comes from a LIVE_*
 // variable of `iempc gen3-gate live`, read on first use, so `--list` works without
 // any of them. A refusal names the variable, never its value, and no error
 // here carries a URL (a socket URL holds a token in its query).

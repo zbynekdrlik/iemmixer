@@ -1,4 +1,4 @@
-//! The soak client against a fake server (S7 plan Task 6): the server's
+//! The soak client against a fake server: the server's
 //! login, `/api/site`, the mixer socket and the listen socket as the real
 //! server serves them, on `127.0.0.1:0`, one thread per connection. Every
 //! run is bounded: it runs on its own thread and the test waits for it with

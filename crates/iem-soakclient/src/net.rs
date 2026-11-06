@@ -1,4 +1,4 @@
-//! The soak client's wire (S7 design note §4): `/api/site`, the build check
+//! The soak client's wire: `/api/site`, the build check
 //! (`/api/version`) and the PIN login over plain HTTP, the mixer and listen
 //! sockets each on its own thread, the run's clock on the calling thread. A
 //! socket read waits at most `read_timeout`, so a reading thread sees the

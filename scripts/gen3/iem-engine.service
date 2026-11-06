@@ -1,9 +1,7 @@
 # iemmixer's engine on the Gen 3 box with our Dante device inside it (#72
-# phase C, plan docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md
-# Task 6): `iem-engine run --backend dante`, installed by scripts/gen3/deploy.sh;
+# phase C): `iem-engine run --backend dante`, installed by scripts/gen3/deploy.sh;
 # rules in .claude/rules/gen3.md and .claude/rules/engine.md.
-# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
-# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# Phase D: it runs as the service user `iemmixer` (a system
 # user without login or home, not site data), and a unit that stays down
 # raises one alarm (iem-alarm@.service).
 # Public repository (P6): the box's interface comes from a file deploy.sh

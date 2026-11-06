@@ -1,4 +1,4 @@
-//! `GET /api/peer` (S7 HIL v2, design §7 "the tunnel peer"): how this server
+//! `GET /api/peer` (HIL v2, design §7 "the tunnel peer"): how this server
 //! classified the request it answers, by `login_guard`'s rule: `origin`
 //! "tunnel" when the socket peer is this host and the request carries
 //! CF-Connecting-IP, else "lan"; `peer` "loopback" | "host" | "other". Fixed

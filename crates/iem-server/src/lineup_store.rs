@@ -1,4 +1,4 @@
-//! The lineups' files (#58 design §6, §7, §11). `<config>/lineups/<id>/`
+//! The lineups' files (#58 design §6). `<config>/lineups/<id>/`
 //! holds a lineup's stored mixer state (`state.json`, a backup's shape: the
 //! state and its people's pins and hides) and its people's presets, history
 //! and pins/hides (the band store's `presets/`, `snapshots/` and

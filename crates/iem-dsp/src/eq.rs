@@ -53,7 +53,7 @@ pub struct Band {
 }
 
 impl Band {
-    /// A band's values must be finite and not negative (the engine caps fields, §2.3).
+    /// A band's values must be finite and not negative (the engine caps fields).
     pub fn is_valid(&self) -> bool {
         [self.freq_hz, self.gain_lin, self.bw_oct]
             .iter()

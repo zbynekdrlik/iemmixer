@@ -1,6 +1,4 @@
-"""`iempc gen3-gate hil` (#72 phase H, plan
-docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Tasks 2, 4 and
-6): the Gen 3 box's own HIL gate, driven from the dev box over ssh on the box
+"""`iempc gen3-gate hil` (#72 phase H): the Gen 3 box's own HIL gate, driven from the dev box over ssh on the box
 that serves the band, its verdict posted as the commit status `hil/gen3` on the
 box's build.
 

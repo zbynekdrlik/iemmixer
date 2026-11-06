@@ -1,4 +1,4 @@
-"""Tests for scripts/iem-pc/live_verdict.py (S7 design note §6, plan Task 22):
+"""Tests for scripts/iem-pc/live_verdict.py:
 the live verdict on synthetic records, the ops report job's mapping and the
 reading of the expected titles from the spec files. Every value is synthetic:
 the titles are invented and mixer.example.org is the placeholder host that no

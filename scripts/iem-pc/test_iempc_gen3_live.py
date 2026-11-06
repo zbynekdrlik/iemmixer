@@ -1,6 +1,5 @@
 """Tests for scripts/iem-pc/iempc_gen3_live.py, `iempc gen3-gate live` (#72
-phase H, plan docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md
-Task 5): the live E2E on the Gen 3 box, driven from the dev box. No box, no
+phase H): the live E2E on the Gen 3 box, driven from the dev box. No box, no
 browser and no public URL exist in CI: test_iempc_gen3_gate's stand-in `ssh`
 plays the box (the HIL job, the service user's mint folder, the burst, the
 server's journal, the push count), a stand-in `npx` first on PATH plays

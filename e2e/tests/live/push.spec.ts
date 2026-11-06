@@ -16,7 +16,7 @@ import { relaySockets, type Relay } from "./support/relay";
 import { USER_AGENT } from "./support/socket";
 import { PushLedger, SUBSCRIBE, UNSUBSCRIBE, bodyOf, browserEndpoint, endpointOf, isPostTo } from "./support/push";
 
-// Push unsubscribe on the real PC (S7, #10; row 717, reaperiem#188): the
+// Push unsubscribe on the real PC (#10; row 717, reaperiem#188): the
 // engineer's page subscribes to Web Push with the server's VAPID key, and
 // logging out in the settings revokes the subscription in the browser and on
 // the server. Playwright's contexts are incognito, where Chrome has no Push

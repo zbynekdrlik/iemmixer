@@ -1,5 +1,5 @@
 //! I7: `process()` neither allocates nor frees, whatever the commands, taps,
-//! talkback, test signal, meters or sanitiser trips (design note §3.8).
+//! talkback, test signal, meters or sanitiser trips.
 //! `assert_no_alloc` runs in warn mode (the violation count must stay zero);
 //! the first test proves the detector sees an allocation. Its own test binary,
 //! because it installs the global allocator.
@@ -43,12 +43,12 @@ fn process_does_not_allocate() {
         common::BLOCK as u64,
         "the loopback probe measured"
     );
-    // The listen probe ran under the detector (S7), into both probe rings.
+    // The listen probe ran under the detector, into both probe rings.
     assert!(
         s.handles.probes.iter().all(|c| c.slots() > 0),
         "the probe path ran"
     );
-    // The backends' histogram records ran under the detector too (S7).
+    // The backends' histogram records ran under the detector too.
     let h = s.hists.snapshot();
     let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
     assert_eq!(

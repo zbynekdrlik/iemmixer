@@ -220,7 +220,7 @@ fn the_hil_outputs_in_status_are_additive() {
     assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
 }
 
-/// The stream histograms in `Status` (S7 design note §3): sparse
+/// The stream histograms in `Status`: sparse
 /// `[[bucket, count], …]`, additive both ways, absent without a stream.
 #[test]
 fn the_histograms_in_status_are_additive_and_sparse() {

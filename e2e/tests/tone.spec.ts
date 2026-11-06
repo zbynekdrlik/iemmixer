@@ -9,7 +9,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 
-// The live specs' pure estimators and their in-page analyser (S7, #10), run
+// The live specs' pure estimators and their in-page analyser (#10), run
 // in the mock E2E job: the live specs themselves run only from `iempc gen3-gate
 // live`, against the box. Every input is synthetic with a known answer; only
 // the analyser test uses a page (its own, served by a route, no server).

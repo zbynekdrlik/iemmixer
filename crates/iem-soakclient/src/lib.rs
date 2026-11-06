@@ -1,4 +1,4 @@
-//! The soak harness (S7 design note §4): signs in as the engineer, opens
+//! The soak harness: signs in as the engineer, opens
 //! one mixer socket and one listen socket on one member's mix at the LAN
 //! address the server names (`/api/site`), decodes the Opus frames and
 //! counts frames, gaps and meter frames into a JSON summary. It reads only:
@@ -15,7 +15,7 @@
 //! summary. [`tally`] counts a run into its summary (pure too); [`net`] is
 //! the wire: the sign-in and the socket threads. [`mint`] is the
 //! `iem-soakclient token` subcommand: a short-lived token, signed on the
-//! server's PC, written to a file for the live run (S7 plan Task 23).
+//! server's PC, written to a file for the live run.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(
@@ -508,7 +508,7 @@ impl Reason {
     }
 }
 
-/// The harness's summary (S7 design note §4), rewritten every minute and at
+/// The harness's summary, rewritten every minute and at
 /// the end: numbers and reason codes only (P6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

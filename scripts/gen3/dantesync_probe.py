@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The read back of dantesync on the Gen 3 box (#72 phase B, plan Task 2;
+"""The read back of dantesync on the Gen 3 box (#72 phase B;
 .claude/rules/gen3.md): runs ON the box, fed to `python3 -` over ssh by
 install-dantesync.sh (stdlib only, no file left on the box), or by hand:
 

@@ -1,5 +1,4 @@
-"""Tests for scripts/gen3/deploy.sh (#72 phase C, plan Task 6; phase D, plan
-docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 7: two slots,
+"""Tests for scripts/gen3/deploy.sh (#72 phase C; phase D: two slots,
 attested, from one commit): the Gen 3 stack's deploy, run from a copy of this
 checkout's script, units and test site in a git repository of its own (the
 checkout deploy.sh checks), against a stand-in `ssh`, `scp` and `gh` first on
@@ -1861,8 +1860,7 @@ class DeployTests(unittest.TestCase):
         self.assertNotIn("systemctl disable iem-dante iem-engine iem-server", seen)
 
 class UnitTests(unittest.TestCase):
-    """The units (phase C plan Task 6 Interfaces, choice 5; phase D plan Task 5,
-    choices 3 and 5: the service user, the alarm unit)."""
+    """The units (phases C and D: the service user, the alarm unit)."""
 
     SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "busybox", "env"}
     HARDENING = (("NoNewPrivileges", "yes"), ("ProtectSystem", "strict"), ("ProtectHome", "yes"),

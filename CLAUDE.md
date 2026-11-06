@@ -2,7 +2,7 @@
 
 An in-ear-monitor mixer for a band: a native Rust audio engine with its own Dante device, a server and a phone UI, on one Linux box (Gen 3). **Public repository** — site data never enters it (program spec P6).
 
-- Design: `docs/superpowers/specs/2026-10-24-gen3-linux-dante-design.md`; the program spec it grew from, `docs/superpowers/specs/2026-09-24-iemmixer-gen2-program.md`, is ended and keeps only its principles (P6, I7, I8). A new sub-project gets a design note and a plan in `docs/superpowers/` before code.
+- Design: `docs/superpowers/specs/2026-10-24-gen3-linux-dante-design.md`; the principles and invariants the code cites (P6, I7, I8 …) are in `docs/superpowers/specs/2026-09-24-iemmixer-gen2-program.md`. A new sub-project gets a design note and a plan in `docs/superpowers/` before code; a finished plan is removed.
 - Tickets: this repository's issues. Predecessor issues are written `reaperiem#N`; `#N` always means this repository.
 
 <!-- airuleset:tray=n/a a server on a headless Linux box, no desktop -->

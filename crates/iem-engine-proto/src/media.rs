@@ -1,4 +1,4 @@
-//! Media-pipe frames (§2.3, X3–X5; design note §3.4): 20 ms of 48 kHz audio
+//! Media-pipe frames (§2.3, X3–X5): 20 ms of 48 kHz audio
 //! as f32 little-endian after a 20-byte header — `IEMF`, version 1, stream,
 //! channels, 0, sequence (`u64` LE), frames (`u16` LE), 0 0.
 
@@ -20,10 +20,10 @@ pub mod stream {
     pub const ENGINEER_LISTEN: u8 = 0;
     /// One member's listen tap (X3 slot 1), stereo.
     pub const MEMBER_LISTEN: u8 = 1;
-    /// The listen probe of the engineer's slot (S7): the HIL sine, stereo,
+    /// The listen probe of the engineer's slot: the HIL sine, stereo,
     /// for `&hil=1` listeners only; an older server drops it.
     pub const ENGINEER_PROBE: u8 = 2;
-    /// The listen probe of the member's slot (S7), like `ENGINEER_PROBE`.
+    /// The listen probe of the member's slot, like `ENGINEER_PROBE`.
     pub const MEMBER_PROBE: u8 = 3;
     /// Talkback from the server into the engine, mono.
     pub const TALKBACK: u8 = 16;
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(out, samples);
     }
 
-    /// The listen probe (S7): streams of its own, so the listen taps keep
+    /// The listen probe: streams of its own, so the listen taps keep
     /// their bytes; the v1 header is unchanged and the stream byte is the
     /// mark.
     #[test]

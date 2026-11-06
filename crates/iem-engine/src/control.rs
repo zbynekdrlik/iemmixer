@@ -1,5 +1,4 @@
-//! The control loop (program spec §2.3–2.4, I6, I9, I10, X2; design note
-//! §3.3, §3.6, §3.7): the one thread that owns the control core. It answers
+//! The control loop (program spec I6, I9, I10): the one thread that owns the control core. It answers
 //! requests, broadcasts revisioned changes, forwards meters and status,
 //! schedules saves, clears solos after the controller left, ends test
 //! signals, and runs the shutdown and fault paths. It never touches audio
@@ -55,7 +54,7 @@ pub trait Driver: Send {
     fn ending(&self) -> Option<Ending> {
         None
     }
-    /// The stream's histograms since it opened (S7 design note §3), read once
+    /// The stream's histograms since it opened, read once
     /// a second for `Status`; none from a backend without them.
     fn histograms(&self) -> Option<HistSnapshot> {
         None
@@ -219,7 +218,7 @@ impl Control {
         self.flush_rt();
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
-            // The last `Status` first (S7 HIL v2): it carries the faulting
+            // The last `Status` first (HIL v2): it carries the faulting
             // callback's time.
             let last = self.next_status(&stats);
             self.broadcast(&EngineMsg::Status(last));

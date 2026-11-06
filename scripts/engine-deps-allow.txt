@@ -1,5 +1,5 @@
 # The iem-engine binary's dependency closure (normal and build edges, the Linux
-# target). A new crate needs a reviewed line here (program spec §5.2);
+# target). A new crate needs a reviewed line here;
 # scripts/check_engine_deps.py compares this list with cargo metadata --locked.
 aho-corasick
 # Gen 3 (#72), Linux only: dsync-ptp's errors (MIT OR Apache-2.0), through dstack's dsync-ptp (since dstack v0.5.4).

@@ -1,4 +1,4 @@
-//! The engine client (S5 design note §4): the server is the engine's one
+//! The engine client: the server is the engine's one
 //! controller. One task keeps the control pipe connected (hello as
 //! controller, then `Hello`, `Topology`, `State`), feeds every engine message
 //! into the [`Mirror`], answers requests by id, asks for the state again on a

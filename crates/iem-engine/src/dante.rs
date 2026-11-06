@@ -1,6 +1,4 @@
-//! The engine's Dante backend on Linux (Gen 3 phase C, #72; plan
-//! `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`
-//! Task 3; design §5.1, §5.2): `run --backend dante` hosts our own Dante
+//! The engine's Dante backend on Linux (Gen 3 phase C, #72; design §5.1): `run --backend dante` hosts our own Dante
 //! device (`iem_dante::host`) in the engine's process and drives the
 //! processor on its media clock (`iem_dante::stream`'s pump).
 //!

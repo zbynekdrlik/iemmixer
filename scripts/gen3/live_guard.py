@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""The live guard of the Gen 3 device (#72 phase B, plan
-docs/superpowers/plans/2026-10-26-gen3-phase-b-audio-through.md Task 8 Step
-1): run on the dev box for a whole live session with our device on the
+"""The live guard of the Gen 3 device (#72 phase B): run on the dev box for a whole live session with our device on the
 band's Dante network, it stops the device the moment its traffic loops.
 
     live_guard.py --rate <the device config's rate> [--seconds <n>]
@@ -21,7 +19,7 @@ box at once and exits 1 when:
   within FLOW_SPAN_S (5 s): the manager's bound is one per 9 s;
 - our own ARC reads of a transmitter's channels (`sent`, opcode 4096, once a
   directory read) of one peer come more than one within FLOW_SPAN_S: the
-  directory's bound is one per 9 s from the last read's end (plan Task 9b);
+  directory's bound is one per 9 s from the last read's end;
 - a TX or an RX flow passes PACKET_MARGIN (1.25) x rate / fpp packets a
   second.
 
@@ -30,15 +28,14 @@ event" stops the service), when --seconds have passed, or on SIGTERM, SIGINT
 or SIGHUP. It prints one numbers-only JSON line every 10 s (LINE_EVERY_S) and
 one at its end (`end`: why it ended, a fixed word; the trip's numbers).
 
-The packets' judge (#72 phase D, plan
-docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 3): each RX
+The packets' judge (#72 phase D): each RX
 flow's `lateness_min_ns` in the status (the least lateness of the
 heartbeat's last second in ns: our clock against the stamps the
 grandmaster's time put on the audio) goes into the 10-second lines as
 `judge`, one entry per RX flow that had one in the line's reads: `flow`,
 `min_ns` and `max_ns` (the smallest and the largest of those seconds),
 `last_ns` (the last read's) and `reads` (how many reads had one). The end's
-line sums up the whole run per RX flow (plan Task 8): `judge` [{flow, n,
+line sums up the whole run per RX flow: `judge` [{flow, n,
 min, p1, p50, p99, max, slope_ns_per_s}], every read that had one (n; a
 second can be read twice or missed: the guard reads about once a
 heartbeat), its percentiles by nearest rank (the value of rank ceil(p n /

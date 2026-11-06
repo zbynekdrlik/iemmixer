@@ -4,7 +4,7 @@
 //! pacing is best effort (the host scheduler decides), and a thread more than
 //! eight periods behind resynchronises instead of bursting. Every interval
 //! between two callbacks and every callback's own time go into the stream
-//! histograms (S7, [`crate::hist`]).
+//! histograms ([`crate::hist`]).
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -44,7 +44,7 @@ struct Shared {
     callbacks: AtomicU64,
     late: AtomicU64,
     max_ns: AtomicU64,
-    /// The faulting callback's own time, ns (S7 HIL v2); stored before
+    /// The faulting callback's own time, ns (HIL v2); stored before
     /// `faulted`, so a reader that sees the fault sees it.
     fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
@@ -54,7 +54,7 @@ pub struct NullRt<P: Process + 'static> {
     thread: JoinHandle<P>,
     shared: Arc<Shared>,
     /// The stream histograms, allocated before the pacing thread starts and
-    /// shared with it (S7).
+    /// shared with it.
     hists: Arc<StreamHists>,
     /// The frames per callback the pacing thread delivers.
     frames: u32,
@@ -112,7 +112,7 @@ impl<P: Process + 'static> NullRt<P> {
         }
     }
 
-    /// The stream histograms since the start (S7): every interval between two
+    /// The stream histograms since the start: every interval between two
     /// callbacks' starts and every callback's own time.
     pub fn histograms(&self) -> HistSnapshot {
         self.hists.snapshot()
@@ -380,7 +380,7 @@ mod tests {
         }
     }
 
-    /// HIL v2 (S7, #10): the faulting callback's own time, from its entry to
+    /// HIL v2 (#10): the faulting callback's own time, from its entry to
     /// the caught panic; 0 until a callback faults. NullRt never reopens.
     #[test]
     fn a_panic_records_the_faulting_callbacks_own_time() {

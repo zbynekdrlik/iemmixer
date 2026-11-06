@@ -3,7 +3,7 @@ import { pause } from "./support/desk";
 import { live } from "./support/env";
 import { dbOf, median } from "./support/series";
 
-// Meters on the real card (S7, #10; a #25 repeat): the engineer's page gets a
+// Meters on the real card (#10; a #25 repeat): the engineer's page gets a
 // Meters frame about every 100 ms, and inside a burst the burst's input shows
 // the burst's level. The input goes dry and open (processing and mute off)
 // only inside the burst, while every mix's TX is zero, and goes back before

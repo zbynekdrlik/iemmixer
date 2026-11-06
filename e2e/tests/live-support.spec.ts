@@ -15,7 +15,7 @@ import { Relay } from "./live/support/relay";
 import { closeFacts } from "./live/support/socket";
 import { PushLedger, bodyOf, endpointOf, isPostTo, postedEndpoint } from "./live/support/push";
 
-// The live specs' support (S7, #10), run in the mock E2E job: the live specs
+// The live specs' support (#10), run in the mock E2E job: the live specs
 // themselves run only from `iempc gen3-gate live`, against the box. The burst
 // watch, the desk and its mixer socket run here on local stand-ins for the
 // public host's sockets (the burst's edges, the frames and the server's
@@ -248,7 +248,7 @@ test("a far-side close of the runner's mixer socket names its code and times", (
   expect(() => mixer.check()).toThrow(CLOSE_FACTS);
 });
 
-/** The engine's talkback gain into its input (program spec A4). */
+/** The engine's talkback gain into its input. */
 const TALKBACK_GAIN = 0.379934;
 
 /** `n` copies of `value`. */

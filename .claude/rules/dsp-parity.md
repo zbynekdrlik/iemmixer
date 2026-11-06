@@ -5,9 +5,9 @@ paths:
   - "crates/iem-golden/**"
 ---
 
-# DSP and limiter parity (S2)
+# DSP and limiter parity
 
-- Parity is proven against `goldens/s1b` only (S2 design note §2): EQ ≤ 1e-9 and ≤ 0.01 dB, limiter ≤ 1e-12, block sizes ≤ 1e-12. A miss is a design bug — never loosen a tolerance, never special-case a golden.
+- Parity is proven against `goldens/s1b` only: EQ ≤ 1e-9 and ≤ 0.01 dB, limiter ≤ 1e-12, block sizes ≤ 1e-12. A miss is a design bug — never loosen a tolerance, never special-case a golden.
 - `goldens/s1b` is frozen: nothing regenerates it, the dev-only crate `iem-golden` reads it for the iem-dsp and iem-limiter-mga golden tests, and it is never edited by hand; `committed_s1b_vectors_are_complete_and_non_blank` guards against the S1b zero-vector bug.
 - ReaEQ laws live in `eq::design` (warp cap at π/2, shelf `S = min(1/bw², 1.2)`, HPF gain ignored, `f0 ≤ 0.49·fs`, `bw ≥ 0.01`, gain 0 = notch). Prototype any change in Python against the goldens first.
 - Steady state must be bit-exact: ramps land on their target and the last step designs from the exact target. New smoothing steps per sample (never per block), or `eq_output_does_not_depend_on_the_block_size` breaks. A moving band is redesigned every `DESIGN_EVERY` (16) samples of its own ramp counter (S3: per-sample redesign of 220 bands cost twice the 32-sample period).

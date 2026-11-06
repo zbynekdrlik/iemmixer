@@ -1,4 +1,4 @@
-//! Persistence (program spec §2.4, I10; design note §3.5): atomic,
+//! Persistence (I10): atomic,
 //! checksummed state files in the state directory —
 //!
 //! - `current.json`: the latest save;

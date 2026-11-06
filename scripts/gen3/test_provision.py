@@ -1,5 +1,4 @@
-"""Tests for the Gen 3 box's provisioning (#72 phase D, plan
-docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9):
+"""Tests for the Gen 3 box's provisioning (#72 phase D):
 provision-root.sh on a temporary root (IEM_PROVISION_ROOT) with stand-in
 commands first on PATH that play the box's users, units, packages, owners and
 the TPM (`systemd-creds`), every call logged; napi-priority on stand-in /sys

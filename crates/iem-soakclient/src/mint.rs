@@ -1,4 +1,4 @@
-//! `iem-soakclient token` (S7 plan Task 23; the #10 decision of 2026-10-08:
+//! `iem-soakclient token` (the #10 decision of 2026-10-08:
 //! no band PIN in GitHub for the live run either). On the server's box
 //! `iempc gen3-gate live` mints the run's engineer token and one
 //! member token with the server's own JWT secret (`--jwt-secret-file`, read

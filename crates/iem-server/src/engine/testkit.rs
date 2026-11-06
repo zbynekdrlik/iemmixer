@@ -1,4 +1,4 @@
-//! A real engine for the server's tests (S5 design note §7): `iem-engine`'s
+//! A real engine for the server's tests: `iem-engine`'s
 //! `run` on a thread with the NullRt backend, the test site and a pipe in a
 //! temporary directory; no mock of the engine. Unix only (the engine's pipe
 //! readers need socket timeouts).

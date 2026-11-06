@@ -8,7 +8,7 @@
 //! listen, limiter raise and lower, the EQ, limiter and volume of a shadowed
 //! mix (member1), test signal, the HIL test signal on both
 //! spare outputs with its listen probe while both listen slots are listened
-//! (S7), an Arm, a full
+//!, an Arm, a full
 //! import), the D5(b) loopback returns (a one-block synthetic loopback of the
 //! spare outputs, so the round-trip probe measures and later signals find the
 //! return busy), talkback, both taps, meter reads, a sanitiser trip
@@ -120,7 +120,7 @@ pub struct Scenario {
     /// The largest D5(b) loopback round-trip (samples) the processor
     /// reported during `drive`: 0 while the probe never measured.
     pub measured: u64,
-    /// The backends' per-block histogram records (S7), as `drive` makes them.
+    /// The backends' per-block histogram records, as `drive` makes them.
     pub hists: Arc<StreamHists>,
 }
 

@@ -261,7 +261,7 @@ impl Core {
 
     /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
     /// `mask` (the HIL signal) it sounds only on those spare outputs
-    /// meanwhile, and no mix's TX carries anything; `listen` (S7, HIL only)
+    /// meanwhile, and no mix's TX carries anything; `listen` (HIL only)
     /// adds the listen probe.
     fn start_test(
         &mut self,

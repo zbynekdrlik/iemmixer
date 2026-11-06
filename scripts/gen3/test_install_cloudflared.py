@@ -1,5 +1,5 @@
 """Tests for scripts/gen3/install-cloudflared.sh and iem-tunnel.service (#72
-phase E, plan Task 6): the install runs against a stand-in `ssh` and `scp`
+phase E): the install runs against a stand-in `ssh` and `scp`
 first on PATH that play the box in a temporary folder (its home and its
 root, dpkg and apt-mark too), the release comes from a local folder through
 curl's file:// URLs; the unit is read as systemd reads its keys. Every value
@@ -328,7 +328,7 @@ class InstallTests(unittest.TestCase):
 
 
 class TunnelUnitTests(unittest.TestCase):
-    """iem-tunnel.service (phase E plan Task 6, choice 3)."""
+    """iem-tunnel.service (phase E)."""
 
     def setUp(self) -> None:
         self.unit = parse_unit(UNIT)

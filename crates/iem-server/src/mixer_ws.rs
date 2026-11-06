@@ -1,5 +1,4 @@
-//! `/ws/{page}` — the mixer page's WebSocket (UI protocol v3; S5 design note
-//! §5, §6). The first message is the hello; then the page's state from the
+//! `/ws/{page}` — the mixer page's WebSocket (UI protocol v3). The first message is the hello; then the page's state from the
 //! mirror, pins and hides, solo, alerts, network mode and tunnel status.
 //! Commands become engine requests (tagged with this session as their
 //! origin); engine deltas become UI updates for every other session on the
@@ -43,7 +42,7 @@ pub struct WsQuery {
     pub proto: Option<u16>,
     #[serde(default)]
     pub talk: Option<String>,
-    /// `/ws/audio`: `1` asks for the listen probe (S7, `listen_ws::asks_for_probe`).
+    /// `/ws/audio`: `1` asks for the listen probe (`listen_ws::asks_for_probe`).
     #[serde(default)]
     pub hil: Option<u8>,
 }

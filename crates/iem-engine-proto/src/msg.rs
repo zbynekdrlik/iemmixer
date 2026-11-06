@@ -1,5 +1,4 @@
-//! Commands, replies and events (program spec §2.3, I6; S3 design note §3.3,
-//! §3.6; the model of the #20 design note §5). JSON shapes: client messages and engine messages carry a `type`
+//! Commands, replies and events (I6). JSON shapes: client messages and engine messages carry a `type`
 //! tag, commands an `op` tag, state changes a `kind` tag, all snake_case.
 //!
 //! Protocol N/N−1: the engine speaks `min(ours, theirs)` while the client is at

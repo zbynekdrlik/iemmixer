@@ -1,5 +1,4 @@
-//! The server's copy of the engine's state (program spec I6; S5 design note
-//! §4): the topology, the persisted `MixState`, the transient state (solo,
+//! The server's copy of the engine's state (program spec I6): the topology, the persisted `MixState`, the transient state (solo,
 //! listen, test signal) and the revision. It changes only through the
 //! engine's messages; a gap in the revision asks for a resync.
 

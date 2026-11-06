@@ -5,17 +5,16 @@
 # (IEM_DANTE_IFACE=). The device's test name and channel names are the ops
 # repository's device config.
 #
-# Phase B (plan Task 7): the device sends and receives audio flows, so it is
+# Phase B: the device sends and receives audio flows, so it is
 # never enabled at boot (deploy.sh disables it): a reboot of
 # the box never brings its flows back unattended: deploy.sh --start device or
 # `sudo systemctl start iem-dante` in dev time starts it.
 #
-# Phase C (plan Task 6): iem-engine.service hosts the same device inside the
+# Phase C: iem-engine.service hosts the same device inside the
 # engine; this unit stays the standalone device (deploy.sh --start device)
 # and never runs beside it.
 #
-# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
-# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# Phase D: it runs as the service user `iemmixer` (a system
 # user without login or home, not site data), and a unit that stays down
 # raises one alarm (iem-alarm@.service).
 

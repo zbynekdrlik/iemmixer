@@ -1,5 +1,4 @@
-"""Read-only acceptance of the Gen 3 box (#72 phase D, plan
-docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9; rules in
+"""Read-only acceptance of the Gen 3 box (#72 phase D; rules in
 .claude/rules/gen3.md): what provision-root.sh made, and the units deploy.sh
 installed, checked on the box as its admin user. provision.sh runs it after the
 root script; by hand: `ssh <host> python3 - < scripts/gen3/verify_box.py`

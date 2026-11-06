@@ -1,4 +1,4 @@
-//! PIN hashing (program spec §5.3): argon2id with OWASP parameters
+//! PIN hashing: argon2id with OWASP parameters
 //! (m = 19 MiB, t = 2, p = 1), keyed with a secret pepper so a copied hash
 //! file cannot be brute-forced offline. Stored as PHC strings.
 

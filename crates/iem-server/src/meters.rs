@@ -1,4 +1,4 @@
-//! Meters for the UI (F9; S5 design note §5): the engine publishes peaks at
+//! Meters for the UI (F9): the engine publishes peaks at
 //! 30 Hz; the server max-merges them and sends every page a map by id every
 //! 100 ms — inputs (post-mute), mixes (post volume and mute; a mix the page
 //! hears as a peer: its own output, #58) and the page's own stems strip

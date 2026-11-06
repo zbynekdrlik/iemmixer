@@ -1,4 +1,4 @@
-//! The UI ↔ server WebSocket protocol, version 3 (S5 design note §5): the
+//! The UI ↔ server WebSocket protocol, version 3: the
 //! mixer page's messages keyed by engine ids (an input or a heard mix; one
 //! namespace) instead of REAPER track numbers. Client commands carry a `cmd`
 //! tag, server events an `event` tag with their fields under `data`.
@@ -7,7 +7,7 @@
 //! version 2 knows neither, so the server serves 3 only and such a page
 //! reloads once, at the deploy (#61 review M4).
 //!
-//! Handshake (program spec §5.3): the page connects with `proto=UI_PROTO`;
+//! Handshake: the page connects with `proto=UI_PROTO`;
 //! the server's first message is [`ServerMsg::Hello`]; a page whose protocol
 //! is outside `min_client_proto..=proto` reloads.
 

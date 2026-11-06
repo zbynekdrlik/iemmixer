@@ -1,5 +1,5 @@
 """Tests for scripts/gen3/install-dantesync.sh and dantesync_probe.py (#72
-phase B, plan Task 2): the install runs against a stand-in `ssh` and `scp`
+phase B): the install runs against a stand-in `ssh` and `scp`
 first on PATH that play the box in a temporary folder (its home and its
 root), the release comes from a local folder through curl's file:// URLs;
 the probe runs against stand-in time and status servers on loopback. Every

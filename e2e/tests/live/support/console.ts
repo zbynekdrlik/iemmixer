@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { collectConsole } from "../../support/fixtures";
 
-// The live specs' console lines (S7, #10; P6): a console line can carry a
+// The live specs' console lines (#10; P6): a console line can carry a
 // URL (the band's host, a socket URL with its token, a push endpoint), and a
 // failing guard prints its lines into the report, so every line a live
 // guard keeps has its URLs redacted.

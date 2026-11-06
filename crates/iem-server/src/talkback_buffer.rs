@@ -1,4 +1,4 @@
-//! Talkback receive (F18, X5; S5 design note §4): the browser's Opus frames
+//! Talkback receive (F18, X5): the browser's Opus frames
 //! (mono, 48 kHz, 20 ms) are decoded on a 20 ms playout clock after a 40 ms
 //! pre-roll; a frame that is not there in time is concealed by Opus' packet
 //! loss concealment, and after three concealed frames the talker is taken as

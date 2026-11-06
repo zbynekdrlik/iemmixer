@@ -1,5 +1,4 @@
-//! iemmixer DSP kernels (S2; program spec §3.3–3.5, design note
-//! `docs/superpowers/specs/2026-09-26-s2-dsp-design.md`):
+//! iemmixer DSP kernels:
 //!
 //! - [`eq`]: the ReaEQ-parity EQ, a TPT state-variable filter fed RBJ
 //!   parameters (A12), and the response function the UI shares (F11);

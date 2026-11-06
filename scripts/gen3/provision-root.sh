@@ -2,9 +2,7 @@
 # sudoers and dpkg-query formats are literal text here, never shell expansions.
 # shellcheck disable=SC2016
 set -euo pipefail
-# The Gen 3 box's provisioning, run as root on the box (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9, choices 1,
-# 4 and 5; rules in .claude/rules/gen3.md). provision.sh copies it with
+# The Gen 3 box's provisioning, run as root on the box (#72 phase D; rules in .claude/rules/gen3.md). provision.sh copies it with
 # sudo-lines.txt, iem-napi.service, napi-priority and the two values into the
 # admin's ~/.cache/iem-gen3-provision and runs it there:
 #
@@ -352,7 +350,7 @@ render_sudoers() {
 # provision run (never edit it here): each command exactly as a Gen 3 tool
 # sends it through `sudo -n`, its program by the absolute path sudo's
 # secure_path finds, NOPASSWD. Until phase G the admin also keeps its own
-# passwordless rule (plan Task 9).
+# passwordless rule.
 HEAD
   while IFS= read -r raw || [ -n "$raw" ]; do
     line="$(trim "$raw")"

@@ -1,5 +1,4 @@
-//! The RT processor (program spec §3.3 A1–A13, §3.4 X1–X4, X13–X15, Q1, I5,
-//! I7; S3 design note §3.2, §3.4; #20 design note §3, §6): one callback runs
+//! The RT processor (program spec I5, I7): one callback runs
 //! the fixed pipeline — the inputs, then every mix's own sum (its inputs
 //! directly or through their group's strip) and, for a mix its peers hear
 //! while it hears others, its shadow (#58: the own sum → EQ → limiter →
@@ -114,7 +113,7 @@ pub struct RtHandles {
     /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix
     /// (X3); silence while a HIL signal runs.
     pub taps: [Consumer<f32>; 2],
-    /// The listen probe's taps (S7), by slot like `taps`: the spare outputs'
+    /// The listen probe's taps, by slot like `taps`: the spare outputs'
     /// samples while a HIL signal with `listen` runs (`probe::push_probe`).
     pub probes: [Consumer<f32>; 2],
     /// Mono 96 kHz talkback into the talkback input (A4).
@@ -189,7 +188,7 @@ struct InputRt {
     peak: PeakMeter<2>,
 }
 
-/// A mix limiter (A13, §4.4): enabling and lowering instant, raising over 10 ms.
+/// A mix limiter (A13): enabling and lowering instant, raising over 10 ms.
 struct MixLimiter {
     lim: Limiter,
     raise: Ramp,
@@ -297,7 +296,7 @@ struct TestRt {
     /// The HIL signal's spare outputs, by HIL slot: until `end` they carry
     /// the sine and every mix's TX is zero.
     mask: Option<HilMask>,
-    /// The listen probe (S7, HIL only): the listened slots' probe taps carry
+    /// The listen probe (HIL only): the listened slots' probe taps carry
     /// the spare outputs' samples until `end`.
     listen: bool,
 }
@@ -716,7 +715,7 @@ impl Processor {
     /// X13: a sine replaces input `i` for `ttl` samples and then fades out;
     /// every TX is capped meanwhile. With `mask` (the HIL signal) the sine
     /// sounds only on those spare outputs until it ended, and every mix's TX
-    /// is zero; `listen` adds the listen probe (S7).
+    /// is zero; `listen` adds the listen probe.
     fn start_test(
         &mut self,
         i: u16,

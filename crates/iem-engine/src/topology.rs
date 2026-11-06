@@ -1,5 +1,4 @@
-//! The topology compiled once per run from the site (program spec I4; #20
-//! design note §3, §4, §6): validated, inputs with their group, groups with
+//! The topology compiled once per run from the site (program spec I4): validated, inputs with their group, groups with
 //! their inputs, the ungrouped inputs every mix sums directly, and mixes in
 //! declaration order with the earlier mixes each one hears. There is no graph
 //! to sort: a mix may hear whole only mixes declared before it. Its peers

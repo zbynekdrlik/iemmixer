@@ -1,5 +1,4 @@
-//! Backups, presets and history over HTTP against the real engine (S5 design
-//! note §6, §7): `iem-engine` on NullRt with the test site, the server's own
+//! Backups, presets and history over HTTP against the real engine: `iem-engine` on NullRt with the test site, the server's own
 //! routes, and what they leave behind — status codes, JSON bodies, the files
 //! written and the engine's state. Every wait is bounded (5 s).
 

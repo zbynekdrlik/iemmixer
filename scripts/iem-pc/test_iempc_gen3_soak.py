@@ -1,6 +1,5 @@
 """Tests for scripts/iem-pc/iempc_gen3_soak.py, `iempc gen3-gate soak` (#72
-phase H, plan docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md
-Task 7): the soak on the Gen 3 box that serves the band, driven from the dev
+phase H): the soak on the Gen 3 box that serves the band, driven from the dev
 box. No box exists in CI: test_iempc_gen3_gate's stand-in `ssh` plays the box
 (a left HIL job, health, the builds, the service user's mint folder), and the
 soak's own part of it, put in front, plays what the soak reads and changes:

@@ -1,5 +1,5 @@
 //! CPU benchmark of `process()` at B = 32, 96 kHz (period 333.3 µs; program
-//! spec I2, §3.5; design note §3.8). Three cases:
+//! spec I2). Three cases:
 //!
 //! - `typical` on `config/test-site.toml`: every level open (member1's and
 //!   member3's peers included, #58), sine inputs, EQs flat, the site at rest;
@@ -8,7 +8,7 @@
 //!   shadows (#58: they hear each other as peers), every level and strip
 //!   ramping, the limiters in gain reduction, both listen taps, talkback,
 //!   the HIL test signal on all eight spare outputs with its listen probe on
-//!   both slots (S7) and their D5(b) loopback returns open (busy returns: the
+//!   both slots and their D5(b) loopback returns open (busy returns: the
 //!   round-trip probe scans every return sample of every block) and a
 //!   512-command group every block;
 //! - `worst, every set hearing every other`: the same on the test site with
@@ -236,7 +236,7 @@ fn bench(name: &str, worst: bool, topo: Arc<Topology>) -> f64 {
     let mut drain = vec![0.0f32; 4 * B];
     let mut times = Vec::with_capacity(CALLS);
     let rate = f64::from(SAMPLE_RATE);
-    // The callback-time histogram a backend keeps (S7), fed the same calls.
+    // The callback-time histogram a backend keeps, fed the same calls.
     let hist = PeriodHist::new(period_ns(B as u32, rate));
     for call in 0..WARMUP + CALLS {
         for (ch, x) in input.chunks_mut(B).enumerate() {

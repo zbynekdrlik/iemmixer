@@ -1,5 +1,4 @@
-//! The iemmixer audio engine (S3; program spec §2, §3.3, §3.4; design note
-//! `docs/superpowers/specs/2026-09-26-s3-engine-core-design.md`):
+//! The iemmixer audio engine:
 //!
 //! - [`site`], [`topology`]: the `[engine]` table of `site.toml` (inputs,
 //!   groups, mixes), validated and compiled once per run (I4, #20);
@@ -7,7 +6,7 @@
 //! - [`cmd`]: the RT thread's command messages;
 //! - [`core`]: the pure control core, single writer of the state (I6);
 //! - [`rt`]: the RT processor, the fixed mix pipeline in one callback (I5, I7);
-//!   [`probe`]: its listen probe (S7);
+//!   [`probe`]: its listen probe;
 //! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4);
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
@@ -24,7 +23,7 @@
 
 #![forbid(unsafe_code)]
 // The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `Processor::process`
-// as a real-time context (design note §3.8).
+// as a real-time context.
 #![cfg_attr(iem_rtsan, feature(sanitize))]
 #![cfg_attr(
     not(test),

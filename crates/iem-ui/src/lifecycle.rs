@@ -28,8 +28,7 @@ pub const PANIC_MESSAGE_MAX_DISPLAY_CHARS: usize = 200;
 
 /// Return the reconnect delay (in ms) for the given attempt number.
 ///
-/// Schedule: 2s, 4s, 8s, 15s, then 30s forever. Matches the design in
-/// docs/superpowers/specs/2026-04-11-pwa-self-healing-design.md.
+/// Schedule: 2s, 4s, 8s, 15s, then 30s forever.
 pub fn backoff_delay_ms(attempt: u32) -> u32 {
     match attempt {
         0 => 2_000,

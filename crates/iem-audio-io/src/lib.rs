@@ -1,5 +1,4 @@
-//! Audio backends of the iemmixer engine (program spec §2.2; S3 design note
-//! §1, §3.7): the [`Process`] trait the engine implements and two backends
+//! Audio backends of the iemmixer engine: the [`Process`] trait the engine implements and two backends
 //! that need no sound card:
 //!
 //! - [`Offline`]: deterministic, any block size — the parity harness;

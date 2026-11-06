@@ -34,7 +34,7 @@ fn hil(listen: bool) -> Cmd {
     }
 }
 
-/// The listen probe (S7 design note §6): `listen` is read as false when
+/// The listen probe: `listen` is read as false when
 /// missing and written only when true, so a plain HIL signal keeps today's
 /// bytes; an older engine reads the probe as a plain HIL signal.
 #[test]
@@ -67,7 +67,7 @@ struct BeforeHilV2 {
     resets: u64,
 }
 
-/// HIL v2 (S7, #10): the last driver reopen's time and the faulting
+/// HIL v2 (#10): the last driver reopen's time and the faulting
 /// callback's time in `Status`, additive both ways: an older client reads
 /// the new message, an older engine's reads 0 and 0.0. Both are written at
 /// 0 too.

@@ -3,7 +3,7 @@
 //! engineer's token itself and never logs in. The build check still comes
 //! first; an unreadable secret sends nothing at all. The fake takes a token
 //! only when it verifies with the script's secret, as the server's
-//! `extract_claims` does. `iem-soakclient token` (S7 plan Task 23) mints
+//! `extract_claims` does. `iem-soakclient token` mints
 //! the live run's tokens with the same secret: the binary's own test is
 //! here, its decisions are `mint.rs`'s.
 
