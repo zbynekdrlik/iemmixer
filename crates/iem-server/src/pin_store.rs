@@ -237,6 +237,28 @@ mod tests {
         );
     }
 
+    /// A change the disk refused is no change: the old PIN still logs in,
+    /// now and after a restart, and the new one does neither.
+    #[test]
+    fn a_failed_save_keeps_the_old_hash_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store.set_engineer_hash(h.hash("2468")).unwrap();
+        store.set_member_hash("member1", h.hash("1357")).unwrap();
+        // The write's temporary file cannot be made: a directory is there.
+        let tmp = dir.path().join(PIN_HASHES_FILE).with_extension("new");
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(store.set_member_hash("member1", h.hash("8642")).is_err());
+        assert!(store.set_member_hash("member2", h.hash("8642")).is_err());
+        assert!(store.set_engineer_hash(h.hash("8642")).is_err());
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+        assert_eq!(store.member_hash("member2"), None);
+        assert!(h.verify("2468", store.engineer_hash().unwrap()));
+        assert!(!store.remove_member("member1").is_ok_and(|gone| gone));
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+    }
+
     #[test]
     fn a_plaintext_value_is_a_load_error() {
         let dir = tempfile::tempdir().unwrap();
