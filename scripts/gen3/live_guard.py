@@ -140,7 +140,7 @@ class Sample:
     # heartbeat's last second, ns, for the flows whose status has one.
     # Reported in the lines, never a trip.
     judge: dict[int, int] = field(default_factory=dict)
-    # The box's clock (phase D Task 8): the CLOCK_COUNTS and CLOCK_SIGNED
+    # The box's clock (phase D): the CLOCK_COUNTS and CLOCK_SIGNED
     # fields the status's `clock` has, by name. Reported, never a trip.
     clock: dict[str, int] = field(default_factory=dict)
 

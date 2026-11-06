@@ -441,7 +441,7 @@ mod tests {
         assert!(rt.stop().unwrap().calls >= 100);
     }
 
-    /// S7: every interval between two callbacks (one fewer than the
+    /// Every interval between two callbacks (one fewer than the
     /// callbacks) and every callback's own time land in the stream
     /// histograms, two periods at 32 samples wide.
     #[test]
@@ -474,7 +474,7 @@ mod tests {
         assert!(rt.stop().unwrap().calls >= 100);
     }
 
-    /// S7, exact once the thread has ended: three callbacks ran (the third
+    /// Exact once the thread has ended: three callbacks ran (the third
     /// panicked), so three callback times and the two intervals between their
     /// starts; the faulting callback's time counts too.
     #[test]

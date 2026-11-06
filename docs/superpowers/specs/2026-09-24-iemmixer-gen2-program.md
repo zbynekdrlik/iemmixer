@@ -1,6 +1,6 @@
 # iemmixer principles
 
-The program this file once planned, Gen 2 on a Windows PC beside REAPER, ended on 2026-11-01 (#86). Its plan is gone from the repository; what stands are the principles and invariants below, which the code and the rules cite by id. Their numbers keep their old gaps. The current design is `2026-10-24-gen3-linux-dante-design.md`.
+The program this file once planned, Gen 2 on a Windows PC beside REAPER, ended on 2026-11-01 (#86). Its plan is gone from the repository; what stands are the principles and invariants below, which the code and the rules cite by id. Their numbers keep their old gaps. The F, X, A, D and Q ids still seen in comments named the old plan's features and assumptions: labels only, nothing defines them any more. The current design is `2026-10-24-gen3-linux-dante-design.md`.
 
 **MVP means limited scope, never lower quality.** Live-audio safety, hearing safety and public-repo security are non-negotiable.
 

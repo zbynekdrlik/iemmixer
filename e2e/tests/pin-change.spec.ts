@@ -114,9 +114,9 @@ test.describe("A member changes their PIN", () => {
 
 test.describe("The engineer resets a member's PIN", () => {
   // The engineer's session subscribes to Web Push; Playwright's contexts are
-  // incognito, where Chrome has no Push API. The refused login is deliberate.
+  // incognito, where Chrome has no Push API.
   test.use({
-    allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/, /status of 401/], { scope: "test" }],
+    allowedConsole: [[/^\[push\] /, /does not support the Push API in incognito mode/], { scope: "test" }],
   });
 
   test("from the member's page, without the current PIN", async ({ page }) => {
@@ -128,7 +128,11 @@ test.describe("The engineer resets a member's PIN", () => {
       expect(await submit(page, [NEW_PIN, NEW_PIN])).toBe(200);
       await closeSuccess(page);
 
-      const oldPin = await page.request.post("/api/auth", { data: { member: MEMBER, pin: MEMBER_PIN } });
+      // page.request does not carry the page's extra headers: its own.
+      const oldPin = await page.request.post("/api/auth", {
+        headers: tunnelClient(23),
+        data: { member: MEMBER, pin: MEMBER_PIN },
+      });
       expect(oldPin.status()).toBe(401);
       const newPin = await page.request.post("/api/auth", { data: { member: MEMBER, pin: NEW_PIN } });
       expect(newPin.status()).toBe(200);

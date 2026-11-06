@@ -23,7 +23,7 @@ import { Wire, liveSocket } from "./socket";
 // (P6): the page and input ids are site data. Restored values are the
 // server's UI values (f32; a level at or below −60 dB comes back as off).
 
-/** A changing step starts with at least this much of its burst left (Task 20). */
+/** A changing step starts with at least this much of its burst left. */
 export const MIN_LEFT_MS = 22_000;
 /** A change starts, and a wait inside the burst ends, at least this long before the burst does: the restore's time. */
 export const RESTORE_MS = 2_000;

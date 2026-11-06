@@ -39,6 +39,6 @@ pub fn negotiate(ours: u16, theirs: u16) -> Option<u16> {
 #[cfg(test)]
 mod tests;
 
-/// S7 (#10): the listen probe's flag on `HilTestSignal`.
+/// The listen probe's flag on `HilTestSignal`.
 #[cfg(test)]
 mod s7_tests;

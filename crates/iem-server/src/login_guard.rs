@@ -141,7 +141,7 @@ pub enum FailureEffect {
     EngineerBudgetExhausted,
 }
 
-/// Counters for the engineer page (wired in S5).
+/// Counters for the engineer page.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct LoginStats {
     pub lan_failures: u64,

@@ -668,7 +668,6 @@ jobs:
       - name: The next dev→main PR's mutants fit the shard matrix
         env:
           # Mutants one shard tests within its 20-minute budget, setup included.
-          # Task 16 measures shard durations and adjusts this value.
           MUTANTS_PER_SHARD: "12"
         run: |
           set -euo pipefail

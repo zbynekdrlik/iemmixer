@@ -1,4 +1,4 @@
-//! S7 HIL v2 (#10): `Status` carries the last driver reopen's
+//! HIL v2 (#10): `Status` carries the last driver reopen's
 //! time and the faulting callback's time, and a fault sends one last
 //! `Status` before its alarm and the driver's release, so a supervisor reads
 //! the faulting callback's time before the engine ends.

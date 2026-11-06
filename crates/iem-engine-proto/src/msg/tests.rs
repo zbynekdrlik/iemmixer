@@ -1,5 +1,5 @@
 //! The protocol's tests: shapes, round trips, parsing and negotiation;
-//! `s7_tests` holds the S7 additions.
+//! `s7_tests` holds later additions.
 
 use serde::Deserialize;
 

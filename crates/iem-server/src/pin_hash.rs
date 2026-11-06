@@ -10,7 +10,7 @@ use rand_core::OsRng;
 
 /// Length of the pepper (argon2 secret) in bytes.
 pub const PEPPER_LEN: usize = 32;
-/// PIN length (4 digits, unchanged from the predecessor — spec P9).
+/// PIN length (4 digits, unchanged from the predecessor).
 pub const PIN_LEN: usize = 4;
 /// argon2id memory cost in KiB (19 MiB).
 pub const PIN_M_COST_KIB: u32 = 19 * 1024;

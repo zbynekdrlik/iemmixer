@@ -19,6 +19,11 @@ HARNESS = {"schema": 1, "build": "a" * 40, "complete": True, "seconds": 28_980.0
            "meter_frames": 289_800, "reconnects": 0, "no_source": 0, "error": None}
 
 
+def problems(summary: object, min_seconds: float, max_gaps: int) -> list[str]:
+    """CI's check of a summary, in order; [] when it passed."""
+    return sv._ci_check(summary, min_seconds, max_gaps)[0]
+
+
 def harness(**change) -> dict:
     return {**HARNESS, **change}
 
@@ -26,26 +31,26 @@ def harness(**change) -> dict:
 class Harness(unittest.TestCase):
     def test_harness_problems_for_the_ci_step(self):
         ci = harness(seconds=600.2, frames=30_000, expected_frames=30_010)
-        self.assertEqual(sv.harness_problems(ci, 599, 3), [])
-        self.assertEqual(sv.harness_problems({**ci, "gaps": 3}, 599, 3), [])
-        self.assertEqual(sv.harness_problems({**ci, "gaps": 4}, 599, 3), ["gaps 4"])
-        self.assertEqual(sv.harness_problems({**ci, "seconds": 598.5}, 599, 3), ["harness ran 598.5 s of 599 s"])
-        self.assertEqual(sv.harness_problems({**ci, "seconds": 599}, 599, 3), [])
-        self.assertEqual(sv.harness_problems({**ci, "complete": False, "error": "login-refused", "frames": 0,
+        self.assertEqual(problems(ci, 599, 3), [])
+        self.assertEqual(problems({**ci, "gaps": 3}, 599, 3), [])
+        self.assertEqual(problems({**ci, "gaps": 4}, 599, 3), ["gaps 4"])
+        self.assertEqual(problems({**ci, "seconds": 598.5}, 599, 3), ["harness ran 598.5 s of 599 s"])
+        self.assertEqual(problems({**ci, "seconds": 599}, 599, 3), [])
+        self.assertEqual(problems({**ci, "complete": False, "error": "login-refused", "frames": 0,
                                               "expected_frames": 0, "gaps": 5, "reconnects": 1}, 599, 3),
                          ["harness incomplete (login-refused)", "gaps 5", "reconnects 1", "no listen frames"])
         # CI's step names a lost socket and a server that does not name the build (#10).
         for code in ("connection-lost", "wrong-server"):
-            self.assertEqual(sv.harness_problems({**ci, "complete": False, "error": code}, 599, 3),
+            self.assertEqual(problems({**ci, "complete": False, "error": code}, 599, 3),
                              [f"harness incomplete ({code})"])
-        self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
+        self.assertEqual(problems(None, 599, 3), ["no harness summary"])
         # A reason code only when it is a known one (P6).
-        self.assertEqual(sv.harness_problems({**ci, "complete": False, "error": "member9.example.org"}, 599, 3),
+        self.assertEqual(problems({**ci, "complete": False, "error": "member9.example.org"}, 599, 3),
                          ["harness incomplete"])
         # Frames: at least one, and at least 99 % of the expected, rounded toward red.
-        self.assertEqual(sv.harness_problems({**ci, "frames": 0}, 599, 3), ["no listen frames"])
-        self.assertEqual(sv.harness_problems({**ci, "frames": 29_710}, 599, 3), [])
-        self.assertEqual(sv.harness_problems({**ci, "frames": 29_709}, 599, 3), ["frames 98.99 % of expected"])
+        self.assertEqual(problems({**ci, "frames": 0}, 599, 3), ["no listen frames"])
+        self.assertEqual(problems({**ci, "frames": 29_710}, 599, 3), [])
+        self.assertEqual(problems({**ci, "frames": 29_709}, 599, 3), ["frames 98.99 % of expected"])
 
     def test_a_summary_of_another_shape_is_unreadable(self):
         for bad in (sv.UNREADABLE, [], {}, harness(seconds=float("inf")), harness(complete=1), harness(gaps=-1),
@@ -74,15 +79,15 @@ class Harness(unittest.TestCase):
     def test_the_ci_step_needs_a_meter_frame(self):
         # CI's run against the real server is the proof that the client reads its Meters.
         ci = harness(seconds=600.2, frames=30_000, expected_frames=30_010)
-        self.assertEqual(sv.harness_problems({**ci, "meter_frames": 1}, 599, 3), [])
-        self.assertEqual(sv.harness_problems({**ci, "meter_frames": 0}, 599, 3), ["no meter frames"])
+        self.assertEqual(problems({**ci, "meter_frames": 1}, 599, 3), [])
+        self.assertEqual(problems({**ci, "meter_frames": 0}, 599, 3), ["no meter frames"])
         # Named after the summary's other checks.
-        self.assertEqual(sv.harness_problems({**ci, "meter_frames": 0, "reconnects": 2}, 599, 3),
+        self.assertEqual(problems({**ci, "meter_frames": 0, "reconnects": 2}, 599, 3),
                          ["reconnects 2", "no meter frames"])
         # An unreadable summary is named once, never also as meterless.
-        self.assertEqual(sv.harness_problems({**ci, "meter_frames": -1}, 599, 3),
+        self.assertEqual(problems({**ci, "meter_frames": -1}, 599, 3),
                          ["the harness summary is unreadable"])
-        self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
+        self.assertEqual(problems(None, 599, 3), ["no harness summary"])
 
     def test_the_harness_reason_codes_are_the_clients_own(self):
         # Reason::code is an exhaustive match: a code the client gains fails here until the verdict knows it,

@@ -1,4 +1,4 @@
-//! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
+//! `iem-engine`: the iemmixer audio engine (NullRt and offline render;
 //! the site check; Gen 3 phase C: the Dante backend
 //! on Linux; phase H: `supervise`, the box's supervisor client). See
 //! `iem-engine --help`.

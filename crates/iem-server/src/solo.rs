@@ -1,4 +1,4 @@
-//! Solo clean-up (X2, the server's half; S3 hand-off): a mix's solo is
+//! Solo clean-up (X2, the server's half): a mix's solo is
 //! cleared 10 s after the last page connection on that mix closed; a
 //! reconnect within the grace keeps it. The engine clears every solo itself
 //! 10 s after the controller (the server) left.

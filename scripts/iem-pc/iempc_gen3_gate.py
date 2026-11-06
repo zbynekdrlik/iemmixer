@@ -6,7 +6,7 @@ Dev time, locked, a box command (iempc's Spec: refused while EVENT-NOW
 exists). The box has no guard: the dev box's flag is the event gate, and
 "ide event" leaves the box running.
 
-**The box's HIL job** (Task 4; shared by the later `live` and `soak` gates:
+**The box's HIL job** (shared by the later `live` and `soak` gates:
 `begin_job` / `end_job`). The engine's HIL mode is its `--test-signal` flag
 (every mix TX written as zero during a burst, the sine only on the site's
 `[guard] hil_tx` spare outputs, their D5(b) returns opened). The job is a
@@ -47,7 +47,7 @@ drop-in); no other drop-in on the engine's unit (`DropInPaths`); the
 installed unit's ExecStart of the expected shape and its start limit; the
 installed device config's RX and TX counts and the installed site's `[guard]
 hil_tx` (read as the service user, numbers kept, nothing of either printed:
-Task 2's preflight), every spare output within the device's TX count and its
+the preflight), every spare output within the device's TX count and its
 D5(b) return within the RX count (else `--test-signal` exits 3 and the unit
 stays down with an alarm), and `iem-engine check-site` of that site exit 0
 (hil_tx against the topology, else exit 2); the box healthy; our device's RX
@@ -56,7 +56,7 @@ table and the first spare output's TX name read over ARC by
 the loop never writes another device's subscription); a left job's end (its engine status unreadable: refused, the
 drop-in kept); the budget.
 
-**The checks** (Task 6), in the job: health healthy and the RX flows back;
+**The checks**, in the job: health healthy and the RX flows back;
 the engine's spare outputs open (`supervise status`); versions (the
 engine's `--version`, the device's `--version` and the server's
 `/api/version` `git_hash` on the box, one SHA); the D5(b) loop (our spare
@@ -72,7 +72,7 @@ device; never a notice) and the engine enabled at boot (the alarm unit's
 gate); no automatic restart so far; then, only while the engine is healthy,
 its RX flows back, its spare outputs open and it never restarted by itself
 (else `panic` reads skipped: the gate fails on that other word), the panic
-(Task 6 Step 3, `panic`:
+(`panic`:
 the engine's own injected RT fault, `supervise inject-fault` once the flag
 is checked; systemd's own restart: within PANIC_WAIT_S the engine active as
 a new process with `NRestarts` exactly one higher, healthy, the RX flows
@@ -97,10 +97,10 @@ spare outputs' numbers and the site never reach stdout or stderr; a box call
 ssh itself failed (exit 255, its stderr names the host) is quoted as fixed
 words (`box_error`).
 
-`iempc gen3-gate live` (Task 5) is iempc_gen3_live.py: it builds on this
+`iempc gen3-gate live` is iempc_gen3_live.py: it builds on this
 module (the preflight without the ARC reads, the job, the budget, the status
 post) and `run` passes the call on to it. `iempc gen3-gate soak [--minutes
-N]` (Task 7) is iempc_gen3_soak.py: no HIL job (a left one is ended first),
+N]` is iempc_gen3_soak.py: no HIL job (a left one is ended first),
 the Box, the status post; `--minutes` is the soak's only.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
@@ -134,7 +134,7 @@ EXEC_HEAD = f"{ENGINE_BIN} run "
 # The engine's flags for a job. By default (the live gate's job) the test
 # signal only: no step of it drives a fault, and an engine under
 # --fault-injection takes one from any supervisor. The HIL gate's job adds the
-# fault injection for its panic check (Task 6 Step 3); the job's end restarts
+# fault injection for its panic check; the job's end restarts
 # the engine without either.
 TEST_FLAGS = ("--test-signal",)
 PANIC_FLAGS = ("--test-signal", "--fault-injection")
@@ -1035,7 +1035,7 @@ def alarm_started_at(box: Box) -> str | None:
 
 
 def panic(job: Job, c: Checks) -> None:
-    """The panic check (Task 6 Step 3; HIL v1's: an RT panic, its exit, one
+    """The panic check (HIL v1's: an RT panic, its exit, one
     respawn): the engine's own injected fault (`supervise inject-fault`, the
     engine under --fault-injection; the flag checked right before it), then
     systemd's own restart (Restart=on-failure; the fault's exit 70): within

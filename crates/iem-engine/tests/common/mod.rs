@@ -7,13 +7,12 @@
 //! input, a whole heard mix (the engineer's) and a peer, a group strip, solo,
 //! listen, limiter raise and lower, the EQ, limiter and volume of a shadowed
 //! mix (member1), test signal, the HIL test signal on both
-//! spare outputs with its listen probe while both listen slots are listened
-//!, an Arm, a full
+//! spare outputs with its listen probe while both listen slots are listened, an Arm, a full
 //! import), the D5(b) loopback returns (a one-block synthetic loopback of the
 //! spare outputs, so the round-trip probe measures and later signals find the
 //! return busy), talkback, both taps, meter reads, a sanitiser trip
 //! every 1000 blocks, a driver reopen's `discontinuity` every 1000 blocks and
-//! the backends' two histogram records per block (S7: the interval before
+//! the backends' two histogram records per block (the interval before
 //! `process`, its time after it; the overflow bucket included).
 #![allow(dead_code)]
 

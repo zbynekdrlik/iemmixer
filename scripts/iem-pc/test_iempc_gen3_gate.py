@@ -815,7 +815,7 @@ class ReviewTests(GateBase):
 
 
 class PanicTests(GateBase):
-    """The panic check (Task 6 Step 3): the engine's own injected fault, systemd's own restart."""
+    """The panic check: the engine's own injected fault, systemd's own restart."""
 
     def panic_failed(self, **env: str) -> dict:
         """A run whose panic check fails: exit 1, `panic` its one failure, posted as a failure, the job ended."""

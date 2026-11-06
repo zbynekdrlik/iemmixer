@@ -4,8 +4,7 @@
 set -euo pipefail
 # Puts a CI Gen 3 bundle on the Gen 3 box into one of two slots and starts the
 # stack from it: the engine with our Dante device inside it and the server, or
-# the standalone device (#72 phase C; phase D;
-# .claude/rules/gen3.md):
+# the standalone device (#72 phases C and D; .claude/rules/gen3.md):
 #
 #   deploy.sh --host <user@host> --bundle <the downloaded gen3-bundle-<sha>>
 #             --sha <its commit, 40 hex> --config <the private device config>
@@ -728,7 +727,7 @@ done
 [ "$health_exit" -eq 0 ] ||
   die "the stack is not healthy after $tries tries a second apart (iem-dante-dev health exit $health_exit; journalctl -u iem-engine -u iem-server -u iem-dante on the box): ${health:-no line}"
 echo "deploy.sh: slot-$target: $engine_version; $device_version; sums as SHA256SUMS; ${started[*]} started; health $health"
-# The box's three gates on the build the engine now runs (phase H Task 8,
+# The box's three gates on the build the engine now runs (phase H,
 # #72; .claude/rules/gen3-new-box.md section 7): the soak first (no engine
 # restart), then the HIL gate at least ten minutes after the deploy's
 # start and the live gate at least ten minutes after the HIL gate ended

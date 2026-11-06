@@ -466,7 +466,7 @@ fn accept_media(
     }
 }
 
-/// Drains the listen taps, then the listen probe's taps (S7: streams 2 and
+/// Drains the listen taps, then the listen probe's taps (streams 2 and
 /// 3), into 48 kHz frames for the current media client; a client that takes
 /// nothing for `pipe::SEND_TIMEOUT` is dropped (`Conn::writer`), so `run`,
 /// which joins this thread, still returns. A probe framer keeps a burst's

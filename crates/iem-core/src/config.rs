@@ -872,6 +872,7 @@ mod tests {
         let path = dir.path().join("site.toml");
         for (key, text) in [
             ("back_to_reaper", "back_to_reaper = [\"zyxqw\"]\n"),
+            ("pin_changes", "pin_changes = false\n"),
             ("card", "[card]\ndriver = \"zyxqw\"\n"),
             ("activity", "[activity]\ninputs = [\"zyxqw\"]\n"),
             ("nonsense", "[nonsense]\nx = \"zyxqw\"\n"),

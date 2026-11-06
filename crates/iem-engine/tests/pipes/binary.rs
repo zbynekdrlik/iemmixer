@@ -267,7 +267,7 @@ fn the_binary_refuses_a_supervise_call_it_cannot_make() {
     );
 }
 
-/// `iem-engine supervise inject-fault` (Gen 3 phase H Task 6 Step 3, #72):
+/// `iem-engine supervise inject-fault` (Gen 3 phase H, #72):
 /// against an engine run without `--fault-injection` it is refused, exit 1
 /// and one fixed line, and the engine plays on; against one run with it
 /// (the box HIL gate's job) it is answered with one JSON line, exit 0, and

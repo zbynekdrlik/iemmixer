@@ -281,7 +281,7 @@ fn the_certificate_next_to_the_site_serves_https() {
     );
 }
 
-/// The HTTPS port (P9: the band's 443) closes with the HTTP one, while an
+/// The HTTPS port (the band's 443) closes with the HTTP one, while an
 /// open HTTP request still drains.
 #[cfg(feature = "tls")]
 #[test]

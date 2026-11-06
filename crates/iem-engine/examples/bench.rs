@@ -17,7 +17,7 @@
 //!   still hears every whole mix.
 //!
 //! Prints p50/p99/p99.9/max per case, and beside them the p99.9 the stream
-//! histogram gives (S7: 1 µs buckets, the soak's rule, `hist::quantile_us`).
+//! histogram gives (1 µs buckets, the soak's rule, `hist::quantile_us`).
 //! Exits 1 when the typical median exceeds 25 % of the period or either
 //! worst-case median exceeds the period; hosted runners preempt, so tails are
 //! reported, not gated (the box's soak gate judges the real pump).

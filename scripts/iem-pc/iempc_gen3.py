@@ -98,7 +98,7 @@ ENGINE_BIN = "/opt/iemmixer/bin/iem-engine"
 SOAKCLIENT = "/opt/iemmixer/bin/iem-soakclient"
 # The path of the box server's JWT key file, beside its site file.
 SIGNER_PATH = "/var/lib/iemmixer/site/secrets/jwt_secret"
-# The service user's mint folder on the box (#72 phase D Task 8; provision
+# The service user's mint folder on the box (#72 phase D; provision
 # makes it, 0700 iemmixer): each token there only between its mint and its read.
 BOX_TOKENS = "/var/lib/iemmixer/mint"
 # Every call on the box's tokens runs as the service user, the jwt_secret's

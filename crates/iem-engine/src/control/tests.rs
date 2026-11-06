@@ -435,6 +435,6 @@ mod peers;
 #[cfg(unix)]
 mod supervise;
 
-/// S7 HIL v2 (#10): the reopen's time and the faulting
+/// HIL v2 (#10): the reopen's time and the faulting
 /// callback's time in `Status`.
 mod s7;

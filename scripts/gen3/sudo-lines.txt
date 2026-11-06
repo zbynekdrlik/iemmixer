@@ -7,7 +7,7 @@
 # (iem-dante, iem-dante iem-engine, ..., iem-server). Lines starting with #
 # and blank lines are no rule. `sudo -n -l <command>` needs no line of its own:
 # it lists a command that has one. A command holds no quote and no backslash
-# (its words are split at spaces). Plan Task 9's provision-root.sh turns this
+# (its words are split at spaces). provision-root.sh turns this
 # file into the box's sudoers rule for its admin user,
 # /etc/sudoers.d/iemmixer-gen3 (each program by the absolute path sudo's
 # secure_path finds, NOPASSWD); the tests check that every `sudo -n` line a
@@ -89,7 +89,7 @@ root | timedatectl set-ntp false
 root | systemctl enable dantesync
 root | systemctl restart dantesync
 
-# scripts/gen3/install-cloudflared.sh (phase E Task 6): the pinned release's
+# scripts/gen3/install-cloudflared.sh (phase E): the pinned release's
 # .deb, held, and the band's tunnel connector's unit (systemctl daemon-reload
 # is deploy's line above); never enabled or started here.
 root | dpkg -i .cache/cloudflared-install/cloudflared-linux-amd64.deb
@@ -164,7 +164,7 @@ iemmixer | /opt/iemmixer/bin/iem-engine check-site --site /var/lib/iemmixer/site
 iemmixer | /opt/iemmixer/bin/iem-engine supervise status
 iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -30 10
 iemmixer | /opt/iemmixer/bin/iem-engine supervise stop-test-signal
-# The panic check (phase H Task 6 Step 3): the engine's own injected RT fault
+# The panic check (phase H): the engine's own injected RT fault
 # (refused unless the HIL gate's job started it with --fault-injection; the
 # engine ends itself and systemd starts it again), then the engine's journal
 # as root, each entry's process and message, for the faulted process's panic.
@@ -175,7 +175,7 @@ root | journalctl -u iem-engine.service -o json --output-fields=_PID,MESSAGE -n 
 # gate reads it too, as the engineer's push subscriptions before and after.
 iemmixer | env IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml /opt/iemmixer/bin/iem-server notify --count alarm
 
-# iempc gen3-gate live (phase H Task 5, #72; scripts/iem-pc/iempc_gen3_live.py):
+# iempc gen3-gate live (phase H, #72; scripts/iem-pc/iempc_gen3_live.py):
 # the browser's tokens for the run's length (the HIL job's begin, then the
 # live specs' 40 minutes; the mint folder's rm -f and cat are the lines above), the run's burst while the browser runs (30 s every 60 s at the HIL
 # ceiling, the listen probe on), and the server's
@@ -185,7 +185,7 @@ iemmixer | /opt/iemmixer/bin/iem-soakclient token --jwt-secret-file /var/lib/iem
 iemmixer | /opt/iemmixer/bin/iem-engine supervise test-signal mic1 -20 30 --listen
 root | journalctl -u iem-server.service -o cat -n 20000 --no-pager -q
 
-# iempc gen3-gate soak (phase H Task 7, #72; scripts/iem-pc/iempc_gen3_soak.py):
+# iempc gen3-gate soak (phase H, #72; scripts/iem-pc/iempc_gen3_soak.py):
 # iem-soakclient as the service user in the transient unit iem-soak beside
 # the engine as it serves the band (no HIL job, no restart), one line per run
 # length (10, 30, 60 and 120 minutes, nothing else). The build it checks the

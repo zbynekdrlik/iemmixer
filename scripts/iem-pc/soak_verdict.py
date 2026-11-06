@@ -37,7 +37,7 @@ UNREADABLE = object()  # a harness file that holds no JSON (no summary shape: th
 
 
 class Bad(ValueError):
-    """A record the verdict cannot read, or a count gone back; its text (numbers and fixed words) is the reason."""
+    """A summary the verdict cannot read; its text (numbers and fixed words) is the reason."""
 
 
 def _harness(summary: object) -> dict:
@@ -90,11 +90,6 @@ def box_check(summary: object, min_seconds: float) -> tuple[list[str], dict]:
     """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the summary's checks and its numbers.
     Gaps are counted, not judged (owner on #72, 2026-10-29: the browser listen is low priority, #88)."""
     return _ci_check(summary, min_seconds, None)
-
-
-def harness_problems(summary: object, min_seconds: float, max_gaps: int) -> list[str]:
-    """CI's harness check, in order; [] when it passed."""
-    return _ci_check(summary, min_seconds, max_gaps)[0]
 
 
 def read_json(path: Path) -> object:

@@ -28,7 +28,7 @@ async fn start_refuses_a_plaintext_pin_store() {
 
 #[tokio::test]
 async fn start_refuses_a_missing_pepper_next_to_pin_hashes() {
-    // A new pepper would silently void every stored PIN (spec P9).
+    // A new pepper would silently void every stored PIN.
     let dir = tempfile::tempdir().unwrap();
     let secrets_dir = dir.path().join(secrets::SECRETS_DIR);
     std::fs::create_dir_all(&secrets_dir).unwrap();

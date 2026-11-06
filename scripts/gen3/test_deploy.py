@@ -4,7 +4,7 @@ checkout's script, units and test site in a git repository of its own (the
 checkout deploy.sh checks), against a stand-in `ssh`, `scp` and `gh` first on
 PATH; ssh and scp play the box in a temporary folder (its home, its root with
 real links for the slots, and its units' states). Also the units' contents
-(phase C's three; phase D's service user and alarm unit, Task 5) and the sudo
+(phase C's three; phase D's service user and alarm unit) and the sudo
 template (sudo-lines.txt). The stand-in ssh records each call's command line
 and its stdin apart, so a PIN is seen to travel only on stdin. Every value is
 synthetic (P6)."""
@@ -54,7 +54,7 @@ ENGINEER_PIN = "3917"
 MEMBER_PIN = "6284"
 ENABLE = "sudo -n systemctl enable iem-engine iem-server"
 IS_ENABLED = "systemctl is-enabled iem-engine iem-server"
-# The closing line of a deploy that started the engine (phase H Task 8): the box's three gates on the build
+# The closing line of a deploy that started the engine (phase H): the box's three gates on the build
 # it now runs, in order, with the restart budget's waits; fixed words, no host or value.
 GATES = ("deploy.sh: next, the box's three gates on this build, in this order: iempc gen3-gate soak (no engine "
          "restart), then iempc gen3-gate hil at least ten minutes after this deploy's start, then iempc gen3-gate "

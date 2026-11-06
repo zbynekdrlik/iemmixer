@@ -537,7 +537,7 @@ pub fn eq_bands(eq: &Eq) -> Vec<EqBand> {
 
 /// `eq` with one band value set; `param` is freq_hz, gain_db, bw_oct or
 /// enabled. A gain change also switches a band with a gain on, as ReaEQ did
-/// under the predecessor (FG-2, P9: the band must not notice the switch); the
+/// under the predecessor (FG-2: the band must not notice the switch); the
 /// high-pass has no gain, so its switch stays as it is (no low cut from a
 /// gain drag or Reset).
 pub fn apply_band(eq: &Eq, band: u8, param: &str, value: f32) -> Result<Eq, ViewError> {

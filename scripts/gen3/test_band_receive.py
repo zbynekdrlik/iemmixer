@@ -1,5 +1,5 @@
 """Tests for scripts/gen3/band_receive.py, the band's data onto the Gen 3 box
-(#72 phase E Task 5). A temporary site and engine folder stand in for the
+(#72 phase E). A temporary site and engine folder stand in for the
 box's; every value is synthetic (P6: invented names and contents)."""
 from __future__ import annotations
 

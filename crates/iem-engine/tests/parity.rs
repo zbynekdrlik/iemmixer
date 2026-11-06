@@ -1,7 +1,7 @@
 //! Parity of the linear mix (#20):
 //!
 //! - the impulse oracle: an independent reference model, written from the
-//!   the model (and #58 design §8 for peers) over the
+//!   mixing rules (and #58 design §8 for peers) over the
 //!   declarative site (not the engine's topology code), gives the gain from
 //!   every RX channel to every TX channel; the engine's `Offline` output of
 //!   staggered impulses equals it within 1e-12 and is exactly zero elsewhere;
