@@ -88,10 +88,13 @@ impl PinStore {
     /// there is none (nothing is written).
     pub fn remove_member(&mut self, member_id: &str) -> io::Result<bool> {
         check_member(member_id)?;
-        if self.file.members.remove(member_id).is_none() {
+        let Some(old) = self.file.members.remove(member_id) else {
             return Ok(false);
+        };
+        if let Err(e) = self.save() {
+            self.file.members.insert(member_id.to_string(), old);
+            return Err(e);
         }
-        self.save()?;
         Ok(true)
     }
 
@@ -134,15 +137,22 @@ impl PinStore {
 
     pub fn set_engineer_hash(&mut self, phc: String) -> io::Result<()> {
         check_phc(ENGINEER_ID, &phc)?;
-        self.file.engineer = Some(phc);
-        self.save()
+        let old = self.file.engineer.replace(phc);
+        self.save().inspect_err(|_| self.file.engineer = old)
     }
 
     pub fn set_member_hash(&mut self, member_id: &str, phc: String) -> io::Result<()> {
         check_member(member_id)?;
         check_phc(member_id, &phc)?;
-        self.file.members.insert(member_id.to_string(), phc);
-        self.save()
+        let old = self.file.members.insert(member_id.to_string(), phc);
+        self.save().inspect_err(|_| match old {
+            Some(old) => {
+                self.file.members.insert(member_id.to_string(), old);
+            }
+            None => {
+                self.file.members.remove(member_id);
+            }
+        })
     }
 
     fn save(&self) -> io::Result<()> {
@@ -151,12 +161,15 @@ impl PinStore {
         }
         let json = serde_json::to_string_pretty(&self.file).map_err(io::Error::other)?;
         crate::secrets::replace_private(&self.path, json.as_bytes())?;
-        // The rename reaches the disk too: a power cut never brings an old
-        // PIN back.
-        match self.path.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => std::fs::File::open(dir)?.sync_all(),
-            _ => Ok(()),
+        // The rename reaches the disk too, so a power cut never brings an old
+        // PIN back. The new file holds the name by now: a sync that fails is
+        // no failed save, memory and file agree.
+        if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty())
+            && let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all())
+        {
+            tracing::warn!(error = %e, "the PIN hashes are saved, the folder's sync failed");
         }
+        Ok(())
     }
 }
 
