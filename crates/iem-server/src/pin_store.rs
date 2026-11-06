@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::atomic_write;
-
 /// File name inside the secrets directory.
 pub const PIN_HASHES_FILE: &str = "pin_hashes.json";
 /// Member id of the engineer; its PIN is the engineer PIN.
@@ -152,7 +150,13 @@ impl PinStore {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.file).map_err(io::Error::other)?;
-        atomic_write(&self.path, &json)
+        crate::secrets::replace_private(&self.path, json.as_bytes())?;
+        // The rename reaches the disk too: a power cut never brings an old
+        // PIN back.
+        match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => std::fs::File::open(dir)?.sync_all(),
+            _ => Ok(()),
+        }
     }
 }
 
