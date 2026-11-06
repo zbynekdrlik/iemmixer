@@ -1,7 +1,7 @@
 //! Engine start-up and the offline renderer (design note §1, §3.7): load the
 //! site and the state, start the backend (NullRt, or our own Dante device,
 //! Gen 3 phase C), open the pipes, run the control loop; or render a WAV file
-//! through the processor with `Offline`; or, S6, check a site
+//! through the processor with `Offline`; or check a site
 //! (`check-site`). Nothing listens to the stage before a switch (#38: only
 //! the owner's signal decides).
 
@@ -47,14 +47,14 @@ pub enum EngineError {
     Usage(String),
     #[error("the render faulted at frame {frame}: {message}")]
     Fault { frame: u64, message: String },
-    /// The card is refused (exit 3, S6 design note §4): a holder of the
-    /// driver module (I3), no such driver, a refused format or channel
-    /// map, the preference window, a measured period other than 32.
+    /// The card is refused (exit 3): the Dante device
+    /// lacks a site channel, or the rate is other than 96 kHz
+    /// (`dante::check`).
     #[error("card refused: {0}")]
     Card(String),
     /// Another process held the state directory past [`STATE_WAIT`]
-    /// (exit 75, #32 minor-4): the guard starts the engine again without
-    /// counting a crash.
+    /// (exit 75, #32 minor-4): an engine that just ended, most likely;
+    /// systemd starts this one again.
     #[error("{0}")]
     StateBusy(String),
 }
@@ -106,7 +106,7 @@ pub struct RunConfig {
     /// X2: solos clear this long after the controller left.
     pub solo_grace: Duration,
     pub backend: Backend,
-    /// `--hold`: silent until the supervisor's `Arm` (S6).
+    /// `--hold`: silent until the supervisor's `Arm`.
     pub hold: bool,
     /// The Dante device of `--backend dante` (its `--dante-*` flags).
     pub dante: Option<DanteArgs>,
@@ -321,8 +321,8 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         "run" => {
             if chosen != Backend::NullRt && (size.is_some() || signal.is_some()) {
                 return Err(
-                    "--block and --sine are for the nullrt backend: the card runs at its [card] \
-                     frames, the Dante device at its config's block"
+                    "--block and --sine are for the nullrt backend: the Dante device runs at its \
+                     config's block"
                         .to_owned(),
                 );
             }
@@ -622,7 +622,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         cfg.flags,
     )
     .with_hil(hil.clone());
-    // The D5(b) loopback return (S6 test 5): under `--test-signal` the engine
+    // The D5(b) loopback return: under `--test-signal` the engine
     // also opens the spare card inputs the HIL spare outputs loop back to, so
     // it can measure the round-trip. One return per HIL output.
     let hil_rx = hil.len();
@@ -723,7 +723,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
 /// holds it (#32 minor-4): an engine that just ended may hold its lock a
 /// moment after its exit (a lock's release can lag the process end).
 /// With the load's read pauses (2 s at most) the engine still listens well
-/// within the guard's READY_S (10 s).
+/// within 10 s of its start.
 pub const STATE_WAIT: Duration = Duration::from_secs(3);
 
 /// Takes the state directory (`Store::lock_within` [`STATE_WAIT`]); still
@@ -766,7 +766,7 @@ pub struct SiteSummary {
     pub mixes: usize,
 }
 
-/// HIL's spare outputs for `run` (S6): the site's `[guard] hil_tx`, checked
+/// HIL's spare outputs for `run`: the site's `[guard] hil_tx`, checked
 /// by `Topology::hil_outputs`, with the test-signal flag only. Without it
 /// no HIL signal can start, so a live engine never reads the key and opens
 /// no card output outside the topology.

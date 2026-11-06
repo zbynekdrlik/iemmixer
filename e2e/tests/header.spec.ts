@@ -90,7 +90,7 @@ test.describe("Header (F10)", () => {
       // The page's mixer socket goes through a route: while the "server" is
       // gone, the page's reconnect attempts are closed at once. It stays gone
       // past MAX_WS_FAILURES (3) failed sockets in a row, as in a server
-      // restart or an S6 mode switch: the drop and three refused retries (the
+      // restart: the drop and three refused retries (the
       // next 2 s tick, then 8 s and 15 s later), the third being the first that
       // also asks whether the token holds. That check gets 502, as a page
       // opened through the tunnel gets from cloudflared during a restart: no

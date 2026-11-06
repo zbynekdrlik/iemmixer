@@ -7,7 +7,7 @@ use iem_dsp::eq::EqParams;
 
 use crate::params::InputParams;
 
-/// HIL's spare card outputs an engine opens at most (S6, `[guard] hil_tx`):
+/// HIL's spare card outputs an engine opens at most (`[guard] hil_tx`):
 /// the D5(b) loopback pair or an unused TX, with room to spare.
 pub const MAX_HIL: usize = 8;
 
@@ -79,7 +79,7 @@ pub enum RtOp {
         amp: f64,
         ttl: u64,
     },
-    /// The HIL test signal (S6): a test signal whose sine, while it runs,
+    /// The HIL test signal: a test signal whose sine, while it runs,
     /// sounds only on the spare outputs in `mask`; every mix's TX and every
     /// other spare output is zero meanwhile. With `listen` (S7) the probe
     /// taps of the listened slots carry the spare outputs' samples too.

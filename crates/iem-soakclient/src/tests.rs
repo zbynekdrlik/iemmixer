@@ -637,7 +637,7 @@ fn the_summary_has_its_schema_and_no_site_value() {
     assert_eq!(v["complete"], false);
     assert!(v["error"].is_null());
     assert!(v["first_frame_ms"].is_null());
-    // A missing field reads as its default (additive, as the guard's records).
+    // A missing field reads as its default (additive).
     let empty: Summary = serde_json::from_str("{}").unwrap();
     assert_eq!(empty, Summary::default());
 }

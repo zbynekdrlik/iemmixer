@@ -56,7 +56,7 @@ pub const ENGINEER: &str = "engineer";
 /// build check, the opens and the closes come on top of the run. The server
 /// reads the token only when a socket opens.
 pub const TOKEN_MARGIN: u64 = 600;
-/// The build, as the guard names its own (`GITHUB_SHA` in CI).
+/// The build (`GITHUB_SHA` in CI).
 pub const BUILD: &str = match option_env!("GITHUB_SHA") {
     Some(sha) => sha,
     None => "local",
@@ -193,8 +193,8 @@ fn is_commit(s: &str) -> bool {
 /// `/api/version`'s answer names `build` (a commit, as `--expect-build`): its
 /// `git_hash`, the server's commit as `git rev-parse --short` printed it at
 /// build time (`iem_core::git_hash`), is at least [`MIN_HASH`] characters
-/// and a prefix of `build`. The predecessor app's answer names its own
-/// commit, never this one; any other answer names none.
+/// and a prefix of `build`. Another build's answer names its own
+/// commit; any other answer names none.
 pub fn names_build(answer: &str, build: &str) -> bool {
     let answer: serde_json::Value = serde_json::from_str(answer).unwrap_or_default();
     answer
@@ -473,7 +473,7 @@ pub enum Reason {
     /// The LAN URL is not plain `http://` (the client speaks no TLS).
     NotHttp,
     /// The server there answered `/api/version` without naming
-    /// `--expect-build` (another build, the predecessor app, no version
+    /// `--expect-build` (another build, no version
     /// route): nothing else was sent to it.
     WrongServer,
     /// The login was refused (the PIN, or the login protection).
@@ -566,7 +566,7 @@ impl Default for Summary {
 }
 
 /// Writes `summary` to `<path>.tmp`, flushes it to disk, then renames it
-/// over `path` (as the guard's `state::write_atomic`), so a reader sees the
+/// over `path`, so a reader sees the
 /// last whole summary, never a part. A failed rename leaves the `.tmp`,
 /// which the next write replaces.
 pub fn write_summary(path: &Path, summary: &Summary) -> io::Result<()> {

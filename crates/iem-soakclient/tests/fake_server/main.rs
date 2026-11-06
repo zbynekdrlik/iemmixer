@@ -5,7 +5,7 @@
 //! `recv_timeout`, so a run that never ends fails here instead of hanging.
 //! Timing is asserted only from below (a wait that must have happened) or
 //! against the run's own measured length, never as a fixed sleep. A run
-//! that must end early is a 30 s run waited for 5 or 6 s. The PC's own
+//! that must end early is a 30 s run waited for 5 or 6 s. The client's own
 //! engineer token (`--jwt-secret-file`) is tested in [`token`].
 
 use std::io::{self, Read, Write};

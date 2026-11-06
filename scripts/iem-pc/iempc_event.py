@@ -1,6 +1,5 @@
 """`iempc event`, "ide event" on the dev box: the flag and nothing else (#86).
-The box serves the band at every event and the IEM PC plays no part (Gen 2 ended
-2026-11-01), so the flag only freezes dev-time work: every command that changes
+The box serves the band at every event (Gen 2 ended 2026-11-01), so the flag only freezes dev-time work: every command that changes
 something refuses while it exists, and every wait sees a new flag within 2 s. A
 flag that cannot be written is a warning, never a stop."""
 from __future__ import annotations
@@ -39,8 +38,8 @@ def write_flag() -> None:
 
 
 def cmd_event(ctx: Ctx) -> int:
-    """The flag; the box and the PC are left alone."""
+    """The flag; the box is left alone."""
     if not getattr(ctx.args, "dry_run", False):
         write_flag()
-    emit({"event": "the flag only: the box keeps serving the band, the PC is left alone"})
+    emit({"event": "the flag only: the box keeps serving the band"})
     return 0

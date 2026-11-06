@@ -214,7 +214,7 @@ class LiveTests(LiveBase):
         self.assertEqual(step["run"], [str(RUN), "1"])
         self.assertEqual((step["mode"], step["folder_mode"], step["tokens"], step["pins"]), (0o600, 0o700, TOKENS, []))
         self.assertEqual(Path(step["path"]).parent.parent, ip.state_dir())
-        # The records live_verdict read, as the ops jobs write them.
+        # The records live_verdict read, as the gate's jobs write them.
         self.assertEqual(self.record("begin.json"), {"reason": "ready", "push_before": 1})
         self.assertEqual(self.record("pc.json"), {"reason": "browser-done"})
         self.assertEqual(self.burst_lines(), [{"t": int(gt.NOW), "exit": 0}] * 2)

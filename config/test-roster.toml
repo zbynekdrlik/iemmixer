@@ -1,6 +1,6 @@
 # Synthetic roster for CI, E2E and tests (#58 design §5, §6): the people and
 # the two lineups ("bands") of the test site. The real roster lives only in
-# the private ops repo, beside the PC's site file (program spec P6).
+# the private ops repo, beside the box's site file (program spec P6).
 #
 # People: member1 ... member11. Lineup `main` (the main band) places
 # member1 ... member9 on their own sets, led by member1 and member3; lineup

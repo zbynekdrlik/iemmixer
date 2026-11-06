@@ -1,13 +1,15 @@
 # iemmixer
 
-Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing REAPER. **Public repository** — site data never enters it (program spec P6).
+An in-ear-monitor mixer for a band: a native Rust audio engine with its own Dante device, a server and a phone UI, on one Linux box (Gen 3). **Public repository** — site data never enters it (program spec P6).
 
-- Program spec: `docs/superpowers/specs/2026-09-24-iemmixer-gen2-program.md` (approved 2026-09-24). Each sub-project gets a design note and a plan in `docs/superpowers/` before code.
-- Tickets: this repository's issues (#1 program, one ticket per sub-project). Predecessor issues are written `reaperiem#N`; `#N` always means this repository.
+- Design: `docs/superpowers/specs/2026-10-24-gen3-linux-dante-design.md`; the program spec it grew from, `docs/superpowers/specs/2026-09-24-iemmixer-gen2-program.md`, is ended and keeps only its principles (P6, I7, I8). A new sub-project gets a design note and a plan in `docs/superpowers/` before code.
+- Tickets: this repository's issues. Predecessor issues are written `reaperiem#N`; `#N` always means this repository.
+
+<!-- airuleset:tray=n/a a server on a headless Linux box, no desktop -->
 
 ## Playbook router
 
-- Public-repo hygiene, denylist, scrubbing, imports from the predecessor → `.claude/rules/public-repo-hygiene.md`
+- Public-repo hygiene, denylist → `.claude/rules/public-repo-hygiene.md`
 - Login protection, PIN hashing, pepper, secrets, provisioning → `.claude/rules/security-baseline.md`
 - Playwright E2E (console guard, env PINs, login budgets) → `.claude/rules/e2e.md`
 - CI Rust toolchain, `--locked`, mutation gate → `.claude/rules/ci-rust-toolchain.md`
@@ -16,28 +18,20 @@ Gen 2 of the band's in-ear-monitor mixer: a native Rust audio engine replacing R
 - Server ↔ engine: ids, pan/dB domains, echoes, solo, talk lock → `.claude/rules/server-engine.md`
 - Cloudflare tunnel watchdog, LAN URL / public host → `.claude/rules/tunnel-watchdog.md`
 - HTTPS certificate keeper (ACME DNS-01 via Cloudflare, `[acme]`, `cloudflare set-token`, sealed store) → `.claude/rules/https-acme.md`
-- ASIO host, the S1a spike, the PC window driver → `.claude/rules/asio-spike.md`
-- PC tuning window (S1c), tuning/measure modules, bundle sync, graceful reboot / I8 → `.claude/rules/pc-tuning.md`
-- Importer, exporter, band data migration (`iem-migrate`, iem-rpp import/export) → `.claude/rules/migration.md`
-- DSP kernels, EQ/pan/limiter parity, golden tolerances → `.claude/rules/dsp-parity.md`
-- Gen 1 test parity manifest (`docs/parity/gen1-tests.tsv`, its CI check, cutover gate) → `.claude/rules/parity.md`
-- Golden renders on the IEM PC (generator, window driver, analysis) → `.claude/rules/golden-renders.md`
-- Guard, iemmode, PC install → `.claude/rules/guard.md`
-- Soak harness, verdict, dispatch-soak → `.claude/rules/soak.md`
-- Live E2E on the PC, live verdict, dispatch-live → `.claude/rules/live.md`
-- Roster onto the PC (`iempc roster-install`) → `.claude/rules/roster-install.md`
-- Dante labels of the IEM card (`iempc dante-labels`, the sheet and `--apply`, `dante_card.py`) → `.claude/rules/dante-labels.md`
-- Gen 3 box from zero (new hardware, OS, provisioning with the realtime kernel and isolated cores, the device config's timing, deploy, proving it) → `.claude/rules/gen3-new-box.md`
-- Gen 3: our own Dante device and the engine on Linux (the `iem-dante` crate, the engine's Dante backend, the units run as the service user `iemmixer`, `scripts/gen3/deploy.sh` into two slots with `--back`, `provision.sh`/`verify_box.py`, `iem-dante-dev health`, `sudo-lines.txt`; real device and channel names only in the ops repo's device config) → `.claude/rules/gen3.md`
+- DSP kernels, EQ/pan/limiter parity, the frozen goldens and `iem-golden` → `.claude/rules/dsp-parity.md`
+- Soak harness, verdict → `.claude/rules/soak.md`
+- Live E2E on the band's public URL, live verdict → `.claude/rules/live.md`
+- A box from zero (new hardware, OS, provisioning with the realtime kernel and isolated cores, the device config's timing, deploy, proving it) → `.claude/rules/gen3-new-box.md`
+- The Gen 3 stack: our own Dante device and the engine on Linux (the engine's Dante backend, the units run as the service user `iemmixer`, `scripts/gen3/deploy.sh` into two slots with `--back`, `provision.sh`/`verify_box.py`, `iem-dante-dev health`, `iempc gen3-gate`, `sudo-lines.txt`, the event flag; real device and channel names only in the ops repo's device config) → `.claude/rules/gen3.md`
 
 ## Always-apply rules
 
-**Owner event signals (D2).** The owner's signals are the only gate: never switch on your own and never ask whether an event is running. Nothing is ever force-killed. **Since the cutover (prod since 2026-10-19, #11) iemmixer serves every event**, from `~/devel/iemmixer-event-main` at the PC's pin: "ide event" → `python3 scripts/iem-pc/iempc.py event` (it writes `~/.config/iemmixer/EVENT-NOW` first, which freezes all PC work, then sends the owner's signal: a maintenance session ends live on the pin, a healthy live stays, an engine that does not play is started live on the pin again: `lifecycle::on_event`); "prepni na reaper" → plain `iemmode event` (the event plan; the PC stays prod and the next boot goes live on the pin); "event skončil" → remove the flag, PC work then runs as maintenance (`iempc dev`). A reboot in prod goes live on the pin. **In prod nothing goes to REAPER on its own** (owner, 2026-10-19 on #11: "na reaper sa už nevraciame"): a failed entry stops with an alarm, a crash loop stays down with an alarm; only an explicit `iemmode event` brings REAPER. While the flag exists, read the PC's process list (ssh) before any `iemmode status`: a status call with no guard running starts one, and a guard's start runs its boot plan. Before the cutover a reboot came back in event and "ide event" brought REAPER (history on #9 and #11). **Gen 3 serves every event (Gen 2 ended, owner, 2026-11-01; #86):** "ide event" → `python3 scripts/iem-pc/iempc.py event` writes the flag and leaves the box and the PC alone; there is no switch back. The PC's guard, engine, server and REAPER autostarts are disabled, nothing is uninstalled, and the PC and the card (spare name `GEN3_CARD_SPARE`) are free for HIL and dante-asio work.
+**Owner event signals.** The owner's signals are the only gate: never ask whether an event is running. Nothing is ever force-killed. The box serves the band at every event, and a reboot serves the band. "ide event" → `python3 scripts/iem-pc/iempc.py event`: it writes `~/.config/iemmixer/EVENT-NOW`, which freezes dev-time work, and leaves the box alone. "event skončil" → remove the flag.
 
 **Predecessor boundary.** Never push to `zbynekdrlik/reaperiem`, never change its code, config or deployment; read it only through `~/devel/reaperiem` at a pinned SHA.
 
 **Site data (P6).** Never commit names, hosts, IPs, Dante channel numbers, real track names, PINs, keys or tokens. Real site values live only in the private `zbynekdrlik/iemmixer-ops` (credential strings not even there: only in `~/.config/iemmixer/` and the CI secret). Every clone installs the pre-push hook (gitleaks + private denylist + allowed commit identities); CI repeats all three.
 
-**Dante.** Never change Dante subscriptions or any Dante device other than the IEM PC's own card. One exception (owner, #72, 2026-10-24): for a Gen 3 test, the card's spare HIL return inputs may subscribe to our own 3.0 device's test TX, never on a band member's channel, and the subscription is removed after the test.
+**Dante.** Never change Dante subscriptions or any Dante device other than our own device on the box.
 
-**Versions.** One version for the workspace: `[workspace.package].version` in `Cargo.toml` (`2.0.0-dev.N` until cutover). `scripts/check_version.py` enforces consistency, and dev > main on PRs.
+**Versions.** One version for the workspace: `[workspace.package].version` in `Cargo.toml` (`2.0.0-dev.N`). `scripts/check_version.py` enforces consistency, and dev > main on PRs.

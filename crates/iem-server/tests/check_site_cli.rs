@@ -34,15 +34,16 @@ fn a_site_the_build_loads_exits_0_and_says_nothing() {
 fn a_key_the_build_no_longer_knows_exits_1_and_is_named() {
     let dir = tempfile::tempdir().unwrap();
     for (key, line) in [
-        ("back_to_reaper", "back_to_reaper = [\"x\"]\n"),
-        ("card", "[card]\ndriver = \"x\"\n"),
-        ("activity", "[activity]\ninputs = [\"x\"]\n"),
+        ("back_to_reaper", "back_to_reaper = [\"zyxqw\"]\n"),
+        ("card", "[card]\ndriver = \"zyxqw\"\n"),
+        ("activity", "[activity]\ninputs = [\"zyxqw\"]\n"),
     ] {
         let out = check(dir.path(), &format!("{line}\n{SITE}"));
         assert_eq!(out.status.code(), Some(1), "{key}: {out:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains(key), "{key}: {stderr}");
         assert!(stderr.contains("iemmixer.toml"), "{key}: {stderr}");
+        assert!(!stderr.contains("zyxqw"), "the value stays out: {stderr}");
     }
 }
 

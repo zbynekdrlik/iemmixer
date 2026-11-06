@@ -39,13 +39,13 @@ use iem_engine_proto::{
 
 pub const BLOCK: usize = 32;
 
-/// The intervals `drive` records, in turn: on time, the S1a p99.9 edge
+/// The intervals `drive` records, in turn: on time, the measured p99.9 edge
 /// (347 µs), late (1.5 periods) and a missed period (the overflow bucket).
 const INTERVALS: [u64; 4] = [333_333, 347_000, 500_000, 700_000];
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), opened after
-/// the topology's TX as `run` does under the test-signal flag (S6), and
-/// their loopback returns after the topology's RX (S6 test 5).
+/// the topology's TX as `run` does under the test-signal flag, and
+/// their loopback returns after the topology's RX.
 pub const HIL: [u16; 2] = [94, 95];
 
 pub fn site_path() -> PathBuf {

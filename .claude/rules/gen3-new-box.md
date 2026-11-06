@@ -115,7 +115,7 @@ Besides the gates, on new hardware or after a timing change:
 ## Gotchas that cost time once
 
 - At most two `iem-engine` restarts in ten minutes: a third hits the start limit and runs the alarm unit (which notifies people only while the box serves the band). `reset-failed` before a deliberate start resets that count, as deploy.sh and the gates do; the gates' own budget still waits ten minutes between runs (section 7).
-- Measure with the stage devices on: otherwise the mirrored flows come from other devices and P is judged on the wrong sources.
+- Measure with the stage devices on: otherwise those flows come from other devices and P is judged on the wrong sources.
 - Dante receivers play our flows at our advertised latency, never their own lower setting: a 1 ms `latency_ns` used for TX cost 0.75 ms at the rack.
 - The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot.
 - systemd gives `MONITOR_*` only to ExecStartPre=/ExecStart=, never to ExecCondition=.

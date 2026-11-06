@@ -808,7 +808,7 @@ fn hil_schedule(
     schedule
 }
 
-/// The HIL outputs (S6; the owner's decision on #9 of 2026-09-28) keep the
+/// The HIL outputs (the owner's decision on #9 of 2026-09-28) keep the
 /// invariance: a HIL signal on one spare output, stopped inside a block, and
 /// one on both spare outputs that runs to its end, with random mix commands
 /// between them, render bit for bit alike at 32/64/97/256 on every output,

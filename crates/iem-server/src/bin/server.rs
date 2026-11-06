@@ -220,7 +220,7 @@ fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The graceful stop request (S6): SIGTERM or SIGINT. The handlers are
+/// The graceful stop request: SIGTERM or SIGINT. The handlers are
 /// installed at the call, so a stop that arrives before the server listens
 /// is not lost; the future resolves on the first one.
 fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {

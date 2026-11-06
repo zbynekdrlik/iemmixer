@@ -31,8 +31,8 @@ async fn test_state(dir: &std::path::Path) -> AppState {
     test_state_with(dir, true).await
 }
 
-/// [`test_state`] with PIN changes frozen, as every `dev` site is
-/// before the cutover.
+/// [`test_state`] with PIN changes frozen, as the test site
+/// is.
 async fn frozen_state(dir: &std::path::Path) -> AppState {
     test_state_with(dir, false).await
 }

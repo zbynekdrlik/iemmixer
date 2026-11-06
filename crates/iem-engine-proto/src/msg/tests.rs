@@ -131,8 +131,8 @@ fn the_supervisor_role_round_trips() {
     );
 }
 
-/// `Status` as an engine before S6 sent it, and as a client before S6
-/// reads it.
+/// `Status` as an engine before the spare outputs sent it, and as a
+/// client before them reads it.
 #[derive(Deserialize)]
 struct OldStatus {
     callbacks: u64,
@@ -198,7 +198,7 @@ fn the_stream_figures_in_status_are_additive() {
     );
 }
 
-/// HIL's spare outputs in `Status` (S6): additive both ways, a partial
+/// HIL's spare outputs in `Status`: additive both ways, a partial
 /// entry reads with its defaults.
 #[test]
 fn the_hil_outputs_in_status_are_additive() {
@@ -612,7 +612,7 @@ fn ops_where(pick: fn(&Cmd) -> bool) -> Vec<&'static str> {
 
 #[test]
 fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change() {
-    // The fault injections are the guard's alone (review of PR #40,
+    // The fault injections are the supervisor's alone (review of PR #40,
     // #35): the controller is told `NotSupervisor`.
     assert_eq!(
         ops_where(Cmd::is_supervisor),

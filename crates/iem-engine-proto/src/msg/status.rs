@@ -35,7 +35,7 @@ pub struct Status {
     pub tap_overruns: u64,
     pub talkback_dropped: u64,
     pub cmd_backlog: u64,
-    // S6, additive: the stream's own figures (NullRt reports its block and
+    // Additive: the stream's own figures (NullRt reports its block and
     // zeros).
     /// The period the driver delivers, measured from its sample positions.
     pub frames: u32,
@@ -45,17 +45,16 @@ pub struct Status {
     pub overruns: u64,
     /// Driver reopens after a reset request or a stall.
     pub resets: u64,
-    /// A callback outlived the stop wait: the stream stays allocated (the
-    /// guard alarms).
+    /// A callback outlived the stop wait: the stream stays allocated.
     pub parked: bool,
     /// Started with `--hold` and not armed yet: every output is silent.
     pub held: bool,
-    /// S6, additive: HIL's spare card outputs (the engine opens the site's
+    /// Additive: HIL's spare card outputs (the engine opens the site's
     /// `[guard] hil_tx` under the test-signal flag), in that order; empty
     /// otherwise. HIL v1 reads them to prove its test signal reached them,
     /// at its level, and left them.
     pub hil: Vec<HilOut>,
-    /// S6 test 5, additive: the D5(b) loopback round-trip, in samples, once
+    /// Additive: the D5(b) loopback round-trip, in samples, once
     /// measured (the HIL signal on a spare output, looped back to the matching
     /// spare input in Dante); 0 while none. `loopback_ms` derives the time.
     pub loopback_samples: u64,
@@ -84,7 +83,7 @@ pub struct Status {
     pub fault_callback_us: f64,
 }
 
-/// One of HIL's spare card outputs in a [`Status`] (S6): its card channel
+/// One of HIL's spare card outputs in a [`Status`]: its card channel
 /// and its peak since the previous `Status` (linear).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

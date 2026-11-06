@@ -1,5 +1,7 @@
 # iemmixer Gen 2 — program specification
 
+**ENDED.** Gen 2 ended on 2026-11-01: REAPER, the Windows PC, the guard, the switching and the cutover this spec plans are gone from the repository (#86). What stands is its principles, cited by id: P6 (no site data), I7 (real-time contract), I8 (nothing force-killed). The current design is `docs/superpowers/specs/2026-10-24-gen3-linux-dante-design.md`.
+
 **Status:** APPROVED by the owner 2026-09-24 (D1–D4 as recommended, plus the switching amendment in §4.3), ticket iemmixer#1; supersedes the archived 22.6k-word draft where they conflict (§9).
 
 **Amended 2026-09-26 (#20, owner rulings):** the engine model is derived from the members' GUI (inputs, groups, mixes that may hear earlier mixes, taps, talkback) instead of REAPER's routing graph — design note `2026-09-26-engine-model-rework-design.md`. A11 and the F29 master fader are removed (the master is muted in the saved project); I4 is reworded.

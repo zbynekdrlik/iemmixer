@@ -10,7 +10,7 @@
 //!   revision `current.json` holds, renamed at each commit, so a listing
 //!   shows every committed revision even when contents cannot be read
 //!   (#32 F3-r4 2; `chain`, the revision floor);
-//! - `baseline.json`: written at each import (and, from S6, at `live` entry);
+//! - `baseline.json`: written at each `ImportState` that asks for one;
 //! - `save.new`: a save being written (never a load source);
 //! - `save.tmp`: a complete save before its renames, always replaced whole
 //!   (a crash before the second rename leaves the newest state only in it;

@@ -19,7 +19,7 @@ fn the_detector_sees_an_allocation() {
     assert_eq!(v.len(), 4);
 }
 
-/// I7 (S1c): the callback records glitches, per-CPU and thread counters
+/// I7: the callback records glitches, per-CPU and thread counters
 /// without allocating — including the ring-full drop path — and the hwlat
 /// scanner observes gaps without allocating after `new`. The glitch ring and
 /// the scanner's `largest` buffer are preallocated; nothing here may touch the

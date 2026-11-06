@@ -4,7 +4,7 @@
 # The build of CI's gen3-bin job (features standalone,tls,audio): plain HTTP
 # on port 80, the UI embedded, HTTPS only with the site's `tls` and a
 # certificate (#91; phase E, #72: port 80 is the band's
-# tunnel's origin, http://127.0.0.1:80 as on the PC; the box's own connector
+# tunnel's origin, http://127.0.0.1:80; the box's own connector
 # reaches it). Its data is the
 # public synthetic test band (config/test-site.toml as iemmixer.toml and
 # config/test-roster.toml as roster.toml), which deploy.sh copies into
@@ -19,7 +19,7 @@
 # at each start; a unit that stays down raises one alarm (iem-alarm@.service).
 #
 # No ordering with iem-engine.service: the server reconnects to the engine's
-# socket by itself (as on the PC), so the two start and stop in parallel.
+# socket by itself, so the two start and stop in parallel.
 # Never enabled at boot (deploy.sh disables it); "ide event" stops it with the
 # engine and the device (plan Task 7).
 

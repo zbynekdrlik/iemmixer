@@ -68,7 +68,7 @@ def rows(status: dict, key: str) -> list[dict]:
     return value
 
 
-# ---- the PC ----
+# ---- the engine's spare outputs ----
 
 
 def spare_peaks(engine) -> dict[int, float] | None:

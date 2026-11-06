@@ -8,7 +8,7 @@
 //! name flags, not their values, and a run's end is a code. It ends no
 //! process: its sockets end with a WebSocket Close.
 //!
-//! `iem-soakclient token …` (S7 plan Task 23) is the PC's token for the
+//! `iem-soakclient token …` (S7 plan Task 23) is the box's live gate's token for the
 //! live run ([`mint`]): 0 with the token in its `--out` file and only
 //! `token-written` on stdout, 1 with its code on stderr (`secret-unreadable`,
 //! `token-unwritable`, `clock-unreadable`), 2 on a usage error. The token is

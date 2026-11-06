@@ -90,8 +90,8 @@ const READ_TRIES: usize = 5;
 
 /// Pauses between read tries in one load, all files together (#32
 /// minor-5): 10 of `files::READ_PAUSE` (200 ms) are 2 s, so however many
-/// files stay locked the engine listens well within the guard's READY_S
-/// (10 s). A file read once they are spent still gets its one try.
+/// files stay locked the engine listens well within 10 s of its start.
+/// A file read once they are spent still gets its one try.
 const READ_PAUSES: usize = 10;
 
 /// Whether a read that failed may succeed when tried again (#32 minor-5):

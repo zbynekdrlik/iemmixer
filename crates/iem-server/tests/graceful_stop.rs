@@ -1,4 +1,4 @@
-//! The server stops gracefully (S6 design note §5.5): SIGTERM or SIGINT
+//! The server stops gracefully: SIGTERM or SIGINT
 //! closes the HTTP and the HTTPS listener at once, open requests get up to
 //! 5 s, the process exits 0 and the ports are free.
 

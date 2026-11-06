@@ -1,4 +1,4 @@
-//! Runtime secrets generated on the PC — never in git or the site config
+//! Runtime secrets generated on the box — never in git or the site config
 //! (program spec §5.3): the JWT signing key and the VAPID private key, one
 //! owner-only file each in `<config dir>/secrets/`. A file is created once and
 //! never overwritten; an empty or unreadable file is an error, not a reason to
@@ -43,9 +43,8 @@ pub fn load_or_create(dir: &Path) -> io::Result<Secrets> {
 }
 
 /// The VAPID private key from `dir`, read only: a missing key is an error,
-/// never made here. Only the server's start (and the band import) create
-/// the secrets; a notice sent before the first import must leave the
-/// directory as it is, so the predecessor's keys can still be taken.
+/// never made here. Only the server's start creates the secrets; a notice
+/// must leave the directory as it is.
 pub fn load_vapid(dir: &Path) -> io::Result<String> {
     let path = dir.join(VAPID_PRIVATE_FILE);
     match std::fs::read_to_string(&path) {

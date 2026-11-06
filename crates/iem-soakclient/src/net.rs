@@ -214,7 +214,7 @@ fn site_lan_url(http: &ureq::Agent, base: &str) -> Option<String> {
     serde_json::from_str::<Site>(&text).ok()?.lan_url
 }
 
-/// Plain HTTP on the LAN, as the guard's: one bound per request, any status
+/// Plain HTTP on the LAN: one bound per request, any status
 /// read as an answer, no redirect, no proxy (the sockets use none either).
 fn agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
@@ -299,7 +299,7 @@ fn watch(
 
 /// One socket for the whole run, opened once. Not opened, it ends the run
 /// at once (`server-gone`): a second try could reach whatever answers at
-/// that address by then (the predecessor app after "ide event"). Lost
+/// that address by then. Lost
 /// before the end, it ends the run (`connection-lost`). Either way it then
 /// ends as [`Role::finish`] says, as far as it still can.
 fn hold(shared: &Shared, url: &str, limits: &Limits, role: &mut Role) {

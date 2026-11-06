@@ -174,7 +174,7 @@ class Verdict(unittest.TestCase):
             r = Record()
             r.jobs["browser"] = job
             self.red(r, f"browser job {job}")
-        # A browser job cancelled alone is no cut of the PC side: red.
+        # A browser job cancelled alone is no cut of the box side: red.
         r = Record()
         r.jobs["browser"] = "cancelled"
         self.red(r, "browser job cancelled")
@@ -295,8 +295,7 @@ class Verdict(unittest.TestCase):
         self.assertEqual(r.verdict()["conclusion"], "failure")
 
     def test_a_failed_pc_job_that_left_no_record_is_cancelled(self):
-        # The guard stops the runner at "ide event": GitHub's conclusion for that job, and whether its
-        # always() upload still runs, are unverified (plan Task 10). A failed PC job without its record is
+        # A failed job of the box side without its record is
         # a cut, never red; one that succeeded or was skipped and left none is red.
         for key, field, job, missing in (("begin", "begin", "pc-begin", "no begin record"),
                                          ("pc", "pc", "pc", "no pc record"),
@@ -595,7 +594,7 @@ class Main(unittest.TestCase):
             self.write_all(r)
             self.write(name, "{")
             self.assertEqual(self.report()["first_failure"], first)
-        # A cancelled job of the PC side stays cancelled whatever the files hold.
+        # A cancelled job of the box side stays cancelled whatever the files hold.
         self.assertEqual(self.report(begin="cancelled")["conclusion"], "cancelled")
         # A left-dev record read from the file.
         self.write_all(r)

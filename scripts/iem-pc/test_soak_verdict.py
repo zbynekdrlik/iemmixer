@@ -249,7 +249,7 @@ class Verdict(unittest.TestCase):
         self.red(polls(), "no harness summary", None)
         self.red(polls(), "harness incomplete (server-gone)", harness(complete=False, error="server-gone"))
         # The client never opens a socket twice and checks the server's build first (#10): a lost socket and
-        # a server that does not name the build are named too. On the PC it signs its own token with the
+        # a server that does not name the build are named too. On the box it signs its own token with the
         # server's secret file (#10): a secret it cannot read is named as well.
         for code in ("connection-lost", "wrong-server", "secret-unreadable"):
             self.red(polls(), f"harness incomplete ({code})", harness(complete=False, error=code))
@@ -383,7 +383,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
 
     def test_the_gen3_box_gate_judges_the_summary_at_the_pc_s_bounds_with_a_meter_frame(self):
-        # iempc gen3-gate soak (#72 phase H Task 7): the checks 9, 11 and 12 at the PC's bounds, then a meter frame
+        # iempc gen3-gate soak (#72 phase H Task 7): the checks 9, 11 and 12 at `verdict`'s bounds, then a meter frame
         # (the box's real server sends them), and the numbers for the gate's line. Gaps are counted, not judged
         # (owner on #72, 2026-10-29: the browser listen is low priority).
         box = harness(seconds=7200.4, frames=360_000, expected_frames=360_000, meter_frames=72_000)
@@ -413,7 +413,7 @@ class Harness(unittest.TestCase):
         self.assertEqual(sv.harness_problems({**ci, "meter_frames": -1}, 599, 3),
                          ["the harness summary is unreadable"])
         self.assertEqual(sv.harness_problems(None, 599, 3), ["no harness summary"])
-        # The PC verdict keeps its 12 checks: the soak's meters decide nothing there.
+        # `verdict` keeps its 12 checks: the soak's meters decide nothing there.
         self.assertEqual(sv.verdict(polls(), harness(meter_frames=0), SHA)["conclusion"], "success")
 
     def test_the_harness_reason_codes_are_the_clients_own(self):
@@ -467,7 +467,7 @@ class Main(unittest.TestCase):
             self.run_main("report", "--pc", "success", "--dir", str(self.dir), "--sha", "member9", "--hours", "8")
 
     def test_main_report_keeps_left_dev_cancelled_whatever_the_harness_file_holds(self):
-        # On left-dev the PC job ends while the client may still rewrite its summary.
+        # On left-dev the `pc` job ends while the client may still rewrite its summary.
         self.write("result.json", '{"conclusion":"cancelled","reason":"left-dev"}')
         self.write("soakclient.json", '{"schema":1,')
         self.assertEqual(self.report()["summary"], "cancelled: the pc left dev")

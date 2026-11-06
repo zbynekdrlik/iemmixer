@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """The soak verdict (S7 design note §4; plan Task 7). Pure, stdlib only.
 
-`report` is the ops soak.yml report job's step: it reads the PC job's record
+`report` (the command line's; no gate calls it, `iempc gen3-gate soak` calls
+`box_check`) reads a `pc` job's record
 directory (result.json, polls.jsonl: one `{"t", "exit", "status"}` per
 status poll, soakclient.json: the iem-soakclient summary) and
 prints one JSON object, `{"conclusion", "summary", "first_failure",
-"numbers"}`, whose summary is posted as `soak/iem-pc`. A cancelled PC job, a
+"numbers"}`. A cancelled `pc` job, a
 failed one that left no record, or the reason `left-dev` is `cancelled`: "ide
-event" never makes red. A PC job that succeeded or was skipped and left no
-record is red (it writes its record first and uploads it always(), so a broken
-report or harness lies behind it), as is any other PC failure, naming its
+event" never makes red. A `pc` job that succeeded or was skipped and left no
+record is red (it writes its record first, so a broken
+report or harness lies behind it), as is any other `pc` failure, naming its
 reason code; else the soak is judged. The checks, in order; the first that fails leads a red
 summary (`red: <it>; <numbers>`):
 
@@ -29,14 +30,14 @@ summary (`red: <it>; <numbers>`):
 Counts before the first poll never count: every gate reads last minus first.
 `harness` is CI's e2e step: the checks 9 to 12 with CI's bounds, then at
 least one meter frame (the run against the real server is the one place that
-proves the client reads its Meters; the PC verdict does not judge them); it
+proves the client reads its Meters; `verdict` does not judge them); it
 prints the problems and exits 1 when there are any. `box_check` is the Gen 3
-box's soak gate (`iempc gen3-gate soak`): the checks 9, 11 and 12 at the PC's
+box's soak gate (`iempc gen3-gate soak`): the checks 9, 11 and 12 at `verdict`'s
 bounds and the meter frame, with the harness's numbers; its gaps are counted,
 not judged (owner on #72, 2026-10-29: the browser listen is low priority, #88).
 
 The summary holds numbers and fixed words only (P6): never a member id, a
-host or a SHA. The harness's and the PC job's reason codes are printed only
+host or a SHA. The harness's and the `pc` job's reason codes are printed only
 when they are known codes."""
 from __future__ import annotations
 
@@ -47,16 +48,16 @@ import re
 import sys
 from pathlib import Path
 
-LATE_US = 347             # S1a p99.9 interval at B = 32 (design §3): intervals of 347 µs or more are late
+LATE_US = 347             # the measured p99.9 interval at B = 32: intervals of 347 µs or more are late
 LATE_PER_MILLE = 2        # ≤ 0.2 % of the soak's intervals
 PROCESS_P999_US = 83      # 25 % of the 333 µs period
 P999 = 999                # per mille
 HOURS = 8.0
 POLL_HOLE_S = 300         # a longer time without a poll is a hole in the record
 FRAMES_PERCENT = 99       # the harness got at least this share of its expected frames
-DRIFT = "tuning drift:"   # the guard's hourly drift alarm (information only)
+DRIFT = "tuning drift:"   # a drift alarm in a poll's record (information only)
 SHA = re.compile(r"[0-9a-f]{40}")
-# The ops soak job's reason codes (result.json) and iem-soakclient's (`Reason::code`).
+# The `pc` job's reason codes (result.json) and iem-soakclient's (`Reason::code`).
 PC_REASONS = frozenset({"finished", "left-dev", "not-finished", "bundle-not-active", "no-client",
                         "harness-did-not-end"})
 HARNESS_REASONS = frozenset({"site-unreadable", "not-http", "wrong-server", "login-refused", "not-engineer",
@@ -331,8 +332,8 @@ def _ci_check(summary: object, min_seconds: float, max_gaps: int | None) -> tupl
 
 
 def box_check(summary: object, min_seconds: float) -> tuple[list[str], dict]:
-    """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the checks 9, 11 and 12 at the
-    PC's bounds, then a meter frame (the box's real server sends them), and the harness's numbers. Gaps are
+    """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the checks 9, 11 and 12 at
+    `verdict`'s bounds, then a meter frame (the box's real server sends them), and the harness's numbers. Gaps are
     counted, not judged (owner on #72, 2026-10-29: the browser listen is low priority, #88)."""
     return _ci_check(summary, min_seconds, None)
 
@@ -379,9 +380,9 @@ def _outcome(conclusion: str, summary: str, first: str | None = None) -> dict:
 
 
 def report(pc_result: str, record: object, polls: list | None, harness: object, sha: str, hours: float) -> dict:
-    """The ops report job's conclusion: cancelled for a cancelled PC job, a failed one without a
-    record or reason left-dev ("ide event" never makes red); failure for a PC job that succeeded or
-    was skipped without a record and for any other PC failure, naming its reason code; else
+    """The report's conclusion: cancelled for a cancelled `pc` job, a failed one without a
+    record or reason left-dev ("ide event" never makes red); failure for a `pc` job that succeeded or
+    was skipped without a record and for any other `pc` failure, naming its reason code; else
     verdict()."""
     reason = _get(record, "reason")
     if pc_result == "cancelled":
@@ -443,7 +444,7 @@ def _hours(v: str) -> float:
 
 def _harness_file(path: Path) -> object:
     """soakclient.json, or UNREADABLE when it holds no JSON, which check 9
-    names: on left-dev the PC job ends while the client may still rewrite
+    names: on left-dev the `pc` job ends while the client may still rewrite
     it, and report() maps the record first."""
     try:
         return read_json(path)
@@ -455,7 +456,7 @@ def cmd_report(a: argparse.Namespace) -> int:
     d = Path(a.dir)
     try:
         record = read_json(d / "result.json")
-    except Bad as e:  # an unreadable record: a cancelled PC job stays cancelled
+    except Bad as e:  # an unreadable record: a cancelled `pc` job stays cancelled
         out = (_outcome("cancelled", "cancelled: the pc job was cancelled") if a.pc == "cancelled"
                else _outcome("failure", f"red: {e}", str(e)))
     else:

@@ -185,8 +185,8 @@ fn only_a_read_error_that_may_pass_is_tried_again() {
 #[test]
 fn a_boot_pauses_between_read_tries_two_seconds_at_most() {
     // #32 minor-5: each file that stays locked took its four pauses (0.8 s
-    // each), so a few of them held the engine past the guard's READY_S
-    // (10 s) before it listened. The pauses of one load are 10 in all
+    // each), so a few of them held the engine past 10 s before it
+    // listened. The pauses of one load are 10 in all
     // (2 s); a file read once they are spent still gets its one try.
     let (_d, faulty, s) = faulty_store();
     for rev in 1..=3 {

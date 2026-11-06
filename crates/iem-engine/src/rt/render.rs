@@ -459,7 +459,7 @@ impl Processor {
         }
     }
 
-    /// HIL's spare outputs after the topology's TX (S6): while a HIL signal
+    /// HIL's spare outputs after the topology's TX: while a HIL signal
     /// runs, the masked ones carry its sine, capped at the test-signal level
     /// and faded like every output; otherwise, and the others, zero (A1).
     /// Their peaks go to the meter frame.
@@ -483,7 +483,7 @@ impl Processor {
         }
     }
 
-    /// The D5(b) loopback round-trip (S6 test 5): records the first hil-output
+    /// The D5(b) loopback round-trip: records the first hil-output
     /// sample at or above the onset threshold as the emit, feeds every block
     /// of every loopback-return input (after the topology's rx) to the probe,
     /// which judges the echo and a busy return, and stores the delay in

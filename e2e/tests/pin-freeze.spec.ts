@@ -2,8 +2,7 @@ import { test, expect } from "./support/fixtures";
 import { MEMBER_PIN, wrongPin } from "./support/pins";
 import { openMixer } from "./support/session";
 
-// Until the cutover PINs change only in the predecessor app (P9): every dev
-// site runs with `pin_changes = false`, and so does the E2E site
+// PINs frozen (P9): the E2E site runs with `pin_changes = false`
 // (config/test-site.toml). The server answers the PIN dialog with 409 and
 // the Slovak reason, which the dialog shows; the PIN stays as it was.
 test.describe("PIN changes before the cutover", () => {

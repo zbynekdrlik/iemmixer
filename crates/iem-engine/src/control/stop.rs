@@ -1,4 +1,4 @@
-//! How a run ends (design note §3.7; S6 §3, §4; Gen 3 phase C): the
+//! How a run ends (design note §3.7; Gen 3 phase C): the
 //! shutdown with its fade, the fault, the refused card, the backend that
 //! ended by itself, and the stream's last word.
 

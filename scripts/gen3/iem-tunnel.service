@@ -1,12 +1,10 @@
-# The band's tunnel connector on the Gen 3 box (#72 phase E, plan
-# docs/superpowers/plans/2026-10-27-gen3-phase-e-band-test.md Task 6, choice
-# 3): Cloudflare's cloudflared, installed with this unit by
+# The band's tunnel connector on the box (#72 phase E):
+# Cloudflare's cloudflared, installed with this unit by
 # scripts/gen3/install-cloudflared.sh (a pinned release, held); rules in
 # .claude/rules/gen3.md. It connects the band's remotely managed tunnel (its
 # ingress lives at Cloudflare, .claude/rules/tunnel-watchdog.md) and so
 # carries the band's public URL to the box's server on port 80
-# (iem-server.service), as the PC's connector does for the PC's server, with
-# the PC's flags: HTTP/2 (QUIC was blocked at an event) and the metrics
+# (iem-server.service), with its flags: HTTP/2 (QUIC was blocked at an event) and the metrics
 # pinned on 127.0.0.1:20241 (its /ready counts the edge connections).
 #
 # Exactly one connector of the tunnel runs at a time: two connectors of one
@@ -23,7 +21,7 @@
 # service user's, and none of the band's data.
 
 [Unit]
-Description=iemmixer Gen 3: the band's tunnel connector (one connector runs, the PC's or the box's)
+Description=iemmixer Gen 3: the band's tunnel connector (one connector runs)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 Wants=network-online.target
 After=network-online.target

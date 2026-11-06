@@ -1,7 +1,7 @@
 """`iempc gen3-gate live` (#72 phase H, plan
 docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Task 5): the live
-E2E on the Gen 3 box that serves the band. The PC's live run (the ops
-live.yml, .claude/rules/live.md) driven from the dev box over ssh, its
+E2E on the Gen 3 box that serves the band, driven from the dev box over ssh
+(.claude/rules/live.md), its
 verdict posted as the commit status `live/gen3` on the box's build. Its call
 site is iempc_gen3_gate.run.
 
@@ -29,7 +29,7 @@ an engineer and a member token minted on the box for TOKEN_SECONDS
 removed on the box at once; the folder is removed on every exit). A token is
 never on a command line and never printed.
 
-**The run** (live.yml's jobs in one process). pc-begin: the box's HIL job
+**The run** (four jobs in one process, named as the verdict's records name them). pc-begin: the box's HIL job
 (iempc_gen3_gate.begin_job: the engine restarted with --test-signal), ready
 when healthy, the RX flows back and the spare outputs open, else
 `engine-not-up` and no browser. browser: `npx playwright test --config
@@ -42,8 +42,7 @@ end by itself (`not-finished`). pc: while it runs, a burst every
 BURST_PERIOD_S (`supervise test-signal mic1 -20 30 --listen`, the flag
 checked before each), each in bursts.jsonl with its exit code. pc-end: the
 burst stopped, the marker in the server's journal (`journalctl -u
-iem-server.service`'s last 20000 lines as root, as pc-end reads the PC
-server log's last 20000; the marker names the run's number, so an earlier
+iem-server.service`'s last 20000 lines as root; the marker names the run's number, so an earlier
 run's never counts), the push count again, the engine's own restarts
 (NRestarts: the budget counts them), then the job's end.
 
@@ -89,14 +88,14 @@ USER_AGENT = "iempc-gen3-live/1 (iemmixer)"
 NAME = "live"   # its refusals: "no live gate"
 CONTEXT = "live/gen3"
 ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
-ORIGIN = re.compile(r"https://[A-Za-z0-9.-]+")   # live.yml's check of LIVE_BASE_URL
-# The burst: the PC's live run's (decision 4: 30 s every 60 s at the HIL
+ORIGIN = re.compile(r"https://[A-Za-z0-9.-]+")   # the check of LIVE_BASE_URL
+# The burst (decision 4: 30 s every 60 s at the HIL
 # ceiling, the listen probe on), fixed, as the sudo rule names it.
 BURST_INPUT, BURST_DBFS, BURST_S = "mic1", -20, 30
 BURST = (*gate.SUPERVISE, "test-signal", BURST_INPUT, str(BURST_DBFS), str(BURST_S), "--listen")
 BURST_PERIOD_S = 60.0
 LOOP_S = 1.0   # how often the loop looks at Playwright
-BROWSER_LIMIT_S = 45 * 60.0   # live.yml's browser job; the config's globalTimeout is 40 min
+BROWSER_LIMIT_S = 45 * 60.0   # the browser job's bound; the config's globalTimeout is 40 min
 TOKEN_SECONDS = 3600   # the job's begin (minutes) and the specs (40 min at most); the mint adds 10 min
 JOURNAL = (*gate.SUDO, "journalctl", "-u", "iem-server.service", "-o", "cat", "-n", "20000", "--no-pager", "-q")
 JOURNAL_S = 60
@@ -123,7 +122,7 @@ class Settings:
 
 @dataclass
 class Run:
-    """What the run did: the records' values and its jobs' results (live.yml's)."""
+    """What the run did: the records' values and its jobs' results."""
     number: int
     records: Path
     push_before: int
@@ -256,7 +255,7 @@ def add_burst(run: Run, code: int) -> None:
 
 
 def verdict_of(run: Run, jobs: dict[str, str]) -> dict:
-    """live_verdict's report over the run's records, as the ops report job reads them."""
+    """live_verdict's report over the run's records."""
     try:
         titles = live_verdict.titles(SPECS)
     except live_verdict.Bad:   # its check names the specs unreadable
@@ -375,7 +374,7 @@ def live_job(job: gate.Job, c: gate.Checks, run: Run, spec_env: dict[str, str]) 
 
 
 def cancelled(ip, c: gate.Checks, run: Run, left: bool) -> None:
-    """A run the flag cut: its records as live.yml's cut jobs leave them,
+    """A run the flag cut: its records as cut jobs leave them,
     the verdict (cancelled), the line; never a status."""
     leave(run)
     if not run.begun:

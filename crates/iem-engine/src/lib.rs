@@ -16,7 +16,7 @@
 //!   its media clock (Gen 3 phase C, #72). Nothing in the engine measures
 //!   the stage to gate a switch (#38: only the owner's signal decides);
 //! - [`supervise`]: `iem-engine supervise`, a supervisor client of the
-//!   control pipe for the Gen 3 box, where no guard runs (the HIL test
+//!   control pipe for the Gen 3 box (the HIL test
 //!   signal, its stop, the engine's `Status`; Gen 3 phase H, #72).
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1) and, on

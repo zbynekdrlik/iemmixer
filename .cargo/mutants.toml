@@ -188,7 +188,7 @@ exclude_re = [
   # The roster watcher's endless 2 s poll (#58), every mutant of it; its
   # steps are the tested stamp and check_file.
   "iem-server/src/roster_watch\\.rs.*\\bwatch\\b",
-  # Unobservable (S6/S1c): `if !hil.is_empty()` in `run` only decides whether
+  # Unobservable: `if !hil.is_empty()` in `run` only decides whether
   # the "HIL's spare card outputs …" info line is logged — no state and no
   # return value change (like the excluded `delete ! in Control::tick`). `run`
   # IS reachable from unit tests (run_bounded), but no test captures or asserts

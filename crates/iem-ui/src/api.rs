@@ -418,7 +418,7 @@ pub async fn change_pin(old_pin: &str, new_pin: &str, member: &str) -> Result<()
 }
 
 /// The PIN dialog's text for a refused change (`status` = HTTP status); 409
-/// is the freeze before the cutover (P9).
+/// is the freeze, `pin_changes = false` (P9).
 pub fn change_pin_error(status: u16) -> String {
     match status {
         400 => "PIN must be exactly 4 digits".to_string(),

@@ -199,8 +199,8 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
     }
     // The controller may not arm, start the HIL signal or inject a
     // fault (an engine keeps `--fault-injection` until it restarts,
-    // after its HIL job too, so only the guard, which allows them
-    // inside a job, sends them; review of PR #40, #35); an observer
+    // so only a supervisor, `iem-engine supervise` in the box's HIL
+    // gate, sends them; review of PR #40, #35); an observer
     // may do none of it either.
     r.c.handle(request_from(1, 30, Cmd::Arm));
     r.c.handle(request_from(1, 31, hil()));

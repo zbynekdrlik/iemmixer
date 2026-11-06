@@ -113,7 +113,7 @@ struct File {
 }
 
 /// The `[guard]` table as the engine reads it: only `hil_tx`, the outputs
-/// HIL's test signal may reach (S6 design note §4, §7).
+/// HIL's test signal may reach.
 #[derive(Default, Deserialize)]
 struct GuardTable {
     #[serde(default)]

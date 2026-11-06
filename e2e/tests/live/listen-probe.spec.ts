@@ -4,7 +4,7 @@ import { ANALYSER_INIT, audioError, audioLevel, playerDropouts, readTone } from 
 import { apiGet, live, openLive } from "./support/env";
 import type { Tone } from "./support/tone";
 
-// The listen probe on the real PC (S7, #10; design note section 6): the PC
+// The listen probe on the real box (S7, #10; design note section 6): the gate
 // fires the HIL test signal with `--listen` in bursts, and the server sends
 // its sine to `&hil=1` listen sockets only. The page's sockets go through the
 // runner's relay (`relay`, `/ws/audio` with `&hil=1`), the runner-side

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { expect, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 
 // The live run's site values (S7, #10; P6): every one comes from a LIVE_*
-// variable of the ops live run, read on first use, so `--list` works without
+// variable of `iempc gen3-gate live`, read on first use, so `--list` works without
 // any of them. A refusal names the variable, never its value, and no error
 // here carries a URL (a socket URL holds a token in its query).
 
@@ -106,9 +106,9 @@ const RUN_NUMBER = /^[0-9]{1,20}$/;
 
 /**
  * The client-error marker of this run, `iemmixer-live-marker-<run id>-<attempt>`,
- * from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` (the ops live run's own:
+ * from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` (the gate's own:
  * `pc-end` in the same run builds the same marker and looks for it in the
- * server's log). Read on use; a refusal names the variable, never its value.
+ * server's journal). Read on use; a refusal names the variable, never its value.
  */
 export function runMarker(env: Env = process.env): string {
   const id = matching("GITHUB_RUN_ID", RUN_NUMBER, "a run number (digits)", env);
@@ -151,8 +151,7 @@ export function namesBuild(gitHash: unknown, sha: string): boolean {
 
 /**
  * Fails unless the public host answers `/api/version` with the run's build:
- * after "ide event" the predecessor answers at the same address, so every
- * real socket opens only after this check.
+ * every real socket opens only after this check.
  */
 export async function expectBuild(request: APIRequestContext): Promise<void> {
   const { baseURL, sha } = box();

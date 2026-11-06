@@ -1,6 +1,6 @@
 //! One request after another (`Core::apply`, `Core::batch`): each command's
 //! checks and caps, the entity it sets through the per-entity setters, its
-//! effect and its RT commands; the test signal (X13) and the HIL signal (S6)
+//! effect and its RT commands; the test signal (X13) and the HIL signal
 //! start here.
 
 use iem_engine_proto::{

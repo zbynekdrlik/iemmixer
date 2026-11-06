@@ -242,7 +242,7 @@ fn status_carries_the_measured_period_the_stream_counters_and_the_hold() {
     assert!(!s.parked && !s.held);
 }
 
-/// HIL v1 proves the test signal from the engine (S6): each `Status`
+/// HIL v1 proves the test signal from the engine: each `Status`
 /// carries every spare output's peak since the previous one, the
 /// largest of the meter frames between them, which starts again after
 /// it; an engine without spare outputs lists none.

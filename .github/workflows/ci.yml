@@ -481,9 +481,9 @@ jobs:
           CI: "true"
           E2E_BASE_URL: http://127.0.0.1:8080
         run: npx playwright test --reporter=list
-      - name: Live specs listed (they run only from the ops live run and iempc gen3-gate live; no LIVE_* here)
-        # Without the mock run's PINs as well: the ops browser job and
-        # `iempc gen3-gate live` (#72) have none (no band PIN in GitHub, #10), so a
+      - name: Live specs listed (they run only from iempc gen3-gate live; no LIVE_* here)
+        # Without the mock run's PINs as well:
+        # `iempc gen3-gate live` (#72) has none (no band PIN in GitHub, #10), so a
         # live spec that reads them at import (support/session.ts ->
         # pins.ts) must fail here, not there.
         working-directory: e2e
@@ -498,15 +498,15 @@ jobs:
         # member's mix gets no_source. The PIN goes in through the client's own
         # variable, never an argument. The verdict runs even when the client
         # ended early, so the log names what failed; --max-gaps 3 is the hosted
-        # runner's tolerance for scheduling stalls (the PC verdict wants 0).
+        # runner's tolerance for scheduling stalls (the box's gate only counts gaps).
         # The server must name the build first: its /api/version git_hash is
         # this checkout's `git rev-parse --short HEAD`, read when the step
         # above built it (iem-core's build.rs), so the client expects the
-        # same HEAD in full. Then 30 s in the PC's mode (#10 decision,
+        # same HEAD in full. Then 30 s in the box's mode (#10 decision,
         # 2026-10-07): no PIN, the client signs its own engineer token with
         # this server's own JWT secret (secrets/jwt_secret next to the site
         # file), so a real server reads a token the client signed before any
-        # PC soak does. Then the live run's tokens (S7 plan Task 23, #10
+        # box soak does. Then the live run's tokens (S7 plan Task 23, #10
         # 2026-10-08: no band PIN in GitHub): `iem-soakclient token` mints an
         # engineer and a member9 token from the same secret into new files
         # (never printed; curl reads each header from a file, so no token is

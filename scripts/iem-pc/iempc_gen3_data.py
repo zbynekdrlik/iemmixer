@@ -29,7 +29,7 @@ PEPPER_LEN = 32
 
 def unpack(ip, out: str, source: str) -> tuple[bytes, dict[str, str]]:
     """`source`'s one JSON line as its zip and manifest, every member's sha256
-    checked here (the PC's script or the box's band_send.py)."""
+    checked here (the box's band_send.py)."""
     lines = [line for line in out.splitlines() if line.strip()]
     try:
         doc = json.loads(lines[-1]) if lines else None

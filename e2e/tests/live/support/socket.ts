@@ -56,8 +56,8 @@ const seconds = (ms: number, digits: number): string => (ms / 1000).toFixed(digi
 
 /**
  * The words of a socket's close from the far side, for a failure (live run 3,
- * #10): its code (a number, else none), its UTC time (to match the PC's
- * server.log, which names every close the server made or saw), how long after
+ * #10): its code (a number, else none), its UTC time (to match the server's
+ * journal, which names every close the server made or saw), how long after
  * the open and after the last message it came. Never the close's reason text:
  * the far side writes that (P6).
  */

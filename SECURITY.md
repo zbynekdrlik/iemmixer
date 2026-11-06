@@ -6,12 +6,12 @@ Report vulnerabilities privately with GitHub's "Report a vulnerability" button o
 
 ## Scope
 
-The server, web UI and tray in this repository, and later the engine and guard. Site configuration and deployment live in a private repository and are out of scope.
+The server, web UI, engine and Dante device in this repository. Site configuration and deployment live in a private repository and are out of scope.
 
 ## Baseline
 
-- No credentials in the code or the repository; secrets are generated on the target PC.
-- PINs are stored as argon2id hashes keyed with a DPAPI-protected pepper.
+- No credentials in the code or the repository; secrets are generated on the target box.
+- PINs are stored as argon2id hashes keyed with a pepper held as a systemd credential.
 - The API grants no cross-origin access (no CORS); the UI is served by the same server.
 - Login attempts are rate-limited per client and per origin and never locked out.
 - CI: SHA-pinned actions, read-only default token, secret scanning with push protection, gitleaks, a private denylist scan, cargo-deny.

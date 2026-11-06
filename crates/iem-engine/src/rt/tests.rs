@@ -120,7 +120,7 @@ fn rig_with(site: &str, cmds: &[Cmd], flags: Flags, opts: Options) -> Rig {
 }
 
 /// `rig_with` on an engine that opened the spare card outputs `hil` for
-/// HIL (S6): the core knows them, and the processor's outputs after the
+/// HIL: the core knows them, and the processor's outputs after the
 /// topology's TX are theirs.
 fn rig_hil(site: &str, cmds: &[Cmd], flags: Flags, opts: Options, hil: Vec<u16>) -> Rig {
     let topo = Arc::new(compile(&parse(site).unwrap()).unwrap());
@@ -991,7 +991,7 @@ fn the_test_sine_starts_upwards_and_fades_out_after_its_ttl() {
     assert!(y[5760..].iter().all(|v| *v == 0.0), "silent after the end");
 }
 
-/// S6: the held output, the reopen fade-in, HIL's spare outputs and the
+/// The held output, the reopen fade-in, HIL's spare outputs and the
 /// D5(b) loopback return.
 mod hil;
 

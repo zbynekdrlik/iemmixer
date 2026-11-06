@@ -73,7 +73,7 @@ fn the_commands_parse_with_the_box_pipe_unless_one_is_given() {
     );
 }
 
-/// The guard's caps (`daemon::hil::test_signal`) with its words: the
+/// The caps with their words: the
 /// ceiling and the longest TTL are allowed, a step past either is not.
 #[test]
 fn the_caps_are_the_guards() {
@@ -113,7 +113,7 @@ fn the_caps_are_the_guards() {
         err("test-signal mic1 -30 -1"),
         "\"-1\" is not a whole number"
     );
-    // The guard's ceiling is the engine's own X13 cap.
+    // The ceiling is the engine's own X13 cap.
     assert_eq!(HIL_MAX_DBFS, crate::params::TEST_DBFS.1);
 }
 
@@ -422,7 +422,7 @@ fn request_of(cmd: Cmd) -> ClientMsg {
 }
 
 /// The burst goes to every spare output the engine's first `Status` names,
-/// in its order, at the asked level and length, the guard's 1 kHz.
+/// in its order, at the asked level and length, at 1 kHz.
 #[test]
 fn the_burst_goes_to_every_spare_output_the_status_names() {
     for listen in [false, true] {

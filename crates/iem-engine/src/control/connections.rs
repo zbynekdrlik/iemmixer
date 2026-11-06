@@ -143,7 +143,7 @@ impl Control {
             self.controller = Some(id);
             self.controller_lost = None;
         }
-        // A new supervisor (a restarted guard) replaces the old one only.
+        // A new supervisor replaces the old one only.
         if role == Role::Supervisor
             && let Some(old) = self.supervisor.filter(|old| *old != id)
         {

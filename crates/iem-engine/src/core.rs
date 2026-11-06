@@ -22,7 +22,7 @@ mod state;
 
 pub use self::state::{MixRec, Reconciled, defaults_muted, reconcile, to_state};
 
-/// The HIL signal's outputs (`HilTestSignal.card_tx`; S6 design note §4,
+/// The HIL signal's outputs (`HilTestSignal.card_tx`;
 /// the owner's decision on #9 of 2026-09-28): the HIL slots of the listed
 /// card channels among the engine's spare outputs `hil` (the site's
 /// `[guard] hil_tx`, `Topology::hil_outputs`), each within the first
@@ -178,7 +178,7 @@ pub struct Core {
     /// may not replace it until it ends.
     hil_test: bool,
     /// HIL's spare card outputs the engine opened after the topology's TX
-    /// (S6): the HIL slots of `HilTestSignal`'s mask.
+    ///: the HIL slots of `HilTestSignal`'s mask.
     hil: Vec<u16>,
     rev: u64,
     flags: Flags,
@@ -201,7 +201,7 @@ impl Core {
     }
 
     /// The core of an engine that opened HIL's spare card outputs `hil`
-    /// (S6, checked by `Topology::hil_outputs`) after the topology's TX, in
+    /// (checked by `Topology::hil_outputs`) after the topology's TX, in
     /// that order.
     pub fn with_hil(mut self, hil: Vec<u16>) -> Self {
         self.hil = hil;

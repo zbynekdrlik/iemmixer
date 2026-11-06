@@ -65,7 +65,7 @@ pub trait Driver: Send {
     }
 }
 
-/// Why a backend ends the run (S6 design note §3, §4; Gen 3 phase C).
+/// Why a backend ends the run (Gen 3 phase C).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
     /// A stop was asked (SIGTERM or SIGINT; the Dante backend reports them,
@@ -123,7 +123,7 @@ pub struct Control {
     peers: BTreeMap<u64, Peer>,
     controller: Option<u64>,
     controller_lost: Option<Instant>,
-    /// The guard's connection (S6): one at a time, beside the controller.
+    /// The supervisor's connection: one at a time, beside the controller.
     supervisor: Option<u64>,
     /// `--hold` until the supervisor's `Arm`.
     held: bool,
@@ -135,7 +135,7 @@ pub struct Control {
     shutdown: bool,
     /// Sanitiser trips already alarmed.
     trips_seen: u64,
-    /// HIL's spare outputs (S6, `Core::hil` order): the largest peak of the
+    /// HIL's spare outputs (`Core::hil` order): the largest peak of the
     /// meter frames since the last `Status`.
     hil_peaks: Vec<f64>,
 }

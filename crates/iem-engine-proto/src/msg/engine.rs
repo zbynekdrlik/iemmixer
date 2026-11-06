@@ -19,7 +19,7 @@ pub enum ErrCode {
     NoSource,
     NotController,
     TooLarge,
-    /// A supervisor command from another role (S6).
+    /// A supervisor command from another role.
     NotSupervisor,
 }
 

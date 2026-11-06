@@ -262,8 +262,8 @@ fn issue_token(
 ///   the engineer PIN with `member = "engineer"`.
 /// - **Members**: change their own PIN (`old_pin` required, `member` ignored);
 ///   a wrong current PIN counts against the login budgets.
-/// - **Before the cutover** (`pin_changes = false`, every `dev` and trial
-///   site; P9): 409 with [`iem_core::PIN_CHANGES_FROZEN`] for everyone, before
+/// - **Frozen** (`pin_changes = false`, the test site; P9): 409 with
+///   [`iem_core::PIN_CHANGES_FROZEN`] for everyone, before
 ///   any PIN is checked; nothing changes.
 pub async fn change_pin(
     State(state): State<AppState>,
@@ -280,7 +280,7 @@ pub async fn change_pin(
         return Err(Rejection::from(subject_gone().into_response()));
     }
     if !state.site_config.pin_changes {
-        tracing::info!(by = %claims.sub, "PIN change refused: PINs change in the predecessor until the cutover");
+        tracing::info!(by = %claims.sub, "PIN change refused: this site freezes PIN changes");
         return Err(Rejection::from(error_response(
             StatusCode::CONFLICT,
             "PIN_CHANGES_FROZEN",

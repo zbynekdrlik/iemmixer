@@ -1,5 +1,5 @@
 //! Presets, history and pins/hides in the band schema-3 files (F8, F13, F14;
-//! S4 design note §3.4, S5 design note §6): `presets/<member>.json`,
+//! S5 design note §6): `presets/<member>.json`,
 //! `snapshots/<member>.json`, `customizations/<member>.json` in a data
 //! directory: the config directory in legacy mode, the active lineup's
 //! `lineups/<id>/` in roster mode (#58). A file of another format or schema

@@ -30,7 +30,7 @@ test.describe("meters on the real PC (S7)", () => {
     const read = await desk.during(async () => {
       const before = await engineer.consoleInput(testInput);
       if (!before) throw new Error("LIVE_TEST_INPUT is not an input of the console");
-      // Dry and open: the burst's sine reaches the input meter as the PC
+      // Dry and open: the burst's sine reaches the input meter as the engine
       // plays it, with no trim, EQ or mute of the site's in the way.
       desk.change(
         engineer,

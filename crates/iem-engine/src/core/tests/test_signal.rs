@@ -1,4 +1,4 @@
-//! The test signal (X13), the HIL signal and its mask (S6), `Arm`, fault
+//! The test signal (X13), the HIL signal and its mask, `Arm`, fault
 //! injection and HIL's forced reopen.
 
 use super::*;
@@ -182,7 +182,7 @@ fn a_hil_signal_never_names_a_mixs_tx() {
     }
 }
 
-/// While a HIL test signal runs (its TTL, S6 design note §4) a plain test
+/// While a HIL test signal runs (its TTL) a plain test
 /// signal may not replace it: that would lift the card mask and sound on
 /// every TX that hears the input. A stop ends it as usual, and after its end
 /// a plain one starts again (lane A review).

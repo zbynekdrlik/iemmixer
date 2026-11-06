@@ -1,7 +1,7 @@
 """`iempc gen3-gate soak` (#72 phase H, plan
 docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Task 7): the soak
-on the Gen 3 box that serves the band. The PC's soak (the ops soak.yml,
-.claude/rules/soak.md) driven from the dev box over ssh: `iem-soakclient` on
+on the Gen 3 box that serves the band (.claude/rules/soak.md), driven from
+the dev box over ssh: `iem-soakclient` on
 the box, beside the dev box's reads of the box's own counters, its verdict
 posted as the commit status `soak/gen3` on the box's build. Its call site is
 iempc_gen3_gate.run.
@@ -59,8 +59,8 @@ reset-failed), the env file and the summary removed on the box.
 **The verdict**, every check run, its words in FAILURES' order:
 - not_finished: the client still ran at the bound; client: its unit's
   result not `success` or its exit not 0;
-- harness: soak_verdict.box_check over the client's summary (the PC
-  verdict's checks 9, 11 and 12 at its bounds: complete, the run's seconds,
+- harness: soak_verdict.box_check over the client's summary (`soak_verdict.verdict`'s
+  checks 9, 11 and 12 at its bounds: complete, the run's seconds,
   no reconnect, 99 % of the expected listen frames; then a meter frame). The
   listen gaps are counted, not judged (owner on #72, 2026-10-29: the browser
   listen is low priority, #88);

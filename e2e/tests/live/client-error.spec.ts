@@ -6,8 +6,8 @@ import { expectBuild, live, openStart, runMarker } from "./support/env";
 // through the band's public host, with this run's marker
 // `iemmixer-live-marker-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>` as its
 // message. The server answers 204 and logs it; `pc-end` of the same run
-// builds the same marker and finds it in the server's log on the PC
-// (`<root>\logs\server.log`, not the tray's rolling log). The marker is
+// builds the same marker and finds it in the server's journal on the box
+// (`journalctl -u iem-server.service`). The marker is
 // read before the page opens, so a run without it fails naming the
 // variable. Any page socket goes through the runner's relay (the fixture).
 
@@ -21,7 +21,7 @@ test.describe("the client error report on the real PC (S7)", () => {
       location: "e2e/tests/live/client-error.spec.ts",
     };
     await openStart(page);
-    // Only to the run's build: after "ide event" the predecessor answers at the same address.
+    // Only to the run's build (`expectBuild`): nothing goes to another server at that address.
     await expectBuild(page.request);
     // From the page, as the panic hook posts: same origin, through the tunnel.
     // A failed fetch comes back as 0 (its error text could name the URL).

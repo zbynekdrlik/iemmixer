@@ -1,7 +1,7 @@
 //! `iem-engine supervise` (Gen 3 phase H, #72; plan
 //! `docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md` Task 3): a
-//! supervisor client of the engine's control pipe for the Gen 3 box, where
-//! no guard runs: `test-signal <input> <dbfs> <seconds> [--listen]` sends
+//! supervisor client of the engine's control pipe for the Gen 3 box:
+//! `test-signal <input> <dbfs> <seconds> [--listen]` sends
 //! `HilTestSignal` (every mix TX written as zero while it runs, the sine
 //! only on HIL's spare outputs, which the engine opens under its
 //! `--test-signal` flag and refuses without it), `stop-test-signal` sends
@@ -17,7 +17,7 @@
 //! **One supervisor at a time.** The engine keeps one supervisor beside its
 //! controller, and a supervisor's hello replaces the one before it
 //! (`Superseded`, then closed; `control/connections.rs`, `Control::hello`).
-//! On the box no guard holds that connection, so nothing is displaced: each
+//! Nothing else holds that connection, so nothing is displaced: each
 //! call is the engine's supervisor for its one command and leaves; two calls
 //! at once end the earlier one with `Superseded` (exit 1). A supervisor that leaves neither stops
 //! nor holds a signal: the burst runs its seconds after the call returned

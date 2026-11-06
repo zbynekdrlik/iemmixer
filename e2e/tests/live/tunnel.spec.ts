@@ -22,8 +22,8 @@ type TunnelStatus = { state?: unknown; ready_connections?: unknown; since_secs?:
 
 /**
  * GET /api/tunnel through the public host, as `who`; it must answer 200 with
- * a status. Only from the run's build: after "ide event" the predecessor
- * answers at the same address, and the failure then names that hop.
+ * a status. Only from the run's build: another server at that address
+ * fails, naming that hop.
  */
 async function tunnelStatus(request: APIRequestContext, who: Who): Promise<TunnelStatus> {
   await expectBuild(request);

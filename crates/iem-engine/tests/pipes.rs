@@ -827,8 +827,7 @@ fn an_engine_waits_a_moment_for_its_state_dir() {
 /// The supervisor's fault injection under the flag ends the engine with a
 /// fault; without the flag it is `Forbidden`. The controller never injects,
 /// flag or not (review of PR #40, #35: an engine keeps `--fault-injection`
-/// until it restarts, and only the guard allows an injection, inside a HIL
-/// job).
+/// until it restarts, and only the box HIL gate's job starts one with it).
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
@@ -872,8 +871,8 @@ fn fault_injection_releases_the_driver_and_exits() {
 
 /// HIL v2 (S7, #10): the last `Status` before a fault's `DriverReleased`
 /// carries the fault and the faulting callback's own time (NullRt: its
-/// `process()` up to the caught panic), so the guard can keep it across the
-/// respawn.
+/// `process()` up to the caught panic), so a supervisor reads it before the
+/// engine ends.
 #[test]
 fn an_injected_fault_ends_with_a_status_that_times_the_faulting_callback() {
     let mut e = Engine::start(

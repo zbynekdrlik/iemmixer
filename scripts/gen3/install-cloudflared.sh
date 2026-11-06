@@ -4,10 +4,8 @@
 set -euo pipefail
 # Puts Cloudflare's tunnel connector (cloudflared) on the Gen 3 box with its
 # unit, iem-tunnel.service, installed and never enabled or started (#72 phase
-# E, plan docs/superpowers/plans/2026-10-27-gen3-phase-e-band-test.md Task 6;
-# .claude/rules/gen3.md). The switch tool starts it while the box serves the
-# band, once the PC's connector stopped: exactly one connector of the band's
-# tunnel runs at a time.
+# E; .claude/rules/gen3.md). It runs while the box serves the band: exactly one
+# connector of the band's tunnel runs at a time.
 #
 #   install-cloudflared.sh --host <user@host> --version <X.Y.Z>
 #                          --sha256 <the release .deb's sha256>

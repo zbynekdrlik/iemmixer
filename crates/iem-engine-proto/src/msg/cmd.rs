@@ -79,14 +79,14 @@ pub enum Cmd {
     Shutdown,
     /// A panic on the RT thread (HIL's panic check), under the
     /// fault-injection flag. Supervisor only: an engine keeps the flag until
-    /// it restarts, after its HIL job too, and only the guard allows an
-    /// injection, inside a job (review of PR #40, #35).
+    /// it restarts, and only the box HIL gate's job starts one with it
+    /// (review of PR #40, #35).
     InjectFault,
     Ping,
-    /// The supervisor lets an engine started with `--hold` sound (S6 design
-    /// note §4): the outputs fade in over 500 ms.
+    /// The supervisor lets an engine started with `--hold` sound:
+    /// the outputs fade in over 500 ms.
     Arm,
-    /// The HIL test signal (S6 design note §4, §7): the test signal on
+    /// The HIL test signal: the test signal on
     /// `input` (under the test-signal flag, capped like `StartTestSignal`;
     /// `dbfs` above the cap is refused), whose sine, while it runs, sounds
     /// only on the card outputs `card_tx`: spare outputs no mix uses (the
@@ -142,7 +142,7 @@ impl Cmd {
         matches!(self, Self::GetState | Self::GetTopology | Self::Ping)
     }
 
-    /// Commands only the supervisor may send (S6 design note §4): `Arm`,
+    /// Commands only the supervisor may send: `Arm`,
     /// the HIL signal and the fault injection (review of PR #40, #35);
     /// anyone else gets `NotSupervisor`.
     pub fn is_supervisor(&self) -> bool {

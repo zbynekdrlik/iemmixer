@@ -10,8 +10,8 @@ import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 
 // The live specs' pure estimators and their in-page analyser (S7, #10), run
-// in the mock E2E job: the live specs themselves run only from the ops live
-// run, against the real PC. Every input is synthetic with a known answer; only
+// in the mock E2E job: the live specs themselves run only from `iempc gen3-gate
+// live`, against the box. Every input is synthetic with a known answer; only
 // the analyser test uses a page (its own, served by a route, no server).
 
 const RATE = 48_000;

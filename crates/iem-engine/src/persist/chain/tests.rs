@@ -673,7 +673,7 @@ fn the_jump_alarm_names_every_file_passed_over_and_the_floor() {
 
 #[test]
 fn a_state_directory_with_an_older_engines_names_loads_as_before() {
-    // F3 round 4, finding 2: the state directory on the PC has names
+    // F3 round 4, finding 2: an older engine's state directory has names
     // without a revision (gen-<seq>.json, no marker). They load as
     // before, and past an unreadable current.json the revision jumps
     // from the state loaded, as no name shows one. The first save names

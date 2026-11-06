@@ -20,7 +20,7 @@
 //! histogram gives (S7: 1 µs buckets, the soak's rule, `hist::quantile_us`).
 //! Exits 1 when the typical median exceeds 25 % of the period or either
 //! worst-case median exceeds the period; hosted runners preempt, so tails are
-//! reported, not gated (the §3.5 p99.9 gate is measured on the PC in S7).
+//! reported, not gated (the box's soak gate judges the real pump).
 //!
 //! `cargo run --release -p iem-engine --example bench`
 

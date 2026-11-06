@@ -655,7 +655,7 @@ body {
   z-index: 56;
 }
 
-/* SAFETY: Disabled state when disconnected from REAPER */
+/* SAFETY: Disabled state when disconnected from the server */
 .channel.disconnected {
   opacity: 0.3;
   pointer-events: none;

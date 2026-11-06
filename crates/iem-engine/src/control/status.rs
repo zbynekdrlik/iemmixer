@@ -70,7 +70,7 @@ impl Control {
     }
 
     /// A meter frame's peaks of HIL's spare outputs join those since the
-    /// last `Status` (S6).
+    /// last `Status`.
     pub(super) fn note_hil(&mut self, peaks: &[f64]) {
         for (held, &p) in self.hil_peaks.iter_mut().zip(peaks) {
             *held = held.max(p);

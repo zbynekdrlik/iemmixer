@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""The band's data onto the Gen 3 box (#72 phase E Task 5; plan
-docs/superpowers/plans/2026-10-27-gen3-phase-e-band-test.md). Runs on the box
+"""The band's data onto the Gen 3 box (#72 phase E Task 5). Runs on the box
 as the service user, with the stack stopped:
 
   sudo -n -u iemmixer /usr/bin/python3 -I /opt/iemmixer/lib/band_receive.py \
@@ -15,8 +14,8 @@ archive before anything is written.
 - server: each top-level item named (a file, or a folder whole) replaces the
   site folder's item of that name: written beside it as `.<name>.incoming`,
   the old one moved to `.<name>.before-<stamp>`, the new one renamed in; a
-  band item the archive lacks (the PC no longer has it) is moved aside the
-  same way, so the box serves the PC's set. The site's own files
+  band item the archive lacks (the sender no longer has it) is moved aside the
+  same way, so the box serves the sender's set. The site's own files
   (iemmixer.toml, the roster's status) are never touched. A staging an
   earlier run left is moved aside (`.incoming.before-<stamp>`).
 - engine: the whole state folder is replaced the same way (generations,
@@ -150,7 +149,7 @@ def receive(raw: bytes, site: Path, engine: Path, stamp: str) -> dict:
             old = aside(staging(t), stamp, hidden=False)
             os.rename(staging(t), old)
             kept.append(old.relative_to(site).as_posix() if t != engine else old.name)
-    # A band item the PC no longer has goes aside too: the box serves the PC's set, not an older one.
+    # A band item the sender no longer has goes aside too: the box serves the sender's set, not an older one.
     for item in (*SERVER_FILES, *SERVER_FOLDERS):
         if item not in sent and ((site / item).exists() or (site / item).is_symlink()):
             old = aside(site / item, stamp, hidden=True)

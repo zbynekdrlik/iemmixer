@@ -2060,7 +2060,7 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(service.get("ExecStart"), [
             '/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "%i stays down: ${MONITOR_SERVICE_RESULT}"',
         ])
-        # The notice is the server unit's own binary: the guard's alarm path.
+        # The notice is the server unit's own binary: the alarm path.
         notify = shlex.split(service["ExecStart"][0])
         self.assertEqual(notify[0], one(self.units["iem-server"], "Service", "ExecStart"))
         self.assertEqual(notify[1:], ["notify", "--to", "alarm", "Gen 3 box",

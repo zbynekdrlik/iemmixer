@@ -88,7 +88,7 @@ fn the_binary_refuses_a_dante_device_it_cannot_set_up_as_usage() {
 
 /// #32 minor-4: a state directory another process holds past the engine's
 /// wait (an engine that just ended may hold its lock a moment) ends the
-/// binary with exit 75, which the guard retries without counting a crash;
+/// binary with exit 75;
 /// no state file is touched. Should it keep waiting, the test frees the
 /// directory and asks it to shut down (never a forced end) before it fails.
 #[test]

@@ -11,7 +11,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from iempc_test_support import Base, ip  # noqa: E402
 
-LEFT_ALONE = {"event": "the flag only: the box keeps serving the band, the PC is left alone"}
+LEFT_ALONE = {"event": "the flag only: the box keeps serving the band"}
 
 
 class FlagTests(Base):

@@ -134,6 +134,20 @@ pub fn is_email(address: &str) -> bool {
     }
 }
 
+/// A site file's parse error: its line and the parser's message, never the
+/// excerpt of the file `toml`'s own text holds. The site's values stay out of
+/// logs and of a deploy's output, which may be pasted (P6).
+fn parse_error(content: &str, e: &toml::de::Error) -> String {
+    match e.span() {
+        Some(span) => {
+            let before = content.get(..span.start).unwrap_or_default();
+            let line = before.matches('\n').count() + 1;
+            format!("line {line}: {}", e.message())
+        }
+        None => e.message().to_string(),
+    }
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,10 +169,8 @@ pub struct Config {
     #[serde(default)]
     pub inputs: Vec<SiteInputMeta>,
 
-    /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
-    /// the predecessor is the only place a PIN changes and every entry into
-    /// `dev` brings its PINs over, so the guard writes `false` into every
-    /// `dev` and trial site: the change and reset route then answers 409.
+    /// PIN changes in the web UI (P9, design note §5.4). `false` (the test
+    /// site) freezes them: the change and reset route then answers 409.
     #[serde(default = "default_pin_changes")]
     pub pin_changes: bool,
 
@@ -345,7 +357,7 @@ impl Config {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|e| ConfigError::Io(e.to_string()))?;
         let config: Self =
-            toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
+            toml::from_str(&content).map_err(|e| ConfigError::Parse(parse_error(&content, &e)))?;
         config.validate()?;
         Ok(config)
     }
@@ -868,40 +880,25 @@ mod tests {
         }
     }
 
-    /// The keys the PC's site carried are errors now, like any unknown key:
+    /// The retired site keys are errors now, like any unknown key:
     /// `iem-server check-site` refuses them before a deploy stops anything.
     #[test]
     fn the_retired_site_keys_and_any_other_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
         for (key, text) in [
-            (
-                "back_to_reaper",
-                "back_to_reaper = [\"x\"]
-",
-            ),
-            (
-                "card",
-                "[card]
-driver = \"x\"
-",
-            ),
-            (
-                "activity",
-                "[activity]
-inputs = [\"x\"]
-",
-            ),
-            (
-                "nonsense",
-                "[nonsense]
-x = 1
-",
-            ),
+            ("back_to_reaper", "back_to_reaper = [\"zyxqw\"]\n"),
+            ("card", "[card]\ndriver = \"zyxqw\"\n"),
+            ("activity", "[activity]\ninputs = [\"zyxqw\"]\n"),
+            ("nonsense", "[nonsense]\nx = \"zyxqw\"\n"),
         ] {
-            std::fs::write(&path, text).unwrap();
+            std::fs::write(&path, format!("port = 80\n{text}")).unwrap();
             match Config::load(&path) {
-                Err(ConfigError::Parse(e)) => assert!(e.contains(key), "{key}: {e}"),
+                Err(ConfigError::Parse(e)) => {
+                    assert!(e.contains(key), "{key}: {e}");
+                    assert!(e.starts_with("line 2: "), "{key}: {e}");
+                    assert!(!e.contains("zyxqw"), "{key}: {e}");
+                }
                 other => panic!("{key}: {other:?}"),
             }
         }

@@ -2,7 +2,7 @@
 //! §5): the server's first message is `Hello{proto, build, min_client_proto}`;
 //! a page whose protocol the server no longer serves, or that is older than
 //! the server's, reloads to fetch the current UI. A server that never says
-//! hello (the predecessor, or a stale proxy) gets one reload. Reloads are at
+//! hello (a stale proxy) gets one reload. Reloads are at
 //! most one per [`RELOAD_GAP_MS`], so a mismatch that a reload cannot cure
 //! never becomes a reload loop.
 

@@ -62,7 +62,7 @@ class IntegrityTests(unittest.TestCase):
             self.assertEqual(ci.violations(root), ["scripts/gen3/M.psm1:1: force-kill command (program spec I8)"])
 
     def test_force_kill_words_in_comments_are_refused(self) -> None:
-        # The S6 crates, the PC scripts and the workflows: prose included.
+        # The crates, the scripts and the workflows: prose included.
         cases = {
             "crates/iem-server/src/x.rs": "/// never TerminateProcess the app\nfn f() {}\n",
             "crates/iem-engine/src/y.rs": "// no taskkill here\nfn f() {}\n",

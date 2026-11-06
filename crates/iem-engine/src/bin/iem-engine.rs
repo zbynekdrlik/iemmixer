@@ -1,5 +1,5 @@
 //! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
-//! S6: the site check; Gen 3 phase C: the Dante backend
+//! the site check; Gen 3 phase C: the Dante backend
 //! on Linux; phase H: `supervise`, the box's supervisor client). See
 //! `iem-engine --help`.
 
@@ -18,7 +18,7 @@ fn code(e: &EngineError) -> u8 {
         EngineError::Site(_) | EngineError::Usage(_) => 2,
         EngineError::Card(_) => 3,
         EngineError::Fault { .. } => 70,
-        // EX_TEMPFAIL: the guard tries again without counting a crash.
+        // EX_TEMPFAIL: the state directory is held; systemd starts it again.
         EngineError::StateBusy(_) => 75,
     }
 }

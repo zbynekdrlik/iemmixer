@@ -758,7 +758,7 @@ pub async fn start_server(
     start_server_until(server_config, ready_tx, std::future::pending()).await
 }
 
-/// [`start_server`] until `stop` resolves (S6 graceful stop): then the HTTP
+/// [`start_server`] until `stop` resolves (graceful stop): then the HTTP
 /// and (with `tls`) the HTTPS listener close at once (the ports are free),
 /// idle connections close, open requests on either get up to [`STOP_DRAIN`]
 /// from the stop to finish, and it returns `Ok`. The caller's runtime still
