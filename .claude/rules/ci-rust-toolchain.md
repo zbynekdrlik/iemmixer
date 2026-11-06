@@ -21,3 +21,4 @@ paths:
 - **Every `uses:` is pinned to a full commit SHA** with a `# vX.Y.Z` comment; `scripts/check_integrity.py` fails otherwise. Pins and crates are updated by hand in their own commit on `dev` (no Dependabot version PRs: they would create `dependabot/*` branches).
 - **A red push run blocks the PR of the same SHA:** the push and the pull_request runs share job names, so a failed job of the push run left PR #73 `BLOCKED` while its own run was green (2026-10-23). Fix the cause and push a new commit; a waiter that fails fast on the commit's check runs reads the push run's failure too, so wait on the PR run's own status.
 - **Required checks** on `main` are regenerated from the job list and the matrix length whenever shards change; a skipped required job counts as passing, so every job a required job `needs` is itself required.
+- **Renaming a Rust test:** `.config/nextest.toml` names tests in its bounds, so a rename goes there too; `integrity` fails otherwise.
