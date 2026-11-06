@@ -160,16 +160,7 @@ impl PinStore {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.file).map_err(io::Error::other)?;
-        crate::secrets::replace_private(&self.path, json.as_bytes())?;
-        // The rename reaches the disk too, so a power cut never brings an old
-        // PIN back. The new file holds the name by now: a sync that fails is
-        // no failed save, memory and file agree.
-        if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty())
-            && let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all())
-        {
-            tracing::warn!(error = %e, "the PIN hashes are saved, the folder's sync failed");
-        }
-        Ok(())
+        crate::secrets::replace_private(&self.path, json.as_bytes())
     }
 }
 

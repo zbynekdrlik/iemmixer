@@ -122,7 +122,15 @@ pub(crate) fn replace_private(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("new");
     let _ = std::fs::remove_file(&tmp);
     write_new_private(&tmp, data)?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    // The rename reaches the disk too, so a power cut never brings an old
+    // value back. The new file already serves, so a failed sync only warns.
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all())
+    {
+        tracing::warn!(path = %path.display(), error = %e, "the file is saved, the folder's sync failed");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
