@@ -559,7 +559,7 @@ class GateTests(GateBase):
         self.assertEqual(self.pc.calls, [])   # no PC call
 
     def test_a_loop_already_there_is_kept_and_another_subscription_is_put_back(self) -> None:
-        # While 3.x serves, the mirror may already loop our RX 94 to our own TX 94: kept, nothing sent.
+        # A subscription may already loop our RX 94 to our own TX 94: kept, nothing sent.
         self.device.rows = {RET: (self.device.tx_name(RET), OURS, 9)}
         self.write_loop()
         code, docs, err = self.gate_run()
@@ -602,7 +602,7 @@ class GateTests(GateBase):
             self) -> None:
         # The review of PR #87: the begin, a crash and the panic's restart would be three starts in the unit's
         # window (systemd's counter reset at the begin), so one more crash before the end's reset-failed would
-        # leave the engine down while 3.x serves. No fault then: `panic` reads skipped, the gate fails all the same.
+        # leave the engine down. No fault then: `panic` reads skipped, the gate fails all the same.
         code, docs, err = self.gate_run(FAKE_CRASHES="1")
         self.assertEqual(code, 1, err)
         doc = docs[0]["gen3_gate"]["hil"]

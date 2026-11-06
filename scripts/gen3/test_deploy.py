@@ -487,7 +487,7 @@ class DeployTests(unittest.TestCase):
         self.flag = self.tmp / "config" / "EVENT-NOW"
         # iempc's private env, absent unless a test writes it: the dev box's
         # own is never read.
-        self.pc_env = self.tmp / "config" / "iem-pc.env"
+        self.pc_env = self.tmp / "private" / "iem-pc.env"
         # git without this user's or the system's configuration.
         self.git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         self.git_env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="tester",
@@ -497,6 +497,7 @@ class DeployTests(unittest.TestCase):
                     "IEMMIXER_EVENT_NOW": str(self.flag), "GEN3_SERVER_WAIT_S": "3", "PC_ENV": str(self.pc_env)}
         # The tests' box serves nobody (--new-box), so the test site and --pins are there; `serving_box` is the rest.
         self.spare = True
+        self.write_pc_env(f"GEN3_HOST={OTHER}\n")
         # The checkout deploy.sh runs from: this one's script, units and test
         # site, committed in a repository of its own.
         self.repo = self.tmp / "checkout"
@@ -1107,7 +1108,7 @@ class DeployTests(unittest.TestCase):
         self.assertFalse((self.box / "reset.log").exists())
 
     def test_a_deploy_over_an_enabled_stack_resets_before_the_disable(self) -> None:
-        # The box 2026-10-30 (#72): 2.x served and the engine and the server
+        # The box 2026-10-30 (#72): a deploy that disables, and the engine and the server
         # were still enabled from 3.x. Stopped, they stayed loaded and were
         # listed; the disable's reload let systemd drop them, and the
         # reset-failed after it failed "not loaded", so nothing started.
@@ -1272,7 +1273,6 @@ class DeployTests(unittest.TestCase):
 
     def test_pins_need_both_pins_of_four_digits_in_the_private_env(self) -> None:
         cases = [
-            (None, "not there"),
             (f"GEN3_ENGINEER_PIN={ENGINEER_PIN}\n", "no GEN3_MEMBER_PIN"),
             (f"GEN3_MEMBER_PIN={MEMBER_PIN}\n", "no GEN3_ENGINEER_PIN"),
             (f"GEN3_ENGINEER_PIN=39170\nGEN3_MEMBER_PIN={MEMBER_PIN}\n", "GEN3_ENGINEER_PIN of iempc's private env is not 4 digits"),
@@ -1686,6 +1686,36 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.enabled(), [])
         self.assertNotIn("WARNING", r.stderr)
 
+    def test_a_new_box_needs_to_know_the_box_that_serves(self) -> None:
+        added = self.new_box()
+        for text in ("PC_ROOT=X:\\root\n", None):
+            with self.subTest(text=text):
+                if text is None:
+                    self.pc_env.unlink()
+                else:
+                    self.write_pc_env(text)
+                r = self.deploy(*added)
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn("--new-box reads GEN3_HOST", r.stderr)
+                self.assertEqual((self.calls(), self.gh_calls()), ([], []))
+
+    def test_a_new_box_never_takes_the_serving_device_s_name(self) -> None:
+        added = self.new_box()
+        ops = self.tmp / "ops-device.toml"
+        self.write_pc_env(f"GEN3_HOST={OTHER}\nGEN3_DEVICE_CONFIG={ops}\n")
+        self.config.write_text('name = "Zyxqw-Band"\n', encoding="utf-8")
+        for text, code, want in (('name = "zyxqw-band"\n', 1, "the config's name is the serving device's"),
+                                 ('name = [\n', 1, "could not be read as a device config"),
+                                 ('name = "zyxqw-band-spare"\n', 0, "")):
+            with self.subTest(text=text):
+                ops.write_text(text.replace("-spare", "") if code else 'name = "zyxqw-other"\n', encoding="utf-8")
+                r = self.deploy(*added)
+                self.assertEqual(r.returncode, code, r.stderr)
+                self.assertIn(want, r.stderr)
+                self.assertNotIn("zyxqw-band", (r.stdout + r.stderr).casefold())
+                if code:
+                    self.assertEqual((self.calls(), self.gh_calls()), ([], []))
+
     def test_a_new_box_is_never_the_box_that_serves(self) -> None:
         added = self.new_box()
         self.write_pc_env(f"GEN3_HOST={HOST}\n")
@@ -1980,7 +2010,7 @@ class UnitTests(unittest.TestCase):
                           for item in shlex.split(one(self.units["iem-server"], "Service", "Environment")))
         self.assertEqual(service.get("Environment"), [f"IEMMIXER_CONFIG={server_env['IEMMIXER_CONFIG']}"])
         # The journal line always; the notice only while the box serves the
-        # band, i.e. while its engine is enabled at boot (gen3-switch to-3
+        # band, i.e. while its engine is enabled at boot (iempc gen3-deploy
         # enables it, to-2 disables it). A box that serves nobody, with a
         # copy of the band's data, must not reach the band's devices (#72,
         # the false alarm of 2026-10-27). systemd hands MONITOR_* to

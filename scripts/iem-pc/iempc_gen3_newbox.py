@@ -15,12 +15,14 @@ secrets, so it stays there: never in this repo, never in the ops repo.
 [--iface <name>] [--from-backup <stamp>]`** (dev time, locked): a fresh OS to
 the band's state, in this order: install-dantesync.sh; the stack stopped;
 provision.sh; one reboot when the realtime kernel does not run yet; deploy.sh
---new-box with the usual device config and the band's site; the stack stopped;
+--new-box with the spare's device config and the band's site; the stack stopped;
 band_receive.py and the pepper, from the running box or from a backup; the
 stack started and healthy; install-cloudflared.sh; verify_box.py, every check 1
 and realtime_running 1. Refused on GEN3_HOST: the box that serves the band is
-never rebuilt. The new box stays a spare: nothing enables its units, and our
-device keeps the config's usual name. Taking the band over is a separate step
+never rebuilt. The new box stays a spare: nothing enables its units, and its
+device runs under a name and a state file of its own (`spare_config`): beside
+the serving box, the same name would be a second device the band's receivers
+can resolve. Taking the band over is a separate step
 (the cookbook, section 6).
 
 A fresh box's provision exits 1 by design: verify_box.py names `units` and
@@ -40,7 +42,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 import iempc_gen3 as g3
@@ -78,6 +82,9 @@ CHECKOUT_FILES = {
     ".cache/iem-gen3-provision/sudo-lines.txt": "sudo-lines.txt",
 }
 DEVICE_CONFIG = "/etc/iemmixer/dante-device.toml"
+SPARE_SUFFIX = "-spare"
+SPARE_STATE = "/var/lib/iem-dante/spare.toml"
+NAME_MAX = 31   # Dante's device names: 1 to 31 characters
 SEND_S = 300
 INSTALL_S = 600
 PROVISION_S = 1800
@@ -301,9 +308,38 @@ def interface(ip, args, host: str) -> str:
     return name
 
 
+def spare_config(ip, text: str) -> str:
+    """The ops device config under the spare's own name and state file; every
+    other line kept. Its state file stays out of the way of the serving name's
+    (a saved name wins over the config's) when this spare takes the band over."""
+    lines = text.splitlines()
+    names = [i for i, line in enumerate(lines) if line.startswith("name = ")]
+    states = [i for i, line in enumerate(lines) if line.startswith("state_file = ")]
+    if len(names) != 1 or len(states) != 1:
+        raise ip.Refused("gen3-new-box: GEN3_DEVICE_CONFIG has no single name and state_file line: nothing was changed")
+    name = tomllib.loads(text)["name"] + SPARE_SUFFIX
+    if len(name) > NAME_MAX:
+        raise ip.Refused(f"gen3-new-box: the device's name with {SPARE_SUFFIX} passes Dante's {NAME_MAX} characters: "
+                         "nothing was changed")
+    lines[names[0]] = f"name = {json.dumps(name)}"
+    lines[states[0]] = f"state_file = {json.dumps(SPARE_STATE)}"
+    return "\n".join(lines) + "\n"
+
+
 def deploy_new(ctx, ip, s: dict[str, str], host: str, sha: str, bundle: Path, iface: str) -> None:
+    text = spare_config(ip, Path(s["GEN3_DEVICE_CONFIG"]).read_text(encoding="utf-8"))
+    fd, name = tempfile.mkstemp(prefix="gen3-new-box-", suffix=".toml", dir=ip.state_dir())
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        deploy_with(ctx, ip, s, host, sha, bundle, iface, name)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def deploy_with(ctx, ip, s: dict[str, str], host: str, sha: str, bundle: Path, iface: str, config: str) -> None:
     words = [*deploy.DEPLOY, "--host", host, "--bundle", str(bundle), "--sha", sha, "--config",
-             s["GEN3_DEVICE_CONFIG"], "--iface", iface, "--start", "engine", "--site-file", s["GEN3_SITE_FILE"],
+             config, "--iface", iface, "--start", "engine", "--site-file", s["GEN3_SITE_FILE"],
              "--roster-file", s["GEN3_ROSTER_FILE"], "--new-box"]
     ip.guarded(words, "", deploy.DEPLOY_S, ctx.watch(abandon=False), env=deploy.deploy_env(ip))
 

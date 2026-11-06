@@ -38,11 +38,11 @@ def unpack(ip, out: str, source: str) -> tuple[bytes, dict[str, str]]:
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             got = {i.filename: hashlib.sha256(z.read(i)).hexdigest() for i in z.infolist()}
     except (ValueError, TypeError, KeyError, binascii.Error, zipfile.BadZipFile):
-        raise ip.StepError(f"gen3-data: {source}'s answer is not the band's zip and its manifest") from None
+        raise ip.StepError(f"the band's data: {source}'s answer is not the band's zip and its manifest") from None
     if not isinstance(manifest, dict) or got != manifest:
-        raise ip.StepError(f"gen3-data: {source}'s zip does not match its own manifest")
+        raise ip.StepError(f"the band's data: {source}'s zip does not match its own manifest")
     if "engine/current.json" not in got:
-        raise ip.StepError(f"gen3-data: {source}'s zip holds no engine/current.json")
+        raise ip.StepError(f"the band's data: {source}'s zip holds no engine/current.json")
     return raw, manifest
 
 
@@ -87,31 +87,31 @@ def install_pepper(ip, host: str, value: bytes) -> None:
     value only on ssh's stdin (iempc_gen3_newbox has it from another box)."""
     code, _, err = box(host, ENCRYPT, value, BOX_S)
     if code != 0:
-        raise ip.StepError(f"gen3-data: systemd-creds encrypt failed on the box (exit {code}): "
+        raise ip.StepError(f"the band's data: systemd-creds encrypt failed on the box (exit {code}): "
                            f"{err.decode(errors='replace').strip()[-300:]}")
     code, _, err = box(host, CHMOD, b"", BOX_S)
     if code != 0:
-        raise ip.StepError(f"gen3-data: the box's pepper credential could not be made owner-only (exit {code}): "
+        raise ip.StepError(f"the band's data: the box's pepper credential could not be made owner-only (exit {code}): "
                            f"{err.decode(errors='replace').strip()[-300:]}")
     code, out_b, _ = box(host, STAT, b"", BOX_S)
     mode, _, rest = out_b.decode(errors="replace").strip().partition(".")
     owner = rest.partition(".")[0]
     if code != 0 or (mode, owner) != ("600", "root"):
-        raise ip.StepError("gen3-data: the box's pepper credential does not read back as 600 root")
+        raise ip.StepError("the band's data: the box's pepper credential does not read back as 600 root")
 
 
 def receive(ip, host: str, raw: bytes, manifest: dict[str, str]) -> dict[str, str]:
     """A checked zip through the box's receiver, what it wrote read back."""
     code, out, err = box(host, RECEIVE, raw, BOX_S)
     if code != 0:
-        raise ip.StepError(f"gen3-data: the box's receiver failed (exit {code}): "
+        raise ip.StepError(f"the band's data: the box's receiver failed (exit {code}): "
                            f"{err.decode(errors='replace').strip()[-300:]}")
     try:
         written = json.loads(out.decode().strip().splitlines()[-1])["written"]
     except (ValueError, IndexError, KeyError, TypeError):
-        raise ip.StepError("gen3-data: the box's receiver gave no answer to read back") from None
+        raise ip.StepError("the band's data: the box's receiver gave no answer to read back") from None
     if written != manifest:
-        raise ip.StepError("gen3-data: what the box wrote does not read back as the sent files")
+        raise ip.StepError("the band's data: what the box wrote does not read back as the sent files")
     return written
 
 

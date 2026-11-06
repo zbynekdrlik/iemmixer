@@ -14,7 +14,8 @@ set -euo pipefail
 #             --site-file <path> --roster-file <path>
 #   deploy.sh ... --new-box [--pins | --site-file <path> --roster-file <path>]
 #   deploy.sh --host <user@host> --back --sha <the build in the other slot>
-#             --config <...> --iface <...> [--start engine|device] [--site-file ...]
+#             --config <...> --iface <...> --site-file ... --roster-file ...
+#   deploy.sh ... --back --new-box [--start engine|device] [--site-file ...]
 #
 # - One commit: this checkout must be exactly --sha with a clean tree (`git
 #   rev-parse HEAD`, `git status --porcelain`): the units, the test site and
@@ -36,7 +37,9 @@ set -euo pipefail
 #   start runs whatever the flag says, and a flag after it stops nothing.
 # - --new-box (`iempc gen3-new-box`, #72): a box that does not serve the band,
 #   beside the one that does. Refused on GEN3_HOST itself, which `iempc
-#   gen3-deploy` deploys. The test site and roster unless --site-file and
+#   gen3-deploy` deploys, without a GEN3_HOST to compare with, and for a --config
+#   under the serving device's name (GEN3_DEVICE_CONFIG's): the band's receivers
+#   would see a second device with it. The test site and roster unless --site-file and
 #   --roster-file name the band's, --pins and --start device only here, and
 #   the units stay disabled.
 # - The bundle (CI's gen3-bin job uploads gen3-bundle-<sha>, its gen3-attest
@@ -269,6 +272,31 @@ refuse_event "nothing was copied"
 # iempc's private env: the box that serves the band and, with --pins, the PINs
 # (values never printed: this output may be pasted).
 pc_env="${PC_ENV:-$HOME/.config/iemmixer/iem-pc.env}"
+# --new-box must know which box serves: a --host it cannot compare could be that one.
+if [ "$new_box" = 1 ]; then
+  env_value=""
+  { [ -f "$pc_env" ] && env_value_of "$pc_env" GEN3_HOST; } ||
+    die "--new-box reads GEN3_HOST, the box that serves the band, from iempc's private env, and it is not there: nothing was copied"
+  env_value=""
+  if env_value_of "$pc_env" GEN3_DEVICE_CONFIG && [ -f "$env_value" ]; then
+    same_name=0
+    python3 -I -c '
+import sys, tomllib
+def name(path):
+    with open(path, "rb") as f:
+        return tomllib.load(f).get("name")
+try:
+    sys.exit(0 if name(sys.argv[1]).casefold() == name(sys.argv[2]).casefold() else 1)
+except (OSError, tomllib.TOMLDecodeError, AttributeError):
+    sys.exit(2)
+' "$config" "$env_value" 2> /dev/null || same_name=$?
+    case "$same_name" in
+      0) die "--new-box: the config's name is the serving device's (GEN3_DEVICE_CONFIG of iempc's private env): the band's receivers would see a second device with it: nothing was copied" ;;
+      1) ;;
+      *) die "--new-box: the config or GEN3_DEVICE_CONFIG could not be read as a device config: nothing was copied" ;;
+    esac
+  fi
+fi
 if [ -f "$pc_env" ]; then
   env_value=""
   if ! env_value_of "$pc_env" GEN3_HOST; then

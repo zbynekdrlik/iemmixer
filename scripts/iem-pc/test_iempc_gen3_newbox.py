@@ -9,6 +9,7 @@ import io
 import json
 import stat
 import sys
+import tomllib
 import tempfile
 import types
 import unittest
@@ -47,6 +48,9 @@ class Ip:
 
     def env_path(self):
         return self.folder / "iem-pc.env"
+
+    def state_dir(self):
+        return self.folder
 
     def check_sha(self, text):
         if len(text) != 40:
@@ -160,7 +164,7 @@ class Base(unittest.TestCase):
         files = {}
         for key in nb.FILE_KEYS:
             path = root / key
-            path.write_text("name = 'synthetic'\n")
+            path.write_text("name = 'synthetic'\nstate_file = '/x'\n")
             files[key] = str(path)
         self.env = {"GEN3_HOST": OLD, "GEN3_DANTESYNC_VERSION": "v1.2.3", "GEN3_DANTESYNC_SHA256": "b" * 64,
                     "GEN3_CLOUDFLARED_VERSION": "2026.1.0", "GEN3_CLOUDFLARED_SHA256": "c" * 64, **files}
@@ -243,8 +247,17 @@ class NewBoxTests(Base):
         self.new_box()
         words = next(c for c in self.ip.calls if any(w.endswith("deploy.sh") for w in c))
         self.assertIn("--new-box", words)
-        self.assertNotIn("--serving", words)
         self.assertEqual(words[words.index("--iface") + 1], "eth7")
+
+    def test_a_spare_runs_under_a_name_and_a_state_file_of_its_own(self) -> None:
+        # Beside the serving box the band's name would be a second device its receivers can resolve.
+        text = 'name = "Zyxqw-Band"\nrate = 1\nstate_file = "/x/state.toml"\ntx = ["a"]\n'
+        self.assertEqual(tomllib.loads(nb.spare_config(self.ip, text)),
+                         {"name": "Zyxqw-Band-spare", "rate": 1, "state_file": nb.SPARE_STATE, "tx": ["a"]})
+        with self.assertRaisesRegex(self.ip.Refused, "no single name and state_file"):
+            nb.spare_config(self.ip, 'name = "Zyxqw-Band"\n')
+        with self.assertRaisesRegex(self.ip.Refused, "31 characters"):
+            nb.spare_config(self.ip, f'name = "{"z" * 26}"\nstate_file = "/x"\n')
 
     def test_a_rerun_past_the_kernel_does_not_reboot(self) -> None:
         self.assertEqual(self.new_box(), 0)

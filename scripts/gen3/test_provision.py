@@ -2147,7 +2147,7 @@ class ProvisionShTests(unittest.TestCase):
             self.assertIn("verify_box: units", r.stderr)
 
     def test_the_band_roster_adds_its_ids_to_the_sudo_rule_s_members(self) -> None:
-        # While 3.x serves, the box mints tokens for the band's own people (the
+        # The box mints tokens for the band's own people (the
         # live gate's member), so the rule's {member} covers the band roster's
         # ids beside the test roster's, each once, never printed.
         band = self.tmp / "band-roster.toml"
