@@ -175,11 +175,6 @@ pub struct Config {
     #[serde(default)]
     pub inputs: Vec<SiteInputMeta>,
 
-    /// PIN changes in the web UI (P9, design note §5.4). `false` (the test
-    /// site) freezes them: the change and reset route then answers 409.
-    #[serde(default = "default_pin_changes")]
-    pub pin_changes: bool,
-
     /// JWT signing key. Never read from the site file: the server loads it
     /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
     #[serde(skip)]
@@ -292,10 +287,6 @@ fn default_port() -> u16 {
     80
 }
 
-fn default_pin_changes() -> bool {
-    true
-}
-
 fn default_engine_pipe() -> String {
     "iemmixer-engine".to_string()
 }
@@ -335,7 +326,6 @@ impl Default for Config {
             engine_pipe: default_engine_pipe(),
             members: Vec::new(),
             inputs: Vec::new(),
-            pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
@@ -765,17 +755,6 @@ mod tests {
     }
 
     #[test]
-    fn pin_changes_are_on_unless_the_site_freezes_them() {
-        assert!(Config::default().pin_changes);
-        assert!(toml::from_str::<Config>("port = 80\n").unwrap().pin_changes);
-        assert!(
-            !toml::from_str::<Config>("pin_changes = false\n")
-                .unwrap()
-                .pin_changes
-        );
-    }
-
-    #[test]
     fn test_tunnel_ready_url_default_and_toml_default() {
         assert_eq!(
             Config::default().tunnel_ready_url,
@@ -852,11 +831,9 @@ mod tests {
             Some("Member3")
         );
         assert!(site.member("translator").is_none());
-        assert!(!site.pin_changes, "the test site is a dev site: frozen");
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
         assert_eq!(example.members.len(), 2);
-        assert!(example.pin_changes);
         assert_eq!(example.problems(), Vec::<String>::new());
     }
 

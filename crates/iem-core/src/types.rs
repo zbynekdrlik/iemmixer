@@ -2,10 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Why a PIN change or reset is refused while `pin_changes` is false (P9,
-/// design note §5.4). The server sends it with 409, the PIN dialog shows it.
-pub const PIN_CHANGES_FROZEN: &str = "PIN sa zatiaľ mení v pôvodnej aplikácii";
-
 /// Mixer state for a band member
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MixerState {

@@ -9,8 +9,6 @@ lan_url = "http://10.0.0.10"
 vapid_subject = "mailto:admin@example.org"
 backup_schedule = ["13:00", "21:00"]
 backup_retention_days = 60
-# PIN changes frozen, so the PIN dialog gets 409 (e2e/tests/pin-freeze.spec.ts).
-pin_changes = false
 
 # HIL's spare outputs (the owner's decision on #9, 2026-09-28): device
 # channels no mix uses, so the HIL test signal never reaches a band member.

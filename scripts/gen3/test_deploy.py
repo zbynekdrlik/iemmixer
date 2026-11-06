@@ -1627,8 +1627,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.installed("/var/lib/iemmixer/site/iemmixer.toml").decode(), body)
         self.assertEqual(self.installed("/var/lib/iemmixer/site/roster.toml"), roster.read_bytes())
-        self.assertNotIn("pin", " ".join(" ".join(c) for c in self.calls() if c and c[0] == "ssh").replace(
-            "pin_changes", ""))
+        self.assertNotIn("pin", " ".join(" ".join(c) for c in self.calls() if c and c[0] == "ssh"))
 
     def test_a_site_the_new_build_refuses_stops_the_deploy_before_the_stop(self) -> None:
         body = TEST_SITE.read_text(encoding="utf-8")

@@ -262,9 +262,6 @@ fn issue_token(
 ///   the engineer PIN with `member = "engineer"`.
 /// - **Members**: change their own PIN (`old_pin` required, `member` ignored);
 ///   a wrong current PIN counts against the login budgets.
-/// - **Frozen** (`pin_changes = false`, the test site; P9): 409 with
-///   [`iem_core::PIN_CHANGES_FROZEN`] for everyone, before
-///   any PIN is checked; nothing changes.
 pub async fn change_pin(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -278,14 +275,6 @@ pub async fn change_pin(
     };
     if !subject_known(&state, &claims) {
         return Err(Rejection::from(subject_gone().into_response()));
-    }
-    if !state.site_config.pin_changes {
-        tracing::info!(by = %claims.sub, "PIN change refused: this site freezes PIN changes");
-        return Err(Rejection::from(error_response(
-            StatusCode::CONFLICT,
-            "PIN_CHANGES_FROZEN",
-            iem_core::PIN_CHANGES_FROZEN,
-        )));
     }
     if !is_valid_pin_format(&req.new_pin) {
         return Err(Rejection::from(error_response(

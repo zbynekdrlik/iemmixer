@@ -30,9 +30,6 @@ tunnel_ready_url = "http://127.0.0.1:20241/ready"
 # Automatic backups (local time, HH:MM) and their retention in days.
 backup_schedule = ["13:00", "21:00"]
 backup_retention_days = 60
-# PIN changes in the web UI (P9). `false` freezes them: the PIN dialog then
-# shows why. Absent: true.
-pin_changes = true
 
 # The server keeps https_domain's certificate itself (#91): ACME DNS-01
 # through the Cloudflare DNS API, renewed when under 30 days are left, written

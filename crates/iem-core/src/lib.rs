@@ -26,7 +26,7 @@ pub use config::{Config, SiteInputMeta, SiteMember};
 pub use lineup::{LineupInfo, LineupRef, SwitchRequest};
 pub use types::{
     ApiError, AuthClaims, BatchControlRequest, BatchOperation, Channel, Customization, MixerState,
-    PIN_CHANGES_FROZEN, is_valid_ui_pan, merge_or_replace_channels,
+    is_valid_ui_pan, merge_or_replace_channels,
 };
 
 pub use tunnel::{TunnelState, TunnelStatusInfo};
