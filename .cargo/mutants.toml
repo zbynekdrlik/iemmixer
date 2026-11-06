@@ -48,7 +48,7 @@ exclude_re = [
   "spawn_tunnel_watch",
   # Browser-only fetches and context accessors in the UI; covered by
   # e2e/tests/site-links.spec.ts, e2e/tests/login-protection.spec.ts,
-  # and e2e/tests/pin-freeze.spec.ts (the PIN change;
+  # and e2e/tests/pin-change.spec.ts (the PIN change;
   # its messages are the tested change_pin_error) and e2e/tests/lineups.spec.ts
   # (the band's read and switch, #58; their answers are the tested
   # lineup_answer and switch_answer).
@@ -124,9 +124,8 @@ exclude_re = [
   # `run_health` (tests/cli.rs runs the binary).
   "iem-dante-dev/src/health\\.rs.*\\bglue::(check|systemctl_show)\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
-  # tested in iem-audio-io (stop_ends_a_running_stream). Its outcome is
-  # always Released (NullRt holds no card; #35).
-  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop -> StopOutcome with ",
+  # tested in iem-audio-io (stop_ends_a_running_stream).
+  "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",
   # The engine's Dante backend (#72 phase C, plan Task 3; Linux), its glue.
   # `start` sets up, starts and wires the real
   # device (`iem_dante::host::prepare` and `Prepared::start`), which needs

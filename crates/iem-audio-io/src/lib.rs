@@ -26,7 +26,6 @@
 pub mod channels;
 pub mod nullrt;
 pub mod offline;
-pub mod owner;
 pub mod wav;
 
 // The audio contract the Dante device shares (#72, 2026-10-30): defined once

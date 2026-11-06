@@ -15,9 +15,7 @@ impl Driver for Streams {
         self.0.clone()
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 }
 
 #[test]

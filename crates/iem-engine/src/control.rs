@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use iem_audio_io::StreamStats;
 use iem_audio_io::hist::HistSnapshot;
-use iem_audio_io::owner::StopOutcome;
 use iem_engine_proto::{Alarm, AlarmCode, EngineMsg, Role};
 use rtrb::Producer;
 use tracing::{info, warn};
@@ -50,9 +49,8 @@ pub const FADE_WAIT: Duration = Duration::from_millis(500);
 /// The audio backend as the control loop sees it.
 pub trait Driver: Send {
     fn stats(&self) -> StreamStats;
-    /// Stops the stream: `Released` once the device is free, `Parked` when
-    /// it stayed held (a callback stuck in the stream; #35).
-    fn stop(self: Box<Self>) -> StopOutcome;
+    /// Stops the stream.
+    fn stop(self: Box<Self>);
     /// The backend's own reason to end the run, if any.
     fn ending(&self) -> Option<Ending> {
         None

@@ -73,10 +73,8 @@ pub enum Effect {
     SendTopology,
     Save,
     Shutdown,
-    /// The whole state was replaced: broadcast `State`; save a baseline too.
-    Imported {
-        baseline: bool,
-    },
+    /// The whole state was replaced: broadcast `State`.
+    Imported,
 }
 
 #[derive(Debug, Clone, PartialEq)]

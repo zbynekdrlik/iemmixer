@@ -376,13 +376,6 @@ impl EngineClient {
                 tracing::warn!(%reason, "the engine released its driver");
                 None
             }
-            EngineMsg::DriverParked { reason } => {
-                tracing::error!(
-                    %reason,
-                    "the engine's stream stayed parked: its driver is not released"
-                );
-                None
-            }
             EngineMsg::Saved { .. } => None,
             other => {
                 let event = {
@@ -584,10 +577,7 @@ pub(crate) mod fake {
     /// state, not answered yet.
     pub async fn next_import(peer: &mut Peer) -> (u64, MixState) {
         match next_request(peer).await {
-            (id, Cmd::ImportState { state, baseline }) => {
-                assert!(!baseline, "a lineup's state is no baseline");
-                (id, state)
-            }
+            (id, Cmd::ImportState { state }) => (id, state),
             (_, other) => panic!("an ImportState, got {other:?}"),
         }
     }
@@ -923,19 +913,15 @@ mod tests {
         assert!(!client.connected());
     }
 
-    /// The stream's stop words (`DriverReleased`, or `DriverParked` when
-    /// the stream stayed parked, #35) raise no event and are no mirror
-    /// message: no revision watcher wakes for them. The engine closes the
-    /// connection right after either.
+    /// The stream's stop word (`DriverReleased`, #35) raises no event and is
+    /// no mirror message: no revision watcher wakes for it. The engine closes
+    /// the connection right after it.
     #[tokio::test]
     async fn the_stream_stop_words_raise_no_event_and_wake_no_revision_watcher() {
         let (client, mut peer, mut events, _peers) = connected().await;
         let rev = client.inner.rev.subscribe();
         for msg in [
             EngineMsg::DriverReleased {
-                reason: "shutdown".into(),
-            },
-            EngineMsg::DriverParked {
                 reason: "shutdown".into(),
             },
             EngineMsg::Superseded,

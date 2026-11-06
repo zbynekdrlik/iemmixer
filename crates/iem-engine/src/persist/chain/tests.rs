@@ -1,5 +1,5 @@
 use super::*;
-use crate::persist::tests::{sample, store};
+use crate::persist::tests::{sample, store, write_baseline};
 use crate::test_support::test_site;
 use iem_engine_proto::{InputId, InputState};
 
@@ -496,7 +496,7 @@ fn a_state_dir_that_cannot_be_listed_is_reported() {
 #[test]
 fn baseline_is_the_last_resort_before_defaults() {
     let (_d, s) = store();
-    s.save_baseline(&sample(9)).unwrap();
+    write_baseline(&s, &sample(9));
     fs::write(s.dir().join(CURRENT), b"{}").unwrap();
     let loaded = s.load(&test_site());
     assert_eq!(loaded.source, Source::Baseline);
@@ -507,7 +507,7 @@ fn baseline_is_the_last_resort_before_defaults() {
 #[test]
 fn an_unreadable_file_is_rejected_not_skipped_as_missing() {
     let (_d, s) = store();
-    s.save_baseline(&sample(4)).unwrap();
+    write_baseline(&s, &sample(4));
     // A directory where current.json belongs: reading it fails, not NotFound.
     fs::create_dir(s.dir().join(CURRENT)).unwrap();
     let loaded = s.load(&test_site());
@@ -547,7 +547,7 @@ fn a_boot_past_an_unreadable_current_json_continues_its_revision_above_it() {
     );
     let generation = s.generations().unwrap()[0].1.clone();
     fs::remove_file(generation).unwrap();
-    s.save_baseline(&sample(4)).unwrap();
+    write_baseline(&s, &sample(4));
     let loaded = s.load(&g);
     assert_eq!(
         (loaded.source, loaded.persisted.rev),

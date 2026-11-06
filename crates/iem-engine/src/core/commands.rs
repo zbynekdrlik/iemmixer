@@ -214,13 +214,11 @@ impl Core {
                 })
             }
             Cmd::Batch { .. } => Err(CmdError::new(ErrCode::BadRequest, "nested batch")),
-            Cmd::ImportState { state, baseline } => {
+            Cmd::ImportState { state } => {
                 self.s = reconcile(&self.topo, state).0;
                 Ok(Partial {
                     rt: self.full_sync(),
-                    effect: Some(Effect::Imported {
-                        baseline: *baseline,
-                    }),
+                    effect: Some(Effect::Imported),
                     bump: true,
                     ..Partial::default()
                 })

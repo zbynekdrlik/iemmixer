@@ -382,7 +382,6 @@ fn batches_are_atomic_and_bounded() {
         Cmd::InjectFault,
         Cmd::ImportState {
             state: MixState::default(),
-            baseline: false,
         },
         Cmd::StartTestSignal {
             input: input("mic1"),

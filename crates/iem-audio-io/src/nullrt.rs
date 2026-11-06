@@ -96,11 +96,10 @@ impl<P: Process + 'static> NullRt<P> {
             frames: self.frames,
             callbacks: s.callbacks.load(Ordering::Acquire),
             late: s.late.load(Ordering::Acquire),
-            // No card: no missed periods, overruns, resets or parked stream.
+            // No card: no missed periods, overruns or resets.
             missed: 0,
             overruns: 0,
             resets: 0,
-            parked: false,
             faulted: s.faulted.load(Ordering::Acquire),
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
@@ -109,6 +108,7 @@ impl<P: Process + 'static> NullRt<P> {
             last_reopen_us: 0,
             // Read after `faulted`, which is stored after it.
             fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
+            ..StreamStats::default()
         }
     }
 
@@ -289,14 +289,8 @@ mod tests {
         assert!(during.running);
         assert!(!during.faulted);
         assert_eq!(
-            (
-                during.frames,
-                during.missed,
-                during.overruns,
-                during.resets,
-                during.parked
-            ),
-            (32, 0, 0, 0, false)
+            (during.frames, during.missed, during.overruns, during.resets),
+            (32, 0, 0, 0)
         );
         let p = rt.stop().unwrap();
         let expected = t0.elapsed().as_secs_f64() * f64::from(SR) / 32.0;

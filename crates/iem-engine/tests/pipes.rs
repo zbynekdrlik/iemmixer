@@ -917,10 +917,7 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
         }
     };
     let before = sup.wait(status(true));
-    assert_eq!(
-        (before.frames, before.missed, before.parked),
-        (32, 0, false)
-    );
+    assert_eq!((before.frames, before.missed), (32, 0));
     // Only the supervisor arms; the controller is told so.
     let mut ctl = e.client();
     ctl.hello(Role::Control);

@@ -40,7 +40,6 @@ use std::time::{Duration, Instant};
 use iem_audio_io::StreamStats;
 use iem_audio_io::channels::{ChannelMap, MapError};
 use iem_audio_io::hist::HistSnapshot;
-use iem_audio_io::owner::StopOutcome;
 use iem_dante::daemon::{Options, Place};
 use iem_dante::device::DeviceConfig;
 use iem_dante::host::{self, Host, HostError, Signals, Stopped};
@@ -214,8 +213,8 @@ impl Driver for DanteDriver {
     /// warning when it is not), so nothing writes the engine rings while
     /// the device ends; then the device ([`Device::stop`] within
     /// [`STOP_WITHIN`]: its RX flows stopped at their transmitters, its
-    /// media threads, the goodbyes). The device holds no card: released.
-    fn stop(self: Box<Self>) -> StopOutcome {
+    /// media threads, the goodbyes).
+    fn stop(self: Box<Self>) {
         let DanteDriver {
             pump,
             pump_stop,
@@ -237,7 +236,6 @@ impl Driver for DanteDriver {
                 "the Dante device did not end within the wait: left to end"
             ),
         }
-        StopOutcome::Released
     }
 
     /// The device that ended by itself first (the run ends with exit 1),

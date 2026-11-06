@@ -42,14 +42,9 @@ fn import_replaces_state_and_fits_one_block() {
         r.mixes.iter().map(|x| x.levels.len()).sum::<usize>(),
         11 * 24 + 9 + 8 + 8
     );
-    let out = c
-        .apply(&Cmd::ImportState {
-            state,
-            baseline: true,
-        })
-        .unwrap();
+    let out = c.apply(&Cmd::ImportState { state }).unwrap();
     assert_eq!(out.rev, 2);
-    assert_eq!(out.effect, Effect::Imported { baseline: true });
+    assert_eq!(out.effect, Effect::Imported);
     assert!(out.rt.len() <= MAX_CMDS_PER_BLOCK);
     assert_eq!(out.rt.len(), 24 * 2 + 11 * 3 + 11 * 24 + 9 + 8 + 8 + 11 * 2);
     let st = c.state();

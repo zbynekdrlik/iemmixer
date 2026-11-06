@@ -48,7 +48,6 @@ impl Control {
             missed: st.missed,
             overruns: st.overruns,
             resets: st.resets,
-            parked: st.parked,
             held: self.held,
             hil: self
                 .core

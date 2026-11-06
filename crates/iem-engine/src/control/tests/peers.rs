@@ -3,6 +3,7 @@ use crate::pipe::{control_name, listen};
 use iem_engine_proto::{ClientMsg, Cmd, ErrCode, InputId, MixId, MixState, PROTO, read_frame};
 use interprocess::local_socket::Stream;
 use interprocess::local_socket::prelude::*;
+use std::sync::atomic::AtomicBool;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -189,7 +190,6 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
             21,
             Cmd::ImportState {
                 state: MixState::default(),
-                baseline: false,
             },
             Some(ErrCode::NotController),
         ),
@@ -349,8 +349,8 @@ fn nothing_after_a_shutdown_request_is_handled() {
     );
 }
 
-/// A backend whose stop ends as scripted (#35).
-struct Stops(StopOutcome);
+/// A backend that counts its stop.
+struct Stops(Arc<AtomicBool>);
 
 impl Driver for Stops {
     fn stats(&self) -> StreamStats {
@@ -360,57 +360,40 @@ impl Driver for Stops {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        self.0
+    fn stop(self: Box<Self>) {
+        self.0.store(true, Ordering::Release);
     }
 }
 
-/// The stream's end says what happened (#35): a stream that stayed
-/// parked (a callback stuck in it)
-/// released nothing, so the engine says `DriverParked`, never
-/// `DriverReleased`; a released one says `DriverReleased`. Either is
-/// the last word before the engine closes the connection, and the
-/// run ends as a shutdown either way.
+/// The stream's end is the last word before the engine closes the
+/// connection, sent once the backend has stopped (#35).
 #[test]
-fn a_stop_that_leaves_the_stream_parked_says_so_never_released() {
-    let reason = || "shutdown".to_owned();
-    for (outcome, end) in [
-        (
-            StopOutcome::Released,
-            EngineMsg::DriverReleased { reason: reason() },
-        ),
-        (
-            StopOutcome::Parked,
-            EngineMsg::DriverParked { reason: reason() },
-        ),
-    ] {
-        let mut r = rig();
-        r.c.driver = Some(Box::new(Stops(outcome)));
-        r.status.faded_out.store(true, Ordering::Release);
-        let (conn, client) = peer(r.dir.path());
-        let got = reader(client);
-        r.c.handle(CtlMsg::Connected { id: 1, conn });
-        r.c.handle(hello());
-        r.c.handle(request(2, Cmd::Shutdown));
-        assert_eq!(
-            r.c.tick(Instant::now()),
-            Some(Exit::Shutdown { faded: true }),
-            "{outcome:?}"
-        );
-        assert!(r.c.driver.is_none(), "{outcome:?}: stopped");
-        let msgs = got.join().unwrap();
-        let ends: Vec<&EngineMsg> = msgs
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m,
-                    EngineMsg::DriverReleased { .. } | EngineMsg::DriverParked { .. }
-                )
-            })
-            .collect();
-        assert_eq!(ends, vec![&end], "{outcome:?}");
-        assert_eq!(msgs.last(), Some(&end), "{outcome:?}: the last word");
-    }
+fn a_stop_says_driver_released_as_its_last_word() {
+    let end = EngineMsg::DriverReleased {
+        reason: "shutdown".to_owned(),
+    };
+    let stopped = Arc::new(AtomicBool::new(false));
+    let mut r = rig();
+    r.c.driver = Some(Box::new(Stops(Arc::clone(&stopped))));
+    r.status.faded_out.store(true, Ordering::Release);
+    let (conn, client) = peer(r.dir.path());
+    let got = reader(client);
+    r.c.handle(CtlMsg::Connected { id: 1, conn });
+    r.c.handle(hello());
+    r.c.handle(request(2, Cmd::Shutdown));
+    assert_eq!(
+        r.c.tick(Instant::now()),
+        Some(Exit::Shutdown { faded: true })
+    );
+    assert!(r.c.driver.is_none());
+    assert!(stopped.load(Ordering::Acquire), "the backend stopped");
+    let msgs = got.join().unwrap();
+    let ends: Vec<&EngineMsg> = msgs
+        .iter()
+        .filter(|m| matches!(m, EngineMsg::DriverReleased { .. }))
+        .collect();
+    assert_eq!(ends, vec![&end]);
+    assert_eq!(msgs.last(), Some(&end), "the last word");
 }
 
 #[test]
@@ -433,25 +416,4 @@ fn stopping_the_test_signal_clears_its_deadline() {
     r.c.handle(request(3, Cmd::StopTestSignal));
     assert_eq!(r.c.test_deadline, None);
     assert!(r.c.core.transient().test_signal.is_none());
-}
-
-#[test]
-fn an_import_as_baseline_writes_the_baseline() {
-    let mut r = rig();
-    let (conn, client) = peer(r.dir.path());
-    let _got = reader(client);
-    r.c.handle(CtlMsg::Connected { id: 1, conn });
-    r.c.handle(hello());
-    let import = |baseline: bool| Cmd::ImportState {
-        state: MixState::default(),
-        baseline,
-    };
-    let baseline = r.dir.path().join("state/baseline.json");
-    r.c.handle(request(2, import(false)));
-    assert_eq!(r.c.core.rev(), 1);
-    assert!(!baseline.exists(), "a plain import keeps the baseline");
-    r.c.handle(request(3, import(true)));
-    let saved = crate::persist::decode(&std::fs::read(&baseline).unwrap()).unwrap();
-    assert_eq!((saved.rev, r.c.core.rev()), (2, 2));
-    assert_eq!(saved.topology_hash, r.c.core.topology().hash);
 }

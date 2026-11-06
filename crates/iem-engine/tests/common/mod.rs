@@ -297,7 +297,6 @@ pub fn scenario() -> Scenario {
         Cmd::StopTestSignal,
         Cmd::ImportState {
             state: open_state(&topo),
-            baseline: false,
         },
     ];
     let groups = cmds

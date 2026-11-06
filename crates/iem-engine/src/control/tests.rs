@@ -74,9 +74,7 @@ impl Driver for Idle {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 }
 
 struct Rig {
@@ -203,13 +201,13 @@ fn status_reports_microseconds_counters_and_the_backlog() {
         missed: 0,
         overruns: 0,
         resets: 0,
-        parked: false,
         faulted: false,
         running: true,
         max_process_ns: 2_500_000,
         fault: None,
         last_reopen_us: 0,
         fault_callback_ns: 0,
+        ..StreamStats::default()
     };
     let s = r.c.status_msg(&st);
     assert_eq!((s.callbacks, s.late, s.faulted), (7, 1, false));
@@ -226,20 +224,18 @@ fn status_carries_the_measured_period_the_stream_counters_and_the_hold() {
         missed: 2,
         overruns: 3,
         resets: 4,
-        parked: true,
         running: true,
         ..StreamStats::default()
     };
     let s = r.c.status_msg(&st);
     assert_eq!((s.frames, s.missed, s.overruns, s.resets), (32, 2, 3, 4));
-    assert!(s.parked, "parked");
     assert!(s.held, "held until Arm");
     let s = rig().c.status_msg(&StreamStats {
         frames: 64,
         ..StreamStats::default()
     });
     assert_eq!((s.frames, s.missed, s.overruns, s.resets), (64, 0, 0, 0));
-    assert!(!s.parked && !s.held);
+    assert!(!s.held);
 }
 
 /// HIL v1 proves the test signal from the engine: each `Status`
@@ -287,9 +283,7 @@ impl Driver for Scripted {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 
     fn ending(&self) -> Option<Ending> {
         self.ending.clone()
@@ -311,9 +305,7 @@ impl Driver for Measured {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 
     fn histograms(&self) -> Option<HistSnapshot> {
         Some(self.0.clone())

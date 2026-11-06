@@ -325,7 +325,6 @@ async fn a_backup_restores_through_import_state() {
         .request_applied(
             Cmd::ImportState {
                 state: backup.state.clone(),
-                baseline: false,
             },
             None,
         )

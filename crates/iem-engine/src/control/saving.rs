@@ -62,13 +62,4 @@ impl Control {
             ),
         }
     }
-
-    pub(super) fn save_baseline(&mut self) {
-        if let Err(e) = self.store.save_baseline(&self.persisted()) {
-            self.alarm(
-                AlarmCode::SaveFailed,
-                format!("saving the baseline failed: {e}"),
-            );
-        }
-    }
 }

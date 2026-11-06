@@ -70,8 +70,6 @@ pub enum Cmd {
     },
     ImportState {
         state: MixState,
-        #[serde(default)]
-        baseline: bool,
     },
     GetState,
     GetTopology,

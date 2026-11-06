@@ -73,7 +73,6 @@ fn every_cmd() -> Vec<Cmd> {
         },
         Cmd::ImportState {
             state: MixState::default(),
-            baseline: true,
         },
         Cmd::GetState,
         Cmd::GetTopology,
@@ -153,7 +152,6 @@ fn the_stream_figures_in_status_are_additive() {
         missed: 2,
         overruns: 3,
         resets: 1,
-        parked: true,
         held: true,
         ..Status::default()
     };
@@ -162,7 +160,6 @@ fn the_stream_figures_in_status_are_additive() {
     assert_eq!(json["missed"], 2);
     assert_eq!(json["overruns"], 3);
     assert_eq!(json["resets"], 1);
-    assert_eq!(json["parked"], true);
     assert_eq!(json["held"], true);
     assert_eq!(
         serde_json::from_value::<Status>(json.clone()).unwrap(),
@@ -471,9 +468,6 @@ fn engine_messages_round_trip() {
         EngineMsg::DriverReleased {
             reason: "shutdown".into(),
         },
-        EngineMsg::DriverParked {
-            reason: "shutdown".into(),
-        },
         EngineMsg::Superseded,
     ];
     for m in msgs {
@@ -488,9 +482,9 @@ fn engine_messages_round_trip() {
     assert_eq!(band.gain_db, 0.0);
 }
 
-/// The stream's end goes out by these names, field by field (#35).
+/// The stream's end goes out by this name, field by field (#35).
 #[test]
-fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
+fn the_stream_end_goes_out_as_driver_released() {
     let released = EngineMsg::DriverReleased {
         reason: "fault".into(),
     };
@@ -498,12 +492,25 @@ fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
         serde_json::to_string(&released).unwrap(),
         r#"{"type":"driver_released","reason":"fault"}"#
     );
-    let parked = EngineMsg::DriverParked {
-        reason: "shutdown".into(),
-    };
-    assert_eq!(
-        serde_json::to_string(&parked).unwrap(),
-        r#"{"type":"driver_parked","reason":"shutdown"}"#
+}
+
+/// An older client's `baseline` key on an import is ignored, never refused.
+#[test]
+fn an_import_with_the_old_baseline_key_still_parses() {
+    let msg = parse_client(
+        br#"{"type":"request","id":3,"cmd":{"op":"import_state","state":{},"baseline":true}}"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            msg,
+            ClientMsg::Request {
+                id: 3,
+                cmd: Cmd::ImportState { .. },
+                ..
+            }
+        ),
+        "{msg:?}"
     );
 }
 

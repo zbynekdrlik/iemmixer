@@ -45,8 +45,6 @@ pub struct Status {
     pub overruns: u64,
     /// Driver reopens after a reset request or a stall.
     pub resets: u64,
-    /// A callback outlived the stop wait: the stream stays allocated.
-    pub parked: bool,
     /// Started with `--hold` and not armed yet: every output is silent.
     pub held: bool,
     /// Additive: HIL's spare card outputs (the engine opens the site's

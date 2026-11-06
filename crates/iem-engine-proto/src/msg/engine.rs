@@ -183,12 +183,5 @@ pub enum EngineMsg {
     DriverReleased {
         reason: String,
     },
-    /// The stream stopped parked (#35): a callback stayed in it, so nothing
-    /// was released and
-    /// the card is free only once the engine's process has ended. Sent
-    /// instead of `DriverReleased`, at the same point.
-    DriverParked {
-        reason: String,
-    },
     Superseded,
 }

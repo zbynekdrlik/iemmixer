@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::files::{Entries, Files, OsFiles};
-use super::tests::sample;
+use super::tests::{sample, write_baseline};
 use super::*;
 use crate::test_support::test_site;
 

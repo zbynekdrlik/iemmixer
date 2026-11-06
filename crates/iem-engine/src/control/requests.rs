@@ -101,13 +101,10 @@ impl Control {
             }
             Effect::Save => self.save(),
             Effect::Shutdown => self.shutdown = true,
-            Effect::Imported { baseline } => {
+            Effect::Imported => {
                 let state = self.state_msg();
                 self.broadcast(&state);
                 self.schedule.changed(Instant::now());
-                if baseline {
-                    self.save_baseline();
-                }
             }
         }
     }

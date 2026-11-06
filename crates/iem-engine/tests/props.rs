@@ -228,7 +228,6 @@ fn command(rng: &mut Rng, g: &Topology, depth: u32) -> Cmd {
         11 => Cmd::StopTestSignal,
         12 => Cmd::ImportState {
             state: random_state(rng, g),
-            baseline: rng.chance(0.5),
         },
         13 => [Cmd::GetState, Cmd::Ping, Cmd::SaveNow, Cmd::InjectFault][rng.below(4)].clone(),
         14 => Cmd::SetGroup {

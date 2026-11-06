@@ -59,8 +59,7 @@ reset-failed), the env file and the summary removed on the box.
 **The verdict**, every check run, its words in FAILURES' order:
 - not_finished: the client still ran at the bound; client: its unit's
   result not `success` or its exit not 0;
-- harness: soak_verdict.box_check over the client's summary (`soak_verdict.verdict`'s
-  checks 9, 11 and 12 at its bounds: complete, the run's seconds,
+- harness: soak_verdict.box_check over the client's summary (complete, the run's seconds,
   no reconnect, 99 % of the expected listen frames; then a meter frame). The
   listen gaps are counted, not judged (owner on #72, 2026-10-29: the browser
   listen is low priority, #88);

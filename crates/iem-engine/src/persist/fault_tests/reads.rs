@@ -172,7 +172,7 @@ fn only_a_read_error_that_may_pass_is_tried_again() {
     // Linux) does not turn readable by waiting:
     // it is Unreadable at once, with no pause.
     let (_d, faulty, s) = faulty_store();
-    s.save_baseline(&sample(4)).unwrap();
+    write_baseline(&s, &sample(4));
     fs::create_dir(s.dir().join(CURRENT)).unwrap();
     let loaded = s.load(&test_site());
     assert_eq!(

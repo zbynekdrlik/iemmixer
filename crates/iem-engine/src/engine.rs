@@ -14,7 +14,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use iem_audio_io::hist::HistSnapshot;
-use iem_audio_io::owner::StopOutcome;
 use iem_audio_io::{InputSignal, NullRt, NullRtConfig, Offline, StreamStats, wav};
 use iem_engine_proto::media::stream;
 use iem_engine_proto::{Alarm, AlarmCode, MixState, write_media};
@@ -368,12 +367,10 @@ impl Driver for NullRtDriver {
         self.0.stats()
     }
 
-    /// NullRt holds no card: its stop always releases.
-    fn stop(self: Box<Self>) -> StopOutcome {
+    fn stop(self: Box<Self>) {
         if self.0.stop().is_none() {
             warn!("the NullRt thread ended outside its guarded callback");
         }
-        StopOutcome::Released
     }
 
     fn histograms(&self) -> Option<HistSnapshot> {
