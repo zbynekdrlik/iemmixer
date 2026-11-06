@@ -1,6 +1,5 @@
 """Tests for scripts/iem-pc/iempc_event.py: `iempc event`, the flag and nothing
-else (#86): no PC call, no ssh to the box, whatever the state folder holds.
-They reuse iempc_test_support's fakes (FakePc stands in for ssh); every value is
+else (#86): no ssh to the box, whatever the state folder holds. Every value is
 synthetic."""
 from __future__ import annotations
 
@@ -10,42 +9,30 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from iempc_test_support import SHA, Base, ip  # noqa: E402
+from iempc_test_support import Base, ip  # noqa: E402
 
 LEFT_ALONE = {"event": "the flag only: the box keeps serving the band, the PC is left alone"}
 
 
 class FlagTests(Base):
-    def test_the_flag_refuses_dev_and_touches_nothing(self) -> None:
-        self.flag()
-        code, docs, err = self.run_main("dev", "--build", SHA)
-        self.assertEqual((code, docs, self.pc.calls, self.pc.modules, self.gh.calls), (1, [], [], [], []))
-        self.assertIn("runs only in dev time", err)
-
     def test_every_dev_time_command_is_refused_with_the_flag(self) -> None:
-        self.fetched()
         self.flag()
-        before = len(self.gh.calls)
-        for argv in (["install", "--sha", SHA], ["install", "--sha", SHA, "--first"], ["dispatch-hil", "--sha", SHA],
-                     ["rehearse-teardown"], ["probe-task"], ["handover-s1a"], ["bootstrap", "Register-IemTasks"],
-                     ["bootstrap", "Get-IemBootstrapState"], ["bootstrap", "Get-IemTunnelOrigin"],
-                     ["bootstrap", "Test-IemServiceRight"], ["dev", "--dry-run"]):
+        for argv in (["gen3-backup"], ["gen3-drift"], ["gen3-gate", "hil"]):
             code, docs, err = self.run_main(*argv)
             self.assertEqual((code, docs), (1, []), argv)
             self.assertIn("runs only in dev time", err, argv)
-        self.assertEqual((self.pc.calls, self.pc.modules, self.pc.scps, len(self.gh.calls)), ([], [], [], before))
+        self.assertEqual(self.gh.calls, [])
 
     def test_event_goes_through_with_the_flag(self) -> None:
         self.flag()
         code, docs, _ = self.run_main("event")
-        self.assertEqual((code, docs, self.pc.calls), (0, [LEFT_ALONE], []))
+        self.assertEqual((code, docs), (0, [LEFT_ALONE]))
 
     def test_event_writes_the_flag_and_calls_nothing(self) -> None:
         with mock.patch("subprocess.Popen", side_effect=AssertionError("no process: no ssh to the box or the PC")):
             code, docs, _ = self.run_main("event")
         self.assertEqual(code, 0)
         self.assertEqual(docs, [{"flag": str(ip.EVENT_NOW), "written": True}, LEFT_ALONE])
-        self.assertEqual((self.pc.calls, self.pc.modules, self.pc.scps), ([], [], []))
         self.assertRegex(ip.EVENT_NOW.read_text(encoding="utf-8"), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d\n$")
 
     def test_no_side_record_changes_the_event(self) -> None:
@@ -53,7 +40,7 @@ class FlagTests(Base):
         ip.state_dir()
         (ip.STATE_DIR / "gen3-side.json").write_text('{"side": 2}', encoding="utf-8")
         code, docs, _ = self.run_main("event")
-        self.assertEqual((code, docs[-1], self.pc.calls), (0, LEFT_ALONE, []))
+        self.assertEqual((code, docs[-1]), (0, LEFT_ALONE))
 
     def test_a_dry_run_writes_no_flag(self) -> None:
         code, docs, _ = self.run_main("event", "--dry-run")

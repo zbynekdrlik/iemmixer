@@ -272,20 +272,6 @@ fn new_outage_clears_the_previous_restart_outcome() {
     assert_eq!(st.last_restart_secs_ago, Some(780));
 }
 
-#[test]
-fn stop_accepted_only_for_ok_and_not_active() {
-    assert!(stop_accepted(Some(0)));
-    assert!(stop_accepted(Some(SC_ERR_SERVICE_NOT_ACTIVE)));
-    assert!(stop_accepted(Some(1062)));
-    assert!(
-        !stop_accepted(Some(5)),
-        "access denied: service still running"
-    );
-    assert!(!stop_accepted(Some(SC_ERR_SERVICE_ALREADY_RUNNING)));
-    assert!(!stop_accepted(Some(1)));
-    assert!(!stop_accepted(None));
-}
-
 // ---------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------
@@ -318,26 +304,6 @@ fn parse_ready_non_200_is_error_even_with_valid_body() {
     let err = parse_ready(503, r#"{"status":503,"readyConnections":0}"#).unwrap_err();
     assert!(err.contains("HTTP 503"), "{err}");
     assert!(parse_ready(201, r#"{"status":201,"readyConnections":4}"#).is_err());
-}
-
-#[test]
-fn parse_sc_state_reads_the_state_code() {
-    let running = "\r\nSERVICE_NAME: cloudflared \r\n        TYPE               : 10  WIN32_OWN_PROCESS  \r\n        STATE              : 4  RUNNING \r\n        WIN32_EXIT_CODE    : 0  (0x0)\r\n";
-    assert_eq!(parse_sc_state(running), Some(4));
-    let stopped = "        STATE              : 1  STOPPED \r\n";
-    assert_eq!(parse_sc_state(stopped), Some(SC_STATE_STOPPED));
-    assert_eq!(parse_sc_state("        STATE : 3  STOP_PENDING"), Some(3));
-}
-
-#[test]
-fn parse_sc_state_rejects_garbage() {
-    assert_eq!(parse_sc_state(""), None);
-    assert_eq!(parse_sc_state("[SC] OpenService FAILED 1060"), None);
-    assert_eq!(
-        parse_sc_state("        STATE              : X  RUNNING"),
-        None
-    );
-    assert_eq!(parse_sc_state("        STATE_OTHER        4"), None);
 }
 
 // ---------------------------------------------------------------

@@ -23,10 +23,6 @@ tungstenite = { version = "0.28", default-features = false, features = ["handsha
 # Login and /api/site over plain HTTP, as the guard uses it.
 ureq = { version = "3.4", default-features = false }
 
-# The housekeeping CPU Set (S1c profile), as the engine sets its own.
-[target.'cfg(windows)'.dependencies]
-iem-win = { path = "../iem-win" }
-
 [dev-dependencies]
 # A listen frame's 960 samples are the engine's FRAME_48K (tally's test).
 iem-engine-proto = { path = "../iem-engine-proto" }

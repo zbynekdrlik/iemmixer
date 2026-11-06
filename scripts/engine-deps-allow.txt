@@ -1,13 +1,11 @@
-# The iem-engine binary's dependency closure (normal and build edges, Windows
-# and Linux targets). A new crate needs a reviewed line here (program spec §5.2);
+# The iem-engine binary's dependency closure (normal and build edges, the Linux
+# target). A new crate needs a reviewed line here (program spec §5.2);
 # scripts/check_engine_deps.py compares this list with cargo metadata --locked.
 aho-corasick
 # Gen 3 (#72), Linux only: dsync-ptp's errors (MIT OR Apache-2.0), through dstack's dsync-ptp (since dstack v0.5.4).
 anyhow
 # Gen 3 (#72), Linux only: memoffset's build script (Apache-2.0 OR MIT), through dstack's dsync-ptp (since dstack v0.5.4).
 autocfg
-azo
-azo-sys
 bitflags
 block-buffer
 # Gen 3 (#72), Linux only: dsync-ptp's packet fields (Unlicense OR MIT), through dstack's dsync-ptp (since dstack v0.5.4).
@@ -39,7 +37,6 @@ iem-audio-io
 iem-dsp
 iem-engine-proto
 iem-limiter-mga
-iem-win
 # Gen 3 phase C (#72), Linux only: the box's interface addresses for --dante-iface (MIT OR BSD-3-Clause), iem-dante and mdns-sd.
 if-addrs
 indexmap
@@ -65,7 +62,6 @@ once_cell
 pin-project-lite
 proc-macro2
 quote
-recvmsg
 regex-automata
 regex-syntax
 rtrb
@@ -110,19 +106,5 @@ triple_buffer
 typenum
 unicode-ident
 version_check
-widestring
-windows-bindgen
-windows-core
-windows-default
-windows-implement
-windows-interface
-windows-link
-windows-metadata
-windows-registry
-windows-result
-windows-strings
-windows-sys
-windows-targets
-windows_x86_64_msvc
 winnow
 zmij

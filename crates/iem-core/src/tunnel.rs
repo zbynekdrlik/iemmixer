@@ -1,7 +1,7 @@
 //! Internet access (Cloudflare tunnel) health, shared by iem-server and iem-ui (reaperiem#202).
 //!
-//! The mixer is published on the internet through the `cloudflared` Windows
-//! service on the iem PC. iem-server watches that service (see
+//! The mixer is published on the internet through `cloudflared`. iem-server
+//! watches it (see
 //! `iem_server::tunnel_watch`) and pushes a [`TunnelStatusInfo`] to every
 //! client: the engineer sees a header indicator, band members see a banner
 //! telling them to use the local network address while the tunnel is broken.

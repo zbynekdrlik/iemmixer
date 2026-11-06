@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Golden bundle gate (P5): every file listed with its sha256, nothing
 unlisted, every plug-in on the allowlist, every media and render path
-inside the job tokens. Runs in CI (golden-bundle) and on the dev box
-before a bundle is uploaded to the PC. Mirrors GoldenPc.psm1 Test-GoldenRpp."""
+inside the job tokens. Runs in CI (golden-bundle)."""
 from __future__ import annotations
 
 import hashlib

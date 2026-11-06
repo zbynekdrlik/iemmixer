@@ -1,5 +1,5 @@
 [graph]
-targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "wasm32-unknown-unknown"]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 all-features = true
 
 [advisories]
@@ -53,7 +53,7 @@ crate = "iem-dante-dev"
 allow = ["GPL-3.0-or-later"]
 
 # The audio contract shared with the Dante device (#72, 2026-10-30), from dstack:
-# linked through iem-audio-io by the GPL engine only (iem-server, the UI and the guard
+# linked through iem-audio-io by the GPL engine only (iem-server and the UI
 # do not depend on iem-audio-io).
 [[licenses.exceptions]]
 crate = "dstack-audio-io"

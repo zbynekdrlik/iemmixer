@@ -2,16 +2,12 @@
 """Integrity gate: no ignored/skipped/focused tests, no continue-on-error,
 self-hosted runners or pull_request_target, every action pinned to a full
 commit SHA with its version comment, no force-kill verb anywhere, comments
-included (program spec I8), no restart but the one marked literal form (I8),
-job breakaway only in iem-win's spawn glue (S6),
-no ASIO rate, clock or control-panel call (I2), and the asio-spike bundle's
-Copy-Item list equal to spike_window.BUNDLE_FILES."""
+included (program spec I8), and no restart but the one marked literal form (I8)."""
 from __future__ import annotations
 
-import ast
 import re
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SELF = {"scripts/check_integrity.py", "scripts/test_check_integrity.py"}
@@ -39,7 +35,7 @@ FORCE_KILL = re.compile(
 # in the next, an argument list over several lines), so the rule is simple:
 # every restart mechanism is a violation unless its line carries RESTART_MARKER
 # and the mechanism is in the one literally safe form, RESTART_SAFE. The one
-# legitimate call is tuning_window.REBOOT_REQUEST. Another graceful form (an
+# legitimate form is that one. Another graceful form (an
 # API call with literal flags, say) needs its own safe form and test first.
 RESTART_MARKER = "iemmixer:graceful-restart"
 RESTART_MECHANISMS = (
@@ -93,65 +89,7 @@ def restart_lines(rows: list[tuple[int, str]]) -> set[int]:
     return found
 
 
-# Children leave the guard's job only through iem-win's spawn glue (S6 design note §5.1).
-BREAKAWAY = re.compile(r"CREATE_BREAKAWAY_FROM_JOB")
-BREAKAWAY_HOME = "crates/iem-win/"
-# Method calls, UFCS paths (`Driver::set_sample_rate(&d, ..)`) and turbofish
-# (`future::<T>(..)`) on azo's safe or raw interface (`as_raw().control_panel()`).
-ASIO_SETTINGS = re.compile(
-    r"(?:\.|::)\s*(?:set_sample_rate|set_clock_source|open_control_panel|control_panel|future)\s*(?:::\s*<[^>]*>\s*)?\(")
 CODE_SUFFIXES = (".rs", ".ts", ".js", ".py", ".sh", ".ps1", ".psm1", ".psd1", ".cmd", ".bat", ".yml", ".yaml", ".toml")
-# The one spike bundle that reaches the PC: fetch-bundle accepts exactly
-# spike_window.BUNDLE_FILES, CI's asio-spike "Bundle" step copies its own list.
-BUNDLE_SOURCE = "scripts/asio-spike/spike_window.py"
-BUNDLE_WORKFLOW = ".github/workflows/ci.yml"
-BUNDLE_JOB = "asio-spike"
-JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
-STEP_NAME = re.compile(r"^\s*-\s*name:\s*(.+?)\s*$")
-COPY_ITEM = re.compile(r"\bCopy-Item\s+-LiteralPath\s+(.+?)\s+-Destination\b")
-
-
-PS_FUNCTION = re.compile(r"\bfunction\s+([\w-]+)\s*(?:\([^)]*\))?\s*\{")
-PS_PARAM = re.compile(r"\bparam\s*\(", re.IGNORECASE)
-PS_ASSIGN = re.compile(r"\$(\w+)\s*=(?!=)")
-
-
-def ps_shadowed_params(text: str) -> list[tuple[int, str, str, str]]:
-    """PowerShell variable names ignore case, so a local `$startupDir = ...`
-    in a function with the parameter `$StartupDir` overwrites the parameter
-    (#11 lane 6: the restore lost its -StartupDir and wrote the shortcuts into
-    another folder). Each such assignment as (line, function, param, local).
-    Braces are counted naively (strings holding braces can shift a body's end;
-    the modules here have none that matter)."""
-    found: list[tuple[int, str, str, str]] = []
-    for match in PS_FUNCTION.finditer(text):
-        start = match.end()
-        depth, i = 1, start
-        while i < len(text) and depth:
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-            i += 1
-        body = text[start:i]
-        head = PS_PARAM.search(body)
-        if not head:
-            continue
-        depth, j = 1, head.end()
-        while j < len(body) and depth:
-            if body[j] == "(":
-                depth += 1
-            elif body[j] == ")":
-                depth -= 1
-            j += 1
-        params = {name.lower(): name for name in re.findall(r"\$(\w+)", body[head.end():j])}
-        for assign in PS_ASSIGN.finditer(body, j):
-            local = assign.group(1)
-            param = params.get(local.lower())
-            if param is not None and param != local:
-                line = text.count("\n", 0, start + assign.start()) + 1
-                found.append((line, match.group(1), param, local))
-    return found
 
 
 def files(root: Path, base: str, suffixes: tuple[str, ...]) -> list[Path]:
@@ -165,59 +103,12 @@ def lines(path: Path) -> list[tuple[int, str]]:
     return list(enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1))
 
 
-def bundle_files(path: Path) -> list[str] | None:
-    """spike_window.BUNDLE_FILES, read without importing the module."""
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "BUNDLE_FILES" for t in node.targets):
-            return sorted(ast.literal_eval(node.value))
-    return None
-
-
-def bundle_copies(path: Path) -> tuple[int, list[str]]:
-    """The file names the asio-spike job's Bundle step copies, and the line of
-    its first Copy-Item (0: no such step)."""
-    job = step = None
-    first, names = 0, []
-    for n, line in lines(path):
-        if match := JOB_KEY.match(line):
-            job, step = match.group(1), None
-            continue
-        if match := STEP_NAME.match(line):
-            step = match.group(1)
-        if job == BUNDLE_JOB and step and step.startswith("Bundle") and (match := COPY_ITEM.search(line)):
-            first = first or n
-            names += [PurePosixPath(p.strip().strip("'\"").replace("\\", "/")).name for p in match.group(1).split(",")]
-    return first, sorted(names)
-
-
-def bundle_violations(root: Path, required: bool = False) -> list[str]:
-    """A drift between the two lists keeps CI green while fetch-bundle rejects
-    every artifact on the dev box (#32 E5). A tree without spike_window.py
-    has nothing to compare, unless `required` (the repository itself)."""
-    source = root / BUNDLE_SOURCE
-    if not source.is_file():
-        return [f"{BUNDLE_SOURCE}: missing (the spike bundle's file list)"] if required else []
-    want = bundle_files(source)
-    if want is None:
-        return [f"{BUNDLE_SOURCE}: no BUNDLE_FILES"]
-    workflow = root / BUNDLE_WORKFLOW
-    line, got = bundle_copies(workflow) if workflow.is_file() else (0, [])
-    if not line:
-        return [f"{BUNDLE_WORKFLOW}: no Copy-Item in the {BUNDLE_JOB} job's Bundle step (it must copy spike_window.BUNDLE_FILES)"]
-    if got != want:
-        return [f"{BUNDLE_WORKFLOW}:{line}: the {BUNDLE_JOB} Bundle step copies {got}, spike_window.BUNDLE_FILES lists {want} "
-                "(fetch-bundle would reject every artifact)"]
-    return []
-
-
-def violations(root: Path, repository: bool = False) -> list[str]:
-    """Everything the gate refuses under `root`; `repository`: root is this
-    repository, whose required files must exist."""
-    found: list[str] = bundle_violations(root, required=repository)
+def violations(root: Path) -> list[str]:
+    """Everything the gate refuses under `root`."""
+    found: list[str] = []
     for path in files(root, "crates", (".rs",)):
         rel = path.relative_to(root).as_posix()
         found += [f"{rel}:{n}: #[ignore] test" for n, line in lines(path) if RUST_IGNORE.search(line)]
-        found += [f"{rel}:{n}: the host never changes the card's rate, clock or panel (program spec I2)" for n, line in lines(path) if ASIO_SETTINGS.search(line)]
     for path in files(root, "e2e", (".ts",)):
         rel = path.relative_to(root).as_posix()
         found += [f"{rel}:{n}: skipped or focused E2E test" for n, line in lines(path) if E2E_SKIP.search(line)]
@@ -244,12 +135,6 @@ def violations(root: Path, repository: bool = False) -> list[str]:
                     found.append(f"{rel}:{n}: force-kill command (program spec I8)")
                 elif n in restarts:
                     found.append(f"{rel}:{n}: {RESTART}")
-                if BREAKAWAY.search(line) and not rel.startswith(BREAKAWAY_HOME):
-                    found.append(f"{rel}:{n}: job breakaway outside iem-win (S6 design note §5.1)")
-            if path.suffix in (".ps1", ".psm1"):
-                text = path.read_text(encoding="utf-8", errors="replace")
-                found += [f"{rel}:{n}: ${local} in {func} is its parameter ${param} (PowerShell names ignore case)"
-                          for n, func, param, local in ps_shadowed_params(text)]
     goldens = root / "goldens"
     if goldens.is_dir():
         total = sum(p.stat().st_size for p in goldens.rglob("*") if p.is_file())
@@ -259,7 +144,7 @@ def violations(root: Path, repository: bool = False) -> list[str]:
 
 
 def main() -> int:
-    found = violations(ROOT, repository=True)
+    found = violations(ROOT)
     for item in found:
         print(f"::error::{item}")
     if found:

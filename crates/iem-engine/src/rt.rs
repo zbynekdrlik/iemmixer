@@ -577,30 +577,16 @@ impl Processor {
         panic!("fault injection: panic on the RT thread");
     }
 
-    /// The owner-approved SEH test (`--fault-injection` only, design §10): a
-    /// structured exception on the RT thread that `catch_unwind` cannot
-    /// catch, so the process's SEH filter runs (Windows). Off Windows there
-    /// is no such filter, so it aborts (equally uncatchable). It never
-    /// returns: `tests/pipes.rs` runs it in the binary off Windows (SIGABRT);
-    /// on Windows `iemmode inject-seh` runs it on the PC.
+    /// The owner-approved crash test (`--fault-injection` only, design §10):
+    /// an abort on the RT thread that `catch_unwind` cannot catch. It never
+    /// returns: `tests/pipes.rs` runs it in the binary (SIGABRT).
     fn inject_seh() {
-        #[cfg(windows)]
-        iem_audio_io::asio::raise_test_seh();
-        #[cfg(not(windows))]
         std::process::abort();
     }
 
     /// The parked-engine test (`--fault-injection` only, design §10 test #2,
-    /// #35): the SEH test's exception under the ASIO backend's test hold, so
-    /// the backend keeps the driver, the SEH filter parks this thread and the
-    /// engine keeps running with its stream parked. Off Windows it aborts
-    /// like `inject_seh` (no filter, no card to keep): `tests/pipes.rs` runs
-    /// it in the binary there; on Windows `iemmode inject-park` runs it on
-    /// the PC.
+    /// #35): aborts like `inject_seh`; `tests/pipes.rs` runs it in the binary.
     fn inject_park() {
-        #[cfg(windows)]
-        iem_audio_io::asio::raise_test_park();
-        #[cfg(not(windows))]
         std::process::abort();
     }
 

@@ -66,13 +66,6 @@ const RUNNING_NAME: &str = "running.json";
 const ROSTERS_NAME: &str = "rosters.kept";
 const PENDING_NAME: &str = "migration.json";
 
-/// How often a rename or a delete a transient Windows error fails is tried,
-/// and the pause between tries (the engine's lesson of #32: a scanner or the
-/// indexer holds a file for a moment). Never a silent fallback: the last
-/// error is returned.
-const RETRY_TRIES: u32 = 5;
-const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// A running switch: from the active lineup to another (#58 design §7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwitchIntent {
@@ -146,52 +139,6 @@ fn read_optional(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-/// Whether a failed rename or delete is tried again: on Windows only, after
-/// access denied (5), a sharing violation (32) or a lock violation (33),
-/// what a scanner or the indexer holding a file for a moment gives.
-fn transient(e: &io::Error, windows: bool) -> bool {
-    windows && matches!(e.raw_os_error(), Some(5 | 32 | 33))
-}
-
-/// Runs `op` until it succeeds, fails with an error `again` refuses, or ran
-/// `tries` times; `pause` runs between two tries. The last error is
-/// returned.
-fn retry<T>(
-    tries: u32,
-    mut op: impl FnMut() -> io::Result<T>,
-    again: impl Fn(&io::Error) -> bool,
-    mut pause: impl FnMut(),
-) -> io::Result<T> {
-    let mut n = 1;
-    loop {
-        match op() {
-            Err(e) if n < tries && again(&e) => {
-                tracing::warn!(error = %e, attempt = n, "a file operation failed for a moment: trying again");
-                pause();
-                n += 1;
-            }
-            done => return done,
-        }
-    }
-}
-
-/// `op` (a rename or a delete), tried again while it fails with a
-/// transient error ([`transient`]; `windows`: the server's OS, which tests
-/// set) up to [`RETRY_TRIES`] times, [`RETRY_PAUSE`] between tries.
-pub(crate) fn retrying<T>(windows: bool, op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    retry(
-        RETRY_TRIES,
-        op,
-        |e| transient(e, windows),
-        || std::thread::sleep(RETRY_PAUSE),
-    )
-}
-
-/// `fs::rename`, tried again on a transient Windows error ([`transient`]).
-fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
-    retrying(cfg!(windows), || fs::rename(from, to))
-}
-
 /// Writes `data` to `path` through a synced temporary file renamed over it:
 /// a crash leaves the old file or the new one, never a torn one.
 fn write_durable(path: &Path, data: &str) -> io::Result<()> {
@@ -203,7 +150,7 @@ fn write_durable(path: &Path, data: &str) -> io::Result<()> {
     file.write_all(data.as_bytes())?;
     file.sync_all()?;
     drop(file);
-    rename_retrying(&tmp, path)
+    fs::rename(&tmp, path)
 }
 
 impl LineupStore {
@@ -413,7 +360,6 @@ fn copy_durable(from: &Path, to: &Path) -> io::Result<bool> {
         fs::create_dir_all(parent)?;
     }
     fs::copy(from, to)?;
-    // Synced through a handle with write access (Windows flushes only so).
     fs::OpenOptions::new().write(true).open(to)?.sync_all()?;
     Ok(true)
 }
@@ -571,7 +517,7 @@ pub(crate) fn migrate_with(
     write_durable(&staging.join(PENDING_NAME), &json)?;
     store.set_active(&roster.main().id, chrono::Utc::now().timestamp())?;
     fault(Step::Commit)?;
-    rename_retrying(&staging, &live)?;
+    fs::rename(&staging, &live)?;
     tracing::info!(
         moved = report.moved.len(),
         taken_over = report.taken_over.len(),

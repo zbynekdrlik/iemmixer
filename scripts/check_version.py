@@ -3,14 +3,13 @@
 version must be greater than main's (SemVer 2.0 precedence).
 
 Single source: [workspace.package].version in Cargo.toml. Every crate uses
-`version.workspace = true`, tauri.conf.json sets no version, and Cargo.lock
+`version.workspace = true`, and Cargo.lock
 records that version for every workspace package (so does fuzz/Cargo.lock for
 the workspace crates it builds).
 """
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import subprocess
 import sys
@@ -18,7 +17,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CRATES = ["iem-core", "iem-server", "iem-ui", "iem-tray", "iem-rpp", "iem-dsp", "iem-limiter-mga", "iem-engine-proto", "iem-audio-io", "iem-engine", "iem-migrate", "iem-win", "iem-guard", "iem-soakclient", "iem-dante-dev"]
+CRATES = ["iem-core", "iem-server", "iem-ui", "iem-rpp", "iem-dsp", "iem-limiter-mga", "iem-engine-proto", "iem-audio-io", "iem-engine", "iem-migrate", "iem-soakclient", "iem-dante-dev"]
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
 
 
@@ -64,9 +63,6 @@ def consistency_errors(root: Path) -> list[str]:
         manifest = tomllib.loads((root / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8"))
         if manifest["package"].get("version") != {"workspace": True}:
             errors.append(f"crates/{crate}/Cargo.toml must use version.workspace = true")
-    tauri = json.loads((root / "crates" / "iem-tray" / "tauri.conf.json").read_text(encoding="utf-8"))
-    if "version" in tauri:
-        errors.append("crates/iem-tray/tauri.conf.json must not set a version (Cargo is the single source)")
     lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
     locked = {package["name"]: package["version"] for package in lock["package"] if package["name"] in CRATES}
     for crate in CRATES:

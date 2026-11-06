@@ -35,8 +35,8 @@ pub struct Status {
     pub tap_overruns: u64,
     pub talkback_dropped: u64,
     pub cmd_backlog: u64,
-    // S6, additive: the stream's own figures (the ASIO backend; NullRt
-    // reports its block and zeros).
+    // S6, additive: the stream's own figures (NullRt reports its block and
+    // zeros).
     /// The period the driver delivers, measured from its sample positions.
     pub frames: u32,
     /// Callback intervals of two periods or more.

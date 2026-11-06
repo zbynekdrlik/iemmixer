@@ -9,7 +9,7 @@ CRLF):
 
 - begin.json (pc-begin): `{"reason": BEGIN_REASONS, "push_before": count}`;
 - pc.json (pc): `{"reason": PC_REASONS}`;
-- bursts.jsonl (pc): one `{"t", "exit"}` per `iemmode test-signal … --listen`,
+- bursts.jsonl (pc): one `{"t", "exit"}` per test-signal burst with --listen,
   its exit code;
 - evidence.json (pc-end): `{"job_end": JOB_END, "client_log": CLIENT_LOG,
   "push_after": count}`; job_end is `left-dev` when the PC was out of dev;

@@ -632,7 +632,7 @@ mod tests {
         // would then wait 3 s for nothing).
         let (_d, s) = store();
         // A directory where engine.lock belongs: opening it fails on every
-        // OS (IsADirectory on Linux, access denied on Windows).
+        // OS (IsADirectory).
         fs::create_dir(s.dir().join(LOCK)).unwrap();
         let t0 = Instant::now();
         let e = s.lock_within(Duration::from_secs(3)).unwrap_err();

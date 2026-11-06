@@ -1,40 +1,32 @@
 //! `iem-engine supervise` (Gen 3 phase H, #72; plan
 //! `docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md` Task 3): a
 //! supervisor client of the engine's control pipe for the Gen 3 box, where
-//! no guard runs. On the PC the guard sends the HIL test signal over its
-//! supervisor connection (`iem-guard`'s `win::engine::hil_signal`); on the
-//! box this does: `test-signal <input> <dbfs> <seconds> [--listen]` sends
+//! no guard runs: `test-signal <input> <dbfs> <seconds> [--listen]` sends
 //! `HilTestSignal` (every mix TX written as zero while it runs, the sine
 //! only on HIL's spare outputs, which the engine opens under its
 //! `--test-signal` flag and refuses without it), `stop-test-signal` sends
 //! `StopTestSignal`, `status` prints the engine's next `Status`, and
-//! `inject-fault` sends `InjectFault` (HIL's panic check, the guard's
-//! `win::engine::inject_fault`: the engine panics on its RT thread and ends
+//! `inject-fault` sends `InjectFault` (HIL's panic check: the engine panics on its RT thread and ends
 //! itself with its fault exit, which systemd starts again; refused without
 //! its `--fault-injection` flag, which only the box HIL gate's job gives it).
 //!
 //! The protocol is the engine's own (`iem_engine_proto`: the same frames,
 //! `ClientMsg` and `EngineMsg` the control loop reads and writes), read
-//! through the engine's own [`Framer`]; the guard keeps a copy of the frame
-//! only because it stays outside the engine's dependency closure.
+//! through the engine's own [`Framer`].
 //!
 //! **One supervisor at a time.** The engine keeps one supervisor beside its
 //! controller, and a supervisor's hello replaces the one before it
 //! (`Superseded`, then closed; `control/connections.rs`, `Control::hello`).
 //! On the box no guard holds that connection, so nothing is displaced: each
 //! call is the engine's supervisor for its one command and leaves; two calls
-//! at once end the earlier one with `Superseded` (exit 1). On the PC the
-//! guard holds it, so a call there would take it from the guard: off Unix
-//! the command is refused (exit 2). A supervisor that leaves neither stops
+//! at once end the earlier one with `Superseded` (exit 1). A supervisor that leaves neither stops
 //! nor holds a signal: the burst runs its seconds after the call returned
 //! (the engine ends it), `stop-test-signal` ends it sooner.
 //!
-//! The caps are the guard's, with its words (`daemon::hil::test_signal`):
-//! at most −20 dBFS (the engine's own X13 cap), a whole number of seconds
-//! from 1 to 60, an input id as the protocol reads one; the tone is the
-//! guard's 1 kHz on every spare output the engine opened (its first
-//! `Status.hil`, the site's `[guard] hil_tx` in order), as the guard sends
-//! it to every `hil_tx`.
+//! The caps: at most −20 dBFS (the engine's own X13 cap), a whole number of seconds
+//! from 1 to 60, an input id as the protocol reads one; the tone is 1 kHz on
+//! every spare output the engine opened (its first `Status.hil`, the site's
+//! `[guard] hil_tx` in order).
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -49,12 +41,11 @@ use crate::pipe::Framer;
 
 /// The box's control pipe (`scripts/gen3/iem-engine.service`'s `--pipe`).
 pub const PIPE: &str = "/run/iemmixer/engine.sock";
-/// The HIL test tone's frequency, the guard's (`effects::engine::HIL_HZ`).
+/// The HIL test tone's frequency.
 pub const HIL_HZ: f64 = 1000.0;
-/// The HIL test signal's ceiling, the guard's (`daemon::HIL_MAX_DBFS`) and
-/// the engine's X13 cap (`params::TEST_DBFS`).
+/// The HIL test signal's ceiling, the engine's X13 cap (`params::TEST_DBFS`).
 pub const HIL_MAX_DBFS: f64 = -20.0;
-/// The longest HIL test signal (s), the guard's (`daemon::HIL_MAX_TTL_S`).
+/// The longest HIL test signal (s).
 pub const HIL_MAX_TTL_S: u32 = 60;
 /// The name the hello gives (the engine logs it).
 pub const CLIENT: &str = "iem-engine supervise";
@@ -105,7 +96,7 @@ fn exactly<'a, const N: usize>(rest: &[&'a str]) -> Result<[&'a str; N], String>
         .map_err(|_| format!("{n} arguments expected, {} given", rest.len()))
 }
 
-/// `test-signal`'s three values, checked as the guard checks them.
+/// `test-signal`'s three values, checked.
 fn test_signal(values: [&str; 3], listen: bool) -> Result<Ask, String> {
     let [input, dbfs, seconds] = values;
     if !valid_id(input) {
@@ -139,7 +130,7 @@ fn test_signal(values: [&str; 3], listen: bool) -> Result<Ask, String> {
 /// Parses what follows `supervise`: `[--pipe <socket>]`, then the command
 /// and its values. `--listen` only as the last word of `test-signal`, taken
 /// off before its three values, so a negative dB value never meets a flag
-/// parser (the guard's `iemmode test-signal`).
+/// parser.
 pub fn parse(words: &[String]) -> Result<Supervise, String> {
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     let (pipe, rest) = match words.split_first() {
@@ -185,11 +176,6 @@ pub fn parse(words: &[String]) -> Result<Supervise, String> {
 /// error code), never the engine's free text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Failure {
-    /// Off Unix (the PC), where the guard is the engine's supervisor.
-    #[error(
-        "supervise is for the Gen 3 box: on the PC the guard is the engine's supervisor, and a new supervisor would replace it"
-    )]
-    NotHere,
     #[error("cannot connect to the engine's pipe ({0})")]
     Connect(String),
     #[error("the engine's pipe failed ({0})")]
@@ -206,16 +192,6 @@ pub enum Failure {
     /// `--test-signal`).
     #[error("the engine refused it: {0}")]
     Refused(String),
-}
-
-impl Failure {
-    /// The exit code: 2 off Unix (as the command line's), else 1.
-    pub fn code(&self) -> u8 {
-        match self {
-            Self::NotHere => 2,
-            _ => 1,
-        }
-    }
 }
 
 impl From<FrameError> for Failure {
@@ -292,7 +268,7 @@ pub struct Waits {
     pub reply: Duration,
 }
 
-/// The guard's waits (`win::engine::STATUS_GAP`, `REPLY`): the engine sends
+/// The waits: the engine sends
 /// a `Status` once a second.
 pub const WAITS: Waits = Waits {
     status: Duration::from_secs(3),
@@ -441,23 +417,15 @@ pub fn exchange<S: Read + Write>(s: &mut S, ask: &Ask, waits: Waits) -> Result<O
 }
 
 /// Connects to the engine's control socket and makes the call with the
-/// guard's waits: reads wait at most the engine's own `pipe::POLL` at a
-/// time, writes at most its `pipe::SEND_TIMEOUT`. Off Unix: [`Failure::NotHere`].
+/// [`WAITS`]: reads wait at most the engine's own `pipe::POLL` at a
+/// time, writes at most its `pipe::SEND_TIMEOUT`.
 pub fn run(a: &Supervise) -> Result<Outcome, Failure> {
-    #[cfg(unix)]
-    {
-        let fail = |e: std::io::Error| Failure::Connect(e.kind().to_string());
-        let mut s = std::os::unix::net::UnixStream::connect(&a.pipe).map_err(fail)?;
-        s.set_read_timeout(Some(crate::pipe::POLL)).map_err(fail)?;
-        s.set_write_timeout(Some(crate::pipe::SEND_TIMEOUT))
-            .map_err(fail)?;
-        exchange(&mut s, &a.ask, WAITS)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = a;
-        Err(Failure::NotHere)
-    }
+    let fail = |e: std::io::Error| Failure::Connect(e.kind().to_string());
+    let mut s = std::os::unix::net::UnixStream::connect(&a.pipe).map_err(fail)?;
+    s.set_read_timeout(Some(crate::pipe::POLL)).map_err(fail)?;
+    s.set_write_timeout(Some(crate::pipe::SEND_TIMEOUT))
+        .map_err(fail)?;
+    exchange(&mut s, &a.ask, WAITS)
 }
 
 #[cfg(test)]

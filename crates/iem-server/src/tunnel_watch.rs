@@ -1,7 +1,6 @@
 //! Cloudflare tunnel watchdog (reaperiem#202).
 //!
-//! Band members reach the mixer from their phones through the `cloudflared`
-//! Windows service on the iem PC. A venue firewall that blocks QUIC
+//! Band members reach the mixer from their phones through `cloudflared`. A venue firewall that blocks QUIC
 //! (UDP 7844), or a cloudflared upgrade that drops `--protocol http2` from the
 //! service command line, leaves the service RUNNING with zero edge
 //! connections: the public URL answers 530 and nobody at the event can tell
@@ -12,14 +11,11 @@
 //! 2. the ready-connection count feeds the pure [`TunnelWatch`] state machine
 //!    (no I/O, time injected) which decides `Ok` / `Down` / `Restarting` and
 //!    whether the service must be restarted;
-//! 3. after [`DOWN_BEFORE_RESTART`] of continuous zero connections the
-//!    `cloudflared` service is restarted with `sc.exe` (Windows only), at most
-//!    once per [`RESTART_COOLDOWN`];
+//! 3. after [`DOWN_BEFORE_RESTART`] of continuous zero connections a restart
+//!    is due, at most once per [`RESTART_COOLDOWN`]
+//!    ([`restart_service_blocking`] only logs it on the box);
 //! 4. every change is broadcast to all WebSocket clients as
 //!    [`ServerMsg::TunnelStatus`]; the same status is served at `GET /api/tunnel`.
-//!
-//! The app runs unelevated; granting it start/stop rights on the
-//! `cloudflared` service is a one-time elevated setup step owned by S6.
 
 use std::time::{Duration, Instant};
 
@@ -40,19 +36,8 @@ pub const RESTART_COOLDOWN: Duration = Duration::from_secs(600);
 pub const RESTART_GRACE: Duration = Duration::from_secs(60);
 /// Per-request timeout for the `/ready` poll.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
-/// Windows service name of the Cloudflare tunnel.
+/// The tunnel's service name, for the logs.
 pub const SERVICE_NAME: &str = "cloudflared";
-/// Upper bound for waiting until `sc.exe stop` has really stopped the service.
-/// cloudflared drains in-flight requests for its 30 s `--grace-period`.
-pub const SERVICE_STOP_WAIT: Duration = Duration::from_secs(45);
-/// `STATE` code printed by `sc.exe query` for a stopped service.
-pub const SC_STATE_STOPPED: u32 = 1;
-/// `sc.exe stop` exit code when the service is already stopped.
-pub const SC_ERR_SERVICE_NOT_ACTIVE: i32 = 1062;
-/// `sc.exe start` exit code while the service is still running/stopping.
-pub const SC_ERR_SERVICE_ALREADY_RUNNING: i32 = 1056;
-/// `STATE` code printed by `sc.exe query` for a running service.
-pub const SC_STATE_RUNNING: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -234,23 +219,6 @@ pub async fn fetch_ready(client: &reqwest::Client, url: &str) -> Result<u32, Str
     parse_ready(status, &body)
 }
 
-/// Whether `sc.exe stop` left the service stopping/stopped: 0 = stop accepted,
-/// 1062 = it was not running. Anything else (e.g. 5 access denied) means the
-/// service is still running and waiting for STOPPED is pointless.
-pub fn stop_accepted(exit_code: Option<i32>) -> bool {
-    matches!(exit_code, Some(0) | Some(SC_ERR_SERVICE_NOT_ACTIVE))
-}
-
-/// Extract the numeric `STATE` from `sc.exe query <service>` output
-/// (`        STATE              : 4  RUNNING`).
-pub fn parse_sc_state(sc_query_stdout: &str) -> Option<u32> {
-    sc_query_stdout.lines().find_map(|line| {
-        let rest = line.trim_start().strip_prefix("STATE")?;
-        let value = rest.trim_start().strip_prefix(':')?;
-        value.split_whitespace().next()?.parse().ok()
-    })
-}
-
 /// One watchdog cycle: poll `/ready`, advance the state machine, log and
 /// broadcast changes. Returns the decision; the caller performs the restart.
 pub async fn watch_tick(state: &AppState, now: Instant) -> Decision {
@@ -344,10 +312,7 @@ pub async fn record_restart(state: &AppState, ok: bool, now: Instant) {
             "cloudflared restart finished OK"
         );
     } else {
-        tracing::error!(
-            service = SERVICE_NAME,
-            "cloudflared restart FAILED — see the sc.exe lines above"
-        );
+        tracing::error!(service = SERVICE_NAME, "cloudflared restart FAILED");
     }
     if changed {
         let receivers = state
@@ -358,159 +323,16 @@ pub async fn record_restart(state: &AppState, ok: bool, now: Instant) {
     }
 }
 
-/// Restart the cloudflared Windows service; `true` when `sc.exe start`
-/// succeeded. Blocking — call via `spawn_blocking`. Always `false` (logged)
-/// on non-Windows hosts.
+/// The restart the state machine asks for: `false`, logged. On the box the
+/// server's user holds no right over `iem-tunnel.service`, whose own unit
+/// restarts cloudflared when it ends; a RUNNING tunnel with no connections
+/// stays visible as `Down` with a failed repair.
 pub fn restart_service_blocking(service: &str) -> bool {
-    #[cfg(windows)]
-    {
-        restart_via_sc_windows(service)
-    }
-    #[cfg(not(windows))]
-    {
-        tracing::warn!(
-            service,
-            "tunnel watchdog: service restart requested, but restarting is only supported on Windows — skipped"
-        );
-        false
-    }
-}
-
-#[cfg(windows)]
-struct ScOutput {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-#[cfg(windows)]
-fn run_sc_windows(args: &[&str]) -> Result<ScOutput, String> {
-    use std::os::windows::process::CommandExt;
-    // The app is a GUI (tray) process — never flash a console window.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = std::process::Command::new("sc.exe")
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("spawning sc.exe {args:?} failed: {e:?}"))?;
-    Ok(ScOutput {
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    })
-}
-
-/// Poll `sc.exe query` until the service is STOPPED or `wait` elapsed.
-#[cfg(windows)]
-fn wait_stopped_sc_windows(service: &str, wait: Duration) -> Option<u32> {
-    let started = Instant::now();
-    loop {
-        let sc_state = run_sc_windows(&["query", service])
-            .ok()
-            .and_then(|o| parse_sc_state(&o.stdout));
-        if sc_state == Some(SC_STATE_STOPPED) || started.elapsed() >= wait {
-            tracing::info!(
-                service,
-                sc_state = ?sc_state,
-                waited = ?started.elapsed(),
-                "cloudflared stop wait finished"
-            );
-            return sc_state;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
-/// `sc.exe start`, logged; returns the exit code.
-#[cfg(windows)]
-fn start_sc_windows(service: &str) -> Option<i32> {
-    match run_sc_windows(&["start", service]) {
-        Ok(out) if out.code == Some(0) => {
-            tracing::info!(
-                service,
-                stdout = %out.stdout.trim(),
-                "sc.exe start OK — cloudflared restarted"
-            );
-            out.code
-        }
-        Ok(out) => {
-            tracing::error!(
-                service,
-                exit_code = ?out.code,
-                stdout = %out.stdout.trim(),
-                stderr = %out.stderr.trim(),
-                "sc.exe start FAILED — is the start/stop ACE for the app user missing? \
-                 Run scripts/windows/setup-cloudflared-service.ps1 elevated"
-            );
-            out.code
-        }
-        Err(e) => {
-            tracing::error!(service, error = %e, "sc.exe start could not run");
-            None
-        }
-    }
-}
-
-/// `sc.exe stop`, wait for STOPPED, `sc.exe start` (retried once if the
-/// service was still stopping). `sc query/stop/start` never print the service
-/// command line, so the tunnel token is never logged.
-#[cfg(windows)]
-fn restart_via_sc_windows(service: &str) -> bool {
-    let started = Instant::now();
-    let stop_code = match run_sc_windows(&["stop", service]) {
-        Ok(out) => {
-            tracing::info!(
-                service,
-                exit_code = ?out.code,
-                stdout = %out.stdout.trim(),
-                stderr = %out.stderr.trim(),
-                "sc.exe stop finished"
-            );
-            out.code
-        }
-        Err(e) => {
-            tracing::error!(service, error = %e, "sc.exe stop could not run");
-            None
-        }
-    };
-    if stop_accepted(stop_code) {
-        let sc_state = wait_stopped_sc_windows(service, SERVICE_STOP_WAIT);
-        if sc_state != Some(SC_STATE_STOPPED) {
-            tracing::warn!(
-                service,
-                sc_state = ?sc_state,
-                "service not STOPPED within the wait — starting anyway"
-            );
-        }
-    } else {
-        tracing::error!(
-            service,
-            exit_code = ?stop_code,
-            "sc.exe stop refused — trying start anyway"
-        );
-    }
-
-    let mut start_code = start_sc_windows(service);
-    if start_code == Some(SC_ERR_SERVICE_ALREADY_RUNNING) && stop_accepted(stop_code) {
-        tracing::warn!(
-            service,
-            "service still stopping — waiting again, retrying start once"
-        );
-        wait_stopped_sc_windows(service, SERVICE_STOP_WAIT);
-        start_code = start_sc_windows(service);
-    }
-    let ok = if start_code == Some(SC_ERR_SERVICE_ALREADY_RUNNING) {
-        // e.g. SCM recovery already brought it back — RUNNING is success.
-        let sc_state = run_sc_windows(&["query", service])
-            .ok()
-            .and_then(|o| parse_sc_state(&o.stdout));
-        tracing::info!(service, sc_state = ?sc_state, "start reported already running — checked state");
-        sc_state == Some(SC_STATE_RUNNING)
-    } else {
-        start_code == Some(0)
-    };
-    tracing::info!(service, ok, elapsed = ?started.elapsed(), "cloudflared restart attempt finished");
-    ok
+    tracing::warn!(
+        service,
+        "tunnel watchdog: a restart is due, but this server has no right to restart the service: skipped"
+    );
+    false
 }
 
 /// Spawn the watchdog loop (started from `start_server`).

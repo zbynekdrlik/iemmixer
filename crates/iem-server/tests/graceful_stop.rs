@@ -1,12 +1,6 @@
 //! The server stops gracefully (S6 design note §5.5): SIGTERM or SIGINT
 //! closes the HTTP and the HTTPS listener at once, open requests get up to
 //! 5 s, the process exits 0 and the ports are free.
-//!
-//! Unix only. The Windows variant (the server started detached with its own
-//! console, the PC's exact shape, and stopped with a Ctrl-Break to that
-//! console through `iem_win::console::ctrl_break`) is still pending: it needs
-//! `iem-win` (S6 plan Task 2) and joins the `windows` CI job in Task 12.
-#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

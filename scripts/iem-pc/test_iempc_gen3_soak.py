@@ -325,7 +325,6 @@ class SoakTests(SoakBase):
         self.assertEqual([p["kind"] for p in polls], ["status", "status", "health", "status", "health"])
         self.assertNotIn(MEMBER, (records / "polls.jsonl").read_text(encoding="utf-8"))
         self.assert_private(err + json.dumps(docs))
-        self.assertEqual(self.pc.calls, [])   # no PC call
 
     def test_each_length_has_its_own_fixed_start_and_other_lengths_are_refused_before_any_call(self) -> None:
         for minutes in (10, 30, 60, 120):
@@ -486,7 +485,6 @@ class FlagTests(SoakBase):
         self.assertEqual(calls[calls.index(client(7200)) + 1:], [gt.CTL, UNIT_SHOW, STOP_UNIT, RM_ENV, RM_SUMMARY])
         self.assertEqual((self.soak_state()["unit"], self.env_file_there()), (None, False))
         self.assertEqual(self.posts(), [])
-        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
         self.assert_private(err + json.dumps(docs))
 
     def test_a_flag_before_the_start_changes_nothing_on_the_box(self) -> None:

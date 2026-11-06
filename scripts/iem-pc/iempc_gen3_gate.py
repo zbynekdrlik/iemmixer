@@ -144,9 +144,9 @@ FLAG_WORDS = ("--test-signal", "--fault-injection")
 AS_SERVICE = g3.AS_SERVICE
 SUDO = ("sudo", "-n")
 SUPERVISE = (*AS_SERVICE, ENGINE_BIN, "supervise")
-# The gate's one burst, HIL v1's (hil-v1.ps1): fixed, as the sudo rule names it.
+# The gate's one burst: fixed, as the sudo rule names it.
 BURST_INPUT, BURST_DBFS, BURST_SECONDS = "mic1", -30, 10
-LEVEL_DB = 0.5   # HIL v1's tolerance for the spare outputs' level
+LEVEL_DB = 0.5   # the tolerance for the spare outputs' level
 CALL_S = 30   # one ssh call: the connect, then the box's own bounded command
 RESTART_S = 60   # `systemctl restart`: the engine's bounded stop (10 s), then its start
 HEALTH_WAIT_S = 90.0   # healthy after a restart: the clock's 30 s grace and more
@@ -418,7 +418,7 @@ class Burst:
 
 
 def signal_judged(outputs: list[int], b: Burst) -> dict:
-    """The spare outputs' level and silence (pure; HIL v1's Test-IemHilSignal):
+    """The spare outputs' level and silence (pure):
     each one's loudest peak over the statuses that carried the burst, the
     last status silent."""
     loudest = {tx: max((p.get(tx, 0.0) for p in b.during), default=0.0) for tx in outputs}

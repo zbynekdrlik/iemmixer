@@ -22,7 +22,7 @@ use std::time::SystemTime;
 
 use iem_soakclient::mint;
 use iem_soakclient::net::{Limits, run};
-use iem_soakclient::{PIN_ENV, Reason, Summary, USAGE, credential, parse_args, write_summary};
+use iem_soakclient::{PIN_ENV, Summary, USAGE, credential, parse_args, write_summary};
 
 fn main() -> ExitCode {
     let argv: Option<Vec<String>> = std::env::args_os()
@@ -59,17 +59,7 @@ fn main() -> ExitCode {
         }
         written.set(ok);
     };
-    let summary = match place(&args.cpu_sets) {
-        Ok(()) => run(&args, &credential, &Limits::default(), &mut save),
-        Err(reason) => {
-            let summary = Summary {
-                error: Some(reason),
-                ..Summary::default()
-            };
-            save(&summary);
-            summary
-        }
-    };
+    let summary = run(&args, &credential, &Limits::default(), &mut save);
     if let Some(reason) = summary.error {
         eprintln!("iem-soakclient: {}", reason.code());
     }
@@ -106,20 +96,4 @@ fn token(argv: &[String]) -> ExitCode {
 fn usage(error: &str) -> ExitCode {
     eprintln!("iem-soakclient: {error}\n\n{USAGE}");
     ExitCode::from(2)
-}
-
-/// Confines this process to the housekeeping CPU Sets (S1c profile, P10),
-/// as the engine places itself on its own.
-#[cfg(windows)]
-fn place(ids: &[u32]) -> Result<(), Reason> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    iem_win::power::set_cpu_sets(ids).map_err(|_| Reason::CpuSets)
-}
-
-/// `parse_args` refuses `--cpu-sets` off Windows.
-#[cfg(not(windows))]
-fn place(_ids: &[u32]) -> Result<(), Reason> {
-    Ok(())
 }

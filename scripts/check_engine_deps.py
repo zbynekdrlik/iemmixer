@@ -2,7 +2,7 @@
 """Engine dependency allowlist (program spec §5.2, S3 design note §2).
 
 Every crate the `iem-engine` binary is built from — its normal and build
-dependencies, transitively, on the Windows and Linux targets — must be named in
+dependencies, transitively, on the Linux target — must be named in
 `scripts/engine-deps-allow.txt`. A new crate in the engine needs a reviewed
 line there; a crate that left the closure must be removed. Reads the lockfile
 through `cargo metadata --locked` (no compilation).
@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ALLOW = ROOT / "scripts" / "engine-deps-allow.txt"
-TARGETS = ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu")
+TARGETS = ("x86_64-unknown-linux-gnu",)
 ROOT_CRATE = "iem-engine"
 
 

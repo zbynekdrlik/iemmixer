@@ -184,7 +184,6 @@ class DeployTests(DeployBase):
         self.assertNotIn("gen3_deploy", json.dumps(docs))
         self.assertEqual(len(self.deploys()), 1)
         self.assertEqual(self.leftovers(), [])
-        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
 
     def test_a_box_without_its_interface_refuses_before_the_deploy(self) -> None:
         cases = (((1, b"", b"cat: /etc/iemmixer/iem-dante.env: No such file or directory"),
@@ -288,7 +287,7 @@ class RefusalTests(DeployBase):
 
     def test_the_command_is_dev_time_locked_a_box_command(self) -> None:
         spec = ip.COMMANDS["gen3-deploy"]
-        self.assertEqual((spec.pc, spec.dev_time, spec.locked), (False, True, True))
+        self.assertEqual((spec.dev_time, spec.locked), (True, True))
 
     def test_deploy_is_this_checkouts_script(self) -> None:
         self.assertEqual(REAL_DEPLOY, ("bash", str(HERE.parent / "gen3" / "deploy.sh")))

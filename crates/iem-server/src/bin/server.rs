@@ -13,16 +13,15 @@
 //!                                   (removes: the ids it takes out of the roster
 //!                                   applied last, null before one), exit 0 when
 //!                                   it can be installed, 1 when not
-//!   iem-server cloudflare set-token read a Cloudflare API token from stdin and
-//!                                   store it sealed for this user (the ACME
-//!                                   keeper's DNS-01 records, #91; Windows only)
+//!   iem-server cloudflare set-token refuses and names the systemd credential
+//!                                   that holds the ACME keeper's token (#91)
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
 //! site's `engine_pipe`. `IEMMIXER_MODE`, the guard's mode (`dev` or `live`,
 //! set by the guard when it starts the server), is only logged as given: no
 //! server behaviour depends on it (#38).
-//! SIGTERM or SIGINT (Windows: Ctrl-Break or Ctrl-C) stop the server
+//! SIGTERM or SIGINT stop the server
 //! gracefully: open requests get up to 5 s, then it exits 0.
 
 use std::path::PathBuf;
@@ -107,26 +106,11 @@ fn pin_command(target: PinTarget) -> ExitCode {
     }
 }
 
-/// Stores the Cloudflare API token read from stdin, sealed for this user
-/// next to the site file: exit 0, 2 for a line that is no token, 1 on an
-/// error (no sealed store on this platform included). Never echoes it.
+/// Refuses: the box's token is a systemd credential, nothing is stored here
+/// ([`iem_server::cf_token::SET_TOKEN_REFUSED`]). Exit 1.
 fn set_token_command() -> ExitCode {
-    let stdin = std::io::stdin();
-    let config_dir = provision::config_dir_of(&config_path());
-    match iem_server::cf_token::run(&config_dir, stdin.lock()) {
-        Ok(()) => {
-            eprintln!("iem-server: stored the Cloudflare API token (sealed)");
-            ExitCode::SUCCESS
-        }
-        Err(e @ ProvisionError::Invalid(_)) => {
-            eprintln!("iem-server: {e}");
-            ExitCode::from(2)
-        }
-        Err(e) => {
-            eprintln!("iem-server: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    eprintln!("iem-server: {}", iem_server::cf_token::SET_TOKEN_REFUSED);
+    ExitCode::FAILURE
 }
 
 /// Exit 0 when a device took the notice, 3 when none did (no subscription,
@@ -227,7 +211,6 @@ fn run_server() -> anyhow::Result<()> {
 /// The graceful stop request (S6): SIGTERM or SIGINT. The handlers are
 /// installed at the call, so a stop that arrives before the server listens
 /// is not lost; the future resolves on the first one.
-#[cfg(unix)]
 fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
@@ -236,21 +219,6 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + 
         tokio::select! {
             _ = term.recv() => tracing::info!("SIGTERM: stopping"),
             _ = int.recv() => tracing::info!("SIGINT: stopping"),
-        }
-    })
-}
-
-/// The graceful stop request (S6): Ctrl-Break (the guard delivers it to the
-/// server's own console) or Ctrl-C, installed at the call.
-#[cfg(windows)]
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
-    use tokio::signal::windows::{ctrl_break, ctrl_c};
-    let mut brk = ctrl_break()?;
-    let mut c = ctrl_c()?;
-    Ok(async move {
-        tokio::select! {
-            _ = brk.recv() => tracing::info!("Ctrl-Break: stopping"),
-            _ = c.recv() => tracing::info!("Ctrl-C: stopping"),
         }
     })
 }

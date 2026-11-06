@@ -173,7 +173,7 @@ fn the_seed_fails_when_the_generations_cannot_be_listed() {
 #[test]
 fn only_a_read_error_that_may_pass_is_tried_again() {
     // #32 minor-5: a directory where current.json belongs (IsADirectory on
-    // Linux, access denied on Windows) does not turn readable by waiting:
+    // Linux) does not turn readable by waiting:
     // it is Unreadable at once, with no pause.
     let (_d, faulty, s) = faulty_store();
     s.save_baseline(&sample(4)).unwrap();

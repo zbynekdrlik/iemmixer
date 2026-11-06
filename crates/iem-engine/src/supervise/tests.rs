@@ -142,8 +142,8 @@ fn the_input_is_an_id() {
     );
 }
 
-/// `--listen` only as `test-signal`'s last word, as the guard's
-/// `iemmode test-signal` takes it; anywhere else it is a fourth value.
+/// `--listen` only as `test-signal`'s last word; anywhere else it is a
+/// fourth value.
 #[test]
 fn the_command_line_is_exact() {
     for (line, want) in [
@@ -241,19 +241,7 @@ fn the_default_pipe_is_the_box_units() {
 }
 
 #[test]
-fn a_failure_exits_1_and_off_unix_2() {
-    assert_eq!(Failure::NotHere.code(), 2);
-    for f in [
-        Failure::Connect("entity not found".into()),
-        Failure::Pipe("broken pipe".into()),
-        Failure::Closed,
-        Failure::Superseded,
-        Failure::NoStatus(Duration::from_secs(3)),
-        Failure::NoReply(Duration::from_secs(5)),
-        Failure::Refused("forbidden".into()),
-    ] {
-        assert_eq!(f.code(), 1, "{f}");
-    }
+fn a_failure_names_its_cause() {
     assert_eq!(
         Failure::Refused("forbidden".into()).to_string(),
         "the engine refused it: forbidden"
@@ -680,17 +668,4 @@ fn a_pipe_nobody_serves_cannot_be_connected() {
         ask: Ask::Status,
     });
     assert_eq!(got, Err(Failure::Connect("entity not found".into())));
-}
-
-/// Off Unix the guard is the engine's supervisor (the PC): refused as a
-/// usage error, nothing connected.
-#[cfg(not(unix))]
-#[test]
-fn off_unix_supervise_is_refused() {
-    let got = run(&Supervise {
-        pipe: "iem-test-none".into(),
-        ask: Ask::Status,
-    });
-    assert_eq!(got, Err(Failure::NotHere));
-    assert_eq!(Failure::NotHere.code(), 2);
 }

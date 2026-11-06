@@ -1,5 +1,5 @@
 //! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
-//! S6: the ASIO backend and the site check; Gen 3 phase C: the Dante backend
+//! S6: the site check; Gen 3 phase C: the Dante backend
 //! on Linux; phase H: `supervise`, the box's supervisor client). See
 //! `iem-engine --help`.
 
@@ -23,7 +23,7 @@ fn code(e: &EngineError) -> u8 {
     }
 }
 
-/// One JSON line on stdout (the guard and `iemmode` read it).
+/// One JSON line on stdout.
 fn print_json(value: &impl serde::Serialize) -> Result<(), EngineError> {
     let line = serde_json::to_string(value).map_err(std::io::Error::other)?;
     println!("{line}");
@@ -67,7 +67,7 @@ fn main() -> ExitCode {
                 }
                 Err(failure) => {
                     eprintln!("iem-engine supervise: {failure}");
-                    ExitCode::from(failure.code())
+                    ExitCode::FAILURE
                 }
             };
         }

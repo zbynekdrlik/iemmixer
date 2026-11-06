@@ -1,6 +1,5 @@
 /target/
 /crates/iem-ui/dist/
-/crates/iem-tray/gen/
 node_modules/
 /e2e/test-results/
 /e2e/playwright-report/

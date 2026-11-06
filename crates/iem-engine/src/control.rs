@@ -54,8 +54,7 @@ pub trait Driver: Send {
     /// it stayed held (a callback stuck in the stream, or the parked-engine
     /// test's hold; #35). A backend without a card releases.
     fn stop(self: Box<Self>) -> StopOutcome;
-    /// Every control tick (never the RT thread): the backend's timed work,
-    /// e.g. the ASIO backend locks its memory after 5 s of streaming.
+    /// Every control tick (never the RT thread): the backend's timed work.
     fn tick(&mut self, _now: Instant) {}
     /// The backend's own reason to end the run, if any.
     fn ending(&self) -> Option<Ending> {
@@ -66,7 +65,7 @@ pub trait Driver: Send {
         false
     }
     /// HIL's forced reopen (`Cmd::ForceReopen`): whether the backend took it
-    /// (the ASIO card reopens through its reset budget; NullRt has no card).
+    /// (no backend reopens today).
     fn force_reopen(&self) -> bool {
         false
     }
@@ -80,10 +79,9 @@ pub trait Driver: Send {
 /// Why a backend ends the run (S6 design note §3, §4; Gen 3 phase C).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
-    /// The Windows session ends: save, fade out, release (the shutdown path).
+    /// The session ends: save, fade out, release (the shutdown path).
     Session,
-    /// The card must be refused (exit 3), e.g. a release could not write
-    /// REAPER's preferred buffer back.
+    /// The card must be refused (exit 3).
     Card(String),
     /// A stop was asked (SIGTERM or SIGINT; the Dante backend reports them,
     /// the unit's stop): the shutdown path, as the session's end.
@@ -245,7 +243,7 @@ impl Control {
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
             // The last `Status` first (S7 HIL v2): it carries the faulting
-            // callback's time, which the guard keeps across the respawn.
+            // callback's time.
             let last = self.next_status(&stats);
             self.broadcast(&EngineMsg::Status(last));
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
@@ -254,7 +252,7 @@ impl Control {
             Some(Ending::Card(why)) => return Some(self.card(why)),
             Some(Ending::Backend(why)) => return Some(self.backend_ended(why)),
             Some(Ending::Session) => {
-                info!("the Windows session ends");
+                info!("the session ends");
                 self.shutdown = true;
             }
             Some(Ending::Stop) => {

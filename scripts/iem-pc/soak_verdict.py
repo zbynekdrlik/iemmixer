@@ -3,7 +3,7 @@
 
 `report` is the ops soak.yml report job's step: it reads the PC job's record
 directory (result.json, polls.jsonl: one `{"t", "exit", "status"}` per
-`iemmode status` poll, soakclient.json: the iem-soakclient summary) and
+status poll, soakclient.json: the iem-soakclient summary) and
 prints one JSON object, `{"conclusion", "summary", "first_failure",
 "numbers"}`, whose summary is posted as `soak/iem-pc`. A cancelled PC job, a
 failed one that left no record, or the reason `left-dev` is `cancelled`: "ide
@@ -60,7 +60,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 PC_REASONS = frozenset({"finished", "left-dev", "not-finished", "bundle-not-active", "no-client",
                         "harness-did-not-end"})
 HARNESS_REASONS = frozenset({"site-unreadable", "not-http", "wrong-server", "login-refused", "not-engineer",
-                             "server-gone", "connection-lost", "cpu-sets", "secret-unreadable"})
+                             "server-gone", "connection-lost", "secret-unreadable"})
 # The summary's whole-number fields the verdict reads (besides `complete` and `seconds`).
 HARNESS_COUNTS = ("frames", "expected_frames", "gaps", "reconnects", "decode_errors", "meter_frames")
 UNREADABLE = object()  # a harness file that holds no JSON (no summary shape: check 9 names it)
@@ -412,7 +412,7 @@ def read_json(path: Path) -> object:
 
 def read_polls(path: Path) -> list | None:
     """polls.jsonl, one poll per line (a BOM tolerated); a line that is no
-    JSON (a status iemmode could not answer, a line cut short) is None, which
+    JSON (a status that could not be read, a line cut short) is None, which
     check 1 names. None when the file is absent."""
     try:
         data = path.read_bytes()

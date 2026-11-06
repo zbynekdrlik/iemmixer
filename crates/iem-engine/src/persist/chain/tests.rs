@@ -793,12 +793,6 @@ fn a_read_is_tried_again_only_for_an_error_that_may_pass() {
     for kind in [IsADirectory, NotADirectory, PermissionDenied, Other] {
         assert!(!transient(&io::Error::from(kind)), "{kind:?}");
     }
-    // Windows' sharing and lock violations; elsewhere these codes are
-    // other errors (EPIPE, EDOM on Linux).
-    for code in [SHARING_VIOLATION, LOCK_VIOLATION] {
-        let e = io::Error::from_raw_os_error(code);
-        assert_eq!(transient(&e), cfg!(windows), "{code}: {e}");
-    }
 }
 
 #[test]

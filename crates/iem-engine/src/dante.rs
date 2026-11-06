@@ -2,14 +2,13 @@
 //! `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`
 //! Task 3; design §5.1, §5.2): `run --backend dante` hosts our own Dante
 //! device (`iem_dante::host`) in the engine's process and drives the
-//! processor on its media clock (`iem_dante::stream`'s pump), as the ASIO
-//! backend (`asio.rs`, Windows) drives it on the card's callback.
+//! processor on its media clock (`iem_dante::stream`'s pump).
 //!
 //! - [`check`] (pure): the device must run at the engine's 96 kHz, and the
 //!   site's channel numbers are the device's own (site RX n = our RX
 //!   channel n, site TX n = our TX channel n; HIL's spare outputs after the
 //!   topology's TX and, under `--test-signal`, their loopback returns after
-//!   its RX, through the portable [`ChannelMap`] the ASIO path uses): a
+//!   its RX, through [`ChannelMap`]): a
 //!   channel the device lacks refuses the start (exit 3, as a card that
 //!   lacks one).
 //! - [`start`] (glue): the device set up with an engine ring on each mapped

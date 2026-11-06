@@ -77,7 +77,6 @@ fn the_arguments_and_their_defaults() {
             out: PathBuf::from("s.json"),
             expect_build: COMMIT.to_owned(),
             jwt_secret_file: None,
-            cpu_sets: Vec::new(),
         }
     );
     // Every flag, in any order; the base is kept as its origin.
@@ -128,8 +127,6 @@ fn every_bad_argument_is_a_usage_error() {
     // The base is plain HTTP with a host.
     assert!(with(&["--base", "https://mixer.example.org"]).is_err());
     assert!(with(&["--base", "http://"]).is_err());
-    assert!(with(&["--cpu-sets", "256,x"]).is_err());
-    assert!(with(&["--cpu-sets", ""]).is_err());
     assert!(with(&["--expect-build", COMMIT]).is_err(), "given twice");
     // The secret file: a path, once, never echoed.
     let file = "secrets/jwt_secret";
@@ -366,28 +363,6 @@ fn the_pin_never_comes_from_argv() {
 }
 
 #[test]
-fn cpu_set_lists_are_comma_separated_ids() {
-    assert_eq!(parse_cpu_sets("256,257"), Some(vec![256, 257]));
-    assert_eq!(parse_cpu_sets("256"), Some(vec![256]));
-    for bad in ["", "256,", ",256", "256,x", "256 257", "-1", "4294967296"] {
-        assert_eq!(parse_cpu_sets(bad), None, "{bad:?}");
-    }
-}
-
-#[test]
-fn cpu_sets_are_windows_only() {
-    let parsed = with(&["--cpu-sets", "256,257"]);
-    if cfg!(windows) {
-        assert_eq!(parsed.unwrap().cpu_sets, vec![256, 257]);
-    } else {
-        assert!(parsed.unwrap_err().contains("Windows only"));
-    }
-    // A bad list is refused on every OS.
-    let bad = with(&["--cpu-sets", "256,x"]).unwrap_err();
-    assert!(bad.contains("CPU Set ids"), "{bad}");
-}
-
-#[test]
 fn the_pin_comes_from_the_environment_as_4_to_12_digits() {
     for good in ["1234", "123456789012"] {
         assert_eq!(pin_from(Some(good.to_owned())), Ok(good.to_owned()));
@@ -561,7 +536,6 @@ fn the_summary_names_its_error_by_the_reason_code() {
         NotEngineer,
         ServerGone,
         ConnectionLost,
-        CpuSets,
         SecretUnreadable,
     ] {
         let summary = Summary {
@@ -634,14 +608,13 @@ fn reasons_are_fixed_codes() {
         NotEngineer,
         ServerGone,
         ConnectionLost,
-        CpuSets,
         SecretUnreadable,
     ];
     let codes = codes.map(Reason::code).join(" ");
     assert_eq!(
         codes,
         "site-unreadable not-http wrong-server login-refused not-engineer server-gone \
-         connection-lost cpu-sets secret-unreadable"
+         connection-lost secret-unreadable"
     );
 }
 

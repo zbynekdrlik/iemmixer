@@ -493,8 +493,7 @@ fn engine_messages_round_trip() {
     assert_eq!(band.gain_db, 0.0);
 }
 
-/// The guard reads the stream's end by these names, field by field
-/// (`iem_guard::effects::engine::parse`; #35).
+/// The stream's end goes out by these names, field by field (#35).
 #[test]
 fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
     let released = EngineMsg::DriverReleased {

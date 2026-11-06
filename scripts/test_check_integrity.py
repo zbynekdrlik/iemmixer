@@ -6,7 +6,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_integrity as ci  # noqa: E402
@@ -55,15 +54,6 @@ class IntegrityTests(unittest.TestCase):
         self.put("scripts/stop.ps1", "taskkill /F /IM engine.exe\n")
         self.assertEqual(len(ci.violations(self.root)), 1)
 
-    def test_a_local_that_is_a_parameter_in_another_case_is_refused(self) -> None:
-        # #11 lane 6: `$startupDir = ''` overwrote the parameter $StartupDir.
-        self.put("scripts/iem-pc/M.psm1",
-                 "function Enable-X {\n    param([string]$StartupDir = '')\n    $linkDir = ''\n"
-                 "    if ($true) { $startupDir = '' }\n    return $StartupDir\n}\n"
-                 "function Ok-X {\n    param([string]$Name)\n    $Name = $Name.Trim()\n    $other = 1\n}\n")
-        self.assertEqual(ci.violations(self.root),
-                         ["scripts/iem-pc/M.psm1:4: $startupDir in Enable-X is its parameter $StartupDir (PowerShell names ignore case)"])
-
     def test_force_kill_in_a_powershell_module_is_found(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -74,8 +64,8 @@ class IntegrityTests(unittest.TestCase):
     def test_force_kill_words_in_comments_are_refused(self) -> None:
         # The S6 crates, the PC scripts and the workflows: prose included.
         cases = {
-            "crates/iem-guard/src/win/app.rs": "/// never TerminateProcess the app\nfn f() {}\n",
-            "crates/iem-win/src/process.rs": "// no taskkill here\nfn f() {}\n",
+            "crates/iem-server/src/x.rs": "/// never TerminateProcess the app\nfn f() {}\n",
+            "crates/iem-engine/src/y.rs": "// no taskkill here\nfn f() {}\n",
             "scripts/iem-pc/IemPc.psm1": "# Stop-Process is never used\nfunction X { }\n",
             "scripts/iem-pc/hil-v1.ps1": "<# the job is never ended with TerminateJobObject #>\n",
             ".github/workflows/ci.yml": "jobs:\n  a:\n    steps:\n" + PINNED + "      # taskkill\n",
@@ -234,19 +224,6 @@ class IntegrityTests(unittest.TestCase):
             self.put("crates/a/src/lib.rs", f"fn f() {{ {body}; }}\n")
             self.assertEqual(ci.violations(self.root), [], body)
 
-    def test_job_breakaway_only_in_iem_win(self) -> None:
-        self.put("crates/iem-win/src/spawn.rs", "pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;\n")
-        self.put("crates/iem-win/tests/ctrl_break.rs", "let f = flags & !CREATE_BREAKAWAY_FROM_JOB;\n")
-        self.assertEqual(ci.violations(self.root), [])
-        self.put("crates/iem-guard/src/win/procs.rs", "let f = CREATE_BREAKAWAY_FROM_JOB;\n")
-        self.put("scripts/iem-pc/x.ps1", "$CREATE_BREAKAWAY_FROM_JOB = 0x01000000\n")
-        self.put("crates/iem-winx/src/lib.rs", "// CREATE_BREAKAWAY_FROM_JOB\n")
-        self.assertEqual(ci.violations(self.root), [
-            "crates/iem-guard/src/win/procs.rs:1: job breakaway outside iem-win (S6 design note §5.1)",
-            "crates/iem-winx/src/lib.rs:1: job breakaway outside iem-win (S6 design note §5.1)",
-            "scripts/iem-pc/x.ps1:1: job breakaway outside iem-win (S6 design note §5.1)",
-        ])
-
     def test_a_pin_needs_its_version_comment(self) -> None:
         sha = "3d3c42e5aac5ba805825da76410c181273ba90b1"
         for line, ok in ((f"      - uses: actions/checkout@{sha} # v7.0.1\n", True),
@@ -259,11 +236,11 @@ class IntegrityTests(unittest.TestCase):
             want = [] if ok else [f".github/workflows/ci.yml:4: pinned action without its version comment (# vX.Y.Z): actions/checkout@{sha}"]
             self.assertEqual(ci.violations(self.root), want, line)
 
-    def test_the_s6_crates_and_scripts_are_scanned(self) -> None:
-        self.put("crates/iem-guard/src/daemon.rs", "#[test]\n#" + "[ignore]\nfn skipped() {}\n")
+    def test_the_crates_and_scripts_are_scanned(self) -> None:
+        self.put("crates/iem-engine/src/daemon.rs", "#[test]\n#" + "[ignore]\nfn skipped() {}\n")
         self.put("scripts/iem-pc/stop.cmd", "taskkill /im iem-engine.exe\n")
         self.assertEqual(ci.violations(self.root), [
-            "crates/iem-guard/src/daemon.rs:2: #" + "[ignore] test",
+            "crates/iem-engine/src/daemon.rs:2: #" + "[ignore] test",
             "scripts/iem-pc/stop.cmd:1: force-kill command (program spec I8)",
         ])
 
@@ -273,71 +250,6 @@ class IntegrityTests(unittest.TestCase):
             (root / "goldens" / "s1b").mkdir(parents=True)
             (root / "goldens" / "s1b" / "x.f64").write_bytes(b"\0" * (20 * 1024 * 1024 + 1))
             self.assertIn("goldens/: 20971521 bytes, over the 20 MB budget (spec §3.5)", ci.violations(root))
-
-    def test_asio_setting_calls_are_refused(self) -> None:
-        for call in ("driver.set_sample_rate(48000.0)", "d.set_clock_source(1)", "self.driver.open_control_panel()",
-                     "Driver::set_sample_rate(&d, 48000.0)", "azo::Driver::set_clock_source(&d, 1)",
-                     "d.as_raw().control_panel()", "d.as_raw().set_sample_rate(48000.0)",
-                     "d.future::<SetIoFormat>(&mut p)", "d.as_raw().future(sel, opt)"):
-            self.put("crates/a/src/lib.rs", f"fn f() {{ {call}; }}\n")
-            self.assertEqual(len(ci.violations(self.root)), 1, call)
-        self.put("crates/a/src/lib.rs", "// the host never calls set_sample_rate\nfn f() {}\n")
-        self.assertEqual(ci.violations(self.root), [])
-        self.put("crates/a/src/lib.rs", "fn f() { let futures = 1; let _ = futures; driver.sample_position(); }\n")
-        self.assertEqual(ci.violations(self.root), [])
-
-class BundleSyncTests(unittest.TestCase):
-    """spike_window.BUNDLE_FILES equals the asio-spike Bundle step's Copy-Item
-    list (#32 E5): a drift makes fetch-bundle reject every artifact on the dev
-    box while CI stays green."""
-
-    def setUp(self) -> None:
-        self.root = Path(tempfile.mkdtemp())
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.root)
-
-    def put(self, rel: str, text: str) -> None:
-        path = self.root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-
-    def bundle(self, files: str, copy: str) -> None:
-        self.put("scripts/asio-spike/spike_window.py", f"import os\nBUNDLE_FILES = ({files})\n")
-        self.put(".github/workflows/ci.yml",
-                 "jobs:\n  asio-spike:\n    steps:\n" + PINNED
-                 + "      - name: Bundle (spike, PC scripts, SHA256SUMS)\n        run: |\n"
-                 + f"          Copy-Item -LiteralPath {copy} -Destination $b\n"
-                 + "  bundle:\n    steps:\n      - name: Bundle\n        run: Copy-Item -LiteralPath other.exe -Destination $b\n")
-
-    def test_a_matching_bundle_passes(self) -> None:
-        self.bundle('"A.psm1", "b.exe"', "target/release/examples/b.exe, scripts/x/A.psm1")
-        self.assertEqual(ci.violations(self.root), [])
-
-    def test_a_drift_either_way_is_refused(self) -> None:
-        for files, missing in (('"A.psm1", "b.exe", "C.psm1"', "C.psm1"), ('"A.psm1"', "b.exe")):
-            self.bundle(files, "target/release/examples/b.exe, scripts/x/A.psm1")
-            found = ci.violations(self.root)
-            self.assertEqual(len(found), 1, files)
-            self.assertTrue(found[0].startswith(".github/workflows/ci.yml:7: "), found[0])   # the Copy-Item line
-            self.assertIn("BUNDLE_FILES", found[0])
-            self.assertIn(missing, found[0])
-
-    def test_a_missing_bundle_step_is_refused(self) -> None:
-        self.put("scripts/asio-spike/spike_window.py", 'BUNDLE_FILES = ("A.psm1",)\n')
-        self.put(".github/workflows/ci.yml", "jobs:\n  a:\n    steps:\n" + PINNED)
-        self.assertEqual(len(ci.violations(self.root)), 1)
-
-    def test_the_repository_is_in_sync(self) -> None:
-        self.assertEqual(ci.bundle_violations(ci.ROOT), [])
-
-    def test_the_real_repository_needs_its_spike_window(self) -> None:
-        # Review m8: a missing spike_window.py must not silence the check on the real tree.
-        self.assertEqual(ci.bundle_violations(self.root), [])            # a fixture tree without it
-        self.assertEqual(len(ci.bundle_violations(self.root, required=True)), 1)
-        with mock.patch.object(ci, "ROOT", self.root):                  # main() scans the real root: required
-            self.assertEqual(ci.main(), 1)
-
 
 if __name__ == "__main__":
     unittest.main()

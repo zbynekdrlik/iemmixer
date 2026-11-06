@@ -33,7 +33,7 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const DECIMAL = /^-?[0-9]+(?:\.[0-9]+)?$/;
-/** The HIL ceiling (`iem-guard` daemon): a burst is never louder. */
+/** The HIL ceiling (`iem-engine supervise`): a burst is never louder. */
 export const BURST_CEILING_DBFS = -20;
 
 /** The failing hop when /api/version does not name the run's build. */
@@ -143,8 +143,7 @@ export function live(): Live {
 
 /**
  * Whether `/api/version`'s `git_hash` names `sha`: at least 7 lowercase hex
- * digits and a prefix of it (the rule of `Test-IemHilVersion`, the guard's
- * `version_matches` and the soak client's `names_build`).
+ * digits and a prefix of it (the rule of the soak client's `names_build`).
  */
 export function namesBuild(gitHash: unknown, sha: string): boolean {
   return typeof gitHash === "string" && /^[0-9a-f]{7,}$/.test(gitHash) && sha.startsWith(gitHash);

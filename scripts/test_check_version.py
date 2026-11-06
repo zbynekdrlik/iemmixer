@@ -1,7 +1,6 @@
 """Tests for scripts/check_version.py."""
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import sys
@@ -17,16 +16,12 @@ CRATE = '[package]\nname = "{name}"\nversion.workspace = true\n'
 FUZZ_CRATES = ["iem-engine", "iem-engine-proto", "iem-dsp", "iem-fuzz"]
 
 
-def write_tree(root: Path, version: str, lock_versions: dict[str, str] | None = None, tauri_version: bool = False,
+def write_tree(root: Path, version: str, lock_versions: dict[str, str] | None = None,
                fuzz_lock_versions: dict[str, str] | None = None) -> None:
     (root / "Cargo.toml").write_text(f'[workspace]\nmembers = []\n\n[workspace.package]\nversion = "{version}"\n', encoding="utf-8")
     for name in cv.CRATES:
         (root / "crates" / name).mkdir(parents=True, exist_ok=True)
         (root / "crates" / name / "Cargo.toml").write_text(CRATE.format(name=name), encoding="utf-8")
-    tauri = {"productName": "iemmixer"}
-    if tauri_version:
-        tauri["version"] = version
-    (root / "crates" / "iem-tray" / "tauri.conf.json").write_text(json.dumps(tauri), encoding="utf-8")
     locks = lock_versions or {name: version for name in cv.CRATES}
     lock = "version = 4\n" + "".join(f'\n[[package]]\nname = "{n}"\nversion = "{v}"\n' for n, v in locks.items())
     (root / "Cargo.lock").write_text(lock, encoding="utf-8")
@@ -67,10 +62,6 @@ class ConsistencyTests(unittest.TestCase):
         write_tree(self.root, "2.0.0-dev.1")
         (self.root / "crates" / "iem-ui" / "Cargo.toml").write_text('[package]\nname = "iem-ui"\nversion = "1.0.0"\n', encoding="utf-8")
         self.assertTrue(any("iem-ui" in e for e in cv.consistency_errors(self.root)))
-
-    def test_tauri_version_fails(self) -> None:
-        write_tree(self.root, "2.0.0-dev.1", tauri_version=True)
-        self.assertTrue(any("tauri.conf.json" in e for e in cv.consistency_errors(self.root)))
 
     def test_stale_lockfile_fails(self) -> None:
         write_tree(self.root, "2.0.0-dev.2", lock_versions={n: "2.0.0-dev.1" for n in cv.CRATES})

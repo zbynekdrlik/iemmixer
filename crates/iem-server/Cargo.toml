@@ -82,9 +82,6 @@ url = "2"
 # PIN hashing (argon2id, keyed with the pepper)
 argon2 = "0.5"
 
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
-
 [[bin]]
 name = "iem-server"
 path = "src/bin/server.rs"

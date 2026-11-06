@@ -12,8 +12,7 @@
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
 //!   start-up, the crash model without the driver and the offline renderer;
-//!   on Windows the private `asio` module starts the ASIO backend (S6); on
-//!   Linux `dante` hosts our own Dante device and drives the processor on
+//!   `dante` hosts our own Dante device and drives the processor on
 //!   its media clock (Gen 3 phase C, #72). Nothing in the engine measures
 //!   the stage to gate a switch (#38: only the owner's signal decides);
 //! - [`supervise`]: `iem-engine supervise`, a supervisor client of the
@@ -37,8 +36,6 @@
     )
 )]
 
-#[cfg(windows)]
-mod asio;
 pub mod cmd;
 pub mod control;
 pub mod core;

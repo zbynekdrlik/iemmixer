@@ -104,7 +104,6 @@ pub fn atomic_write_bytes(path: &std::path::Path, data: &[u8]) -> std::io::Resul
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp_path, path)?;
-    // Windows cannot open a directory; only the Linux box needs this sync.
     #[cfg(unix)]
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::File::open(dir)?.sync_all()?;
@@ -704,7 +703,7 @@ pub struct ServerConfig {
 pub struct Assets;
 
 /// The HTTP application: API and static routes behind the security headers.
-/// No CORS layer: the UI (browser, the tray's window, the E2E suite) is always
+/// No CORS layer: the UI (browser, the E2E suite) is always
 /// loaded from this server, so its requests are same-origin; a foreign page
 /// gets no `Access-Control-Allow-Origin` and cannot read API responses.
 fn app_router(state: AppState) -> Router {
@@ -1068,7 +1067,7 @@ fn spawn_keeper(
 }
 
 /// Redirect HTTP requests to HTTPS when the Host header matches the configured domain.
-/// Requests via IP address (e.g., from Tauri desktop app) pass through unchanged.
+/// Requests via IP address pass through unchanged.
 /// Requests proxied through Cloudflare Tunnel (X-Forwarded-Proto: https) pass through unchanged.
 #[cfg(feature = "tls")]
 async fn https_redirect(

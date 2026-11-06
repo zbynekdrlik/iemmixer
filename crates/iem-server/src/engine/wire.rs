@@ -33,22 +33,11 @@ pub fn media_pipe(pipe: &str) -> String {
     format!("{pipe}.media")
 }
 
-/// Connects to the engine's pipe `pipe`: a Unix socket path, or on Windows the
-/// name of a named pipe (`\\.\pipe\<pipe>`, the engine's namespaced name).
+/// Connects to the engine's pipe `pipe`: a Unix socket path.
 pub async fn connect(pipe: &str) -> io::Result<(Reader, Writer)> {
-    #[cfg(unix)]
-    {
-        let s = tokio::net::UnixStream::connect(pipe).await?;
-        let (r, w) = s.into_split();
-        Ok((Box::new(r), Box::new(w)))
-    }
-    #[cfg(windows)]
-    {
-        let path = format!(r"\\.\pipe\{pipe}");
-        let c = tokio::net::windows::named_pipe::ClientOptions::new().open(&path)?;
-        let (r, w) = tokio::io::split(c);
-        Ok((Box::new(r), Box::new(w)))
-    }
+    let s = tokio::net::UnixStream::connect(pipe).await?;
+    let (r, w) = s.into_split();
+    Ok((Box::new(r), Box::new(w)))
 }
 
 /// Fills `buf`; a clean end before the first byte is `Closed`.

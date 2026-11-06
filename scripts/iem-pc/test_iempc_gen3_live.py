@@ -230,7 +230,6 @@ class LiveTests(LiveBase):
         self.assertEqual((self.state()["hil"], self.state()["starts"], self.ledger()), (False, 2, [gt.NOW] * 2))
         self.assert_no_token_left()
         self.assert_private(err + json.dumps(docs))
-        self.assertEqual(self.pc.calls, [])   # no PC call
 
     def test_a_burst_goes_out_every_period_while_the_browser_runs(self) -> None:
         with mock.patch.dict(os.environ, {"FAKE_SPEC_BURSTS": "3"}):
@@ -329,7 +328,6 @@ class FlagTests(LiveBase):
         self.assertFalse(self.state()["hil"])
         self.assertEqual(self.posts(), [])   # never a status for a cancelled run
         self.assertEqual(self.record("pc.json"), {"reason": "left-dev"})
-        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
         self.assert_no_token_left()
         self.assert_private(err + json.dumps(docs))
 

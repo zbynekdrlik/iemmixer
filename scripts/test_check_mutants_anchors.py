@@ -19,7 +19,7 @@ FILES = {RT: RT_SRC, READ: READ_SRC, "crates/iem-engine/src/engine.rs": "fn run(
 
 def config(*entries: str) -> str:
     body = "\n".join(entries)
-    return f'profile = "mutants"\n\nexclude_globs = [\n  "crates/iem-tray/**",\n]\n\nexclude_re = [\n{body}\n]\n'
+    return f'profile = "mutants"\n\nexclude_globs = [\n  "crates/iem-dante-dev/src/main.rs",\n]\n\nexclude_re = [\n{body}\n]\n'
 
 
 def run(text: str, files: dict[str, str] | None = None) -> tuple[list[str], int]:

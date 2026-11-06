@@ -514,9 +514,8 @@ fn a_save_that_moves_a_save_tmp_aside_raises_an_alarm_naming_it() {
     assert_eq!(r.c.alarms.len(), 1, "{:?}", r.c.alarms);
 }
 
-/// Connections need a socket pair. Unix only: the harness's client
-/// reads with a socket receive timeout, which Windows pipes do not have;
-/// `tests/pipes.rs` runs the engine's pipes on Windows.
+/// Connections need a socket pair: the harness's client reads with a socket
+/// receive timeout.
 #[cfg(unix)]
 mod peers;
 

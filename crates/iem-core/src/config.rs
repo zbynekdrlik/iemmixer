@@ -153,8 +153,7 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    /// The engine's control pipe: a socket path on Unix, a pipe name on
-    /// Windows; the media pipe is `<engine_pipe>.media`.
+    /// The engine's control pipe: a socket path; the media pipe is `<engine_pipe>.media`.
     /// `IEMMIXER_ENGINE_PIPE` overrides it.
     #[serde(default = "default_engine_pipe")]
     pub engine_pipe: String,
@@ -261,12 +260,12 @@ pub struct Config {
     #[serde(default, skip_serializing)]
     pub engine: Option<toml::Table>,
 
-    /// The engine's ASIO card (`[card]`, S6): read by `iem-engine` and the
-    /// guard only.
+    /// The old `[card]` table: read by nothing, accepted while the ops site
+    /// has it (#86 step C drops it).
     #[serde(default, skip_serializing)]
     pub card: Option<serde::de::IgnoredAny>,
 
-    /// The guard's own table (`[guard]`, S6): read by `iemmixer-guard` only.
+    /// The `[guard]` table: `iem-engine` reads its `hil_tx`.
     #[serde(default, skip_serializing)]
     pub guard: Option<serde::de::IgnoredAny>,
 }

@@ -1,7 +1,6 @@
 //! The `iem-engine` binary through its command line (split from
-//! `pipes.rs`, #32): run and shut down, the SEH and parked-engine tests'
-//! abort off Windows, the offline render, `check-site` and the card off
-//! Windows.
+//! `pipes.rs`, #32): run and shut down, the crash and parked-engine tests'
+//! abort, the offline render and `check-site`.
 
 use super::*;
 use iem_audio_io::{Planar, wav};
@@ -88,31 +87,26 @@ fn the_binary_refuses_a_dante_device_it_cannot_set_up_as_usage() {
     );
 }
 
-/// The owner-approved SEH test (design §10 test #4) off Windows: with
+/// The owner-approved crash test (design §10 test #4): with
 /// `--fault-injection`, `InjectSeh` reaches the RT thread, whose
-/// `inject_seh` aborts the process (no SEH filter exists here; like the
-/// structured exception on the PC, nothing can catch it).
-#[cfg(unix)]
+/// `inject_seh` aborts the process (nothing can catch it).
 #[test]
-fn inject_seh_aborts_the_binary_off_windows() {
-    aborts_the_binary_off_windows(Cmd::InjectSeh);
+fn inject_seh_aborts_the_binary() {
+    aborts_the_binary(Cmd::InjectSeh);
 }
 
-/// The parked-engine test (design §10 test #2, #35) off Windows: with
+/// The parked-engine test (design §10 test #2, #35): with
 /// `--fault-injection`, `InjectPark` reaches the RT thread, whose
-/// `inject_park` aborts the process like `inject_seh` (no SEH filter and no
-/// card to keep exist here).
-#[cfg(unix)]
+/// `inject_park` aborts the process like `inject_seh`.
 #[test]
-fn inject_park_aborts_the_binary_off_windows() {
-    aborts_the_binary_off_windows(Cmd::InjectPark);
+fn inject_park_aborts_the_binary() {
+    aborts_the_binary(Cmd::InjectPark);
 }
 
 /// The binary with `--fault-injection` ends by SIGABRT after `cmd`, not by a
 /// clean exit or a caught panic. Should it keep running, the test asks it to
 /// shut down (never a forced end) before it fails.
-#[cfg(unix)]
-fn aborts_the_binary_off_windows(cmd: Cmd) {
+fn aborts_the_binary(cmd: Cmd) {
     use std::os::unix::process::ExitStatusExt;
     /// SIGABRT on Linux and macOS.
     const SIGABRT: i32 = 6;
@@ -268,23 +262,21 @@ fn the_binary_checks_a_site() {
     assert_eq!(summary["inputs"], 24);
     assert_eq!(summary["groups"], 1);
     assert_eq!(summary["mixes"], 11);
-    assert_eq!(summary["card"], true);
     let dir = tempfile::tempdir().unwrap();
     let bad = dir.path().join("site.toml");
     let text = std::fs::read_to_string(common::site_path()).unwrap();
-    std::fs::write(&bad, text.replace("frames = 32", "frames = 64")).unwrap();
+    std::fs::write(&bad, text.replace("tx = [93]", "tx = [92]")).unwrap();
     let refused = check(bad.as_path());
     assert_eq!(refused.status.code(), Some(2));
     assert!(refused.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("frames must be 32"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("used twice"));
 }
 
-/// Off Windows the card cannot open: `run --backend asio` is a usage error
-/// (exit 2), never a card refusal (exit 3). `interlock` is no command (#38:
-/// nothing listens to the stage before a switch): a usage error too.
-#[cfg(not(windows))]
+/// `run --backend asio` is a usage error (exit 2): the backend is gone.
+/// `interlock` is no command (#38: nothing listens to the stage before a
+/// switch): a usage error too.
 #[test]
-fn off_windows_the_binary_refuses_the_card_as_usage() {
+fn the_binary_refuses_an_unknown_backend_and_command_as_usage() {
     let dir = tempfile::tempdir().unwrap();
     let engine = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_iem-engine"))
@@ -310,14 +302,13 @@ fn off_windows_the_binary_refuses_the_card_as_usage() {
         pipe.as_str(),
     ]);
     assert_eq!(asio.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&asio.stderr).contains("Windows"));
+    assert!(String::from_utf8_lossy(&asio.stderr).contains("--backend is nullrt or dante"));
 }
 
 /// `iem-engine supervise` (Gen 3 phase H, #72) on its command line: a
 /// level above the HIL ceiling is exit 2 before anything is connected, a
 /// socket nobody serves exit 1, each with one line on stderr and nothing on
-/// stdout. Off Unix the command is refused as usage (exit 2): on the PC the
-/// guard is the engine's supervisor.
+/// stdout.
 #[test]
 fn the_binary_refuses_a_supervise_call_it_cannot_make() {
     let dir = tempfile::tempdir().unwrap();
@@ -339,19 +330,11 @@ fn the_binary_refuses_a_supervise_call_it_cannot_make() {
     let unserved = supervise(&["--pipe", none.as_str(), "status"]);
     assert!(unserved.stdout.is_empty());
     let said = String::from_utf8_lossy(&unserved.stderr);
-    if cfg!(unix) {
-        assert_eq!(unserved.status.code(), Some(1), "{said}");
-        assert_eq!(
-            said,
-            "iem-engine supervise: cannot connect to the engine's pipe (entity not found)\n"
-        );
-    } else {
-        assert_eq!(unserved.status.code(), Some(2), "{said}");
-        assert!(
-            said.contains("the guard is the engine's supervisor"),
-            "{said}"
-        );
-    }
+    assert_eq!(unserved.status.code(), Some(1), "{said}");
+    assert_eq!(
+        said,
+        "iem-engine supervise: cannot connect to the engine's pipe (entity not found)\n"
+    );
 }
 
 /// `iem-engine supervise inject-fault` (Gen 3 phase H Task 6 Step 3, #72):

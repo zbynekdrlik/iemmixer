@@ -94,20 +94,14 @@ const READ_TRIES: usize = 5;
 /// (10 s). A file read once they are spent still gets its one try.
 const READ_PAUSES: usize = 10;
 
-/// Windows' `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`: another
-/// process holds the file a moment.
-const SHARING_VIOLATION: i32 = 32;
-const LOCK_VIOLATION: i32 = 33;
-
 /// Whether a read that failed may succeed when tried again (#32 minor-5):
-/// an interrupted, would-block or timed-out read, or on Windows a sharing
-/// or lock violation. Anything else (a directory, no access, a path part
+/// an interrupted, would-block or timed-out read. Anything else (a directory, no access, a path part
 /// that is no directory) is Unreadable at once.
 fn transient(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    ) || (cfg!(windows) && matches!(e.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)))
+    )
 }
 
 impl Store {

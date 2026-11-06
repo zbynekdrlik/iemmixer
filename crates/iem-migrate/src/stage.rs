@@ -56,15 +56,8 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     f.sync_all()
 }
 
-#[cfg(unix)]
 fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
-}
-
-/// Windows has no directory handle to flush this way.
-#[cfg(not(unix))]
-fn sync_dir(_: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 fn remove_if_there(dir: &Path) -> io::Result<()> {

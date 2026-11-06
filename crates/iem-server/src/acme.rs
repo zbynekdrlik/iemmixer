@@ -19,8 +19,7 @@
 //! meanwhile.
 //!
 //! The ACME account's key is kept for the server's user (`sealed.rs`:
-//! `secrets/acme_account.dpapi` on Windows, an owner-only
-//! `secrets/acme_account.private` on the box); the Cloudflare token is
+//! an owner-only `secrets/acme_account.private`); the Cloudflare token is
 //! `cf_token.rs`'s. Neither is ever logged.
 //!
 //! Adapted from fohmixer: one name (no second keeper, so no shared turn),

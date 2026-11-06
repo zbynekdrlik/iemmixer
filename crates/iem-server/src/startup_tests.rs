@@ -48,8 +48,6 @@ async fn start_refuses_a_missing_pepper_next_to_pin_hashes() {
     );
 }
 
-// Linux only: on Windows the pepper file is DPAPI data and the error text differs.
-#[cfg(not(windows))]
 #[tokio::test]
 async fn start_refuses_a_corrupt_pepper() {
     let dir = tempfile::tempdir().unwrap();
@@ -71,7 +69,6 @@ async fn start_refuses_a_corrupt_pepper() {
 /// stops the start before the server is ready (no port, nothing written).
 /// `CREDENTIALS_DIRECTORY` is the process's own environment, so the start
 /// runs in a child: this test binary again, running only this test.
-#[cfg(not(windows))]
 #[tokio::test]
 async fn start_up_refuses_a_short_credential_before_any_port() {
     const CHILD: &str = "IEMMIXER_TEST_CREDENTIAL_CHILD";

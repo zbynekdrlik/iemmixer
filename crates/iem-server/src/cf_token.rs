@@ -3,10 +3,7 @@
 //! DNS-01 records (#91), never in the site file and never logged. It needs
 //! `Zone > DNS > Edit` on the zone of `https_domain` only.
 //!
-//! Windows (the PC): set with `iem-server cloudflare set-token` (read from
-//! stdin, never from argv: process listings, shell history), sealed for the
-//! server's user in `<config dir>/secrets/cloudflare_token.dpapi`.
-//! Linux with systemd's credentials folder (`$CREDENTIALS_DIRECTORY`, the
+//! With systemd's credentials folder (`$CREDENTIALS_DIRECTORY`, the
 //! Gen 3 box): the systemd credential [`CREDENTIAL`], sealed on the box and
 //! decrypted by systemd at each start; absent means no token is set, and
 //! `set-token` refuses and names it. Otherwise (CI, local runs) test-only:
@@ -16,23 +13,26 @@
 //! server runs is used at its next attempt (on the box: at its next start,
 //! when systemd decrypts the credential).
 
+#[cfg(test)]
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use crate::provision::ProvisionError;
+#[cfg(test)]
 use crate::secrets::SECRETS_DIR;
 
 /// The token file's name without its extension (`sealed::SEALED_EXT`).
 pub const TOKEN_STEM: &str = "cloudflare_token";
 
-/// The systemd credential that holds the token on Linux, also its file name
+/// The systemd credential that holds the token, also its file name
 /// under `/etc/credstore.encrypted`: the server's unit imports it
 /// (`ImportCredential=`, which unlike `LoadCredentialEncrypted=` leaves the
 /// unit running when the file does not exist).
 pub const CREDENTIAL: &str = "iemmixer-cloudflare";
 
-/// Why `set-token` refuses outside Windows.
-pub const SET_TOKEN_REFUSED: &str = "set-token stores nothing outside Windows: on Linux the token is the systemd credential `iemmixer-cloudflare` (`systemd-creds encrypt --name=iemmixer-cloudflare --with-key=auto - /etc/credstore.encrypted/iemmixer-cloudflare`, then restart the server)";
+/// Why `set-token` refuses.
+pub const SET_TOKEN_REFUSED: &str = "set-token stores nothing: the token is the systemd credential `iemmixer-cloudflare` (`systemd-creds encrypt --name=iemmixer-cloudflare --with-key=auto - /etc/credstore.encrypted/iemmixer-cloudflare`, then restart the server)";
 
 /// The longest token accepted (Cloudflare's are 40 to about 60 characters).
 pub const MAX_TOKEN_LEN: usize = 256;
@@ -62,7 +62,7 @@ pub fn token_path(secrets_dir: &Path) -> PathBuf {
 /// Whether `token` looks like a Cloudflare API token: letters, digits, `_`
 /// and `-` (a legacy token or a `cfat_` account token), at least 20 and at
 /// most [`MAX_TOKEN_LEN`] characters. A pasted line with spaces or quotes is
-/// refused before anything is stored.
+/// refused.
 pub fn is_token_shaped(token: &str) -> bool {
     (20..=MAX_TOKEN_LEN).contains(&token.len())
         && token
@@ -71,7 +71,8 @@ pub fn is_token_shaped(token: &str) -> bool {
 }
 
 /// The token of one line of `input` (its line end and outer spaces cut).
-pub fn read_token(mut input: impl BufRead) -> Result<CfToken, ProvisionError> {
+#[cfg(test)]
+pub(crate) fn read_token(mut input: impl BufRead) -> Result<CfToken, ProvisionError> {
     let mut line = String::new();
     input.read_line(&mut line)?;
     let token = line.trim();
@@ -85,20 +86,17 @@ pub fn read_token(mut input: impl BufRead) -> Result<CfToken, ProvisionError> {
     }
 }
 
-/// Seals `token` into `<config_dir>/secrets/`, replacing a stored one.
-pub fn store(config_dir: &Path, token: &CfToken) -> std::io::Result<()> {
+/// Stores `token` in `<config_dir>/secrets/`, replacing a stored one.
+#[cfg(test)]
+pub(crate) fn store(config_dir: &Path, token: &CfToken) -> std::io::Result<()> {
     let secrets_dir = config_dir.join(SECRETS_DIR);
     std::fs::create_dir_all(&secrets_dir)?;
     crate::sealed::write(&token_path(&secrets_dir), token.expose().as_bytes())
 }
 
-/// The token ([`load_from`]): on Linux from systemd's credentials folder
-/// when systemd gives this process one (`$CREDENTIALS_DIRECTORY`), else from
-/// `secrets_dir`. Windows keeps its DPAPI file.
+/// The token ([`load_from`]): from systemd's credentials folder when systemd
+/// gives this process one (`$CREDENTIALS_DIRECTORY`), else from `secrets_dir`.
 pub fn load(secrets_dir: &Path) -> std::io::Result<Option<CfToken>> {
-    #[cfg(windows)]
-    let credentials: Option<PathBuf> = None;
-    #[cfg(not(windows))]
     let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
     load_from(secrets_dir, credentials.as_deref())
 }
@@ -124,7 +122,7 @@ pub fn load_from(
         None => {
             let path = token_path(secrets_dir);
             let stored = crate::sealed::read(&path)?;
-            (path, "`iem-server cloudflare set-token`", stored)
+            (path, "the systemd credential `iemmixer-cloudflare`", stored)
         }
     };
     let Some(bytes) = stored else {
@@ -142,21 +140,6 @@ pub fn load_from(
             ),
         )),
     }
-}
-
-/// The whole `cloudflare set-token` command for the site in `config_dir`:
-/// outside Windows nothing is read or stored ([`SET_TOKEN_REFUSED`]).
-pub fn run(config_dir: &Path, input: impl BufRead) -> Result<(), ProvisionError> {
-    if !cfg!(windows) {
-        return Err(ProvisionError::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            SET_TOKEN_REFUSED,
-        )));
-    }
-    let token = read_token(input)?;
-    store(config_dir, &token)?;
-    tracing::info!("Cloudflare API token stored (sealed)");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -214,22 +197,9 @@ mod tests {
         assert!(token_path(&secrets).is_file());
     }
 
-    #[cfg(windows)]
     #[test]
-    fn set_token_stores_a_sealed_token_the_keeper_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        run(dir.path(), format!("{}\n", token()).as_bytes()).unwrap();
-        let secrets = dir.path().join(SECRETS_DIR);
-        assert_eq!(load(&secrets).unwrap().unwrap().expose(), token());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn set_token_refuses_outside_windows_and_names_the_credential() {
-        let dir = tempfile::tempdir().unwrap();
-        let error = run(dir.path(), format!("{}\n", token()).as_bytes()).unwrap_err();
-        assert!(error.to_string().contains(CREDENTIAL), "{error}");
-        assert!(!dir.path().join(SECRETS_DIR).exists());
+    fn set_token_refused_names_the_credential() {
+        assert!(SET_TOKEN_REFUSED.contains(CREDENTIAL));
     }
 
     #[test]
@@ -273,13 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_token_stores_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(run(dir.path(), "x\n".as_bytes()).is_err());
-        assert!(!dir.path().join(SECRETS_DIR).exists());
-    }
-
-    #[test]
     fn a_stored_file_that_is_no_token_is_an_error_naming_the_fix() {
         let dir = tempfile::tempdir().unwrap();
         let secrets = dir.path().join(SECRETS_DIR);
@@ -290,7 +253,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("iem-server cloudflare set-token"),
+                .contains("the systemd credential `iemmixer-cloudflare`"),
             "{error}"
         );
         crate::sealed::write(&token_path(&secrets), &[0xff; 30]).unwrap();

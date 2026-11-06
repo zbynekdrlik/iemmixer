@@ -427,7 +427,6 @@ fn args(base: &str, direct: bool, seconds: u64) -> Args {
         out: PathBuf::from("unused.json"),
         expect_build: BUILD.to_owned(),
         jwt_secret_file: None,
-        cpu_sets: Vec::new(),
     }
 }
 

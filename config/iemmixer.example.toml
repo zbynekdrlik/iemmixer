@@ -5,7 +5,7 @@
 
 # HTTP port of the web app.
 port = 80
-# The engine's control pipe (a socket path on Unix, a pipe name on Windows);
+# The engine's control pipe (a socket path);
 # the media pipe is "<engine_pipe>.media". IEMMIXER_ENGINE_PIPE overrides it.
 engine_pipe = "iemmixer-engine"
 # HTTPS for phones (PWA install); certificate and key next to this file.
@@ -45,8 +45,8 @@ pin_changes = true
 # through the Cloudflare DNS API, renewed when under 30 days are left, written
 # to tls_cert/tls_key and loaded without a restart. Needs tls = true and
 # https_domain. The Cloudflare token (Zone > DNS > Edit on the name's zone)
-# is never in this file: `iem-server cloudflare set-token` reads it from
-# stdin and seals it for the server's user (Windows, DPAPI). Absent: the
+# is never in this file: it is the systemd credential `iemmixer-cloudflare`
+# (`iem-server cloudflare set-token` names the command). Absent: the
 # certificate files are served as they are.
 # [acme]
 # directory = "https://acme-v02.api.letsencrypt.org/directory"  # the default

@@ -2,8 +2,7 @@
 //! engine on NullRt at B = 32 with a temporary state directory, and the
 //! `iem-engine` binary. Every read has a 5 s timeout; every wait is bounded.
 //!
-//! Unix sockets on Linux, named pipes on Windows (the `windows` CI job, S6).
-//! Windows pipes have no timeouts, so a client reads the way the engine does
+//! Unix sockets. A client reads the way the engine does
 //! (`pipe::read_loop` on a thread of its own, closed when the client is
 //! dropped): it never leaves the engine blocked on a full pipe, and every
 //! wait on it is a bounded channel receive.
@@ -11,7 +10,6 @@
 mod common;
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -31,18 +29,9 @@ use interprocess::local_socket::Stream;
 use interprocess::local_socket::prelude::*;
 
 const WAIT: Duration = Duration::from_secs(5);
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn pipe_name(dir: &tempfile::TempDir) -> String {
-    if cfg!(unix) {
-        dir.path().join("ctl.sock").to_string_lossy().into_owned()
-    } else {
-        format!(
-            "iem-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )
-    }
+    dir.path().join("ctl.sock").to_string_lossy().into_owned()
 }
 
 fn connect(
@@ -968,9 +957,3 @@ mod binary;
 /// The listen probe on the media pipe (S7).
 #[path = "pipes/probe.rs"]
 mod probe;
-
-/// Windows named pipes only (S6 design note §4): the private DACL, the
-/// first-instance flag and writes bounded like the Unix send timeout.
-#[cfg(windows)]
-#[path = "pipes/named_pipes.rs"]
-mod named_pipes;

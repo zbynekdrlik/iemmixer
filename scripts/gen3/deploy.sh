@@ -463,7 +463,7 @@ fi
 printf 'IEM_DANTE_IFACE=%s\n' "$iface" > "$work/iem-dante.env"
 cp -- "$config" "$work/dante-device.toml"
 if [ -n "$site_file" ]; then
-  # The engineer's "Back to REAPER" runs iemmode on the PC: the box has none,
+  # The engineer's "Back to REAPER" ran iemmode on the PC: the box has none,
   # so the band's one-line back_to_reaper is left out of the box's copy
   # (phase E, #72).
   reaper_lines="$(grep -c '^back_to_reaper' -- "$test_site" || true)"

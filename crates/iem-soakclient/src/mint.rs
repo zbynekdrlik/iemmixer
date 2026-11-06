@@ -217,9 +217,8 @@ pub fn run(args: &TokenArgs, now: u64) -> Result<(), MintError> {
 }
 
 /// Writes `token` alone to `path`, a NEW file: one that exists (a symlink
-/// too) is never written through or replaced. On Unix it is created
-/// owner-only (0600); on Windows it inherits its folder's ACL, so the ops
-/// job makes that folder its runner user's only. A file that could not be
+/// too) is never written through or replaced. It is created owner-only
+/// (0600). A file that could not be
 /// written whole is removed, so a part of a token never stays behind.
 pub fn write_token(path: &Path, token: &str) -> io::Result<()> {
     let mut options = OpenOptions::new();

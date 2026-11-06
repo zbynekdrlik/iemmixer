@@ -71,13 +71,12 @@ pub const DEFAULT_BASE: &str = "http://127.0.0.1";
 /// `--expect-build`: a commit's hex digits.
 const COMMIT_LEN: usize = 40;
 /// A server names its build by this many of the commit's first hex digits
-/// at least: git's short hash, as HIL v1's `Test-IemHilVersion` takes it.
+/// at least: git's short hash.
 pub const MIN_HASH: usize = 7;
 
 pub const USAGE: &str = "\
 iem-soakclient --member ID --seconds N --out FILE --expect-build SHA
                [--jwt-secret-file PATH] [--base URL] [--direct]
-               [--cpu-sets IDS]
 iem-soakclient token ...   a token in a file for the live run (its own usage)
 
 Goes to the LAN address the server at --base names (/api/site; with --direct
@@ -93,8 +92,7 @@ PIN from IEM_SOAK_PIN (never an argument) for the server's login.
   --expect-build SHA      the server's commit: 40 lower-case hex digits
   --seconds N             1 to 36000
   --jwt-secret-file PATH  the server's jwt_secret file
-  --base URL              http://HOST[:PORT], default http://127.0.0.1
-  --cpu-sets IDS          CPU Set ids, e.g. 256,257 (Windows only)";
+  --base URL              http://HOST[:PORT], default http://127.0.0.1";
 
 /// The command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,9 +114,6 @@ pub struct Args {
     /// `--jwt-secret-file`: the server's JWT secret file, on the server's
     /// PC; [`credential`] takes it or the PIN, never both.
     pub jwt_secret_file: Option<PathBuf>,
-    /// `--cpu-sets 256,257` (Windows): CPU Set ids, as the engine's
-    /// `[card] cpu_sets`.
-    pub cpu_sets: Vec<u32>,
 }
 
 /// Reads the arguments after the program's name. `Err` is the usage error;
@@ -131,7 +126,6 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut out = None;
     let mut expect_build = None;
     let mut jwt_secret_file = None;
-    let mut cpu_sets = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let slot: &mut Option<String> = match flag.as_str() {
@@ -145,7 +139,6 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
             "--out" => &mut out,
             "--expect-build" => &mut expect_build,
             "--jwt-secret-file" => &mut jwt_secret_file,
-            "--cpu-sets" => &mut cpu_sets,
             f if f == "--pin" || f.starts_with("--pin=") => {
                 return Err(format!(
                     "the PIN comes from {PIN_ENV}, never from the command line"
@@ -181,16 +174,6 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
     }
     let base = http_origin(base.as_deref().unwrap_or(DEFAULT_BASE))
         .ok_or("--base must be http://HOST[:PORT]")?;
-    let cpu_sets = match cpu_sets {
-        None => Vec::new(),
-        Some(list) => {
-            let ids = parse_cpu_sets(&list).ok_or("--cpu-sets takes CPU Set ids, e.g. 256,257")?;
-            if !cfg!(windows) {
-                return Err("--cpu-sets is Windows only".to_owned());
-            }
-            ids
-        }
-    };
     Ok(Args {
         base,
         direct,
@@ -199,7 +182,6 @@ pub fn parse_args(args: &[String]) -> Result<Args, String> {
         out: PathBuf::from(out),
         expect_build,
         jwt_secret_file: jwt_secret_file.map(PathBuf::from),
-        cpu_sets,
     })
 }
 
@@ -213,12 +195,6 @@ fn is_commit(s: &str) -> bool {
 /// build time (`iem_core::git_hash`), is at least [`MIN_HASH`] characters
 /// and a prefix of `build`. The predecessor app's answer names its own
 /// commit, never this one; any other answer names none.
-///
-/// The same rule has two other copies: HIL v1's `Test-IemHilVersion`
-/// (`scripts/iem-pc/IemPcHilV1.psm1`, lower case and an ordinal prefix, as here)
-/// and the guard's `iem_guard::effects::web::version_matches` (any case).
-/// This crate links no server or guard crate, so the rule is repeated; a
-/// change to one is made to all three.
 pub fn names_build(answer: &str, build: &str) -> bool {
     let answer: serde_json::Value = serde_json::from_str(answer).unwrap_or_default();
     answer
@@ -233,11 +209,6 @@ fn valid_member(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// `256,257`: CPU Set ids; anything else is `None`.
-fn parse_cpu_sets(list: &str) -> Option<Vec<u32>> {
-    list.split(',').map(|id| id.parse().ok()).collect()
 }
 
 /// The engineer's PIN from [`PIN_ENV`]: 4 to 12 digits. The error never
@@ -515,8 +486,6 @@ pub enum Reason {
     /// A socket closed, failed or stayed silent for the idle bound before
     /// the end: no socket is opened twice (#10).
     ConnectionLost,
-    /// The process could not be placed on the given CPU Sets.
-    CpuSets,
     /// `--jwt-secret-file` could not be read, is not UTF-8 text or is
     /// blank: nothing was sent (it is read before any request). Also a
     /// token that could not be signed with it, after the build check (not
@@ -534,7 +503,6 @@ impl Reason {
             Reason::NotEngineer => "not-engineer",
             Reason::ServerGone => "server-gone",
             Reason::ConnectionLost => "connection-lost",
-            Reason::CpuSets => "cpu-sets",
             Reason::SecretUnreadable => "secret-unreadable",
         }
     }

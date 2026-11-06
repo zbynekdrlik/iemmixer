@@ -234,7 +234,7 @@ if words[:4] == SVC:
     if rest == [ENGINE, "check-site", "--site", SITE]:
         if os.environ.get("FAKE_CHECK_SITE_FAILS"):
             fail("iem-engine: site: [guard] hil_tx 94 is the TX of mix zyxqw", 2)
-        print(json.dumps({"topology": "ab12", "inputs": 32, "groups": 2, "mixes": 11, "card": False}))
+        print(json.dumps({"topology": "ab12", "inputs": 32, "groups": 2, "mixes": 11}))
         done()
     if rest == [ENGINE, "supervise", "status"]:
         if os.environ.get("FAKE_STATUS_FAILS"):
@@ -556,7 +556,6 @@ class GateTests(GateBase):
         # The budget: the job's begin, the panic's restart and the job's end.
         self.assertEqual(self.ledger(), [NOW] * 3)
         self.assert_private(err + json.dumps(docs))
-        self.assertEqual(self.pc.calls, [])   # no PC call
 
     def test_a_loop_already_there_is_kept_and_another_subscription_is_put_back(self) -> None:
         # A subscription may already loop our RX 94 to our own TX 94: kept, nothing sent.
@@ -715,7 +714,6 @@ class JobTests(GateBase):
         self.assertFalse(self.dropin_there())
         self.assertFalse(self.state()["hil"])
         self.assertEqual(self.posts(), [])
-        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
 
     def test_a_flag_before_the_begin_changes_nothing_on_the_box(self) -> None:
         original = gate.preflight
@@ -915,7 +913,6 @@ class PanicTests(GateBase):
         self.assertFalse(self.state()["fault"])
         self.assertEqual(self.posts(), [])
         self.assertEqual(self.ledger(), [NOW] * 2)   # the begin and the end, no fault
-        self.assertNotIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])   # Gen 2 ended: the PC is left alone
 
 
 class PreflightTests(GateBase):
@@ -995,7 +992,7 @@ class PreflightTests(GateBase):
 
     def test_the_command_is_dev_time_locked_a_box_command_and_reads_no_side_record(self) -> None:
         spec = ip.COMMANDS["gen3-gate"]
-        self.assertEqual((spec.pc, spec.dev_time, spec.locked), (False, True, True))
+        self.assertEqual((spec.dev_time, spec.locked), (True, True))
         # The old record may still lie in the state folder: it neither refuses nor allows anything.
         (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 2}), encoding="utf-8")
         self.flag()   # the Spec's own refusal, before any call
