@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+import warnings
 from pathlib import Path
 from typing import Iterator
 from unittest import mock
@@ -137,6 +138,10 @@ class Base(unittest.TestCase):
 
     def run_main(self, *argv: str) -> tuple[int, list[dict], str]:
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        # unittest turns ResourceWarning on: a call `guarded` left running warns
+        # with its pid when collected, and the pid would land in the captured
+        # stderr (a test's look for a private number once failed on pid 9427).
+        with warnings.catch_warnings(), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            warnings.simplefilter("ignore", ResourceWarning)
             code = ip.main(list(argv))
         return code, [json.loads(line) for line in out.getvalue().splitlines() if line.strip()], err.getvalue()
