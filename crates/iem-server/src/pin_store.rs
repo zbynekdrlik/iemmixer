@@ -422,7 +422,7 @@ mod tests {
         std::fs::write(&file, &text).unwrap();
         let mut store = PinStore::load(dir.path()).unwrap();
         // The write's temporary file cannot be made: a directory is there.
-        let tmp = file.with_extension("tmp");
+        let tmp = file.with_extension("new");
         std::fs::create_dir(&tmp).unwrap();
         assert!(store.drop_archived().is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "unchanged");
