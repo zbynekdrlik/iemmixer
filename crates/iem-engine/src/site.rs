@@ -126,19 +126,36 @@ struct GuardFile {
     guard: GuardTable,
 }
 
-fn toml_error(e: &toml::de::Error) -> SiteError {
-    SiteError::Toml(e.to_string())
+/// A site file's parse error: its line and the parser's message, never the
+/// excerpt of the file `toml`'s own text holds, and never a value the message
+/// quotes (`invalid type: string "…"`). Logs and a deploy's output, which may
+/// be pasted, stay free of the site's values (P6).
+fn parse_error(content: &str, e: &toml::de::Error) -> String {
+    let message = e.message();
+    let mut parts = message.split('"');
+    let mut text = parts.next().unwrap_or_default().to_owned();
+    for (i, part) in parts.enumerate() {
+        text.push_str(if i % 2 == 0 { "\"…\"" } else { part });
+    }
+    match e.span() {
+        Some(span) => {
+            let before = content.get(..span.start).unwrap_or_default();
+            format!("line {}: {text}", before.matches('\n').count() + 1)
+        }
+        None => text,
+    }
 }
 
 /// Parses the `[engine]` table of a site file.
 pub fn parse(text: &str) -> Result<Site, SiteError> {
-    let file: File = toml::from_str(text).map_err(|e| toml_error(&e))?;
+    let file: File = toml::from_str(text).map_err(|e| SiteError::Toml(parse_error(text, &e)))?;
     file.engine.ok_or(SiteError::NoEngineTable)
 }
 
 /// `[guard] hil_tx` of a site file: HIL's card outputs (empty without it).
 pub fn parse_hil_tx(text: &str) -> Result<Vec<u16>, SiteError> {
-    let file: GuardFile = toml::from_str(text).map_err(|e| toml_error(&e))?;
+    let file: GuardFile =
+        toml::from_str(text).map_err(|e| SiteError::Toml(parse_error(text, &e)))?;
     Ok(file.guard.hil_tx)
 }
 

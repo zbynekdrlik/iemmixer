@@ -415,9 +415,9 @@ impl Topology {
     /// loopback returns, so no `hil_tx` may be a topology input;
     /// `check-site` refuses a site whose `hil_tx` breaks the rule.
     /// `[engine] channels` is no bound (the highest channel the topology
-    /// uses, not the card's channel count, which `[card]` does not hold): the
-    /// card's own counts are checked when the stream opens (`ChannelMap`, a
-    /// channel the card lacks refuses it, exit 3). The card needs an input
+    /// uses, not the device's channel count): the device's own counts are
+    /// checked when the stream opens (`ChannelMap`, a channel it lacks
+    /// refuses it, exit 3). The device needs an input
     /// for every `hil_tx` too: with fewer inputs than the highest one, every
     /// HIL stream is refused ([`hil_return_refusal`] names that input).
     pub fn hil_outputs(&self, hil_tx: &[u16]) -> Result<Vec<u16>, SiteError> {

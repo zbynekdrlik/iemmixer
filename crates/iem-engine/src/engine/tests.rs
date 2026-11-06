@@ -165,7 +165,7 @@ fn dante_refuses_block_and_sine() {
         .unwrap_err();
         assert!(e.contains("nullrt backend"), "{extra}: {e}");
         assert!(
-            e.contains("Dante device at its config's block"),
+            e.contains("Dante device runs at its config's block"),
             "{extra}: {e}"
         );
     }
@@ -284,6 +284,22 @@ fn edited_site(dir: &Path, name: &str, edit: impl FnOnce(String) -> String) -> P
     let path = dir.join(name);
     std::fs::write(&path, edit(crate::test_support::test_site_text())).unwrap();
     path
+}
+
+/// `[engine]` errors reach a deploy's output: its values stay out.
+#[test]
+fn a_site_parse_error_names_the_line_and_no_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = edited_site(dir.path(), "bad.toml", |t| {
+        format!("{t}\n[engine.bad]\nzz = 1\n").replacen(
+            "[engine]",
+            "[engine]\nchannels = \"zyxqw\"",
+            1,
+        )
+    });
+    let e = check_site(&bad).unwrap_err().to_string();
+    assert!(e.contains("line "), "{e}");
+    assert!(!e.contains("zyxqw"), "{e}");
 }
 
 #[test]

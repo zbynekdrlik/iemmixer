@@ -7,11 +7,8 @@
 #
 # Phase B (plan Task 7): the device sends and receives audio flows, so it is
 # never enabled at boot (deploy.sh disables it): a reboot of
-# the box, during an event or not, never brings its flows back unattended.
-# "ide event" stops it (iempc event: ssh <GEN3_HOST> sudo -n systemctl stop
-# iem-server iem-engine iem-dante, from plan Task 7 with the engine and the
-# server); nothing starts it again when the event ends: deploy.sh --start
-# device or `sudo systemctl start iem-dante` in dev time does.
+# the box never brings its flows back unattended: deploy.sh --start device or
+# `sudo systemctl start iem-dante` in dev time starts it.
 #
 # Phase C (plan Task 6): iem-engine.service hosts the same device inside the
 # engine; this unit stays the standalone device (deploy.sh --start device)

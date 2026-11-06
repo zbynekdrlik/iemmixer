@@ -5,7 +5,7 @@ import { openMixer } from "./support/session";
 // PINs frozen (P9): the E2E site runs with `pin_changes = false`
 // (config/test-site.toml). The server answers the PIN dialog with 409 and
 // the Slovak reason, which the dialog shows; the PIN stays as it was.
-test.describe("PIN changes before the cutover", () => {
+test.describe("PIN changes while frozen", () => {
   // The refused change is deliberate: Chrome reports the 409 response.
   test.use({ allowedConsole: [/status of 409/] });
 

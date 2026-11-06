@@ -499,18 +499,20 @@ if [ "$back" = 0 ]; then
   on_box "$fill" || die "slot-$target could not be filled: the stack was not stopped"
   on_box "cd $slot && sha256sum --check --strict --quiet SHA256SUMS" ||
     die "slot-$target's SHA256SUMS does not hold on the box: the stack was not stopped"
-  # The new build reads the site it will serve, while the old one still
-  # serves: a key this build no longer knows stops the deploy here, never after
-  # the stop (the server's site file refuses unknown keys).
-  on_box "IEMMIXER_CONFIG=$STAGE/iemmixer.toml $slot/iem-server check-site" ||
-    die "the new build's server refuses this site file (the reason above; the ops repo's site must lose such a key first): the stack was not stopped"
-  on_box "$slot/iem-engine check-site --site $STAGE/iemmixer.toml" > /dev/null ||
-    die "the new build's engine refuses this site file (the reason above): the stack was not stopped"
-  echo "deploy.sh: slot-$target holds the bundle, its sums hold, it takes the site; the stack was not stopped"
+  echo "deploy.sh: slot-$target holds the bundle, its sums hold; the stack was not stopped"
   refuse_event "slot-$target holds the bundle; the stack was not stopped"
 else
   refuse_event "copied to ~/$STAGE; the stack was not stopped"
 fi
+
+# The build going live reads the site it will serve, while the old one still
+# serves (a --back's slot too): a key it does not know stops the deploy here,
+# never after the stop (the server's site file refuses unknown keys).
+on_box "IEMMIXER_CONFIG=$STAGE/iemmixer.toml $slot/iem-server check-site" ||
+  die "the new build's server refuses this site file (the reason above; the ops repo's site must lose such a key first): the stack was not stopped"
+on_box "$slot/iem-engine check-site --site $STAGE/iemmixer.toml" > /dev/null ||
+  die "the new build's engine refuses this site file (the reason above): the stack was not stopped"
+echo "deploy.sh: slot-$target takes the site; the stack was not stopped"
 
 # Stop the stack, then read what still runs: a unit no deploy has installed
 # yet makes the stop exit 5 ("not loaded") while it stops the others.

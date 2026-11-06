@@ -1,5 +1,5 @@
 //! How a run ends (design note §3.7; Gen 3 phase C): the
-//! shutdown with its fade, the fault, the refused card, the backend that
+//! shutdown with its fade, the fault, the backend that
 //! ended by itself, and the stream's last word.
 
 use std::sync::atomic::Ordering;
@@ -14,7 +14,7 @@ use crate::cmd::RtOp;
 
 /// What the engine says about its stream as it stops (#35): `DriverReleased`
 /// once the card is free; a stream that stayed parked (a callback stuck in
-/// it, or the parked-engine test's hold) released nothing, so
+/// it) released nothing, so
 /// `DriverParked`: the card is free only once the process has ended.
 fn stream_end(outcome: StopOutcome, reason: &str) -> EngineMsg {
     let reason = reason.to_owned();

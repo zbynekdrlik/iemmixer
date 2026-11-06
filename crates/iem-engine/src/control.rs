@@ -50,9 +50,8 @@ pub const FADE_WAIT: Duration = Duration::from_millis(500);
 /// The audio backend as the control loop sees it.
 pub trait Driver: Send {
     fn stats(&self) -> StreamStats;
-    /// Stops the stream: `Released` once the card is free, `Parked` when
-    /// it stayed held (a callback stuck in the stream, or the parked-engine
-    /// test's hold; #35). A backend without a card releases.
+    /// Stops the stream: `Released` once the device is free, `Parked` when
+    /// it stayed held (a callback stuck in the stream; #35).
     fn stop(self: Box<Self>) -> StopOutcome;
     /// The backend's own reason to end the run, if any.
     fn ending(&self) -> Option<Ending> {

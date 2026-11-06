@@ -366,7 +366,7 @@ impl Driver for Stops {
 }
 
 /// The stream's end says what happened (#35): a stream that stayed
-/// parked (a callback stuck in it, or the parked-engine test's hold)
+/// parked (a callback stuck in it)
 /// released nothing, so the engine says `DriverParked`, never
 /// `DriverReleased`; a released one says `DriverReleased`. Either is
 /// the last word before the engine closes the connection, and the

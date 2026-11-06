@@ -732,9 +732,9 @@ class DeployTests(unittest.TestCase):
             out += [f"cat {slot}/BUILD", f"cat {slot}/SHA256SUMS", f"cd {slot} && {CHECK}"]
         out += [f"mkdir -p {STAGE}", "scp"]
         if not back:
-            out += [f"cd {STAGE} && {CHECK}", self.fill(target), f"cd {slot} && {CHECK}",
-                    f"IEMMIXER_CONFIG={STAGE}/iemmixer.toml {slot}/iem-server check-site",
-                    f"{slot}/iem-engine check-site --site {STAGE}/iemmixer.toml"]
+            out += [f"cd {STAGE} && {CHECK}", self.fill(target), f"cd {slot} && {CHECK}"]
+        out += [f"IEMMIXER_CONFIG={STAGE}/iemmixer.toml {slot}/iem-server check-site",
+                f"{slot}/iem-engine check-site --site {STAGE}/iemmixer.toml"]
         out += [STOP, "systemctl is-active iem-server iem-engine iem-dante", self.switch(target, phase_c),
                 self.INSTALL]
         if people is not None:
@@ -943,6 +943,19 @@ class DeployTests(unittest.TestCase):
         self.assert_slot_holds("b", second)
         self.assertIn(f"iem-engine 2.0.0-dev.45+{first_sha}", r.stdout)
         self.assertEqual(self.states(), {"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"})
+
+    def test_back_refuses_a_site_its_slot_refuses_with_nothing_stopped(self) -> None:
+        first_sha, _ = self.sha, self.bundle
+        self.deployed()
+        sha2, second = self.next_build("the second build")
+        self.deployed(args=self.full_args(sha2, second))
+        self.git("checkout", "-q", "--detach", first_sha)
+        self.clear_logs()
+        r = self.deploy(args=self.back_args(first_sha), FAKE_SERVER_REFUSES_SITE="1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("the new build's server refuses this site file", r.stderr)
+        self.assertNotIn(STOP, self.remote())
+        self.assertEqual(self.link(), "slot-b/bin")
 
     def test_back_refuses_a_slot_that_is_not_the_sha_or_whose_sums_fail_with_nothing_stopped(self) -> None:
         first_sha = self.sha
@@ -1337,7 +1350,7 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("an event is on", r.stderr)
         self.assertIn("the stack was not stopped", r.stderr)
-        self.assertEqual(self.kinds()[-1], f"/opt/iemmixer/slot-a/bin/iem-engine check-site --site {STAGE}/iemmixer.toml")
+        self.assertEqual(self.kinds()[-1], f"cd /opt/iemmixer/slot-a/bin && {CHECK}")
         self.assertNotIn(STOP, self.remote())
         self.assertIsNone(self.link())
 

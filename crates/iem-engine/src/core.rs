@@ -177,8 +177,8 @@ pub struct Core {
     /// The running test signal is the HIL one (card-masked): a plain one
     /// may not replace it until it ends.
     hil_test: bool,
-    /// HIL's spare card outputs the engine opened after the topology's TX
-    ///: the HIL slots of `HilTestSignal`'s mask.
+    /// HIL's spare outputs the engine opened after the topology's TX: the
+    /// HIL slots of `HilTestSignal`'s mask.
     hil: Vec<u16>,
     rev: u64,
     flags: Flags,

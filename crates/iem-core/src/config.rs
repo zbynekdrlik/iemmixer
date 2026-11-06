@@ -135,16 +135,22 @@ pub fn is_email(address: &str) -> bool {
 }
 
 /// A site file's parse error: its line and the parser's message, never the
-/// excerpt of the file `toml`'s own text holds. The site's values stay out of
-/// logs and of a deploy's output, which may be pasted (P6).
+/// excerpt of the file `toml`'s own text holds, and never a value the message
+/// quotes (`invalid type: string "…"`). Logs and a deploy's output, which may
+/// be pasted, stay free of the site's values (P6).
 fn parse_error(content: &str, e: &toml::de::Error) -> String {
+    let message = e.message();
+    let mut parts = message.split('"');
+    let mut text = parts.next().unwrap_or_default().to_owned();
+    for (i, part) in parts.enumerate() {
+        text.push_str(if i % 2 == 0 { "\"…\"" } else { part });
+    }
     match e.span() {
         Some(span) => {
             let before = content.get(..span.start).unwrap_or_default();
-            let line = before.matches('\n').count() + 1;
-            format!("line {line}: {}", e.message())
+            format!("line {}: {text}", before.matches('\n').count() + 1)
         }
-        None => e.message().to_string(),
+        None => text,
     }
 }
 
@@ -860,17 +866,18 @@ mod tests {
     #[test]
     fn a_site_with_the_engine_and_guard_tables_loads() {
         let text = include_str!("../../../config/test-site.toml");
-        assert!(
-            text.contains(
-                "
-[guard]"
-            ),
-            "the test site's [guard]"
-        );
+        assert!(text.contains("\n[guard]"), "the test site's [guard]");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
         std::fs::write(&path, text).unwrap();
         let site = Config::load(&path).expect("a site with [guard] and [engine] loads");
+        // Whatever else the table holds is not the server's to read.
+        std::fs::write(
+            &path,
+            text.replacen("\n[guard]", "\n[guard]\nother = [1, 2]", 1),
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_ok());
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(site.guard.is_some(), "the [guard] table is accepted");
         assert_eq!(site.members.len(), 10);
@@ -901,6 +908,22 @@ mod tests {
                 }
                 other => panic!("{key}: {other:?}"),
             }
+        }
+    }
+
+    /// A wrongly typed value stays out of the error too.
+    #[test]
+    fn a_parse_error_never_quotes_a_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        std::fs::write(&path, "tls = false\nport = \"zyxqw\"\n").unwrap();
+        match Config::load(&path) {
+            Err(ConfigError::Parse(e)) => {
+                assert!(e.starts_with("line 2: "), "{e}");
+                assert!(e.contains("invalid type"), "{e}");
+                assert!(!e.contains("zyxqw"), "{e}");
+            }
+            other => panic!("{other:?}"),
         }
     }
 

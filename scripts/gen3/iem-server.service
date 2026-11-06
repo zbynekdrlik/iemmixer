@@ -20,8 +20,8 @@
 #
 # No ordering with iem-engine.service: the server reconnects to the engine's
 # socket by itself, so the two start and stop in parallel.
-# Never enabled at boot (deploy.sh disables it); "ide event" stops it with the
-# engine and the device (plan Task 7).
+# A serving deploy enables it at boot (--new-box disables it); "ide event"
+# only writes a flag on the dev box and leaves it running.
 
 [Unit]
 Description=iemmixer Gen 3 server and UI (plain HTTP on port 80)

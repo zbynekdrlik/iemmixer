@@ -1,5 +1,5 @@
-//! The test signal (X13), the HIL signal and its mask, `Arm`, fault
-//! injection and HIL's forced reopen.
+//! The test signal (X13), the HIL signal and its mask, `Arm` and fault
+//! injection.
 
 use super::*;
 

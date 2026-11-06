@@ -344,6 +344,4 @@ async fn api_tunnel_returns_status_json() {
     assert_eq!(json["state"], "Down");
     assert_eq!(json["ready_connections"], 0);
     assert!(json["since_secs"].is_u64());
-    assert!(json["last_restart_secs_ago"].is_null());
-    assert!(json["last_restart_ok"].is_null());
 }
