@@ -5,3 +5,6 @@
 noreply@github.com
 # Dependabot (alerts only today; kept so a future Dependabot PR is not blocked)
 49699333+dependabot[bot]@users.noreply.github.com
+# The account that merged PR 93 (a GitHub App): hash of its exact name and email, because the name
+# is not written in this tree. The form is explained in denylist_scan.py.
+sha256:e3838ad987ad8e5d8963c974e44477b4d942d84d40fa4daa06191abf3e4b7dc8

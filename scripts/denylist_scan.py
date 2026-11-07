@@ -41,6 +41,10 @@ not plain text, or is a container, is read whole and the units the old blob
 lacks are reported as `<sha> <path>:<unit>`. With `--identities FILE` it also
 rejects every commit whose author or committer email is not exactly one listed
 there (read NUL-separated; an email holding a line separator is never allowed).
+A listed `sha256:<hex>` of an exact name and email pair (`identity_key`) allows
+that pair, and its two fields are then not read against the denylist: it is how
+an account whose own name holds a term is accepted without writing the term in
+the tree. The message, the tree and the diffs are still read.
 Lines are split on `\n` only (not str.splitlines()), so a term after a
 CR/VT/FF/NEL/U+2028 cannot slip past, and a malformed C-quoted path never
 crashes the scan (`unquote_c` keeps a bad escape literal rather than dropping
@@ -536,18 +540,49 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
     return hits
 
 
-def identity_problems(repo: Path, sha: str, identities: set[str]) -> list[IdentityProblem]:
-    """The author and committer emails that are not exactly (case aside) an allowed identity.
+IDENTITY_KEY_PREFIX = "sha256:"
 
-    The two emails are read NUL-terminated -- git never stores a NUL in an ident -- because a
-    line split cannot tell them apart: str.splitlines() also breaks at U+2028 / U+2029 / NEL, so an
-    author email "allowed<U+2028>allowed" would read as two allowed lines and push the committer
-    email out of the check. An email holding any such separator is never allowed, and there is no
-    strip(): a trailing separator is whitespace to strip() and would make a stranger's email equal
-    an allowed one."""
-    author, committer, _end = decode(git(repo, *METADATA, "--format=%ae%x00%ce%x00", sha)).split("\0")
-    return [IdentityProblem(sha[:12], role) for role, email in (("author", author), ("committer", committer))
-            if LINE_SEPARATORS.intersection(email) or email.lower() not in identities]
+
+def identity_key(name: str, email: str) -> str:
+    """The line of the identity list that allows this exact name and email (email case aside)."""
+    pair = f"{name}\n{email.lower()}".encode("utf-8", "surrogateescape")
+    return f"{IDENTITY_KEY_PREFIX}{hashlib.sha256(pair).hexdigest()}"
+
+
+def email_allowed(email: str, identities: set[str]) -> bool:
+    """A listed email; a hash line is a public string, never an email anyone may use."""
+    return email.lower() in identities and not email.lower().startswith(IDENTITY_KEY_PREFIX)
+
+
+def commit_identities(repo: Path, sha: str) -> list[tuple[str, str, str]]:
+    """(role, name, email) of the author and the committer.
+
+    The fields are read NUL-terminated -- git never stores a NUL in an ident -- because a line split
+    cannot tell them apart: str.splitlines() also breaks at U+2028 / U+2029 / NEL, so an author email
+    "allowed<U+2028>allowed" would read as two allowed lines and push the committer email out of the
+    check."""
+    fields = decode(git(repo, *METADATA, "--format=%an%x00%ae%x00%cn%x00%ce%x00", sha)).split("\0")
+    return [("author", fields[0], fields[1]), ("committer", fields[2], fields[3])]
+
+
+def identity_problems(repo: Path, sha: str, identities: set[str]) -> list[IdentityProblem]:
+    """The author and committer emails that are not exactly (case aside) an allowed identity, by
+    themselves or as a hashed name and email pair.
+
+    An email holding any line separator is never allowed, and there is no strip(): a trailing
+    separator is whitespace to strip() and would make a stranger's email equal an allowed one."""
+    return [IdentityProblem(sha[:12], role) for role, name, email in commit_identities(repo, sha)
+            if LINE_SEPARATORS.intersection(email)
+            or (not email_allowed(email, identities) and identity_key(name, email) not in identities)]
+
+
+def metadata_text(repo: Path, sha: str, identities: set[str] | None) -> str:
+    """The commit's metadata as the denylist reads it: the idents, except a pair allowed by its hash,
+    and the whole message."""
+    idents = [field for _role, name, email in commit_identities(repo, sha)
+              if identities is None or LINE_SEPARATORS.intersection(email) or identity_key(name, email) not in identities
+              for field in (name, email)]
+    return "\n".join([*idents, decode(git(repo, *METADATA, "--format=%B", sha))])
 
 
 def scan_commits(
@@ -556,7 +591,7 @@ def scan_commits(
     hits: list[Finding] = []
     for sha in decode(git(repo, "rev-list", *revlist_args)).split():
         short = sha[:12]
-        metadata = decode(git(repo, *METADATA, "--format=%an%n%ae%n%cn%n%ce%n%B", sha))
+        metadata = metadata_text(repo, sha, identities)
         entries = {entry for reading in [metadata, *from_git_latin1(metadata)] for entry in scanner.entries_in(reading)}
         hits += [Hit(f"{short} commit metadata", entry) for entry in sorted(entries)]
         if identities is not None:
