@@ -87,3 +87,10 @@ The gate is `scripts/iem-pc/iempc_gen3_soak.py` (`.claude/rules/gen3.md`, "The b
 ## The 72 h NullRt soak: dropped (owner, 2026-10-10)
 
 - An event lasts at most 2 h; the owner dropped the 72 h NullRt soak as waste. The tool (`scripts/soak/`), its tests and the CI artifact are removed. A 5.2 h run before the stop showed no memory growth and flat fds and threads (numbers on #10, 2026-10-10). `iempc gen3-gate soak`, up to 120 minutes, is the long run now.
+
+## Reading a failed box soak
+
+- The box runs at 96 kHz: one sample is 10.4 µs, so samples divided by 96 give ms. The conversion at 48 kHz gave twice the real value and went out to other sessions on 2026-11-06.
+- `iem-dante-dev ctl status` keeps counters since the flow started, and a flow id changes when its sender reconnects. Split a soak's `rx_late` and `rx_holes` by flow and second with a per-second delta of those counters, started before the soak. The deltas must add up to the gate's numbers; each channel's holes count once per channel.
+- A late burst at the box alone proves nothing about where it came from. Compare the second at the flow's other receivers, in Dante Controller's history: the same event at all of them is the sender's side. An event only here is ours.
+- The gate is not loosened for an announced outage: it stays a failure, recorded with its window.
