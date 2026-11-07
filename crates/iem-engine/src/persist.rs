@@ -1,4 +1,4 @@
-//! Persistence (program spec §2.4, I10; design note §3.5): atomic,
+//! Persistence (I10): atomic,
 //! checksummed state files in the state directory —
 //!
 //! - `current.json`: the latest save;
@@ -10,13 +10,13 @@
 //!   revision `current.json` holds, renamed at each commit, so a listing
 //!   shows every committed revision even when contents cannot be read
 //!   (#32 F3-r4 2; `chain`, the revision floor);
-//! - `baseline.json`: written at each import (and, from S6, at `live` entry);
+//! - `baseline.json`: the last load source; no engine writes it any more,
+//!   but a state folder may hold one from an older build, so it still loads;
 //! - `save.new`: a save being written (never a load source);
 //! - `save.tmp`: a complete save before its renames, always replaced whole
 //!   (a crash before the second rename leaves the newest state only in it;
 //!   `chain` decides when it is the live state, and the boot's recovery
 //!   finishes that save);
-//! - `baseline.tmp`: a baseline before its rename;
 //! - `current.json.damaged-<n>`: a damaged `current.json` the boot moved
 //!   aside, never read again;
 //! - `save.tmp.orphan-<n>`: a `save.tmp` the boot did not load (it could
@@ -68,7 +68,6 @@ const BASELINE: &str = "baseline.json";
 const TMP: &str = "save.tmp";
 const NEW: &str = "save.new";
 const LOCK: &str = "engine.lock";
-const BASELINE_TMP: &str = "baseline.tmp";
 /// The name of a `save.tmp` moved aside, before its number.
 const ORPHAN: &str = "save.tmp.orphan-";
 /// The marker's name before the revision `current.json` holds (#32 F3-r4
@@ -114,13 +113,6 @@ pub struct Loaded {
     /// Why the state loaded may be older than one the directory holds
     /// (the engine raises each as an alarm, #32).
     pub alarms: Vec<String>,
-    /// The alarms among them that leave the live state in doubt: a state
-    /// file that could not be read, a `save.tmp` loaded without a
-    /// comparison, the revision continued above a file passed over. A
-    /// writer that replaces the live state (`iem-migrate import`) refuses
-    /// on these; an older `save.tmp` (its save moves it aside) or an orphan
-    /// above the state loaded is no such doubt (#32 F3-r4 6).
-    pub doubts: Vec<String>,
     /// What the chain found at `current.json` (the boot's recovery acts on
     /// it, #32).
     pub current_json: FileState,
@@ -329,9 +321,8 @@ impl Store {
         &self.dir
     }
 
-    /// Takes the state directory for this engine (or `iem-migrate import`),
-    /// before anything in it is read or written: the boot recovery moves
-    /// files, so a second engine, or an import while an engine runs, gets a
+    /// Takes the state directory for this engine, before anything in it is
+    /// read or written: the boot recovery moves files, so a second engine gets a
     /// `WouldBlock` error at once and stops before it touches a state file
     /// (#32 P5). The lock is an OS file lock on `engine.lock`, released
     /// with the lock or the process.
@@ -459,15 +450,6 @@ impl Store {
         }
         Ok(())
     }
-
-    /// Writes `baseline.json` through its own `baseline.tmp`, never
-    /// `save.tmp`, which may hold the only copy of an interrupted save (#32).
-    pub fn save_baseline(&self, p: &Persisted) -> io::Result<()> {
-        let tmp = self.dir.join(BASELINE_TMP);
-        self.write_synced(&tmp, &encode(p)?)?;
-        self.files.rename(&tmp, &self.dir.join(BASELINE))?;
-        self.files.sync_dir(&self.dir)
-    }
 }
 
 /// Saves 1 s after the last change, at most 5 s after the first (§2.4).
@@ -510,6 +492,11 @@ mod tests {
     use super::*;
     use crate::test_support::test_site;
     use iem_engine_proto::{InputId, InputState, Level, Mix};
+
+    /// A `baseline.json` as an older engine left it.
+    pub(super) fn write_baseline(s: &Store, p: &Persisted) {
+        fs::write(s.dir().join(BASELINE), encode(p).unwrap()).unwrap();
+    }
 
     pub(super) fn sample(rev: u64) -> Persisted {
         let mut p = Persisted {
@@ -632,7 +619,7 @@ mod tests {
         // would then wait 3 s for nothing).
         let (_d, s) = store();
         // A directory where engine.lock belongs: opening it fails on every
-        // OS (IsADirectory on Linux, access denied on Windows).
+        // OS (IsADirectory).
         fs::create_dir(s.dir().join(LOCK)).unwrap();
         let t0 = Instant::now();
         let e = s.lock_within(Duration::from_secs(3)).unwrap_err();
@@ -666,16 +653,6 @@ mod tests {
                 .unwrap_err()
                 .starts_with("not a state file")
         );
-    }
-
-    #[test]
-    fn a_baseline_write_leaves_an_interrupted_save_alone() {
-        let (_d, s) = store();
-        fs::write(s.dir().join(TMP), b"NEWEST").unwrap();
-        s.save_baseline(&sample(3)).unwrap();
-        assert_eq!(fs::read(s.dir().join(TMP)).unwrap(), b"NEWEST");
-        let baseline = fs::read(s.dir().join(BASELINE)).unwrap();
-        assert_eq!(decode(&baseline).unwrap().rev, 3);
     }
 
     #[test]

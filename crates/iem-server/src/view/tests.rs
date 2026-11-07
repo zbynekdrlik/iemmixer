@@ -1524,7 +1524,7 @@ fn a_gain_change_leaves_a_disabled_high_pass_off() {
 
 #[test]
 fn a_gain_change_enables_a_disabled_band() {
-    // ReaEQ's behaviour, kept from gen1 (P9: the band notices nothing):
+    // ReaEQ's behaviour, kept from gen1 (the band notices nothing):
     // moving the gain of a disabled band switches the band on.
     let eq = Eq::default();
     assert!(!eq.bands[1].enabled);

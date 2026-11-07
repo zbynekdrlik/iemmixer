@@ -31,31 +31,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
-          python3 -m unittest discover -s scripts/asio-spike -p 'test_*.py' -v
-          python3 -m unittest discover -s scripts/pc-tuning -p 'test_*.py' -v
           python3 -m unittest discover -s scripts/iem-pc -p 'test_*.py' -v
           python3 scripts/test_check_disposal_safety.py
-      - name: Golden tooling self-tests (numpy venv)
-        run: |
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/gvenv"
-          "$RUNNER_TEMP/gvenv/bin/pip" install --quiet numpy==2.4.6
-          "$RUNNER_TEMP/gvenv/bin/python" -m unittest discover -s scripts/golden -p 'test_*.py' -v
       - name: Leptos disposal safety
         run: python3 scripts/check_disposal_safety.py
-      - name: Gen 1 test parity manifest
-        run: python3 scripts/check_parity_manifest.py
       - name: Version consistency
         run: python3 scripts/check_version.py
       - name: Mutation exclusion line anchors
         run: python3 scripts/check_mutants_anchors.py
-      - name: Tray icons
-        run: |
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet pillow==11.3.0
-          cd crates/iem-tray/icons
-          "$RUNNER_TEMP/venv/bin/python" verify_icons.py
 
   gen3-scripts:
     # The Gen 3 box's scripts (provision, deploy, the installers, the live
@@ -86,8 +69,8 @@ jobs:
         run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
       - name: rustfmt
         run: cargo fmt --all -- --check
-      - name: Clippy (native, all features; the tray is linted on Windows)
-        run: cargo clippy --locked --workspace --exclude iem-tray --all-targets --all-features -- -D warnings
+      - name: Clippy (native, all features)
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Clippy (UI, DSP and engine protocol for wasm32; the EQ response function and the protocol are shared with the UI)
         run: cargo clippy --locked -p iem-ui -p iem-dsp -p iem-engine-proto --target wasm32-unknown-unknown -- -D warnings
 
@@ -109,14 +92,14 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
       - name: UI unit tests (native)
         run: cargo test --locked -p iem-ui --lib
-      - name: Tests with line coverage (iem-core, iem-server, iem-rpp, iem-dsp, iem-limiter-mga, engine crates, iem-migrate, iem-win, iem-guard, iem-soakclient, iem-dante) against the floor
+      - name: Tests with line coverage (iem-core, iem-server, iem-golden, iem-dsp, iem-limiter-mga, engine crates, iem-soakclient, iem-dante-dev) against the floor
         # Runs after a failed UI test step too (the job still fails): one CI
         # cycle reports every failing test.
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo llvm-cov --locked --no-fail-fast --package iem-core --package iem-server --package iem-rpp \
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --package iem-guard --package iem-soakclient --package iem-dante --all-features \
+          cargo llvm-cov --locked --no-fail-fast --package iem-core --package iem-server --package iem-golden \
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-soakclient --package iem-dante-dev --all-features \
             --json --summary-only --output-path "$RUNNER_TEMP/coverage.json"
           pct="$(jq '.data[0].totals.lines.percent' "$RUNNER_TEMP/coverage.json")"
           floor="$(tr -d '[:space:]' < .github/coverage-floor)"
@@ -185,63 +168,13 @@ jobs:
       - name: CPU benchmark of process() at B = 32 (typical p50 <= 25 %, worst p50 <= 100 % of 333 us; tails reported)
         run: cargo run --locked --release -p iem-engine --example bench
 
-  golden-bundle:
-    name: golden-bundle
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-    needs: [test]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Generate the golden bundle
-        run: cargo run --locked --release -p iem-rpp --bin iem-rpp-gen -- --out "$RUNNER_TEMP/golden-bundle"
-      - name: Check the bundle (hashes, plug-in allowlist, job-relative paths)
-        run: python3 scripts/golden/check_bundle.py "$RUNNER_TEMP/golden-bundle"
-      - name: Upload (dev pushes only — the only bundle that may reach the PC, P5)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: golden-bundle-${{ github.sha }}
-          path: ${{ runner.temp }}/golden-bundle
-          retention-days: 14
-          if-no-files-found: error
-
-  migrate-bin:
-    name: migrate-bin
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-    needs: [test]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Placeholder UI dist (rust-embed needs the folder)
-        run: mkdir -p crates/iem-ui/dist && echo placeholder > crates/iem-ui/dist/index.html
-      - name: Build the migration CLI (Linux, for private dry runs on the dev box, S4)
-        run: cargo build --locked --release -p iem-migrate
-      - name: Upload (dev pushes only)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: iem-migrate-linux-${{ github.sha }}
-          path: target/release/iem-migrate
-          retention-days: 14
-          if-no-files-found: error
-
   gen3-bin:
     name: gen3-bin
-    # The Gen 3 box's bundle (#72 phase C, plan Task 5) for scripts/gen3/deploy.sh:
+    # The Gen 3 box's bundle (#72 phase C) for scripts/gen3/deploy.sh:
     # the engine (it hosts our Dante device), the server with the UI, the
     # standalone device and the soak client (its token mint), built for
     # x86_64 Linux on every push and pull request and checked as they ship,
-    # uploaded only from a push to dev or main, as the PC's bundle is.
+    # uploaded only from a push to dev or main.
     needs: [test, wasm]
     runs-on: ubuntu-24.04
     # The e2e job's three release builds plus the device's (about 3 min on a
@@ -259,13 +192,14 @@ jobs:
           path: crates/iem-ui/dist
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build the engine, the soak client, the device and the server (release, x86_64 Linux)
-        # The server as the box runs it (plan choice 4): the e2e job's
-        # features, plain HTTP, the UI from wasm-dist embedded.
+        # The server as the box runs it: plain HTTP on
+        # port 80, the UI from wasm-dist embedded, and the tls feature for
+        # the HTTPS listener and its certificate keeper (#91).
         run: |
           set -euo pipefail
           cargo build --locked --release -p iem-engine -p iem-soakclient
-          cargo build --locked --release -p iem-dante --bin iem-dante-dev
-          cargo build --locked --release -p iem-server --features standalone,audio
+          cargo build --locked --release -p iem-dante-dev --bin iem-dante-dev
+          cargo build --locked --release -p iem-server --features standalone,tls,audio
       - name: Stage the bundle (the checks below run the staged copies)
         run: |
           set -euo pipefail
@@ -283,7 +217,7 @@ jobs:
               || { echo "::error::$name is not an x86-64 ELF executable: $kind"; exit 1; }
           done
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          dante="$(jq -r '.packages[] | select(.name == "iem-dante") | .version' <<< "$metadata")"
+          dante="$(jq -r '.packages[] | select(.name == "iem-dante-dev") | .version' <<< "$metadata")"
           engine="$(jq -r '.packages[] | select(.name == "iem-engine") | .version' <<< "$metadata")"
           said="$("$b/iem-dante-dev" --version)"
           echo "$said"
@@ -294,7 +228,7 @@ jobs:
           [ "$said" = "iem-engine ${engine}+${GITHUB_SHA}" ] \
             || { echo "::error::iem-engine --version says '$said', not 'iem-engine ${engine}+${GITHUB_SHA}'"; exit 1; }
       - name: The server names this build on a scratch copy of the test site, then stops on SIGTERM with exit 0
-        # The box's data (plan choice 4): the public test site and roster in a
+        # The box's data: the public test site and roster in a
         # folder of their own (the server writes its secrets beside them), a
         # free port, an engine socket nobody serves (the server keeps trying
         # to reach it; /api/version answers without it). The git_hash is the
@@ -371,9 +305,9 @@ jobs:
 
   gen3-attest:
     name: gen3-attest
-    # Provenance of the Gen 3 bundle (#72 phase D, plan Task 7) by the digest
+    # Provenance of the Gen 3 bundle (#72 phase D) by the digest
     # of its SHA256SUMS, which names the four binaries and BUILD (this commit):
-    # no checkout, no build, as `attest` does for the PC's zip. deploy.sh runs
+    # no checkout, no build. deploy.sh runs
     # `gh attestation verify` on that SHA256SUMS before anything leaves the
     # dev box.
     if: github.event_name == 'push'
@@ -547,17 +481,16 @@ jobs:
           CI: "true"
           E2E_BASE_URL: http://127.0.0.1:8080
         run: npx playwright test --reporter=list
-      - name: Live and Gen 3 specs listed (they run only from the ops live run and iempc gen3-mix; no LIVE_* here)
-        # Without the mock run's PINs as well: the ops browser job and
-        # `iempc gen3-mix` (#72) have none (no band PIN in GitHub, #10), so a
-        # live or Gen 3 spec that reads them at import (support/session.ts ->
+      - name: Live specs listed (they run only from iempc gen3-gate live; no LIVE_* here)
+        # Without the mock run's PINs as well:
+        # `iempc gen3-gate live` (#72) has none (no band PIN in GitHub, #10), so a
+        # live spec that reads them at import (support/session.ts ->
         # pins.ts) must fail here, not there.
         working-directory: e2e
         run: |
           set -euo pipefail
           env -u E2E_ENGINEER_PIN -u E2E_MEMBER_PIN npx playwright test --config playwright.live.config.ts --list
-          env -u E2E_ENGINEER_PIN -u E2E_MEMBER_PIN npx playwright test --config playwright.gen3.config.ts --list
-      - name: Soak client against the NullRt engine and the server (10 min on a push, 2 min on a pull request; S7 design note section 9), then the live run's minted tokens
+      - name: Soak client against the NullRt engine and the server (10 min on a push, 2 min on a pull request), then the live run's minted tokens
         # After Playwright, so no spec runs beside it. The client reads only (it
         # sends no mixer command) and listens to member9's mix, which no spec
         # changes (the tunnel pages only look at it). The member listen tap is
@@ -565,15 +498,15 @@ jobs:
         # member's mix gets no_source. The PIN goes in through the client's own
         # variable, never an argument. The verdict runs even when the client
         # ended early, so the log names what failed; --max-gaps 3 is the hosted
-        # runner's tolerance for scheduling stalls (the PC verdict wants 0).
+        # runner's tolerance for scheduling stalls (the box's gate only counts gaps).
         # The server must name the build first: its /api/version git_hash is
         # this checkout's `git rev-parse --short HEAD`, read when the step
         # above built it (iem-core's build.rs), so the client expects the
-        # same HEAD in full. Then 30 s in the PC's mode (#10 decision,
+        # same HEAD in full. Then 30 s in the box's mode (#10 decision,
         # 2026-10-07): no PIN, the client signs its own engineer token with
         # this server's own JWT secret (secrets/jwt_secret next to the site
         # file), so a real server reads a token the client signed before any
-        # PC soak does. Then the live run's tokens (S7 plan Task 23, #10
+        # box soak does. Then the live run's tokens (#10
         # 2026-10-08: no band PIN in GitHub): `iem-soakclient token` mints an
         # engineer and a member9 token from the same secret into new files
         # (never printed; curl reads each header from a file, so no token is
@@ -638,410 +571,6 @@ jobs:
             ${{ runner.temp }}/soakclient.json
             ${{ runner.temp }}/soakclient-secret.json
           retention-days: 7
-
-  windows:
-    name: windows
-    needs: [wasm]
-    runs-on: windows-2025
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Golden PC module self-test (Windows PowerShell 5.1, as on the PC)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/golden/Test-GoldenPc.ps1
-      - name: Guard PC module self-test, parse check of every PC script included (Windows PowerShell 5.1, as on the PC)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPc.ps1
-      - name: Guard PC module self-test, the other bootstrap steps (service right, bundle sums and Defender, runner, tunnel and predecessor facts; #36)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPcBootstrap.ps1
-      - name: Guard PC module self-test, HIL v1's helpers (#36)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemPcHilV1.ps1
-      - name: HIL script self-test (hil-v1.ps1 end to end against a stand-in iemmode, IemHil.psm1's checks; #10)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemHil.ps1
-      - name: OpenSSH default shell self-test (a test key, task folder and elevated root; the probe through cmd.exe, #15)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemSshShell.ps1
-      - name: Cutover self-test (the predecessor's autostarts exported, disabled and re-enabled, the guard's logon trigger; test task folders, an HKCU test key, a temp elevated root; S8, #11)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/iem-pc/Test-IemCutover.ps1
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: wasm-dist
-          path: crates/iem-ui/dist
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Clippy (server + tray, Windows-only code)
-        run: cargo clippy --locked -p iem-server -p iem-tray --all-targets --all-features -- -D warnings
-      - name: Pepper DPAPI tests
-        run: "cargo test --locked -p iem-server --all-features --lib pepper::"
-      - name: Clippy (engine crates on the engine's target OS)
-        run: cargo clippy --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --all-targets -- -D warnings
-      - name: Engine crate tests (library)
-        run: cargo test --locked -p iem-engine-proto -p iem-audio-io -p iem-engine --lib
-      - name: Engine pipe tests on named pipes (private DACL, first instance, peeking readers)
-        run: cargo test --locked -p iem-engine --test pipes
-      - name: Clippy (Windows glue iem-win, with its Ctrl-Break test helper)
-        run: cargo clippy --locked -p iem-win --all-targets --features test-helper -- -D warnings
-      - name: Windows glue tests (processes, ports, windows, registry under a test key, Ctrl-Break to a child)
-        run: cargo test --locked -p iem-win --features test-helper
-      # One cargo command per step: the pwsh wrapper stops only on the last
-      # command's exit code, so a lint-only clippy failure followed by green
-      # tests would pass the step.
-      - name: Guard clippy (its Windows effects WinPc build here only; the pure core runs on Linux too)
-        run: cargo clippy --locked -p iem-guard --all-targets -- -D warnings
-      - name: Guard tests on Windows
-        run: cargo test --locked -p iem-guard
-      - name: Migration CLI clippy (it runs on the PC; the PIN pepper is DPAPI here)
-        run: cargo clippy --locked -p iem-migrate --all-targets -- -D warnings
-      - name: Migration CLI tests on Windows
-        run: cargo test --locked -p iem-migrate
-      # The first compile of the soak client's Windows path (its CPU Sets
-      # through iem_win::power::set_cpu_sets); the bundle job builds it.
-      - name: Soak client clippy (its Windows CPU Sets)
-        run: cargo clippy --locked -p iem-soakclient --all-targets -- -D warnings
-      # The PC runs it on Windows: the fake-server tests read Windows sockets,
-      # whose read timeout is TimedOut, not WouldBlock (.claude/rules/soak.md).
-      - name: Soak client tests on Windows
-        run: cargo test --locked -p iem-soakclient
-
-  bundle:
-    name: bundle
-    # The one bundle that may reach the PC (P5, S6 design note section 5.5): built
-    # on every push and pull request, verified by the guard's own install code,
-    # uploaded only from a push to dev or main, then attested by digest.
-    needs: [windows]
-    runs-on: windows-2025
-    timeout-minutes: 40
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: wasm-dist
-          path: crates/iem-ui/dist
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Build (release; the server as the PC runs it, with TLS and the audio paths)
-        run: cargo build --locked --release -p iem-engine -p iem-server -p iem-guard -p iem-tray -p iem-migrate -p iem-soakclient --features iem-server/standalone,iem-server/tls,iem-server/audio
-      - name: Zip with manifest and sums
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $b = Join-Path $env:RUNNER_TEMP 'bundle'
-          New-Item -ItemType Directory -Force -Path $b | Out-Null
-          # The soak client rides along (S7) but is not required: older bundles still install.
-          $exes = 'iem-engine', 'iem-server', 'iemmixer-guard', 'iemmode', 'iem-tray', 'iem-migrate', 'iem-soakclient' | ForEach-Object { "target/release/$_.exe" }
-          Copy-Item -LiteralPath $exes -Destination $b
-          # IemSshShell.psm1 (#15, iempc ssh-shell), IemHil.psm1 (#10, HIL v2's checks, which
-          # hil-v1.ps1 imports from its own folder) and IemCutover.psm1 (#11, iempc cutover) are
-          # not required: older bundles still install.
-          Copy-Item -LiteralPath scripts/iem-pc/hil-v1.ps1, scripts/iem-pc/IemPc.psm1, scripts/iem-pc/IemSshShell.psm1, scripts/iem-pc/IemHil.psm1, scripts/iem-pc/IemCutover.psm1 -Destination $b
-          # IemPc.psm1's siblings (#36: it imports them from its own folder; iempc stages them before
-          # it on every admin-only path). Not required either: a bundle from before the split still
-          # installs, and its IemPc.psm1 is one file.
-          Copy-Item -LiteralPath scripts/iem-pc/IemPcAcl.psm1, scripts/iem-pc/IemPcTasks.psm1, scripts/iem-pc/IemPcBootPref.psm1, scripts/iem-pc/IemPcFastStartup.psm1, scripts/iem-pc/IemPcPref.psm1, scripts/iem-pc/IemPcState.psm1, scripts/iem-pc/IemPcHilV1.psm1 -Destination $b
-          Copy-Item -LiteralPath crates/iem-engine/LICENSE -Destination (Join-Path $b 'LICENSE-iem-engine')
-          # The S1c tuning modules, one level deep (bundle names allow tuning/<name> only).
-          if (Test-Path -LiteralPath scripts/pc-tuning) {
-            New-Item -ItemType Directory -Force -Path (Join-Path $b 'tuning') | Out-Null
-            Copy-Item -Path scripts/pc-tuning/*.psm1 -Destination (Join-Path $b 'tuning')
-          }
-          # [workspace.package].version, read from its own table (never the first version line).
-          $version = ''
-          $inPackage = $false
-          foreach ($line in Get-Content -LiteralPath Cargo.toml) {
-            if ($line -match '^\s*\[') { $inPackage = ($line.Trim() -ceq '[workspace.package]'); continue }
-            if ($inPackage -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
-          }
-          if (-not $version) { throw 'no [workspace.package] version in Cargo.toml' }
-          $branch = if ($env:GITHUB_REF -like 'refs/heads/*') { $env:GITHUB_REF.Substring(11) } else { 'pr' }
-          # guard_lifecycle (S8 lane 5, #11): this build's guard keeps the lifecycle; in prod
-          # `activate` refuses a bundle without it (bundle::keeps_lifecycle).
-          [ordered]@{ sha = $env:GITHUB_SHA; branch = $branch; version = $version; run = [int64]$env:GITHUB_RUN_ID; guard_lifecycle = 1 } | ConvertTo-Json |
-            Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $b 'manifest.json')
-          $lines = Get-ChildItem -LiteralPath $b -File -Recurse | Sort-Object FullName | ForEach-Object {
-            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring($b.Length + 1).Replace('\', '/')
-          }
-          [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
-          Get-Content -LiteralPath (Join-Path $b 'SHA256SUMS')
-          Compress-Archive -Path (Join-Path $b '*') -DestinationPath (Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip")
-      - name: Verify the zip with the code that installs it; a tampered copy is refused
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $zip = Join-Path $env:RUNNER_TEMP "iemmixer-$env:GITHUB_SHA.zip"
-          & target/release/iemmixer-guard.exe install $zip --verify-only
-          if ($LASTEXITCODE -ne 0) { throw "bundle verify failed ($LASTEXITCODE)" }
-          $t = Join-Path $env:RUNNER_TEMP 'tampered'
-          Copy-Item -Recurse -LiteralPath (Join-Path $env:RUNNER_TEMP 'bundle') -Destination $t
-          Add-Content -LiteralPath (Join-Path $t 'hil-v1.ps1') -Value '# tampered after the sums'
-          $out = New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'tampered-zip')
-          $bad = Join-Path $out.FullName "iemmixer-$env:GITHUB_SHA.zip"
-          Compress-Archive -Path (Join-Path $t '*') -DestinationPath $bad
-          # The refusal must name the tampered file's sum, not fail for another reason.
-          $ErrorActionPreference = 'Continue'
-          $said = (& target/release/iemmixer-guard.exe install $bad --verify-only 2>&1 | ForEach-Object { "$_" }) -join "`n"
-          $code = $LASTEXITCODE
-          $ErrorActionPreference = 'Stop'
-          Write-Output $said
-          if ($code -eq 0) { throw 'install --verify-only accepted a tampered bundle' }
-          if ($said -cnotmatch 'hil-v1\.ps1: sha256 [0-9a-f]{64}, SHA256SUMS says [0-9a-f]{64}') {
-            throw "install --verify-only refused the tampered bundle ($code) without naming hil-v1.ps1's sum"
-          }
-          $global:LASTEXITCODE = 0
-      - name: Upload (dev/main pushes only, P5)
-        if: github.event_name == 'push'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: iemmixer-bundle-${{ github.sha }}
-          path: ${{ runner.temp }}/iemmixer-${{ github.sha }}.zip
-          retention-days: 30
-          if-no-files-found: error
-
-  attest:
-    name: attest
-    # Provenance of the zip by digest: no checkout, no build. The dev box reads
-    # this run's jobs and dispatches the private ops repo's HIL itself (iempc
-    # dispatch-hil); no dispatch job and no token live here (design section 7).
-    if: github.event_name == 'push'
-    needs: [bundle]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      id-token: write
-      attestations: write
-      contents: read
-    outputs:
-      digest: ${{ steps.d.outputs.digest }}
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: iemmixer-bundle-${{ github.sha }}
-      - name: Digest of the zip
-        id: d
-        run: |
-          set -euo pipefail
-          sum="$(sha256sum "iemmixer-${GITHUB_SHA}.zip" | cut -d' ' -f1)"
-          [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no digest for iemmixer-${GITHUB_SHA}.zip"; exit 1; }
-          echo "digest=sha256:$sum" >> "$GITHUB_OUTPUT"
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: iemmixer-${{ github.sha }}.zip
-          subject-digest: ${{ steps.d.outputs.digest }}
-
-  asio-spike:
-    name: asio-spike
-    runs-on: windows-2025
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Spike PC module self-test (Windows PowerShell 5.1, as on the PC)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/asio-spike/Test-SpikePc.ps1
-      - name: Tuning module self-test (Windows PowerShell 5.1, real backends on the ephemeral runner)
-        shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/pc-tuning/Test-IemTuning.ps1
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # One cargo command per step (the pwsh wrapper stops only on the last
-      # command's exit code).
-      - name: Audio I/O clippy on Windows (format, telemetry, the ASIO host builds, the spike's parser)
-        run: cargo clippy --locked -p iem-audio-io --all-targets -- -D warnings
-      - name: Audio I/O tests on Windows
-        run: cargo test --locked -p iem-audio-io
-      - name: Build the spike (release)
-        run: cargo build --locked --release -p iem-audio-io --example asio_spike
-      - name: Without an ASIO driver the spike reports no-driver and exits 3
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $report = Join-Path $env:RUNNER_TEMP 'probe.json'
-          & target/release/examples/asio_spike.exe probe --driver 'No Such Card' --report $report --stop-file (Join-Path $env:RUNNER_TEMP 'stop')
-          if ($LASTEXITCODE -ne 3) { throw "exit $LASTEXITCODE, expected 3" }
-          $r = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
-          if ($r.outcome -ne 'no-driver') { throw "outcome $($r.outcome), expected no-driver" }
-          $global:LASTEXITCODE = 0
-      - name: Bundle (spike, PC scripts, SHA256SUMS)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $b = Join-Path $env:RUNNER_TEMP 'asio-spike'
-          New-Item -ItemType Directory -Force -Path $b | Out-Null
-          Copy-Item -LiteralPath target/release/examples/asio_spike.exe, scripts/asio-spike/SpikePc.psm1, scripts/asio-spike/spike-task.ps1, scripts/golden/GoldenPc.psm1, scripts/pc-tuning/IemTuning.psm1, scripts/pc-tuning/IemTuningStore.psm1, scripts/pc-tuning/IemMeasure.psm1 -Destination $b
-          $lines = Get-ChildItem -LiteralPath $b -File | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
-          [IO.File]::WriteAllText((Join-Path $b 'SHA256SUMS'), (($lines -join "`n") + "`n"))
-      # The S1c measurement poll is PowerShell composed in Python: run it here
-      # exactly as sw.ps sends it (Windows PowerShell 5.1, the bundle's
-      # SpikePc import) and check the sample the dev box reads (#32 review m11).
-      - name: Measurement poll runs as on the PC (Windows PowerShell 5.1)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'pcroot'
-          New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin') | Out-Null
-          Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
-          $tid = (Get-Process -Id $PID).Threads[0].Id
-          $sums = Join-Path $env:RUNNER_TEMP 'asio-spike\SHA256SUMS'
-          $script = @(python scripts/pc-tuning/tuning_window.py poll-script --root $root --governor EventLog --pid $PID --tid $tid --sums $sums)
-          if ($LASTEXITCODE -ne 0) { throw "poll-script exited $LASTEXITCODE" }
-          $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
-          if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
-          $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
-          if (-not $doc.ok) { throw "the poll failed: $($doc.error)" }
-          $s = $doc.r
-          if (@($s.cpu.cpus).Count -lt 1) { throw 'no per-CPU counters' }
-          foreach ($f in 'lp', 't100ns', 'interrupts', 'dpcs', 'dpc_time', 'int_time', 'idle_time', 'c1_time', 'c2_time', 'c3_time') {
-            if ($null -eq @($s.cpu.cpus)[0].$f) { throw "counter field $f missing" }
-          }
-          if ($s.plan -notmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { throw "plan '$($s.plan)'" }
-          if ($s.governor -ne 'Running') { throw "governor '$($s.governor)'" }
-          if ($null -eq $s.thread -or $null -eq $s.thread.base -or $null -eq $s.thread.current) { throw 'no callback-thread priority' }
-          if (-not $s.at) { throw 'no sample time' }
-          Write-Output "poll sample: $(@($s.cpu.cpus).Count) CPUs, plan $($s.plan), thread priority $($s.thread.base)/$($s.thread.current)"
-          $global:LASTEXITCODE = 0
-      # An analysis step's start (S1c measure) is PowerShell composed in Python too:
-      # run it exactly as sw.ps sends it, with the bundle as bin. Without a stop file,
-      # or with one older than the analysis start, it starts at Idle and loads the
-      # tuning modules; a stop file written after the start (a pre-emption) refuses
-      # it with the text the dev box turns into EventNow (#32 F2 round 3 m11).
-      - name: Analysis guard runs as on the PC (Windows PowerShell 5.1)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'pcroot-analysis'
-          New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin'), (Join-Path $root 'queue') | Out-Null
-          Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
-          $stop = Join-Path $root 'queue\stop'
-          $sums = Join-Path $env:RUNNER_TEMP 'asio-spike\SHA256SUMS'
-          $since = (Get-Date).ToUniversalTime().ToString('o')
-          $refused = @(python -c "import sys; sys.path.insert(0, 'scripts/pc-tuning'); import tuning_window as tw; print(tw.ANALYSIS_REFUSED)")[-1]
-          if ($LASTEXITCODE -ne 0 -or -not $refused) { throw "the refusal text could not be read (exit $LASTEXITCODE)" }
-          function Invoke-AnalysisStep {
-            $script = @(python scripts/pc-tuning/tuning_window.py analysis-script --root $root --since $since --sums $sums)
-            if ($LASTEXITCODE -ne 0) { throw "analysis-script exited $LASTEXITCODE" }
-            $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
-            if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
-            return (@($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json)
-          }
-          $doc = Invoke-AnalysisStep
-          if (-not $doc.ok) { throw "no stop file: the step did not start: $($doc.error)" }
-          if ($doc.r.priority -ne 'Idle' -or -not $doc.r.now -or $doc.r.tuning -ne $true) {
-            throw "no stop file: priority '$($doc.r.priority)', now '$($doc.r.now)', IemTuning loaded '$($doc.r.tuning)'"
-          }
-          # The step ran (and IemTuning's Add-Type compiled) with the admin-only elevated temp,
-          # never the user's TEMP (#15); GetTempPath ends with a backslash.
-          $etemp = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\temp') + '\'
-          if ($doc.r.temp -ne $etemp) { throw "the step's temp folder is '$($doc.r.temp)', not '$etemp'" }
-          # The five modules (IemTuning's store too, #34) were imported from the
-          # admin-only stage, never from bin (#15).
-          $estage = (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'iemmixer\bootstrap-stage') + '\'
-          $mods = @($doc.r.modules)
-          if ($mods.Count -ne 5 -or @($mods | Where-Object { -not "$_".StartsWith($estage, [StringComparison]::OrdinalIgnoreCase) }).Count -ne 0) {
-            throw "the step's modules are not all in the stage: $($mods -join ', ')"
-          }
-          New-Item -ItemType File -Force -Path $stop | Out-Null
-          (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow.AddMinutes(-5)
-          $doc = Invoke-AnalysisStep
-          if (-not $doc.ok -or $doc.r.priority -ne 'Idle') { throw "an older stop file: the step did not start: $($doc.error)" }
-          (Get-Item -LiteralPath $stop).LastWriteTimeUtc = [datetime]::UtcNow
-          $doc = Invoke-AnalysisStep
-          if ($doc.ok) { throw 'a stop file written after the analysis start did not refuse the step' }
-          if ("$($doc.error)" -ne $refused) { throw "refused with '$($doc.error)', expected '$refused'" }
-          Write-Output "analysis guard: starts at Idle without a newer stop file, refused with '$refused' after one"
-          $global:LASTEXITCODE = 0
-      # The preempt's first call at "ide event" (#15): plain PowerShell with no module
-      # and no stage. Run it exactly as sw.plain_ps sends it, through the remote
-      # command every ssh call names (elevated_ps.REMOTE) as a cmd.exe default shell
-      # runs it: it writes the spike's stop file and counts the spike (none runs here).
-      - name: Preempt's first call runs as on the PC (Windows PowerShell 5.1)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'pcroot-preempt'
-          New-Item -ItemType Directory -Force -Path (Join-Path $root 'queue') | Out-Null
-          $script = @(python scripts/pc-tuning/tuning_window.py preempt-script --root $root)
-          if ($LASTEXITCODE -ne 0) { throw "preempt-script exited $LASTEXITCODE" }
-          $remote = @(python -c "import sys; sys.path.insert(0, 'scripts/asio-spike'); import elevated_ps; print(elevated_ps.REMOTE)")[-1]
-          if ($LASTEXITCODE -ne 0 -or -not $remote) { throw "elevated_ps.REMOTE could not be read (exit $LASTEXITCODE)" }
-          $out = @($script | & cmd.exe /c $remote)
-          if ($LASTEXITCODE -ne 0) { throw "cmd.exe /c '$remote' exited $LASTEXITCODE" }
-          $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
-          if (-not $doc.ok) { throw "the preempt's first call failed: $($doc.error)" }
-          if ($doc.r -ne 0) { throw "spike count '$($doc.r)', expected 0" }
-          if (-not (Test-Path -LiteralPath (Join-Path $root 'queue\stop') -PathType Leaf)) { throw 'the stop file was not written' }
-          Write-Output "preempt's first call: the stop file written, spike count $($doc.r)"
-          $global:LASTEXITCODE = 0
-      # Every trace stop (#15): the stop as sw.ps sends it (the stage, IemMeasure's
-      # stop-only import, Stop-IemTraceSessions) ends within the ssh call's bound,
-      # TRACE_STOP_CALL_S. Our kernel logger and marker session run, so the stop
-      # makes the four logman calls the bound counts. The run folder lies under
-      # ProgramData (an 8.3 temp path may read back in its long form, pc-tuning.md).
-      - name: Trace stop as sent ends within its bound (Windows PowerShell 5.1)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'pcroot-trace-stop'
-          New-Item -ItemType Directory -Force -Path (Join-Path $root 'bin') | Out-Null
-          Copy-Item -Path (Join-Path $env:RUNNER_TEMP 'asio-spike\*') -Destination (Join-Path $root 'bin')
-          $run = Join-Path $env:ProgramData ('iem-trace-stop-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-          New-Item -ItemType Directory -Force -Path $run | Out-Null
-          $sums = Join-Path $env:RUNNER_TEMP 'asio-spike\SHA256SUMS'
-          $limit = [double](@(python -c "import sys; sys.path.insert(0, 'scripts/asio-spike'); import spike_window as sw; print(sw.TRACE_STOP_CALL_S)")[-1])
-          if ($LASTEXITCODE -ne 0 -or $limit -le 0) { throw "TRACE_STOP_CALL_S could not be read (exit $LASTEXITCODE)" }
-          $script = @(python scripts/pc-tuning/tuning_window.py trace-stop-script --root $root --dir $run --sums $sums)
-          if ($LASTEXITCODE -ne 0) { throw "trace-stop-script exited $LASTEXITCODE" }
-          $started = @()
-          try {
-            $out = & logman.exe start IemMarkers -p '{3b6c1e0a-5d2f-4c8e-9a71-0e4f2d9b8c11}' -o (Join-Path $run 'markers.etl') -ets
-            if ($LASTEXITCODE -ne 0) { throw "logman start IemMarkers exited ${LASTEXITCODE}: $out" }
-            $started += 'IemMarkers'
-            $out = & logman.exe start 'NT Kernel Logger' -p 'Windows Kernel Trace' '(process,thread)' -o (Join-Path $run 'kernel.etl') -ets
-            if ($LASTEXITCODE -ne 0) { throw "logman start NT Kernel Logger exited $LASTEXITCODE (another one runs?): $out" }
-            $started += 'NT Kernel Logger'
-            $clock = [Diagnostics.Stopwatch]::StartNew()
-            $out = @($script | powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -)
-            $took = $clock.Elapsed.TotalSeconds
-            if ($LASTEXITCODE -ne 0) { throw "powershell exited $LASTEXITCODE" }
-            $doc = @($out | Where-Object { "$_".Trim() })[-1] | ConvertFrom-Json
-            if (-not $doc.ok) { throw "the trace stop failed: $($doc.error)" }
-            $stopped = @($doc.r.stopped)
-            if (@($doc.r.kept).Count -ne 0 -or $stopped -notcontains 'NT Kernel Logger' -or $stopped -notcontains 'IemMarkers') {
-              throw "the trace stop did not stop both sessions: stopped '$($stopped -join ', ')', kept '$(@($doc.r.kept) -join ', ')'"
-            }
-            # On the PC the same bound also covers ssh's connect (ConnectTimeout 10 s) and
-            # its authentication: 15 s of it are kept for those. The stage copies exist
-            # already (the earlier steps), as they do on the PC after any session.
-            $budget = $limit - 15
-            if ($took -ge $budget) { throw "the trace stop took $([math]::Round($took, 1)) s; TRACE_STOP_CALL_S ($limit s) less 15 s for ssh leaves $budget s" }
-            Write-Output "trace stop as sent: $([math]::Round($took, 1)) s of $budget s ($limit s less 15 s for ssh), stopped $($stopped -join ', ')"
-          } finally {
-            foreach ($s in $started) {   # only the sessions this step started, if the stop left them
-              & logman.exe query $s -ets *> $null
-              if ($LASTEXITCODE -eq 0) { & logman.exe stop $s -ets | Out-Null }
-            }
-          }
-          $global:LASTEXITCODE = 0
-      - name: Upload (dev pushes only — the only spike that may reach the PC, P5)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: asio-spike-${{ github.sha }}
-          path: ${{ runner.temp }}/asio-spike
-          retention-days: 14
-          if-no-files-found: error
 
   supply-chain:
     name: supply-chain
@@ -1139,7 +668,6 @@ jobs:
       - name: The next dev→main PR's mutants fit the shard matrix
         env:
           # Mutants one shard tests within its 20-minute budget, setup included.
-          # Task 16 measures shard durations and adjusts this value.
           MUTANTS_PER_SHARD: "12"
         run: |
           set -euo pipefail
@@ -1147,8 +675,8 @@ jobs:
           count=0
           if [ -s "$RUNNER_TEMP/pr.diff" ]; then
             cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" \
-              --package iem-core --package iem-server --package iem-ui --package iem-rpp \
-              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --package iem-guard --package iem-soakclient --package iem-dante > "$RUNNER_TEMP/mutants.txt"
+              --package iem-core --package iem-server --package iem-ui --package iem-golden \
+              --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-soakclient --package iem-dante-dev > "$RUNNER_TEMP/mutants.txt"
             count="$(wc -l < "$RUNNER_TEMP/mutants.txt")"
           fi
           [ "$(grep -cE '^ +shard: \[' .github/workflows/ci.yml)" -eq 1 ] \
@@ -1181,7 +709,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
       - name: Build the mutants profile once (the shards restore this cache)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate -p iem-win -p iem-guard -p iem-soakclient -p iem-dante --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-golden -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-soakclient -p iem-dante-dev --all-features --all-targets
       - name: Unmutated tests under the mutants profile (every test's duration; the shards skip the baseline)
         env:
           # A test that fails or times out here unmutated would make every
@@ -1192,7 +720,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=()
-          for p in iem-core iem-server iem-ui iem-rpp iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-migrate iem-win iem-guard iem-soakclient iem-dante; do
+          for p in iem-core iem-server iem-ui iem-golden iem-dsp iem-limiter-mga iem-engine-proto iem-audio-io iem-engine iem-soakclient iem-dante-dev; do
             echo "::group::$p"
             cargo nextest run --locked --cargo-profile mutants --no-fail-fast -p "$p" --all-features --all-targets || failed+=("$p")
             echo "::endgroup::"
@@ -1230,7 +758,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.146
       - name: Warm target (dependencies restored; workspace crates build once, then are copied per job)
-        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-rpp -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-migrate -p iem-win -p iem-guard -p iem-soakclient -p iem-dante --all-features --all-targets
+        run: cargo nextest run --locked --cargo-profile mutants --no-run -p iem-core -p iem-server -p iem-ui -p iem-golden -p iem-dsp -p iem-limiter-mga -p iem-engine-proto -p iem-audio-io -p iem-engine -p iem-soakclient -p iem-dante-dev --all-features --all-targets
       - name: Diff-scoped mutants
         env:
           # .config/nextest.toml: stop at the first failing test (fail fast on hangs).
@@ -1242,8 +770,8 @@ jobs:
             echo "No Rust changes against ${{ github.base_ref }}: no mutants to test."
             exit 0
           fi
-          packages=(--package iem-core --package iem-server --package iem-ui --package iem-rpp
-            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-migrate --package iem-win --package iem-guard --package iem-soakclient --package iem-dante)
+          packages=(--package iem-core --package iem-server --package iem-ui --package iem-golden
+            --package iem-dsp --package iem-limiter-mga --package iem-engine-proto --package iem-audio-io --package iem-engine --package iem-soakclient --package iem-dante-dev)
           # --timeout: with --baseline=skip cargo-mutants has no measured test time
           # and would allow 300 s per mutant; the tests take ~6 s.
           status=0

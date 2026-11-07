@@ -36,7 +36,7 @@ DONE = 1
 MORE = 0x8112
 MAX_RX = 1024
 MAX_NAME = 31
-# Characters Dante refuses in a channel label (dante_card.FORBIDDEN).
+# Characters Dante refuses in a channel label.
 FORBIDDEN = frozenset("=.@")
 
 

@@ -490,7 +490,7 @@ fn clears_shown_alert(shown: Option<&(String, String)>, cleared: &str) -> bool {
 /// Create and connect a WebSocket, wiring up message handlers to signals
 // Eight parameters: the Rc/Arc handles are created once by `setup_connection`
 // and shared by its two call sites (initial connect and the reconnect loop);
-// bundling them into a struct is a refactor of imported code outside S0.
+// bundling them into a struct is a refactor of imported code outside this change.
 #[allow(clippy::too_many_arguments)]
 fn connect_websocket(
     member: &str,

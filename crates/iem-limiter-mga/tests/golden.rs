@@ -10,9 +10,9 @@
     clippy::field_reassign_with_default
 )]
 
+use iem_golden::golden::{Goldens, s1b_dir};
+use iem_golden::stimulus::hot_material;
 use iem_limiter_mga::{LINK_PCT, Limiter, Mga, RELEASE_MS, Sliders};
-use iem_rpp::golden::{Goldens, s1b_dir};
-use iem_rpp::stimulus::hot_material;
 
 const FIXTURE: &str = include_str!("../fixtures/MGA_JSLimiterST");
 

@@ -198,7 +198,7 @@ fn notify_without_a_subscription_exits_3() {
     );
 }
 
-/// The guard's alarms go to the engineer's subscriptions (#9 2026-09-28):
+/// The alarm unit's notices go to the engineer's subscriptions (#9 2026-09-28):
 /// with one, the notice gets as far as the VAPID key, which a notice never
 /// creates (exit 1, no secret made).
 #[test]

@@ -1,13 +1,12 @@
-"""`iempc gen3-gate soak` (#72 phase H, plan
-docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Task 7): the soak
-on the Gen 3 box that serves the band. The PC's soak (the ops soak.yml,
-.claude/rules/soak.md) driven from the dev box over ssh: `iem-soakclient` on
+"""`iempc gen3-gate soak` (#72 phase H): the soak
+on the Gen 3 box that serves the band (.claude/rules/soak.md), driven from
+the dev box over ssh: `iem-soakclient` on
 the box, beside the dev box's reads of the box's own counters, its verdict
 posted as the commit status `soak/gen3` on the box's build. Its call site is
 iempc_gen3_gate.run.
 
-Dev time, locked, a box command, only while 3.x serves (iempc's Spec and
-WHILE_3X_SERVES, as `gen3-gate hil` and `live`): the dev box's flag is the
+Dev time, locked, a box command, (iempc's Spec, as
+`gen3-gate hil` and `live`): the dev box's flag is the
 event gate. `--minutes` is one of MINUTES (10, 30, 60, 120; default 120: the
 owner sizes tests to an event of at most 2 h), each one fixed line of the
 sudo rule. No HIL job and no engine restart: the soak runs against the
@@ -59,8 +58,7 @@ reset-failed), the env file and the summary removed on the box.
 **The verdict**, every check run, its words in FAILURES' order:
 - not_finished: the client still ran at the bound; client: its unit's
   result not `success` or its exit not 0;
-- harness: soak_verdict.box_check over the client's summary (the PC
-  verdict's checks 9, 11 and 12 at its bounds: complete, the run's seconds,
+- harness: soak_verdict.box_check over the client's summary (complete, the run's seconds,
   no reconnect, 99 % of the expected listen frames; then a meter frame). The
   listen gaps are counted, not judged (owner on #72, 2026-10-29: the browser
   listen is low priority, #88);
@@ -77,11 +75,13 @@ reset-failed), the env file and the summary removed on the box.
 - clock_not_ready: a read whose clock was not ready;
 - holdover: a read in holdover, or the clock's holdovers rose;
 - re_anchor: the clock's re_anchors rose or its epoch changed;
-- rx_late: an RX flow's late packets rose;
-- tx_holes: a TX flow's holes rose.
-Information only: the RX channels' ring holes (`rx_holes`: a stage device
-that stops leaves holes the box did not cause), the longest block since the
-engine started (`max_process_us`), the worst RX flow lateness of a second in
+- rx_late: an RX flow's late packets rose (judged per flow by the stack);
+- tx_holes: a TX flow's holes rose;
+- rx_holes: an RX channel's ring holes rose (owner, 2026-10-31 on #72: zero
+  loss, a stage device that stops fails it too);
+- rx_off: a read with a subscribed RX channel that does not receive.
+Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
+Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in
 samples (`lateness_max`). A rise is summed read to read; a count that went
 back counts its new value from 0.
 
@@ -150,7 +150,7 @@ RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "
 # The failures a verdict names, in its order.
 FAILURES = ("not_finished", "client", "harness", "polls", "health", "restarted", "pump_stalled", "pump_late",
             "pump_missed", "pump_overruns", "pump_rebootstraps", "clock_not_ready", "holdover", "re_anchor",
-            "rx_late", "tx_holes")
+            "rx_late", "tx_holes", "rx_holes", "rx_off")
 DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min)"
 DESC_FAIL = "the Gen 3 box's soak failed: "
 
@@ -194,7 +194,7 @@ def _by(rows: list[dict], key: str, value: str) -> dict[str, int]:
     return out
 
 
-def sample(status) -> dict | None:
+def sample(status, optional: frozenset[int] = frozenset()) -> dict | None:
     """The numbers the soak judges from one `ctl status` (pure); None when it
     is not a status. `engine` is None without the pump's object."""
     clock = status.get("clock") if isinstance(status, dict) else None
@@ -205,7 +205,8 @@ def sample(status) -> dict | None:
         rx = g3.rows(status, "rx")
         s["rx_late"] = _by(rx, "flow", "late")
         s["tx_holes"] = _by(g3.rows(status, "tx"), "flow", "holes")
-        s["rx_holes"] = _by(g3.rows(status, "channels"), "rx", "holes")
+        s["rx_holes"] = _by([c for c in g3.rows(status, "channels") if c.get("rx") not in optional], "rx", "holes")
+        s["rx_off"] = len(gate.not_receiving(status, optional))
         lateness = [_count(r, "lateness") for r in rx]
     except ValueError:
         return None
@@ -214,7 +215,7 @@ def sample(status) -> dict | None:
     s["lateness"] = max(lateness, default=0)
     engine = {k: _count(status.get("engine"), k) for k in ENGINE_KEYS}
     s["engine"] = None if any(v is None for v in engine.values()) else engine
-    return {k: s[k] for k in (*CLOCK_KEYS, "engine", "rx_late", "tx_holes", "rx_holes", "lateness")}
+    return {k: s[k] for k in (*CLOCK_KEYS, "engine", "rx_late", "tx_holes", "rx_holes", "rx_off", "lateness")}
 
 
 def growth(values: list[dict]) -> tuple[int, int]:
@@ -337,6 +338,7 @@ def judged(samples: list[dict]) -> dict:
     for key in ("rx_late", "tx_holes", "rx_holes"):
         out[key], b = growth([s[key] for s in samples])
         back += b
+    out["rx_off"] = sum(1 for s in samples if s["rx_off"])
     out["lateness_max"] = max((s["lateness"] for s in samples), default=None)
     out["counts_back"] = back
     return out
@@ -391,7 +393,8 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
                             ("pump_missed", j["pump_missed"]), ("pump_overruns", j["pump_overruns"]),
                             ("pump_rebootstraps", j["pump_rebootstraps"]), ("clock_not_ready", j["clock_not_ready"]),
                             ("holdover", j["holdovers"] + j["in_holdover"]), ("re_anchor", j["re_anchors"]),
-                            ("rx_late", j["rx_late"]), ("tx_holes", j["tx_holes"])):
+                            ("rx_late", j["rx_late"]), ("tx_holes", j["tx_holes"]),
+                            ("rx_holes", j["rx_holes"]), ("rx_off", j["rx_off"])):
             if value:
                 failed.append(word)
     ended = w.finished and w.unit is not None
@@ -504,11 +507,15 @@ def baseline(box: gate.Box, w: Watch) -> None:
     pump, the stack's units."""
     no = f"no {NAME} gate"
     status = box.device_status()
-    s = sample(status) if status is not None else None
+    s = sample(status, box.optional) if status is not None else None
     if s is None:
         raise box.ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
     if s["engine"] is None:
         raise box.ip.Refused(f"{no}: the Gen 3 device's status shows no engine (nothing was changed)")
+    if s["rx_off"]:
+        # Right after a start the flows still subscribe: their first holes are
+        # no loss, and a run counted from here fails on them.
+        raise box.ip.Refused(f"{no}: {s['rx_off']} required RX channels do not receive yet (nothing was changed)")
     units = read_stack(box)
     if units is None:
         raise box.ip.Refused(f"{no}: the stack's units could not be read (systemctl show of {', '.join(STACK)}) "
@@ -556,7 +563,7 @@ def start(job: Job, sha: str, member: str, minutes: int) -> None:
 
 def read_sample(box: gate.Box, w: Watch) -> None:
     status = box.device_status()
-    s = sample(status) if status is not None else None
+    s = sample(status, box.optional) if status is not None else None
     if s is None:
         w.failed_reads += 1
         return
@@ -681,7 +688,7 @@ def soak_run(job: Job, w: Watch, sha: str, member: str) -> None:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate soak [--minutes N]` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate soak [--minutes N]` (dev time, locked)."""
     minutes = minutes_of(ip, ctx.args)
     host = g3.gen3_host(ip, ctx.env, gate.WORDS)
     member = member_of(ip, ctx.env)

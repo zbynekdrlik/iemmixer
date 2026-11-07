@@ -1,5 +1,5 @@
 //! The worst-case scenario driven through the Dante backend's pump (Gen 3
-//! phase C, plan Task 3; Linux): the real `Processor` of `scenario()` inside
+//! phase C; Linux): the real `Processor` of `scenario()` inside
 //! `iem_dante::stream::Pump`, its inputs read from the device's RX rings
 //! (hot topology inputs; the D5(b) loopback returns fed one block later from
 //! the spare outputs' engine rings, so the round-trip probe measures), its
@@ -8,7 +8,7 @@
 //! test site and HIL's spare pair. Every buffer, ring and socket is built
 //! before the blocks run. `rt.rs` runs it under `assert_no_alloc`, `rtsan.rs`
 //! under RealtimeSanitizer (`Pump::block` carries the real-time attribute),
-//! each at both of the device's blocks (`iem_dante::stream::BLOCKS`: 32 and
+//! each at both of the device's blocks (`iem_engine::dante::BLOCKS`: 32 and
 //! the box's 16, #72).
 
 use std::net::Ipv4Addr;

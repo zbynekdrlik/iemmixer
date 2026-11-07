@@ -1,5 +1,4 @@
-"""Tests for the Gen 3 box's provisioning (#72 phase D, plan
-docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9):
+"""Tests for the Gen 3 box's provisioning (#72 phase D):
 provision-root.sh on a temporary root (IEM_PROVISION_ROOT) with stand-in
 commands first on PATH that play the box's users, units, packages, owners and
 the TPM (`systemd-creds`), every call logged; napi-priority on stand-in /sys
@@ -52,9 +51,9 @@ INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
 """
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "realtime", "apt", "sleep", "swap", "clock",
-         "napi", "display", "stack", "sudoers")
+         "napi", "display", "idle", "stack", "sudoers")
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
-          "sleep", "swap", "clock", "napi", "display")
+          "sleep", "swap", "clock", "napi", "display", "idle")
 # verify's information beside the checks, never part of pass.
 INFO = ("tpm2", "realtime_running")
 # The realtime step on a 4-CPU box (#72 phase F): the kernel the stand-in
@@ -94,6 +93,11 @@ TMP_INSTALL = ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", 
 POLL = "sys/module/drm_kms_helper/parameters/poll"
 DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
 POLL_OFF = "w /sys/module/drm_kms_helper/parameters/poll - - - - N\n"
+# No deep CPU idle (#72, 2026-10-31: a package asleep held the NIC's DMA, a
+# receiver read 490 us against 240 us).
+IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
+IDLE_OFF = "".join(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1\n" for n in (2, 3, 4))
+WAKE_GRANT = "z /dev/cpu_dma_latency 0660 root iemmixer - -\n"
 STACK = ("iem-engine.service", "iem-server.service", "iem-dante.service")
 # The stack's state folders (the units' StateDirectory=), and find's question
 # about them: the first path not owned by iemmixer:iemmixer.
@@ -914,6 +918,7 @@ class ProvisionRootTests(World):
             *napi_calls,
             [*tmp_install, DISPLAY_CONF],
             ["systemd-tmpfiles", "--create", DISPLAY_CONF],
+            [*tmp_install, IDLE_CONF],
             ["systemctl", "disable", "iem-dante.service"],
             ["install", "-D", "-m", "0440", "-o", "root", "-g", "root", "--", "<tmp>",
              "/etc/sudoers.d/.iemmixer-gen3.new"],
@@ -1227,6 +1232,33 @@ class ProvisionRootTests(World):
         self.assertIn("display: no display output polling on this box", r.stdout)
         self.assertNotIn("systemd-tmpfiles", [c[0] for c in self.writes()])
         self.assertTrue((self.root / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8").endswith(POLL_OFF))
+
+    def test_a_box_serving_the_band_stays_enabled_at_boot(self) -> None:
+        # Provisioning the serving box on 2026-11-01 (#72) disabled the engine
+        # and the server: the next reboot would have left the band silent.
+        self.provisioned()
+        for unit in ("iem-engine.service", "iem-server.service"):
+            self.set_unit(unit, UnitFileState="enabled")
+        self.set_unit("iem-dante.service", UnitFileState="enabled")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["stack"], "changed")
+        self.assertEqual(self.writes(), [["systemctl", "disable", "iem-dante.service"]])
+
+    def test_the_service_user_may_hold_the_cpu_wake_latency(self) -> None:
+        # The engine warned "CPU wake latency not held" at every start
+        # (#72, 2026-11-01): /dev/cpu_dma_latency is root's alone, so C1E
+        # stayed open while the service user asked to keep it shut.
+        device = self.root / "dev/cpu_dma_latency"
+        write(device, "", 0o660)
+        self.provisioned()
+        self.assertIn(WAKE_GRANT, (self.root / IDLE_CONF.lstrip("/")).read_text(encoding="utf-8"))
+        # A device back at root's mode (a boot before the file) is granted again.
+        device.chmod(0o600)
+        self.clear_calls()
+        r = self.provision()
+        self.assertEqual(self.steps(r)["idle"], "changed")
+        self.assertEqual(self.writes(), [["systemd-tmpfiles", "--create", IDLE_CONF]])
 
     def test_swap_is_sized_to_the_memory_and_a_box_with_swap_keeps_its_own(self) -> None:
         for mem_kb, want in ((900_000, "2G"), (3_500_000, "4G"), (16_123_456, "8G")):
@@ -1544,6 +1576,25 @@ class NapiTests(unittest.TestCase):
     def read(self, rel: str) -> str:
         return (self.root / rel).read_text(encoding="utf-8").strip()
 
+    def test_the_unit_rate_limits_non_audio_and_keeps_ptp_unlimited(self) -> None:
+        # Audio goes past the qdisc (AF_PACKET); what stays in it is limited so a
+        # burst cannot fill the switch's queue, except the box's clock (UDP 319/320).
+        unit = NAPI_UNIT.read_text(encoding="utf-8")
+        tc = "ExecStartPost=/usr/sbin/tc "
+        wanted = [
+            "ExecStartPost=/usr/sbin/ethtool -K ${IEM_DANTE_IFACE} tso off gso off\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} root noqueue\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} root handle 1: prio bands 3\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} parent 1:1 handle 10: pfifo limit 1000\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} parent 1:2 handle 20: tbf rate 100mbit burst 3028 limit 100000\n",
+            tc + "qdisc replace dev ${IEM_DANTE_IFACE} parent 1:3 handle 30: tbf rate 100mbit burst 3028 limit 100000\n",
+            tc + "filter add dev ${IEM_DANTE_IFACE} parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 319 0xffff flowid 1:1\n",
+            tc + "filter add dev ${IEM_DANTE_IFACE} parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 320 0xffff flowid 1:1\n",
+        ]
+        at = [unit.find(line) for line in wanted]
+        self.assertNotIn(-1, at, unit)
+        self.assertEqual(at, sorted(at))
+
     def test_it_sets_every_value_and_reads_it_back(self) -> None:
         r = self.napi()
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1725,7 +1776,7 @@ class VerifyTests(World):
             "user": (db_change(lambda db: db["group"].update(iemmixer="iemmixer:x:990:")),
                      "the admin is not in the group iemmixer"),
             "units": (drop_in, "iem-server.service does not run as iemmixer"),
-            "boot": (unit("iem-engine.service", UnitFileState="enabled"), "iem-engine.service is enabled at boot"),
+            "boot": (unit("iem-dante.service", UnitFileState="enabled"), "iem-dante.service is enabled at boot"),
             "sudoers": (lambda: (self.root / "etc/sudoers.d/iemmixer-gen3").unlink(), "sudo -n visudo -c fails"),
             "pepper": (lambda: (self.root / "etc/credstore.encrypted/iemmixer-pepper").chmod(0o644),
                        "the pepper's credential is not 600 root"),
@@ -1745,6 +1796,8 @@ class VerifyTests(World):
             "napi": (lambda: write(self.root / "proc/irq" / IRQS[0] / "smp_affinity_list", "0-3\n"),
                      "an interrupt of the Dante interface is not on core 0 alone"),
             "display": (lambda: write(self.root / POLL, "Y\n"), "display output polling is on"),
+            "idle": (lambda: write(self.root / "sys/devices/system/cpu/cpu0/cpuidle/state2/disable", "0\n"),
+                     "a CPU may enter deep idle"),
             "realtime": (lambda: write(self.root / GRUB.lstrip("/"),
                                        GRUB_AFTER.replace(RT_CMDLINE, RT_CMDLINE + " quiet"), 0o644),
                          "/etc/default/grub does not boot the saved entry with the engine's CPUs isolated"),
@@ -1812,6 +1865,9 @@ class VerifyTests(World):
             ("units", lambda: (self.root / "etc/systemd/system/iem-alarm@.service").unlink(),
              "iem-alarm@.service is not installed"),
             ("units", unit("iem-dante.service", LoadState="not-found"), "iem-dante.service is not installed"),
+            ("units", lambda: write(self.root / "etc/systemd/system/iem-engine.service",
+                                    "[Service]\nAmbientCapabilities=CAP_NET_RAW\n"),
+             "iem-engine.service cannot bind PTP's UDP 319"),
             ("clock", unit("dantesync.service", ActiveState="failed"), "dantesync is not enabled and running"),
             ("clock", unit("ptp4l.service", ActiveState="active"), "ptp4l.service is enabled or running"),
             ("napi", unit("irqbalance.service", ActiveState="active"), "irqbalance runs"),
@@ -1841,6 +1897,12 @@ class VerifyTests(World):
              "a file of the stack's state is not the service user's"),
             ("state", lambda: shutil.rmtree(self.root / "var/lib/iem-dante"),
              "the stack's state folders cannot be searched (sudo -n find)"),
+            ("idle", lambda: (self.root / IDLE_CONF.lstrip("/")).unlink(),
+             "no /etc/tmpfiles.d/iemmixer-idle.conf keeping the CPUs out of deep idle"),
+            ("idle", lambda: write(self.root / IDLE_CONF.lstrip("/"), IDLE_OFF),
+             "no /etc/tmpfiles.d/iemmixer-idle.conf keeping the CPUs out of deep idle"),
+            ("idle", lambda: write(self.root / "dev/cpu_dma_latency", "", 0o600),
+             "the service user cannot hold the CPU wake latency"),
             ("display", lambda: (self.root / DISPLAY_CONF.lstrip("/")).unlink(),
              "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
             ("display", lambda: write(self.root / DISPLAY_CONF.lstrip("/"), POLL_OFF.replace(" N", " Y")),
@@ -2084,7 +2146,7 @@ class ProvisionShTests(unittest.TestCase):
             self.assertIn("verify_box: units", r.stderr)
 
     def test_the_band_roster_adds_its_ids_to_the_sudo_rule_s_members(self) -> None:
-        # While 3.x serves, the box mints tokens for the band's own people (the
+        # The box mints tokens for the band's own people (the
         # live gate's member), so the rule's {member} covers the band roster's
         # ids beside the test roster's, each once, never printed.
         band = self.tmp / "band-roster.toml"

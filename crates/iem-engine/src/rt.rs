@@ -1,12 +1,11 @@
-//! The RT processor (program spec §3.3 A1–A13, §3.4 X1–X4, X13–X15, Q1, I5,
-//! I7; S3 design note §3.2, §3.4; #20 design note §3, §6): one callback runs
+//! The RT processor (program spec I5, I7): one callback runs
 //! the fixed pipeline — the inputs, then every mix's own sum (its inputs
 //! directly or through their group's strip) and, for a mix its peers hear
 //! while it hears others, its shadow (#58: the own sum → EQ → limiter →
 //! volume/mute), then every mix in the topology's render order (its own sum,
 //! the mixes it hears, its peers' own output, then EQ → limiter →
 //! volume/mute → Q1 safety → clamp → TX), then HIL's spare outputs after the
-//! topology's TX (S6: the HIL test signal's sine while one runs, zero
+//! topology's TX (the HIL test signal's sine while one runs, zero
 //! otherwise).
 //!
 //! A block is cut into segments of at most [`SEG`] samples at every command
@@ -55,7 +54,7 @@ pub const FADE_IN_MS: f64 = 500.0;
 pub struct Options {
     /// Output fade-in after start (§4.4: 500 ms); 0 starts at full level.
     pub fade_in_ms: f64,
-    /// `--hold` (S6 design note §4): every output stays silent until
+    /// `--hold`: every output stays silent until
     /// `RtOp::Arm`, then fades in.
     pub hold: bool,
 }
@@ -82,7 +81,7 @@ pub struct MeterFrame {
     pub gr_db: Vec<f64>,
     pub active: Vec<u64>,
     pub trips: u64,
-    /// HIL's spare outputs (S6), in the order the engine opened them: what
+    /// HIL's spare outputs, in the order the engine opened them: what
     /// HIL v1 reads to prove the signal reached them, and left them.
     pub hil: Vec<f64>,
     /// Each mix's own output (#58), what its peers hear, per mix in topology
@@ -101,7 +100,7 @@ pub struct RtStatus {
     /// Blocks that left commands for the next block (the 512 budget): a
     /// command due in the block that it did not apply. Counted once per block.
     pub deferred: AtomicU64,
-    /// The D5(b) loopback round-trip, in samples, once measured (S6 test 5):
+    /// The D5(b) loopback round-trip, in samples, once measured:
     /// 0 while no measurement (a loopback is never 0 samples). Cleared when a
     /// new HIL test signal starts.
     pub loopback_samples: AtomicU64,
@@ -112,9 +111,9 @@ pub struct RtHandles {
     pub cmds: Producer<RtCmd>,
     pub meters: triple_buffer::Output<MeterFrame>,
     /// Interleaved stereo 96 kHz: slot 0 the engineer, slot 1 one other mix
-    /// (X3); silence while a HIL signal runs (S6).
+    /// (X3); silence while a HIL signal runs.
     pub taps: [Consumer<f32>; 2],
-    /// The listen probe's taps (S7), by slot like `taps`: the spare outputs'
+    /// The listen probe's taps, by slot like `taps`: the spare outputs'
     /// samples while a HIL signal with `listen` runs (`probe::push_probe`).
     pub probes: [Consumer<f32>; 2],
     /// Mono 96 kHz talkback into the talkback input (A4).
@@ -189,7 +188,7 @@ struct InputRt {
     peak: PeakMeter<2>,
 }
 
-/// A mix limiter (A13, §4.4): enabling and lowering instant, raising over 10 ms.
+/// A mix limiter (A13): enabling and lowering instant, raising over 10 ms.
 struct MixLimiter {
     lim: Limiter,
     raise: Ramp,
@@ -297,7 +296,7 @@ struct TestRt {
     /// The HIL signal's spare outputs, by HIL slot: until `end` they carry
     /// the sine and every mix's TX is zero.
     mask: Option<HilMask>,
-    /// The listen probe (S7, HIL only): the listened slots' probe taps carry
+    /// The listen probe (HIL only): the listened slots' probe taps carry
     /// the spare outputs' samples until `end`.
     listen: bool,
 }
@@ -345,10 +344,10 @@ pub struct Processor {
     /// The test sine of the current segment: the input it replaces and HIL's
     /// spare outputs read it.
     test_buf: Vec<f64>,
-    /// HIL's spare outputs (S6), the engine's outputs after the topology's
+    /// HIL's spare outputs, the engine's outputs after the topology's
     /// TX: their peaks since the last meter frame.
     hil_peaks: Vec<PeakMeter<1>>,
-    /// How many D5(b) loopback-return inputs the engine opened (S6 test 5),
+    /// How many D5(b) loopback-return inputs the engine opened,
     /// after the topology's `rx` in the input buffer; 0 unless opened.
     hil_rx: usize,
     /// The loopback round-trip measurement (test 5).
@@ -378,7 +377,7 @@ impl Processor {
         Self::with_hil(topo, state, counters, opts, 0, 0)
     }
 
-    /// [`Processor::new`] with `hil` of HIL's spare card outputs (S6, at
+    /// [`Processor::new`] with `hil` of HIL's spare card outputs (at
     /// most [`MAX_HIL`]) as the engine's outputs after the topology's TX:
     /// they carry the HIL test signal's sine while one runs and zero
     /// otherwise (A1).
@@ -577,33 +576,6 @@ impl Processor {
         panic!("fault injection: panic on the RT thread");
     }
 
-    /// The owner-approved SEH test (`--fault-injection` only, design §10): a
-    /// structured exception on the RT thread that `catch_unwind` cannot
-    /// catch, so the process's SEH filter runs (Windows). Off Windows there
-    /// is no such filter, so it aborts (equally uncatchable). It never
-    /// returns: `tests/pipes.rs` runs it in the binary off Windows (SIGABRT);
-    /// on Windows `iemmode inject-seh` runs it on the PC.
-    fn inject_seh() {
-        #[cfg(windows)]
-        iem_audio_io::asio::raise_test_seh();
-        #[cfg(not(windows))]
-        std::process::abort();
-    }
-
-    /// The parked-engine test (`--fault-injection` only, design §10 test #2,
-    /// #35): the SEH test's exception under the ASIO backend's test hold, so
-    /// the backend keeps the driver, the SEH filter parks this thread and the
-    /// engine keeps running with its stream parked. Off Windows it aborts
-    /// like `inject_seh` (no filter, no card to keep): `tests/pipes.rs` runs
-    /// it in the binary there; on Windows `iemmode inject-park` runs it on
-    /// the PC.
-    fn inject_park() {
-        #[cfg(windows)]
-        iem_audio_io::asio::raise_test_park();
-        #[cfg(not(windows))]
-        std::process::abort();
-    }
-
     fn apply(&mut self, op: RtOp) {
         let sr = self.sr;
         match op {
@@ -731,8 +703,6 @@ impl Processor {
                 self.fading_out = true;
             }
             RtOp::Panic => Self::inject_fault(),
-            RtOp::Seh => Self::inject_seh(),
-            RtOp::Park => Self::inject_park(),
             RtOp::Arm => {
                 if !self.armed {
                     self.armed = true;
@@ -745,7 +715,7 @@ impl Processor {
     /// X13: a sine replaces input `i` for `ttl` samples and then fades out;
     /// every TX is capped meanwhile. With `mask` (the HIL signal) the sine
     /// sounds only on those spare outputs until it ended, and every mix's TX
-    /// is zero; `listen` adds the listen probe (S7).
+    /// is zero; `listen` adds the listen probe.
     fn start_test(
         &mut self,
         i: u16,
@@ -755,7 +725,7 @@ impl Processor {
         mask: Option<HilMask>,
         listen: bool,
     ) {
-        // A new HIL signal restarts the loopback measurement (S6 test 5).
+        // A new HIL signal restarts the loopback measurement.
         if mask.is_some() {
             self.latency.reset();
             self.status.loopback_samples.store(0, Ordering::Relaxed);
@@ -909,7 +879,7 @@ impl Processor {
 }
 
 impl Process for Processor {
-    /// A driver reopen (S6): the output fades in again (not while held or
+    /// A driver reopen: the output fades in again (not while held or
     /// fading out).
     #[cfg_attr(iem_rtsan, sanitize(realtime = "nonblocking"))]
     fn discontinuity(&mut self) {

@@ -1,6 +1,5 @@
 """Tests for scripts/iem-pc/iempc_gen3_soak.py, `iempc gen3-gate soak` (#72
-phase H, plan docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md
-Task 7): the soak on the Gen 3 box that serves the band, driven from the dev
+phase H): the soak on the Gen 3 box that serves the band, driven from the dev
 box. No box exists in CI: test_iempc_gen3_gate's stand-in `ssh` plays the box
 (a left HIL job, health, the builds, the service user's mint folder), and the
 soak's own part of it, put in front, plays what the soak reads and changes:
@@ -169,7 +168,8 @@ if line == f"{DANTE} ctl status":
            "recv_errors": 0} for f in (1, 2)]
     tx = [{"flow": 1, "live": 1, "fpp": 8, "channels": 8, "packets": 2000 * so["all"], "send_errors": 0,
            "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes")}]
-    channels = [{"rx": n, "status": 0x01010009, "written": 1,
+    off = (os.environ.get("FAKE_RX_OFF") == "1" and late()) or os.environ.get("FAKE_RX_OFF") == "base"
+    channels = [{"rx": n, "status": 1 if off and n == 104 else 0x01010009, "written": 1,
                  "holes": (2 if n == 101 else 0) + (grown("rx_holes") if n == 102 else 0), "late": 0,
                  "duplicate": 0, "early": 0} for n in (101, 102, 103, 104)]
     doc = {"clock": clock, "requests": [], "sent": [], "uncounted": 0, "tx": tx, "rx": rx, "rx_poll_errors": 0,
@@ -241,7 +241,7 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "reads": 3, "failed_reads": 0, "health_reads": 2, "not_healthy": 0, "health_reasons": [],
         "pump_late": 0, "pump_missed": 0, "pump_overruns": 0, "pump_rebootstraps": 0, "pump_stalled": 0,
         "max_process_us": 210, "clock_not_ready": 0, "holdovers": 0, "in_holdover": 0, "re_anchors": 0,
-        "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "lateness_max": 16, "counts_back": 0, "unit_restarts": 0,
+        "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0, "unit_restarts": 0,
         "left_job": 0, "left_soak": 0, "failed": []}
 
 
@@ -324,7 +324,6 @@ class SoakTests(SoakBase):
         self.assertEqual([p["kind"] for p in polls], ["status", "status", "health", "status", "health"])
         self.assertNotIn(MEMBER, (records / "polls.jsonl").read_text(encoding="utf-8"))
         self.assert_private(err + json.dumps(docs))
-        self.assertEqual(self.pc.calls, [])   # no PC call
 
     def test_each_length_has_its_own_fixed_start_and_other_lengths_are_refused_before_any_call(self) -> None:
         for minutes in (10, 30, 60, 120):
@@ -372,6 +371,8 @@ class CriteriaTests(SoakBase):
             ({"FAKE_CLOCK": "epoch"}, "re_anchor", "re_anchors", 1),
             ({"FAKE_GROW": "rx_late"}, "rx_late", "rx_late", 1),
             ({"FAKE_GROW": "tx_holes"}, "tx_holes", "tx_holes", 1),
+            ({"FAKE_GROW": "rx_holes"}, "rx_holes", "rx_holes", 1),
+            ({"FAKE_RX_OFF": "1"}, "rx_off", "rx_off", 1),
             ({"FAKE_UNIT_RESTART": "iem-engine.service"}, "restarted", "unit_restarts", 1),
             ({"FAKE_UNIT_RESTART": "iem-server.service"}, "restarted", "unit_restarts", 1),
             ({"FAKE_UNIT_ENTER": "iem-server.service"}, "restarted", "unit_restarts", 1),
@@ -402,11 +403,16 @@ class CriteriaTests(SoakBase):
         self.assertEqual(code, 1, err)
         self.assertEqual(self.ledger(), [gt.NOW])
 
-    def test_ring_holes_on_the_rx_channels_are_information_only(self) -> None:
-        code, docs, err = self.gate_run(FAKE_GROW="rx_holes")
-        self.assertEqual(code, 0, err)
-        doc = self.line(docs)
-        self.assertEqual((doc["rx_holes"], doc["failed"]), (1, []))
+    def test_an_optional_rx_channel_fails_no_gate(self) -> None:
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=102,104\n")
+        for env in ({"FAKE_RX_OFF": "1"}, {"FAKE_GROW": "rx_holes"}):
+            with self.subTest(env=env):
+                self.again()
+                code, docs, err = self.gate_run(**env)
+                self.assertEqual(code, 0, err)
+                doc = self.line(docs)
+                self.assertEqual((doc["rx_off"], doc["rx_holes"], doc["failed"]), (0, 0, []))
 
     def test_the_harness_checks_judge_the_client_s_summary(self) -> None:
         cases = (
@@ -478,7 +484,6 @@ class FlagTests(SoakBase):
         self.assertEqual(calls[calls.index(client(7200)) + 1:], [gt.CTL, UNIT_SHOW, STOP_UNIT, RM_ENV, RM_SUMMARY])
         self.assertEqual((self.soak_state()["unit"], self.env_file_there()), (None, False))
         self.assertEqual(self.posts(), [])
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
         self.assert_private(err + json.dumps(docs))
 
     def test_a_flag_before_the_start_changes_nothing_on_the_box(self) -> None:
@@ -557,12 +562,6 @@ class RefusalTests(SoakBase):
                 self.assertIn(words, err)
                 self.assertNotIn("zyx member", err)
         ip.env_path().write_text(text, encoding="utf-8")
-        # While 2.x serves, and in an event: iempc's Spec, before any call.
-        self.again()
-        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 2}), encoding="utf-8")
-        code, docs, err = self.gate_run()
-        self.assertEqual((code, docs, self.calls()), (1, [], []), err)
-        self.assertIn("'gen3-gate' runs only while 3.x serves", err)
 
     def test_every_refusal_before_any_change(self) -> None:
         cases = (({"FAKE_UNHEALTHY": "1"}, "no soak gate: the box is not healthy"),
@@ -573,7 +572,8 @@ class RefusalTests(SoakBase):
                  ({"FAKE_SERVER_HASH": ""},
                   "no soak gate: the box's server does not name the engine's build in /api/version"),
                  ({"FAKE_BASELINE_FAILS": "1"}, "no soak gate: the Gen 3 device's status could not be read"),
-                 ({"FAKE_NO_ENGINE": "1"}, "no soak gate: the Gen 3 device's status shows no engine"))
+                 ({"FAKE_NO_ENGINE": "1"}, "no soak gate: the Gen 3 device's status shows no engine"),
+                 ({"FAKE_RX_OFF": "base"}, "no soak gate: 1 required RX channels do not receive yet"))
         for env, words in cases:
             with self.subTest(words=words):
                 self.again()
@@ -651,7 +651,7 @@ class PureTests(unittest.TestCase):
             "ready": 1, "epoch": 0, "re_anchors": 2, "holdovers": 3, "holdover": 0,
             "engine": {"media": 1, "blocks": 30, "late": 5, "missed": 7, "overruns": 11, "rebootstraps": 1,
                        "max_process_us": 210},
-            "rx_late": {"1": 4, "3": 0}, "tx_holes": {"2": 6}, "rx_holes": {"101": 2, "102": 0}, "lateness": 31})
+            "rx_late": {"1": 4, "3": 0}, "tx_holes": {"2": 6}, "rx_holes": {"101": 2, "102": 0}, "rx_off": 0, "lateness": 31})
         self.assertIsNone(soak.sample({**status, "engine": None})["engine"])
         for bad in ({}, {**status, "clock": {"ready": 1}}, {**status, "rx": "x"},
                     {**status, "rx": [{"flow": 1, "late": -1, "lateness": 0}]}):

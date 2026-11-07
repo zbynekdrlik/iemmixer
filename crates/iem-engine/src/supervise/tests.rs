@@ -73,7 +73,7 @@ fn the_commands_parse_with_the_box_pipe_unless_one_is_given() {
     );
 }
 
-/// The guard's caps (`daemon::hil::test_signal`) with its words: the
+/// The caps with their words: the
 /// ceiling and the longest TTL are allowed, a step past either is not.
 #[test]
 fn the_caps_are_the_guards() {
@@ -113,7 +113,7 @@ fn the_caps_are_the_guards() {
         err("test-signal mic1 -30 -1"),
         "\"-1\" is not a whole number"
     );
-    // The guard's ceiling is the engine's own X13 cap.
+    // The ceiling is the engine's own X13 cap.
     assert_eq!(HIL_MAX_DBFS, crate::params::TEST_DBFS.1);
 }
 
@@ -142,8 +142,8 @@ fn the_input_is_an_id() {
     );
 }
 
-/// `--listen` only as `test-signal`'s last word, as the guard's
-/// `iemmode test-signal` takes it; anywhere else it is a fourth value.
+/// `--listen` only as `test-signal`'s last word; anywhere else it is a
+/// fourth value.
 #[test]
 fn the_command_line_is_exact() {
     for (line, want) in [
@@ -241,19 +241,7 @@ fn the_default_pipe_is_the_box_units() {
 }
 
 #[test]
-fn a_failure_exits_1_and_off_unix_2() {
-    assert_eq!(Failure::NotHere.code(), 2);
-    for f in [
-        Failure::Connect("entity not found".into()),
-        Failure::Pipe("broken pipe".into()),
-        Failure::Closed,
-        Failure::Superseded,
-        Failure::NoStatus(Duration::from_secs(3)),
-        Failure::NoReply(Duration::from_secs(5)),
-        Failure::Refused("forbidden".into()),
-    ] {
-        assert_eq!(f.code(), 1, "{f}");
-    }
+fn a_failure_names_its_cause() {
     assert_eq!(
         Failure::Refused("forbidden".into()).to_string(),
         "the engine refused it: forbidden"
@@ -434,7 +422,7 @@ fn request_of(cmd: Cmd) -> ClientMsg {
 }
 
 /// The burst goes to every spare output the engine's first `Status` names,
-/// in its order, at the asked level and length, the guard's 1 kHz.
+/// in its order, at the asked level and length, at 1 kHz.
 #[test]
 fn the_burst_goes_to_every_spare_output_the_status_names() {
     for listen in [false, true] {
@@ -680,17 +668,4 @@ fn a_pipe_nobody_serves_cannot_be_connected() {
         ask: Ask::Status,
     });
     assert_eq!(got, Err(Failure::Connect("entity not found".into())));
-}
-
-/// Off Unix the guard is the engine's supervisor (the PC): refused as a
-/// usage error, nothing connected.
-#[cfg(not(unix))]
-#[test]
-fn off_unix_supervise_is_refused() {
-    let got = run(&Supervise {
-        pipe: "iem-test-none".into(),
-        ask: Ask::Status,
-    });
-    assert_eq!(got, Err(Failure::NotHere));
-    assert_eq!(Failure::NotHere.code(), 2);
 }

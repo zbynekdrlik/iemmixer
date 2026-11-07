@@ -1,9 +1,7 @@
 # iemmixer's engine on the Gen 3 box with our Dante device inside it (#72
-# phase C, plan docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md
-# Task 6): `iem-engine run --backend dante`, installed by scripts/gen3/deploy.sh;
+# phase C): `iem-engine run --backend dante`, installed by scripts/gen3/deploy.sh;
 # rules in .claude/rules/gen3.md and .claude/rules/engine.md.
-# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
-# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# Phase D: it runs as the service user `iemmixer` (a system
 # user without login or home, not site data), and a unit that stays down
 # raises one alarm (iem-alarm@.service).
 # Public repository (P6): the box's interface comes from a file deploy.sh
@@ -12,11 +10,9 @@
 # synthetic test band deploy.sh copies into /var/lib/iemmixer/site; the
 # device's names are the ops repository's device config.
 #
-# Never enabled at boot (deploy.sh disables it): a reboot of the box never
-# brings our flows back unattended. "ide event" stops it (iempc event: ssh
-# <GEN3_HOST> sudo -n systemctl stop iem-server iem-engine iem-dante, plan
-# Task 7); nothing starts it again when the event ends: deploy.sh or
-# `sudo systemctl start iem-engine iem-server` in dev time does.
+# A serving deploy enables it at boot, so a reboot serves the band; a spare
+# (deploy.sh --new-box) stays disabled. "ide event" only writes a flag on the
+# dev box and leaves it running.
 # iem-server.service talks to it over /run/iemmixer/engine.sock and reconnects
 # by itself, so the two have no ordering and stop in parallel.
 
@@ -77,10 +73,14 @@ RuntimeDirectoryMode=0750
 # for 40 (below dantesync's 50); without this limit they run at normal
 # priority and say so once.
 LimitRTPRIO=80
-# No capability: every port is above 1024 (the device's, see iem-dante.service;
-# dantesync is the box's one PTP owner, our device never opens UDP 319/320).
-CapabilityBoundingSet=
-AmbientCapabilities=
+# CAP_NET_RAW: the device's audio TX goes past the qdisc through AF_PACKET with
+# PACKET_QDISC_BYPASS (dstack v0.4.15), so a stalled non-audio sender cannot hold
+# audio back (#72). CAP_NET_BIND_SERVICE: the media clock's in-process PTP
+# follower binds UDP 319 (dstack v0.6.23, owner 2026-11-04). It only listens and
+# shares 319/320 with dantesync, which keeps disciplining the system clock and
+# stays the media clock's fallback; every other port is above 1024.
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

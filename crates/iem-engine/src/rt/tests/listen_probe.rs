@@ -1,4 +1,4 @@
-//! Unit tests of the listen probe (S7 design note §6, #10): while a HIL
+//! Unit tests of the listen probe (#10): while a HIL
 //! signal with `listen` runs, each listened slot's probe tap carries the
 //! spare outputs' own samples, its listen tap stays exactly silent and every
 //! mix's TX zero (the owner's rule, #9 2026-09-28).

@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::files::{Entries, Files, OsFiles};
-use super::tests::sample;
+use super::tests::{sample, write_baseline};
 use super::*;
 use crate::test_support::test_site;
 
@@ -29,8 +29,7 @@ struct FaultState {
     next: Option<&'static str>,
     /// Paths every read of which fails (an I/O error, not a missing file).
     unreadable: Vec<PathBuf>,
-    /// Paths another process holds open without sharing (a Windows sharing
-    /// violation): every read fails and so does every rename from or to
+    /// Paths another process holds open without sharing: every read fails and so does every rename from or to
     /// them.
     locked: Vec<PathBuf>,
     /// Read failures still to come per path; then its reads succeed.

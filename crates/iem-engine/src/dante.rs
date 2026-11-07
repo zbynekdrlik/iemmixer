@@ -1,15 +1,12 @@
-//! The engine's Dante backend on Linux (Gen 3 phase C, #72; plan
-//! `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`
-//! Task 3; design §5.1, §5.2): `run --backend dante` hosts our own Dante
+//! The engine's Dante backend on Linux (Gen 3 phase C, #72; design §5.1): `run --backend dante` hosts our own Dante
 //! device (`iem_dante::host`) in the engine's process and drives the
-//! processor on its media clock (`iem_dante::stream`'s pump), as the ASIO
-//! backend (`asio.rs`, Windows) drives it on the card's callback.
+//! processor on its media clock (`iem_dante::stream`'s pump).
 //!
 //! - [`check`] (pure): the device must run at the engine's 96 kHz, and the
 //!   site's channel numbers are the device's own (site RX n = our RX
 //!   channel n, site TX n = our TX channel n; HIL's spare outputs after the
 //!   topology's TX and, under `--test-signal`, their loopback returns after
-//!   its RX, through the portable [`ChannelMap`] the ASIO path uses): a
+//!   its RX, through [`ChannelMap`]): a
 //!   channel the device lacks refuses the start (exit 3, as a card that
 //!   lacks one).
 //! - [`start`] (glue): the device set up with an engine ring on each mapped
@@ -41,8 +38,6 @@ use std::time::{Duration, Instant};
 use iem_audio_io::StreamStats;
 use iem_audio_io::channels::{ChannelMap, MapError};
 use iem_audio_io::hist::HistSnapshot;
-use iem_audio_io::owner::StopOutcome;
-use iem_dante::clock::to_samples;
 use iem_dante::daemon::{Options, Place};
 use iem_dante::device::DeviceConfig;
 use iem_dante::host::{self, Host, HostError, Signals, Stopped};
@@ -71,6 +66,12 @@ pub const STOP_WITHIN: Duration = Duration::from_secs(7);
 /// same number (indices from 0). A channel the device lacks is
 /// [`EngineError::Card`] (exit 3).
 pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, EngineError> {
+    if !BLOCKS.contains(&cfg.block) {
+        return Err(EngineError::Card(format!(
+            "the Dante device's block {} is not one the engine runs: {BLOCKS:?} (B = 32, RT contract)",
+            cfg.block
+        )));
+    }
     if cfg.sample_rate != SAMPLE_RATE {
         return Err(EngineError::Card(format!(
             "the Dante device runs at {} Hz; the engine runs at {SAMPLE_RATE} Hz only (I2)",
@@ -92,16 +93,17 @@ pub fn check(cfg: &DeviceConfig, topo: &Topology, hil: &[u16]) -> Result<Map, En
     })
 }
 
+/// The device blocks the engine runs, frames: 16 or B = 32 (the RT
+/// contract). dstack also allows larger blocks for other hosts.
+pub const BLOCKS: [u64; 2] = [16, iem_dante::stream::BLOCK];
+
 /// The pump's timing on the device `cfg`: B = the device's `block` (32
 /// unless the config sets 16), P = the device's latency in samples (the
 /// playout point its RX checks read at), W = the device's `work_margin` (1
-/// ms unless the config sets it; at least B).
+/// ms unless the config sets it; at least B). dstack's own `Timing::of`, so
+/// the pump cannot read a sample off the RX's playout point.
 pub fn timing(cfg: &DeviceConfig) -> Timing {
-    Timing {
-        block: cfg.block,
-        playout: to_samples(cfg.latency_ns, cfg.sample_rate),
-        margin: cfg.work_margin,
-    }
+    Timing::of(cfg)
 }
 
 /// The device's options from the engine's `--dante-*` flags.
@@ -209,8 +211,8 @@ impl Driver for DanteDriver {
     /// warning when it is not), so nothing writes the engine rings while
     /// the device ends; then the device ([`Device::stop`] within
     /// [`STOP_WITHIN`]: its RX flows stopped at their transmitters, its
-    /// media threads, the goodbyes). The device holds no card: released.
-    fn stop(self: Box<Self>) -> StopOutcome {
+    /// media threads, the goodbyes).
+    fn stop(self: Box<Self>) {
         let DanteDriver {
             pump,
             pump_stop,
@@ -232,7 +234,6 @@ impl Driver for DanteDriver {
                 "the Dante device did not end within the wait: left to end"
             ),
         }
-        StopOutcome::Released
     }
 
     /// The device that ended by itself first (the run ends with exit 1),

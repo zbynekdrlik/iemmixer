@@ -101,10 +101,7 @@ pub fn target_state_recorded(
 }
 
 fn import(state: MixState) -> Cmd {
-    Cmd::ImportState {
-        state,
-        baseline: false,
-    }
+    Cmd::ImportState { state }
 }
 
 /// Records `id` as the active lineup in the running server's roster.

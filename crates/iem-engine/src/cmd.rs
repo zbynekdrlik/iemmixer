@@ -7,7 +7,7 @@ use iem_dsp::eq::EqParams;
 
 use crate::params::InputParams;
 
-/// HIL's spare card outputs an engine opens at most (S6, `[guard] hil_tx`):
+/// HIL's spare card outputs an engine opens at most (`[guard] hil_tx`):
 /// the D5(b) loopback pair or an unused TX, with room to spare.
 pub const MAX_HIL: usize = 8;
 
@@ -79,9 +79,9 @@ pub enum RtOp {
         amp: f64,
         ttl: u64,
     },
-    /// The HIL test signal (S6): a test signal whose sine, while it runs,
+    /// The HIL test signal: a test signal whose sine, while it runs,
     /// sounds only on the spare outputs in `mask`; every mix's TX and every
-    /// other spare output is zero meanwhile. With `listen` (S7) the probe
+    /// other spare output is zero meanwhile. With `listen` the probe
     /// taps of the listened slots carry the spare outputs' samples too.
     HilTestSignal {
         i: u16,
@@ -95,14 +95,6 @@ pub enum RtOp {
     FadeOut,
     /// Fault injection (the `--fault-injection` launch flag only).
     Panic,
-    /// A structured exception on the RT thread (the `--fault-injection` flag
-    /// only, the owner-approved SEH test, design §10): `catch_unwind` cannot
-    /// catch it, so the SEH filter releases the driver or parks the stream.
-    Seh,
-    /// The parked-engine test (the `--fault-injection` flag only, design §10
-    /// test #2, #35): the same exception under the backend's test hold, so
-    /// the driver is kept and the SEH filter parks the RT thread.
-    Park,
     /// A held processor (`Options::hold`) starts its fade-in.
     Arm,
 }

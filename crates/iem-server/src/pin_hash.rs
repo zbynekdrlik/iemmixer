@@ -1,4 +1,4 @@
-//! PIN hashing (program spec §5.3): argon2id with OWASP parameters
+//! PIN hashing: argon2id with OWASP parameters
 //! (m = 19 MiB, t = 2, p = 1), keyed with a secret pepper so a copied hash
 //! file cannot be brute-forced offline. Stored as PHC strings.
 
@@ -10,7 +10,7 @@ use rand_core::OsRng;
 
 /// Length of the pepper (argon2 secret) in bytes.
 pub const PEPPER_LEN: usize = 32;
-/// PIN length (4 digits, unchanged from the predecessor — spec P9).
+/// PIN length (4 digits, unchanged from the predecessor).
 pub const PIN_LEN: usize = 4;
 /// argon2id memory cost in KiB (19 MiB).
 pub const PIN_M_COST_KIB: u32 = 19 * 1024;

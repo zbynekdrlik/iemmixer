@@ -1,5 +1,4 @@
-# The Gen 3 box's alarm (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 5, choice 3);
+# The Gen 3 box's alarm (#72 phase D);
 # rules in .claude/rules/gen3.md. Each unit of the stack (iem-engine,
 # iem-server, iem-dante) has OnFailure=iem-alarm@%n.service with
 # RestartMode=direct, so this runs, with the unit's name as its instance, only
@@ -7,8 +6,8 @@
 # does not restart (2, 3), a stop past its bound. Never per restart.
 #
 # It writes one journal line (`journalctl -t iem-alarm`) and, only while the
-# box serves the band (its engine enabled at boot: `gen3-switch to-3` enables
-# it, `to-2` disables it), sends the notice down the guard's own path to the
+# box serves the band (its engine enabled at boot: `iempc gen3-deploy` enables
+# it, a spare's stays disabled), sends the notice down the server's own path to the
 # engineer's devices, `iem-server notify --to alarm` on the box's site. A box
 # that serves nobody keeps a copy of the band's data, subscribers included,
 # and must not reach them (#72, the false alarm of 2026-10-27): the second

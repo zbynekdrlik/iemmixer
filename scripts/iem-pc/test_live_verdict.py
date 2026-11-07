@@ -1,4 +1,4 @@
-"""Tests for scripts/iem-pc/live_verdict.py (S7 design note §6, plan Task 22):
+"""Tests for scripts/iem-pc/live_verdict.py:
 the live verdict on synthetic records, the ops report job's mapping and the
 reading of the expected titles from the spec files. Every value is synthetic:
 the titles are invented and mixer.example.org is the placeholder host that no
@@ -15,8 +15,6 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-import check_parity_manifest as cpm  # noqa: E402
 import live_verdict as lv  # noqa: E402
 
 T0 = 1_790_000_000
@@ -176,7 +174,7 @@ class Verdict(unittest.TestCase):
             r = Record()
             r.jobs["browser"] = job
             self.red(r, f"browser job {job}")
-        # A browser job cancelled alone is no cut of the PC side: red.
+        # A browser job cancelled alone is no cut of the box side: red.
         r = Record()
         r.jobs["browser"] = "cancelled"
         self.red(r, "browser job cancelled")
@@ -297,8 +295,7 @@ class Verdict(unittest.TestCase):
         self.assertEqual(r.verdict()["conclusion"], "failure")
 
     def test_a_failed_pc_job_that_left_no_record_is_cancelled(self):
-        # The guard stops the runner at "ide event": GitHub's conclusion for that job, and whether its
-        # always() upload still runs, are unverified (plan Task 10). A failed PC job without its record is
+        # A failed job of the box side without its record is
         # a cut, never red; one that succeeded or was skipped and left none is red.
         for key, field, job, missing in (("begin", "begin", "pc-begin", "no begin record"),
                                          ("pc", "pc", "pc", "no pc record"),
@@ -513,23 +510,17 @@ test('second; with a semicolon', async () => { run(); });
         want = ['first "quoted" title', "second; with a semicolon", "third title", "fourth, from a .test.ts file"]
         # Files in path order (nested/ before probe, zz last), titles in source order.
         self.assertEqual(lv.titles(self.dir), [want[2], want[0], want[1], want[3]])
-        # The parity checker's own `test(` rule: the same titles from the same text.
-        self.assertIs(lv.PW_TEST, cpm.PW_TEST)
-        self.assertEqual(set(lv.titles(self.dir)) - {want[2], want[3]}, cpm.playwright_titles(a))
         # A title twice stays twice: each needs its own test.
         self.spec("nested/again.spec.ts", "test(`third title`, async () => { run(); });\n")
         self.assertEqual(lv.titles(self.dir).count("third title"), 2)
 
-    def test_each_files_titles_are_the_parity_checkers_on_every_e2e_spec(self):
-        # One rule for both: on the repository's own spec files, a file's titles in source order hold
-        # exactly the titles check_parity_manifest reads, one per `test(` it finds.
+    def test_each_e2e_spec_file_has_titles(self):
         specs = sorted((Path(__file__).resolve().parents[2] / "e2e" / "tests").rglob("*.spec.ts"))
         self.assertGreater(len(specs), 10)
         for path in specs:
             text = path.read_text(encoding="utf-8")
             got = lv.file_titles(text)
-            self.assertEqual(set(got), cpm.playwright_titles(text), path.name)
-            self.assertEqual(len(got), len(cpm.PW_TEST.findall(text)), path.name)
+            self.assertTrue(got, path.name)
         self.assertEqual(lv.file_titles('test("b", f);\ntest(`a \\` tick`, f);\ntest(\'c\', f);\n'),
                          ["b", "a ` tick", "c"])
 
@@ -601,7 +592,7 @@ class Main(unittest.TestCase):
             self.write_all(r)
             self.write(name, "{")
             self.assertEqual(self.report()["first_failure"], first)
-        # A cancelled job of the PC side stays cancelled whatever the files hold.
+        # A cancelled job of the box side stays cancelled whatever the files hold.
         self.assertEqual(self.report(begin="cancelled")["conclusion"], "cancelled")
         # A left-dev record read from the file.
         self.write_all(r)

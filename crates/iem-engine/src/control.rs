@@ -1,5 +1,4 @@
-//! The control loop (program spec §2.3–2.4, I6, I9, I10, X2; design note
-//! §3.3, §3.6, §3.7): the one thread that owns the control core. It answers
+//! The control loop (program spec I6, I9, I10): the one thread that owns the control core. It answers
 //! requests, broadcasts revisioned changes, forwards meters and status,
 //! schedules saves, clears solos after the controller left, ends test
 //! signals, and runs the shutdown and fault paths. It never touches audio
@@ -19,7 +18,6 @@ use std::time::{Duration, Instant};
 
 use iem_audio_io::StreamStats;
 use iem_audio_io::hist::HistSnapshot;
-use iem_audio_io::owner::StopOutcome;
 use iem_engine_proto::{Alarm, AlarmCode, EngineMsg, Role};
 use rtrb::Producer;
 use tracing::{info, warn};
@@ -50,43 +48,24 @@ pub const FADE_WAIT: Duration = Duration::from_millis(500);
 /// The audio backend as the control loop sees it.
 pub trait Driver: Send {
     fn stats(&self) -> StreamStats;
-    /// Stops the stream: `Released` once the card is free, `Parked` when
-    /// it stayed held (a callback stuck in the stream, or the parked-engine
-    /// test's hold; #35). A backend without a card releases.
-    fn stop(self: Box<Self>) -> StopOutcome;
-    /// Every control tick (never the RT thread): the backend's timed work,
-    /// e.g. the ASIO backend locks its memory after 5 s of streaming.
-    fn tick(&mut self, _now: Instant) {}
+    /// Stops the stream.
+    fn stop(self: Box<Self>);
     /// The backend's own reason to end the run, if any.
     fn ending(&self) -> Option<Ending> {
         None
     }
-    /// Locking the real-time memory failed (logged by the backend).
-    fn lock_failed(&self) -> bool {
-        false
-    }
-    /// HIL's forced reopen (`Cmd::ForceReopen`): whether the backend took it
-    /// (the ASIO card reopens through its reset budget; NullRt has no card).
-    fn force_reopen(&self) -> bool {
-        false
-    }
-    /// The stream's histograms since it opened (S7 design note §3), read once
+    /// The stream's histograms since it opened, read once
     /// a second for `Status`; none from a backend without them.
     fn histograms(&self) -> Option<HistSnapshot> {
         None
     }
 }
 
-/// Why a backend ends the run (S6 design note §3, §4; Gen 3 phase C).
+/// Why a backend ends the run (Gen 3 phase C).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ending {
-    /// The Windows session ends: save, fade out, release (the shutdown path).
-    Session,
-    /// The card must be refused (exit 3), e.g. a release could not write
-    /// REAPER's preferred buffer back.
-    Card(String),
     /// A stop was asked (SIGTERM or SIGINT; the Dante backend reports them,
-    /// the unit's stop): the shutdown path, as the session's end.
+    /// the unit's stop): save, fade out, release (the shutdown path).
     Stop,
     /// The backend ended by itself (the Dante device's serving failed):
     /// save, release without a fade, [`Exit::Backend`] (exit 1, restarted).
@@ -108,8 +87,6 @@ pub enum Exit {
         faded: bool,
     },
     Fault(String),
-    /// The backend refused the card while running (exit 3).
-    Card(String),
     /// The backend ended by itself while running (exit 1): the Dante
     /// device stopped serving.
     Backend(String),
@@ -142,7 +119,7 @@ pub struct Control {
     peers: BTreeMap<u64, Peer>,
     controller: Option<u64>,
     controller_lost: Option<Instant>,
-    /// The guard's connection (S6): one at a time, beside the controller.
+    /// The supervisor's connection: one at a time, beside the controller.
     supervisor: Option<u64>,
     /// `--hold` until the supervisor's `Arm`.
     held: bool,
@@ -154,7 +131,7 @@ pub struct Control {
     shutdown: bool,
     /// Sanitiser trips already alarmed.
     trips_seen: u64,
-    /// HIL's spare outputs (S6, `Core::hil` order): the largest peak of the
+    /// HIL's spare outputs (`Core::hil` order): the largest peak of the
     /// meter frames since the last `Status`.
     hil_peaks: Vec<f64>,
 }
@@ -239,24 +216,16 @@ impl Control {
 
     fn tick(&mut self, now: Instant) -> Option<Exit> {
         self.flush_rt();
-        if let Some(d) = self.driver.as_mut() {
-            d.tick(now);
-        }
         let stats = self.driver.as_ref().map(|d| d.stats()).unwrap_or_default();
         if stats.faulted {
-            // The last `Status` first (S7 HIL v2): it carries the faulting
-            // callback's time, which the guard keeps across the respawn.
+            // The last `Status` first (HIL v2): it carries the faulting
+            // callback's time.
             let last = self.next_status(&stats);
             self.broadcast(&EngineMsg::Status(last));
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
         }
         match self.driver.as_ref().and_then(|d| d.ending()) {
-            Some(Ending::Card(why)) => return Some(self.card(why)),
             Some(Ending::Backend(why)) => return Some(self.backend_ended(why)),
-            Some(Ending::Session) => {
-                info!("the Windows session ends");
-                self.shutdown = true;
-            }
             Some(Ending::Stop) => {
                 info!("a stop was asked (SIGTERM or SIGINT)");
                 self.shutdown = true;

@@ -1,4 +1,4 @@
-//! `iem-server`: the standalone mixer server (CI E2E and the PC), PIN
+//! `iem-server`: the standalone mixer server (the box and CI E2E), PIN
 //! provisioning and alarms without a running server.
 //!
 //!   iem-server                      run the server
@@ -13,13 +13,17 @@
 //!                                   (removes: the ids it takes out of the roster
 //!                                   applied last, null before one), exit 0 when
 //!                                   it can be installed, 1 when not
+//!   iem-server check-site           load the site file as the server's start does:
+//!                                   exit 0 when it loads, 1 with the reason on
+//!                                   stderr when not (a deploy runs it before it
+//!                                   stops anything)
+//!   iem-server cloudflare set-token refuses and names the systemd credential
+//!                                   that holds the ACME keeper's token (#91)
 //!
 //! The site config is `$IEMMIXER_CONFIG` (default `iemmixer.toml`); runtime
 //! data and secrets live next to it. `IEMMIXER_ENGINE_PIPE` overrides the
-//! site's `engine_pipe`. `IEMMIXER_MODE`, the guard's mode (`dev` or `live`,
-//! set by the guard when it starts the server), is only logged as given: no
-//! server behaviour depends on it (#38).
-//! SIGTERM or SIGINT (Windows: Ctrl-Break or Ctrl-C) stop the server
+//! site's `engine_pipe`.
+//! SIGTERM or SIGINT stop the server
 //! gracefully: open requests get up to 5 s, then it exits 0.
 
 use std::path::PathBuf;
@@ -32,7 +36,7 @@ use iem_server::ServerConfig;
 use iem_server::notify::Audience;
 use iem_server::provision::{self, PinTarget, ProvisionError};
 
-const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file>]   (a PIN is read from stdin)";
+const USAGE: &str = "usage: iem-server [pin set-engineer | pin set-member <member-id> | notify --to alarm <title> <body> | notify --count alarm | roster check <file> | check-site | cloudflare set-token]   (a PIN or a token is read from stdin)";
 
 fn config_path() -> PathBuf {
     PathBuf::from(std::env::var("IEMMIXER_CONFIG").unwrap_or_else(|_| "iemmixer.toml".to_string()))
@@ -57,6 +61,8 @@ fn main() -> ExitCode {
         },
         ["notify", "--count", "alarm"] => count_command(),
         ["roster", "check", file] => roster_check(file),
+        ["check-site"] => check_site(),
+        ["cloudflare", "set-token"] => set_token_command(),
         _ => usage(),
     }
 }
@@ -76,6 +82,19 @@ fn roster_check(file: &str) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Exit 0 when the site file loads as the server's start loads it, 1 with
+/// the reason on stderr when not.
+fn check_site() -> ExitCode {
+    let path = config_path();
+    match Config::load(&path) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("iem-server: site file {}: {e}", path.display());
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -101,6 +120,13 @@ fn pin_command(target: PinTarget) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Refuses: the box's token is a systemd credential, nothing is stored here
+/// ([`iem_server::cf_token::SET_TOKEN_REFUSED`]). Exit 1.
+fn set_token_command() -> ExitCode {
+    eprintln!("iem-server: {}", iem_server::cf_token::SET_TOKEN_REFUSED);
+    ExitCode::FAILURE
 }
 
 /// Exit 0 when a device took the notice, 3 when none did (no subscription,
@@ -158,15 +184,11 @@ fn run_server() -> anyhow::Result<()> {
     if let Ok(pipe) = std::env::var("IEMMIXER_ENGINE_PIPE") {
         config.engine_pipe = pipe;
     }
-    // The guard's mode, logged as given in its Debug form (`Some("live")`,
-    // `None` when unset), so a stray character stays escaped.
-    let mode = std::env::var("IEMMIXER_MODE").ok();
     tracing::info!(
         path = %path.display(),
         members = config.members.len(),
         inputs = config.inputs.len(),
         engine_pipe = %config.engine_pipe,
-        ?mode,
         "site config loaded"
     );
     let port = match std::env::var("PORT") {
@@ -198,10 +220,9 @@ fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The graceful stop request (S6): SIGTERM or SIGINT. The handlers are
+/// The graceful stop request: SIGTERM or SIGINT. The handlers are
 /// installed at the call, so a stop that arrives before the server listens
 /// is not lost; the future resolves on the first one.
-#[cfg(unix)]
 fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate())?;
@@ -210,21 +231,6 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + 
         tokio::select! {
             _ = term.recv() => tracing::info!("SIGTERM: stopping"),
             _ = int.recv() => tracing::info!("SIGINT: stopping"),
-        }
-    })
-}
-
-/// The graceful stop request (S6): Ctrl-Break (the guard delivers it to the
-/// server's own console) or Ctrl-C, installed at the call.
-#[cfg(windows)]
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send + 'static> {
-    use tokio::signal::windows::{ctrl_break, ctrl_c};
-    let mut brk = ctrl_break()?;
-    let mut c = ctrl_c()?;
-    Ok(async move {
-        tokio::select! {
-            _ = brk.recv() => tracing::info!("Ctrl-Break: stopping"),
-            _ = c.recv() => tracing::info!("Ctrl-C: stopping"),
         }
     })
 }

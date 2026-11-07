@@ -6,7 +6,7 @@ import { box, expectBuild, type Who } from "./env";
 import { Wire, liveSocket } from "./socket";
 
 // The live specs' runner-side mixer sockets, and the one way a live spec
-// changes the engine (S7, #10). The owner's rule (#9 2026-09-28): a live spec
+// changes the engine (#10). The owner's rule (#9 2026-09-28): a live spec
 // changes a mix or an input only inside a burst, while the engine holds every
 // mix's TX at zero, and puts it back before the burst ends, checked against
 // the server's `listening` status. `Desk.during` runs a spec's changing steps
@@ -23,7 +23,7 @@ import { Wire, liveSocket } from "./socket";
 // (P6): the page and input ids are site data. Restored values are the
 // server's UI values (f32; a level at or below −60 dB comes back as off).
 
-/** A changing step starts with at least this much of its burst left (Task 20). */
+/** A changing step starts with at least this much of its burst left. */
 export const MIN_LEFT_MS = 22_000;
 /** A change starts, and a wait inside the burst ends, at least this long before the burst does: the restore's time. */
 export const RESTORE_MS = 2_000;

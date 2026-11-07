@@ -1,6 +1,5 @@
-//! The engineer's surfaces and the server's background jobs (S5 design note
-//! §6): the F29 console (inputs, limiter counters, member-less pages, login
-//! failures), SOS alerts (F20), the "Back to REAPER" switch (§4.3), and the
+//! The engineer's surfaces and the server's background jobs: the F29 console (inputs, limiter counters, member-less pages, login
+//! failures), SOS alerts (F20), and the
 //! tasks that merge meters, clear solos after the last connection left (X2)
 //! and end silent talk locks (X6).
 //!
@@ -13,15 +12,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use axum::{
-    Json,
-    extract::{ConnectInfo, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
-use iem_core::{
-    ApiError, ConsoleInfo, ConsoleInput, ConsoleMix, LoginFailures, PageLink, ServerMsg,
-};
+use iem_core::{ConsoleInfo, ConsoleInput, ConsoleMix, LoginFailures, PageLink, ServerMsg};
 use iem_engine_proto::{Change, Cmd, MixId};
 use tokio::sync::broadcast;
 
@@ -37,8 +28,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// How often solos and talk locks are checked.
 pub const JANITOR_PERIOD: Duration = Duration::from_millis(250);
 
-/// The console's data (F29), and whether the site has the "Back to REAPER"
-/// switch (§4.3), whose button the console shows.
+/// The console's data (F29).
 pub fn console_info(state: &AppState, site: &SiteView) -> ConsoleInfo {
     let mirror = state.engine.mirror();
     let inputs = site
@@ -83,7 +73,6 @@ pub fn console_info(state: &AppState, site: &SiteView) -> ConsoleInfo {
             tunnel: stats.tunnel_failures,
             engineer_budget_trips: stats.engineer_budget_trips,
         },
-        can_switch: !state.site_config.back_to_reaper.is_empty(),
     }
 }
 
@@ -227,78 +216,6 @@ async fn janitor_task(state: AppState) {
     }
 }
 
-#[derive(serde::Deserialize)]
-pub struct SwitchRequest {
-    pub pin: String,
-}
-
-/// `POST /api/mode/event` — the engineer's "Back to REAPER" (§4.3): an
-/// engineer token and the engineer PIN (checked like a login), then the
-/// configured command is started (no shell, not awaited): 202.
-pub async fn back_to_reaper(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Json(req): Json<SwitchRequest>,
-) -> Result<impl IntoResponse, crate::auth::Rejection> {
-    let claims = {
-        let config = state.config.read().await;
-        crate::auth::verify_member_access(
-            &headers,
-            crate::pin_store::ENGINEER_ID,
-            &config.jwt_secret,
-        )
-        .map_err(IntoResponse::into_response)?
-    };
-    if !claims.engineer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiError::new("FORBIDDEN", "The switch is the engineer's")),
-        )
-            .into_response()
-            .into());
-    }
-    let argv = state.site_config.back_to_reaper.clone();
-    let Some((program, args)) = argv.split_first() else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiError::new("NOT_CONFIGURED", "No switch on this site")),
-        )
-            .into_response()
-            .into());
-    };
-    crate::auth::verify_engineer_pin(&state, peer, &headers, &req.pin).await?;
-    let child = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .spawn();
-    match child {
-        Ok(mut child) => {
-            tracing::warn!(program = %program, by = %claims.sub, "Back to REAPER: switch started");
-            tokio::task::spawn_blocking(move || match child.wait() {
-                Ok(status) => tracing::info!(%status, "Back to REAPER: switch finished"),
-                Err(e) => tracing::error!(error = %e, "Back to REAPER: waiting failed"),
-            });
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({ "ok": true })),
-            ))
-        }
-        Err(e) => {
-            tracing::error!(program = %program, error = %e, "Back to REAPER: cannot start the switch");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError::new(
-                    "SWITCH_FAILED",
-                    "The switch could not be started",
-                )),
-            )
-                .into_response()
-                .into())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,21 +287,6 @@ mod tests {
                 processing: false
             })]
         );
-    }
-
-    /// The console says whether this site has the "Back to REAPER" switch
-    /// (§4.3): the engineer's settings show its button only then. #38 moved
-    /// the button out of the band-activity banner into the console.
-    #[tokio::test]
-    async fn the_console_tells_whether_the_switch_is_configured() {
-        let (_d, s) = state();
-        let v = test_view();
-        let json = serde_json::to_value(console_info(&s, &v)).unwrap();
-        assert_eq!(json["can_switch"], true, "the test site's switch");
-        let dir = tempfile::tempdir().unwrap();
-        let none = AppState::new(iem_core::Config::default(), dir.path());
-        let json = serde_json::to_value(console_info(&none, &v)).unwrap();
-        assert_eq!(json["can_switch"], false, "no back_to_reaper: no button");
     }
 
     #[tokio::test]

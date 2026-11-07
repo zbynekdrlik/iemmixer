@@ -1,10 +1,10 @@
-//! The requests (design note §3.3): a frame's checks by role, the core's
+//! The requests: a frame's checks by role, the core's
 //! answer and its effect, and the RT commands it queues.
 
 use std::time::{Duration, Instant};
 
 use iem_engine_proto::{ClientMsg, Cmd, EngineMsg, ErrCode, ErrorBody, Role, parse_client};
-use tracing::{info, warn};
+use tracing::info;
 
 use super::Control;
 use crate::MAX_CMDS_PER_BLOCK;
@@ -101,20 +101,10 @@ impl Control {
             }
             Effect::Save => self.save(),
             Effect::Shutdown => self.shutdown = true,
-            Effect::Reopen => {
-                if self.driver.as_ref().is_some_and(|d| d.force_reopen()) {
-                    info!("a forced reopen of the card was asked for");
-                } else {
-                    warn!("a forced reopen was asked for, but the backend has no card");
-                }
-            }
-            Effect::Imported { baseline } => {
+            Effect::Imported => {
                 let state = self.state_msg();
                 self.broadcast(&state);
                 self.schedule.changed(Instant::now());
-                if baseline {
-                    self.save_baseline();
-                }
             }
         }
     }

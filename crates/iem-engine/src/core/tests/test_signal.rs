@@ -1,5 +1,5 @@
-//! The test signal (X13), the HIL signal and its mask (S6), `Arm`, fault
-//! injection and HIL's forced reopen.
+//! The test signal (X13), the HIL signal and its mask, `Arm` and fault
+//! injection.
 
 use super::*;
 
@@ -182,7 +182,7 @@ fn a_hil_signal_never_names_a_mixs_tx() {
     }
 }
 
-/// While a HIL test signal runs (its TTL, S6 design note §4) a plain test
+/// While a HIL test signal runs (its TTL) a plain test
 /// signal may not replace it: that would lift the card mask and sound on
 /// every TX that hears the input. A stop ends it as usual, and after its end
 /// a plain one starts again (lane A review).
@@ -280,54 +280,23 @@ fn fault_injection_needs_the_flag() {
 }
 
 #[test]
-fn seh_injection_needs_the_flag() {
-    // The owner-approved SEH test (design §10): a structured exception on the
-    // RT thread, only under the fault-injection flag, like InjectFault.
+fn the_test_signal_flag_does_not_allow_fault_injection_which_changes_nothing() {
     let mut off = core(Flags::default());
-    assert_eq!(code(off.apply(&Cmd::InjectSeh)), ErrCode::Forbidden);
-    let mut on = core(Flags {
-        test_signal: false,
-        fault_injection: true,
-    });
-    let out = on.apply(&Cmd::InjectSeh).unwrap();
-    assert_eq!((out.rev, out.rt), (0, vec![RtOp::Seh]));
-}
-
-#[test]
-fn park_injection_needs_the_flag() {
-    // The parked-engine test (design §10 test #2, #35): the SEH test's
-    // exception under the backend's hold, only under the fault-injection
-    // flag; neither state nor revision changes.
-    let mut off = core(Flags::default());
-    assert_eq!(code(off.apply(&Cmd::InjectPark)), ErrCode::Forbidden);
+    assert_eq!(code(off.apply(&Cmd::InjectFault)), ErrCode::Forbidden);
     let mut test_signal_only = core(Flags {
         test_signal: true,
         fault_injection: false,
     });
     assert_eq!(
-        code(test_signal_only.apply(&Cmd::InjectPark)),
+        code(test_signal_only.apply(&Cmd::InjectFault)),
         ErrCode::Forbidden
     );
     let mut on = core(Flags {
         test_signal: false,
         fault_injection: true,
     });
-    let out = on.apply(&Cmd::InjectPark).unwrap();
+    let out = on.apply(&Cmd::InjectFault).unwrap();
     assert!(out.changes.is_empty());
     assert_eq!(out.effect, Effect::None);
-    assert_eq!((out.rev, out.rt), (0, vec![RtOp::Park]));
-}
-
-#[test]
-fn a_forced_reopen_needs_the_fault_flag_and_changes_nothing() {
-    let mut off = core(Flags::default());
-    assert_eq!(code(off.apply(&Cmd::ForceReopen)), ErrCode::Forbidden);
-    let mut on = core(Flags {
-        test_signal: false,
-        fault_injection: true,
-    });
-    let out = on.apply(&Cmd::ForceReopen).unwrap();
-    assert_eq!(out.effect, Effect::Reopen);
-    assert_eq!((out.rev, out.rt, out.changes), (0, vec![], vec![]));
-    assert_eq!(on.rev(), 0);
+    assert_eq!((out.rev, out.rt), (0, vec![RtOp::Panic]));
 }

@@ -1,6 +1,6 @@
 //! One request after another (`Core::apply`, `Core::batch`): each command's
 //! checks and caps, the entity it sets through the per-entity setters, its
-//! effect and its RT commands; the test signal (X13) and the HIL signal (S6)
+//! effect and its RT commands; the test signal (X13) and the HIL signal
 //! start here.
 
 use iem_engine_proto::{
@@ -213,34 +213,12 @@ impl Core {
                     ..Partial::default()
                 })
             }
-            Cmd::InjectSeh => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Seh],
-                    ..Partial::default()
-                })
-            }
-            // The parked-engine test (design §10 test #2, #35): the SEH
-            // test's exception under the backend's test hold.
-            Cmd::InjectPark => {
-                self.need_fault_injection()?;
-                Ok(Partial {
-                    rt: vec![RtOp::Park],
-                    ..Partial::default()
-                })
-            }
-            Cmd::ForceReopen => {
-                self.need_fault_injection()?;
-                Ok(Partial::effect(Effect::Reopen))
-            }
             Cmd::Batch { .. } => Err(CmdError::new(ErrCode::BadRequest, "nested batch")),
-            Cmd::ImportState { state, baseline } => {
+            Cmd::ImportState { state } => {
                 self.s = reconcile(&self.topo, state).0;
                 Ok(Partial {
                     rt: self.full_sync(),
-                    effect: Some(Effect::Imported {
-                        baseline: *baseline,
-                    }),
+                    effect: Some(Effect::Imported),
                     bump: true,
                     ..Partial::default()
                 })
@@ -269,8 +247,7 @@ impl Core {
         }
     }
 
-    /// Fault injection and HIL's forced reopen run only under the
-    /// `--fault-injection` launch flag.
+    /// Fault injection runs only under the `--fault-injection` launch flag.
     fn need_fault_injection(&self) -> Result<(), CmdError> {
         if self.flags.fault_injection {
             Ok(())
@@ -284,7 +261,7 @@ impl Core {
 
     /// X13: a sine replaces `input` for `ttl_s`, every TX capped; with
     /// `mask` (the HIL signal) it sounds only on those spare outputs
-    /// meanwhile, and no mix's TX carries anything; `listen` (S7, HIL only)
+    /// meanwhile, and no mix's TX carries anything; `listen` (HIL only)
     /// adds the listen probe.
     fn start_test(
         &mut self,

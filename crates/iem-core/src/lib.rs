@@ -1,8 +1,7 @@
 //! IEM Mixer Core Library
 //!
 //! Shared types, configuration, and constants for the IEM mixing system: the
-//! site file and the roster, the UI protocol, band data and backups; the
-//! predecessor's formats only in [`legacy`] (the importer's).
+//! site file and the roster, the UI protocol, band data and backups.
 
 pub mod backup;
 pub mod band;
@@ -10,7 +9,6 @@ pub mod band;
 pub mod config;
 #[cfg(feature = "jwt")]
 pub mod jwt;
-pub mod legacy;
 pub mod lineup;
 #[cfg(feature = "config")]
 pub mod roster;
@@ -28,7 +26,7 @@ pub use config::{Config, SiteInputMeta, SiteMember};
 pub use lineup::{LineupInfo, LineupRef, SwitchRequest};
 pub use types::{
     ApiError, AuthClaims, BatchControlRequest, BatchOperation, Channel, Customization, MixerState,
-    PIN_CHANGES_FROZEN, is_valid_ui_pan, merge_or_replace_channels,
+    is_valid_ui_pan, merge_or_replace_channels,
 };
 
 pub use tunnel::{TunnelState, TunnelStatusInfo};

@@ -1,4 +1,4 @@
-//! Backups v2 (F19) and restore with preview (F31; S5 design note §6): a
+//! Backups v2 (F19) and restore with preview (F31): a
 //! backup is the engine's state from the mirror plus every member's pins and
 //! hides; the preview is a diff of the running state and the backup in the
 //! UI's names; the restore is one `ImportState` of the backup completed from

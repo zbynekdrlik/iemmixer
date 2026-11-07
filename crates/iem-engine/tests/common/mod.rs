@@ -7,13 +7,12 @@
 //! input, a whole heard mix (the engineer's) and a peer, a group strip, solo,
 //! listen, limiter raise and lower, the EQ, limiter and volume of a shadowed
 //! mix (member1), test signal, the HIL test signal on both
-//! spare outputs with its listen probe while both listen slots are listened
-//! (S7), an Arm, a full
+//! spare outputs with its listen probe while both listen slots are listened, an Arm, a full
 //! import), the D5(b) loopback returns (a one-block synthetic loopback of the
 //! spare outputs, so the round-trip probe measures and later signals find the
 //! return busy), talkback, both taps, meter reads, a sanitiser trip
 //! every 1000 blocks, a driver reopen's `discontinuity` every 1000 blocks and
-//! the backends' two histogram records per block (S7: the interval before
+//! the backends' two histogram records per block (the interval before
 //! `process`, its time after it; the overflow bucket included).
 #![allow(dead_code)]
 
@@ -39,13 +38,13 @@ use iem_engine_proto::{
 
 pub const BLOCK: usize = 32;
 
-/// The intervals `drive` records, in turn: on time, the S1a p99.9 edge
+/// The intervals `drive` records, in turn: on time, the measured p99.9 edge
 /// (347 µs), late (1.5 periods) and a missed period (the overflow bucket).
 const INTERVALS: [u64; 4] = [333_333, 347_000, 500_000, 700_000];
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), opened after
-/// the topology's TX as `run` does under the test-signal flag (S6), and
-/// their loopback returns after the topology's RX (S6 test 5).
+/// the topology's TX as `run` does under the test-signal flag, and
+/// their loopback returns after the topology's RX.
 pub const HIL: [u16; 2] = [94, 95];
 
 pub fn site_path() -> PathBuf {
@@ -120,7 +119,7 @@ pub struct Scenario {
     /// The largest D5(b) loopback round-trip (samples) the processor
     /// reported during `drive`: 0 while the probe never measured.
     pub measured: u64,
-    /// The backends' per-block histogram records (S7), as `drive` makes them.
+    /// The backends' per-block histogram records, as `drive` makes them.
     pub hists: Arc<StreamHists>,
 }
 
@@ -297,7 +296,6 @@ pub fn scenario() -> Scenario {
         Cmd::StopTestSignal,
         Cmd::ImportState {
             state: open_state(&topo),
-            baseline: false,
         },
     ];
     let groups = cmds

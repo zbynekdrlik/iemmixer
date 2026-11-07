@@ -105,10 +105,9 @@ fn a_read_that_keeps_failing_is_tried_a_bounded_number_of_times() {
 }
 
 #[test]
-fn only_what_leaves_the_live_state_in_doubt_is_a_doubt() {
-    // #32 F3-r4 6: an import refuses on `Loaded::doubts` only. An older
-    // save.tmp (its save moves it aside) and an orphan above the state
-    // loaded are alarms, no doubt.
+fn what_the_load_passes_over_or_cannot_compare_is_an_alarm() {
+    // An older save.tmp (its save moves it aside) and an orphan above the
+    // state loaded.
     let g = test_site();
     let (_d, _f, s) = faulty_store();
     s.save(&sample(5)).unwrap();
@@ -120,15 +119,13 @@ fn only_what_leaves_the_live_state_in_doubt_is_a_doubt() {
     .unwrap();
     let loaded = s.load(&g);
     assert_eq!(loaded.alarms.len(), 2, "{:?}", loaded.alarms);
-    assert!(loaded.doubts.is_empty(), "{:?}", loaded.doubts);
     // A file that cannot be read, and the revision continued above it.
     let (_d, faulty, s) = faulty_store();
     s.save(&sample(7)).unwrap();
     s.save(&sample(8)).unwrap();
     faulty.set_unreadable(&s.dir().join(CURRENT), true);
     let loaded = s.load(&g);
-    assert_eq!(loaded.doubts.len(), 2, "{:?}", loaded.doubts);
-    assert_eq!(loaded.doubts, loaded.alarms);
+    assert_eq!(loaded.alarms.len(), 2, "{:?}", loaded.alarms);
     // A save.tmp loaded without a comparison.
     let (_d, faulty, s) = faulty_store();
     s.save(&sample(7)).unwrap();
@@ -137,8 +134,7 @@ fn only_what_leaves_the_live_state_in_doubt_is_a_doubt() {
     faulty.fail_next("list");
     let loaded = s.load(&g);
     assert_eq!(loaded.source, Source::Interrupted);
-    assert_eq!(loaded.doubts.len(), 1, "{:?}", loaded.doubts);
-    assert_eq!(loaded.doubts, loaded.alarms);
+    assert_eq!(loaded.alarms.len(), 1, "{:?}", loaded.alarms);
 }
 
 #[test]
@@ -173,10 +169,10 @@ fn the_seed_fails_when_the_generations_cannot_be_listed() {
 #[test]
 fn only_a_read_error_that_may_pass_is_tried_again() {
     // #32 minor-5: a directory where current.json belongs (IsADirectory on
-    // Linux, access denied on Windows) does not turn readable by waiting:
+    // Linux) does not turn readable by waiting:
     // it is Unreadable at once, with no pause.
     let (_d, faulty, s) = faulty_store();
-    s.save_baseline(&sample(4)).unwrap();
+    write_baseline(&s, &sample(4));
     fs::create_dir(s.dir().join(CURRENT)).unwrap();
     let loaded = s.load(&test_site());
     assert_eq!(
@@ -189,8 +185,8 @@ fn only_a_read_error_that_may_pass_is_tried_again() {
 #[test]
 fn a_boot_pauses_between_read_tries_two_seconds_at_most() {
     // #32 minor-5: each file that stays locked took its four pauses (0.8 s
-    // each), so a few of them held the engine past the guard's READY_S
-    // (10 s) before it listened. The pauses of one load are 10 in all
+    // each), so a few of them held the engine past 10 s before it
+    // listened. The pauses of one load are 10 in all
     // (2 s); a file read once they are spent still gets its one try.
     let (_d, faulty, s) = faulty_store();
     for rev in 1..=3 {

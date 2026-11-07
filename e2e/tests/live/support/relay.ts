@@ -4,8 +4,7 @@ import { box, expectBuild } from "./env";
 import { Wire, liveSocket } from "./socket";
 
 // Every page socket of a live spec goes through the runner (the #10 decision
-// of 2026-10-07, applied to the browser): after "ide event" the predecessor
-// answers at the same address with the same secret, so a socket opens only
+// of 2026-10-07, applied to the browser): a socket opens only
 // after /api/version names the run's build, and never twice. Playwright
 // 1.58's `WebSocketRoute.connectToServer()` takes no URL (and connects from
 // the page, past any check), so the relay holds the real socket itself.
@@ -164,8 +163,7 @@ export class Relay {
 /**
  * Routes every page socket (`/ws/…`) through the runner: one real socket per
  * path and test, opened only after /api/version names LIVE_SHA; a second
- * attempt is refused and never reaches the server (after "ide event" the
- * predecessor answers at the same address with the same secret). With `hil`,
+ * attempt is refused and never reaches the server. With `hil`,
  * `/ws/audio` gains `&hil=1`. Errors name the socket (`named`), never the URL. The real
  * sockets close with the page.
  */

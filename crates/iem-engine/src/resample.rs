@@ -1,4 +1,4 @@
-//! 96 ↔ 48 kHz for the listen taps and talkback (X4; design note §3.4): a
+//! 96 ↔ 48 kHz for the listen taps and talkback (X4): a
 //! 79-tap Kaiser-windowed half-band FIR (β = 10.06), linear phase, each
 //! polyphase branch normalised to unity. Measured in numpy: ±1e-4 dB up to
 //! 20 kHz, ≥ 99.6 dB rejection from 28 kHz (aliases land above 20 kHz).

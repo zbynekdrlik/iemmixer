@@ -1,13 +1,10 @@
 import { readFileSync } from "node:fs";
 import { expect, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 
-// The live run's site values (S7, #10; P6): every one comes from a LIVE_*
-// variable of the ops live run, read on first use, so `--list` works without
+// The live run's site values (#10; P6): every one comes from a LIVE_*
+// variable of `iempc gen3-gate live`, read on first use, so `--list` works without
 // any of them. A refusal names the variable, never its value, and no error
-// here carries a URL (a socket URL holds a token in its query). The Gen 3
-// box's browser step (`tests/gen3/`, #72 phase C) reads the same variables
-// for the box's own server: `box()`, with a plain-HTTP origin its spec
-// allows (`allowPlainHttp`).
+// here carries a URL (a socket URL holds a token in its query).
 
 export type Who = "engineer" | "member";
 
@@ -36,7 +33,7 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const DECIMAL = /^-?[0-9]+(?:\.[0-9]+)?$/;
-/** The HIL ceiling (`iem-guard` daemon): a burst is never louder. */
+/** The HIL ceiling (`iem-engine supervise`): a burst is never louder. */
 export const BURST_CEILING_DBFS = -20;
 
 /** The failing hop when /api/version does not name the run's build. */
@@ -60,8 +57,6 @@ function matching(name: string, re: RegExp, what: string, env: Env = process.env
 /** The schemes an origin may have: the live run's public host is `https:` only. */
 export type Schemes = readonly ("http:" | "https:")[];
 const PUBLIC_HOST: Schemes = ["https:"];
-/** The Gen 3 box serves its UI over plain HTTP on its LAN (#72 phase C, plan choice 4). */
-const LAN_BOX: Schemes = ["http:", "https:"];
 
 /**
  * The variable `name`'s value as a bare origin with one of `schemes`; a
@@ -111,9 +106,9 @@ const RUN_NUMBER = /^[0-9]{1,20}$/;
 
 /**
  * The client-error marker of this run, `iemmixer-live-marker-<run id>-<attempt>`,
- * from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` (the ops live run's own:
+ * from `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` (the gate's own:
  * `pc-end` in the same run builds the same marker and looks for it in the
- * server's log). Read on use; a refusal names the variable, never its value.
+ * server's journal). Read on use; a refusal names the variable, never its value.
  */
 export function runMarker(env: Env = process.env): string {
   const id = matching("GITHUB_RUN_ID", RUN_NUMBER, "a run number (digits)", env);
@@ -121,25 +116,13 @@ export function runMarker(env: Env = process.env): string {
   return `iemmixer-live-marker-${id}-${attempt}`;
 }
 
-/** The schemes LIVE_BASE_URL may have in this process: the public host's, until `allowPlainHttp`. */
-let schemes: Schemes = PUBLIC_HOST;
 let boxCached: Box | null = null;
 let cached: Live | null = null;
-
-/**
- * The Gen 3 box's spec, at its top: LIVE_BASE_URL may be the box's plain
- * `http://` origin too (GEN3_UI_URL). Only before any value is read, so a
- * live spec, which never calls it, keeps the public host's `https://`.
- */
-export function allowPlainHttp(): void {
-  if (boxCached) throw new Error("allowPlainHttp comes before the first LIVE_* value is read");
-  schemes = LAN_BOX;
-}
 
 /** The values every spec against a server of ours reads, read and checked on the first call. */
 export function box(): Box {
   boxCached ??= {
-    baseURL: originOf("LIVE_BASE_URL", schemes),
+    baseURL: originOf("LIVE_BASE_URL", PUBLIC_HOST),
     sha: matching("LIVE_SHA", SHA, "a 40-hex SHA"),
     tokens: tokensOf("LIVE_TOKENS"),
     member: matching("LIVE_MEMBER", ID, "an id"),
@@ -160,8 +143,7 @@ export function live(): Live {
 
 /**
  * Whether `/api/version`'s `git_hash` names `sha`: at least 7 lowercase hex
- * digits and a prefix of it (the rule of `Test-IemHilVersion`, the guard's
- * `version_matches` and the soak client's `names_build`).
+ * digits and a prefix of it (the rule of the soak client's `names_build`).
  */
 export function namesBuild(gitHash: unknown, sha: string): boolean {
   return typeof gitHash === "string" && /^[0-9a-f]{7,}$/.test(gitHash) && sha.startsWith(gitHash);
@@ -169,8 +151,7 @@ export function namesBuild(gitHash: unknown, sha: string): boolean {
 
 /**
  * Fails unless the public host answers `/api/version` with the run's build:
- * after "ide event" the predecessor answers at the same address, so every
- * real socket opens only after this check.
+ * every real socket opens only after this check.
  */
 export async function expectBuild(request: APIRequestContext): Promise<void> {
   const { baseURL, sha } = box();

@@ -53,7 +53,7 @@ pub struct Band {
 }
 
 impl Band {
-    /// A band's values must be finite and not negative (the engine caps fields, §2.3).
+    /// A band's values must be finite and not negative (the engine caps fields).
     pub fn is_valid(&self) -> bool {
         [self.freq_hz, self.gain_lin, self.bw_oct]
             .iter()
@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// Independent reference: ReaEQ's RBJ biquad as S1b measured it
-    /// (scripts/golden/analyze.py `rbj`, `alpha_oct`, `alpha_shelf`), direct form I.
+    /// (`goldens/s1b/README.md` has its formulas), direct form I.
     fn rbj_ir(b: &Band, fs: f64, n: usize) -> Vec<f64> {
         let w0 = 2.0 * PI * b.freq_hz / fs;
         let c = w0.cos();

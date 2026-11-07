@@ -298,26 +298,6 @@ pub async fn batch_mute_all(member: &str) -> Result<(), String> {
     }
 }
 
-/// "Back to REAPER" (§4.3): the engineer's switch in the console, confirmed
-/// with the engineer PIN; the server starts the site's switch command (202).
-pub async fn back_to_reaper(pin: &str) -> Result<(), String> {
-    let token = crate::auth::get_token().ok_or("Not authenticated")?;
-    let resp = Request::post(&format!("{}/mode/event", API_BASE))
-        .header("Authorization", &format!("Bearer {}", token))
-        .json(&serde_json::json!({ "pin": pin }))
-        .map_err(|e| format!("Request error: {}", e))?
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {}", e))?;
-    if resp.ok() {
-        Ok(())
-    } else {
-        Err(crate::components::back_to_reaper::switch_error_message(
-            resp.status(),
-        ))
-    }
-}
-
 /// What a band switch came to (#58).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Switched {
@@ -437,13 +417,11 @@ pub async fn change_pin(old_pin: &str, new_pin: &str, member: &str) -> Result<()
     }
 }
 
-/// The PIN dialog's text for a refused change (`status` = HTTP status); 409
-/// is the freeze before the cutover (P9).
+/// The PIN dialog's text for a refused change (`status` = HTTP status).
 pub fn change_pin_error(status: u16) -> String {
     match status {
         400 => "PIN must be exactly 4 digits".to_string(),
         401 => "Wrong current PIN".to_string(),
-        409 => iem_core::PIN_CHANGES_FROZEN.to_string(),
         other => format!("Server error: {other}"),
     }
 }
@@ -691,10 +669,6 @@ mod tests {
     fn pin_change_errors_are_readable() {
         assert_eq!(change_pin_error(400), "PIN must be exactly 4 digits");
         assert_eq!(change_pin_error(401), "Wrong current PIN");
-        assert_eq!(
-            change_pin_error(409),
-            "PIN sa zatiaľ mení v pôvodnej aplikácii"
-        );
         assert_eq!(change_pin_error(500), "Server error: 500");
     }
 }

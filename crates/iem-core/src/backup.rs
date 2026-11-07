@@ -1,4 +1,4 @@
-//! Backups v2 (F19, F31; S5 design note §6): the engine's whole mix state at
+//! Backups v2 (F19, F31): the engine's whole mix state at
 //! one revision plus every member's pins and hides. A backup never holds a
 //! PIN or a secret. Restores are previewed as a diff of two states first.
 

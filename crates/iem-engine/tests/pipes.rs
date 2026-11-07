@@ -1,9 +1,8 @@
-//! The engine through its pipes (design note §3.6, §3.7): an in-process
+//! The engine through its pipes: an in-process
 //! engine on NullRt at B = 32 with a temporary state directory, and the
 //! `iem-engine` binary. Every read has a 5 s timeout; every wait is bounded.
 //!
-//! Unix sockets on Linux, named pipes on Windows (the `windows` CI job, S6).
-//! Windows pipes have no timeouts, so a client reads the way the engine does
+//! Unix sockets. A client reads the way the engine does
 //! (`pipe::read_loop` on a thread of its own, closed when the client is
 //! dropped): it never leaves the engine blocked on a full pipe, and every
 //! wait on it is a bounded channel receive.
@@ -11,7 +10,6 @@
 mod common;
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -31,18 +29,9 @@ use interprocess::local_socket::Stream;
 use interprocess::local_socket::prelude::*;
 
 const WAIT: Duration = Duration::from_secs(5);
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn pipe_name(dir: &tempfile::TempDir) -> String {
-    if cfg!(unix) {
-        dir.path().join("ctl.sock").to_string_lossy().into_owned()
-    } else {
-        format!(
-            "iem-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        )
-    }
+    dir.path().join("ctl.sock").to_string_lossy().into_owned()
 }
 
 fn connect(
@@ -461,7 +450,7 @@ fn meters_and_status_flow() {
         s.process_max_us
     );
     assert_eq!(s.cmd_backlog, 0);
-    // NullRt's stream histograms (S7): two periods at 32 samples, every
+    // NullRt's stream histograms: two periods at 32 samples, every
     // callback's time counted before its callback was.
     let total = |v: &[(u32, u64)]| v.iter().map(|e| e.1).sum::<u64>();
     assert_eq!(s.hist_top_us, 667);
@@ -838,8 +827,7 @@ fn an_engine_waits_a_moment_for_its_state_dir() {
 /// The supervisor's fault injection under the flag ends the engine with a
 /// fault; without the flag it is `Forbidden`. The controller never injects,
 /// flag or not (review of PR #40, #35: an engine keeps `--fault-injection`
-/// until it restarts, and only the guard allows an injection, inside a HIL
-/// job).
+/// until it restarts, and only the box HIL gate's job starts one with it).
 #[test]
 fn fault_injection_releases_the_driver_and_exits() {
     let off = Engine::start(Flags::default(), InputSignal::Silence);
@@ -860,17 +848,11 @@ fn fault_injection_releases_the_driver_and_exits() {
     let mut c = e.client();
     c.hello(Role::Control);
     assert!(c.request(1, set_mix("member7", -5.0)).error.is_none());
-    for (id, cmd) in [
-        (2, Cmd::InjectFault),
-        (3, Cmd::InjectSeh),
-        (4, Cmd::InjectPark),
-    ] {
-        assert_eq!(
-            c.request(id, cmd).error.map(|b| b.code),
-            Some(ErrCode::NotSupervisor),
-            "the controller's injection {id}"
-        );
-    }
+    assert_eq!(
+        c.request(2, Cmd::InjectFault).error.map(|b| b.code),
+        Some(ErrCode::NotSupervisor),
+        "the controller's injection"
+    );
     let mut sup = e.client();
     sup.hello(Role::Supervisor);
     assert!(sup.request(5, Cmd::InjectFault).error.is_none());
@@ -887,10 +869,10 @@ fn fault_injection_releases_the_driver_and_exits() {
     assert_eq!(iem_engine::persist::decode(&saved).unwrap().rev, 1);
 }
 
-/// HIL v2 (S7, #10): the last `Status` before a fault's `DriverReleased`
+/// HIL v2 (#10): the last `Status` before a fault's `DriverReleased`
 /// carries the fault and the faulting callback's own time (NullRt: its
-/// `process()` up to the caught panic), so the guard can keep it across the
-/// respawn.
+/// `process()` up to the caught panic), so a supervisor reads it before the
+/// engine ends.
 #[test]
 fn an_injected_fault_ends_with_a_status_that_times_the_faulting_callback() {
     let mut e = Engine::start(
@@ -935,10 +917,7 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
         }
     };
     let before = sup.wait(status(true));
-    assert_eq!(
-        (before.frames, before.missed, before.parked),
-        (32, 0, false)
-    );
+    assert_eq!((before.frames, before.missed), (32, 0));
     // Only the supervisor arms; the controller is told so.
     let mut ctl = e.client();
     ctl.hello(Role::Control);
@@ -965,12 +944,6 @@ fn a_held_engine_sounds_after_its_supervisor_arms_it() {
 #[path = "pipes/binary.rs"]
 mod binary;
 
-/// The listen probe on the media pipe (S7).
+/// The listen probe on the media pipe.
 #[path = "pipes/probe.rs"]
 mod probe;
-
-/// Windows named pipes only (S6 design note §4): the private DACL, the
-/// first-instance flag and writes bounded like the Unix send timeout.
-#[cfg(windows)]
-#[path = "pipes/named_pipes.rs"]
-mod named_pipes;

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_mutants_anchors as cma  # noqa: E402
 
 RT = "crates/iem-engine/src/rt.rs"
-READ = "crates/iem-rpp/src/read.rs"
+READ = "crates/iem-demo/src/read.rs"
 RT_SRC = "fn process() {\n    let x = 1;\n    if budget > 0\n        && next\n}\n"
 READ_SRC = "fn raw_tokens() {\n    while i < n {\n        k += 1;\n        while i < n && b != c {\n        }\n    }\n}\n"
 FILES = {RT: RT_SRC, READ: READ_SRC, "crates/iem-engine/src/engine.rs": "fn run() {}\n"}
@@ -19,7 +19,7 @@ FILES = {RT: RT_SRC, READ: READ_SRC, "crates/iem-engine/src/engine.rs": "fn run(
 
 def config(*entries: str) -> str:
     body = "\n".join(entries)
-    return f'profile = "mutants"\n\nexclude_globs = [\n  "crates/iem-tray/**",\n]\n\nexclude_re = [\n{body}\n]\n'
+    return f'profile = "mutants"\n\nexclude_globs = [\n  "crates/iem-dante-dev/src/main.rs",\n]\n\nexclude_re = [\n{body}\n]\n'
 
 
 def run(text: str, files: dict[str, str] | None = None) -> tuple[list[str], int]:
@@ -87,12 +87,12 @@ class AnchorTests(unittest.TestCase):
         both = config(
             "  # anchor 2: while i < n {",
             "  # anchor 4: while i < n && b != c {",
-            '  "iem-rpp/src/read\\\\.rs:(2|4):.*replace < with <= in raw_tokens$",',
+            '  "iem-demo/src/read\\\\.rs:(2|4):.*replace < with <= in raw_tokens$",',
         )
         self.assertEqual(run(both), ([], 2))
         one = config(
             "  # anchor 2: while i < n {",
-            '  "iem-rpp/src/read\\\\.rs:(2|4):.*replace < with <= in raw_tokens$",',
+            '  "iem-demo/src/read\\\\.rs:(2|4):.*replace < with <= in raw_tokens$",',
         )
         problems, held = run(one)
         self.assertEqual(held, 1)

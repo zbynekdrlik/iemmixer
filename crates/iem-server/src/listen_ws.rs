@@ -5,7 +5,7 @@
 //! starts the engine's tap; the last listener of a mix leaving stops it; a
 //! second different mix while one is heard gets `no_source`.
 //!
-//! The listen probe (S7, #10): a session opened with `&hil=1` (engineer-only
+//! The listen probe (#10): a session opened with `&hil=1` (engineer-only
 //! like every `/ws/audio` socket) also takes its slot's probe channel and,
 //! while probe frames come, sends them in place of the slot's own (silent)
 //! frames (`probe_gate`), telling the socket `AudioStatus` `probe` at a
@@ -64,7 +64,7 @@ pub async fn ws_audio(
     Ok(ws.on_upgrade(move |socket| session(socket, state, hil)))
 }
 
-/// `&hil=1` (S7): the session also takes its slot's listen probe. Any other
+/// `&hil=1`: the session also takes its slot's listen probe. Any other
 /// value, or none, is a plain listener.
 pub fn asks_for_probe(query: &WsQuery) -> bool {
     query.hil == Some(1)

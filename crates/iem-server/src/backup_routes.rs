@@ -206,13 +206,7 @@ async fn restore(state: AppState, filename: String) -> Result<Json<RestoreResult
     });
     state
         .engine
-        .request_applied(
-            Cmd::ImportState {
-                state: import,
-                baseline: false,
-            },
-            None,
-        )
+        .request_applied(Cmd::ImportState { state: import }, None)
         .await
         .map_err(|e| {
             tracing::error!(%filename, error = %e, "restore failed");

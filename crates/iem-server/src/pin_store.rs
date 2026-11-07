@@ -1,18 +1,12 @@
-//! Argon2id PIN hashes (program spec §5.3): `<secrets>/pin_hashes.json`.
+//! Argon2id PIN hashes: `<secrets>/pin_hashes.json`.
 //! Never plaintext: every stored value must be an argon2id PHC string, and a
 //! file that holds anything else is a load error instead of being ignored.
-//! The predecessor's plaintext `pins.json` is never read here; the S4
-//! migration (`band_import`) hashes its values with `import_*_hash`, which
-//! marks them `imported`. Setting a PIN in iemmixer drops the mark, so a
-//! later import never overwrites an iemmixer-set PIN (program spec §3.4).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-use crate::atomic_write;
 
 /// File name inside the secrets directory.
 pub const PIN_HASHES_FILE: &str = "pin_hashes.json";
@@ -25,10 +19,6 @@ struct PinFile {
     engineer: Option<String>,
     #[serde(default)]
     members: BTreeMap<String, String>,
-    /// Owners (member ids, `engineer`) whose hash came from an import of the
-    /// predecessor's PIN and was not changed in iemmixer since.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    imported: BTreeSet<String>,
     /// Hashes an older server kept for the people it archived (#58
     /// decision 6, overruled by the owner on 2026-10-24: a removed person is
     /// removed, not archived), member id → hash. Read only to be deleted
@@ -93,16 +83,18 @@ impl PinStore {
         Ok(Self { file, path })
     }
 
-    /// Deletes a member's hash and its import mark (#58: a person the
+    /// Deletes a member's hash (#58: a person the
     /// roster removes is removed, nothing of theirs kept). `false` when
     /// there is none (nothing is written).
     pub fn remove_member(&mut self, member_id: &str) -> io::Result<bool> {
         check_member(member_id)?;
-        if self.file.members.remove(member_id).is_none() {
+        let Some(old) = self.file.members.remove(member_id) else {
             return Ok(false);
+        };
+        if let Err(e) = self.save() {
+            self.file.members.insert(member_id.to_string(), old);
+            return Err(e);
         }
-        self.file.imported.remove(member_id);
-        self.save()?;
         Ok(true)
     }
 
@@ -143,51 +135,24 @@ impl PinStore {
         self.file.engineer.is_some() || !self.file.members.is_empty()
     }
 
-    /// Whether `owner`'s hash (a member id or `engineer`) came from an import.
-    pub fn is_imported(&self, owner: &str) -> bool {
-        self.file.imported.contains(owner)
-    }
-
     pub fn set_engineer_hash(&mut self, phc: String) -> io::Result<()> {
         check_phc(ENGINEER_ID, &phc)?;
-        self.file.engineer = Some(phc);
-        self.file.imported.remove(ENGINEER_ID);
-        self.save()
+        let old = self.file.engineer.replace(phc);
+        self.save().inspect_err(|_| self.file.engineer = old)
     }
 
     pub fn set_member_hash(&mut self, member_id: &str, phc: String) -> io::Result<()> {
         check_member(member_id)?;
         check_phc(member_id, &phc)?;
-        self.file.members.insert(member_id.to_string(), phc);
-        self.file.imported.remove(member_id);
-        self.save()
-    }
-
-    /// Stores an imported engineer PIN hash unless an iemmixer-set one exists
-    /// (then `false`, nothing written).
-    pub fn import_engineer_hash(&mut self, phc: String) -> io::Result<bool> {
-        check_phc(ENGINEER_ID, &phc)?;
-        if self.file.engineer.is_some() && !self.is_imported(ENGINEER_ID) {
-            return Ok(false);
-        }
-        self.file.engineer = Some(phc);
-        self.file.imported.insert(ENGINEER_ID.to_string());
-        self.save()?;
-        Ok(true)
-    }
-
-    /// Stores an imported member PIN hash unless an iemmixer-set one exists
-    /// (then `false`, nothing written).
-    pub fn import_member_hash(&mut self, member_id: &str, phc: String) -> io::Result<bool> {
-        check_member(member_id)?;
-        check_phc(member_id, &phc)?;
-        if self.file.members.contains_key(member_id) && !self.is_imported(member_id) {
-            return Ok(false);
-        }
-        self.file.members.insert(member_id.to_string(), phc);
-        self.file.imported.insert(member_id.to_string());
-        self.save()?;
-        Ok(true)
+        let old = self.file.members.insert(member_id.to_string(), phc);
+        self.save().inspect_err(|_| match old {
+            Some(old) => {
+                self.file.members.insert(member_id.to_string(), old);
+            }
+            None => {
+                self.file.members.remove(member_id);
+            }
+        })
     }
 
     fn save(&self) -> io::Result<()> {
@@ -195,7 +160,7 @@ impl PinStore {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.file).map_err(io::Error::other)?;
-        atomic_write(&self.path, &json)
+        crate::secrets::replace_private(&self.path, json.as_bytes())
     }
 }
 
@@ -247,6 +212,55 @@ mod tests {
         assert!(h.verify("1357", store.member_hash("member1").unwrap()));
         let text = std::fs::read_to_string(dir.path().join(PIN_HASHES_FILE)).unwrap();
         assert!(!text.contains("\"2468\"") && !text.contains("\"1357\""));
+    }
+
+    /// The hashes are a secret like the others: a change through the web
+    /// leaves the file owner-only, also when it was not before.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_store_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PIN_HASHES_FILE);
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store
+            .set_member_hash("member1", hasher().hash("1357"))
+            .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(
+            hasher().verify(
+                "1357",
+                PinStore::load(dir.path())
+                    .unwrap()
+                    .member_hash("member1")
+                    .unwrap()
+            )
+        );
+    }
+
+    /// A change the disk refused is no change: the old PIN still logs in,
+    /// now and after a restart, and the new one does neither.
+    #[test]
+    fn a_failed_save_keeps_the_old_hash_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = hasher();
+        let mut store = PinStore::load(dir.path()).unwrap();
+        store.set_engineer_hash(h.hash("2468")).unwrap();
+        store.set_member_hash("member1", h.hash("1357")).unwrap();
+        // The write's temporary file cannot be made: a directory is there.
+        let tmp = dir.path().join(PIN_HASHES_FILE).with_extension("new");
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(store.set_member_hash("member1", h.hash("8642")).is_err());
+        assert!(store.set_member_hash("member2", h.hash("8642")).is_err());
+        assert!(store.set_engineer_hash(h.hash("8642")).is_err());
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
+        assert_eq!(store.member_hash("member2"), None);
+        assert!(h.verify("2468", store.engineer_hash().unwrap()));
+        assert!(!store.remove_member("member1").is_ok_and(|gone| gone));
+        assert!(h.verify("1357", store.member_hash("member1").unwrap()));
     }
 
     #[test]
@@ -327,15 +341,22 @@ mod tests {
         assert!(!dir.path().join(PIN_HASHES_FILE).exists());
     }
 
+    /// A file written before the importer went holds `imported`: it loads,
+    /// and the next save drops the list.
     #[test]
-    fn a_file_without_import_marks_still_loads() {
+    fn a_file_with_the_old_import_marks_loads_and_loses_them_on_save() {
         let dir = tempfile::tempdir().unwrap();
         let h = hasher();
-        let text = format!(r#"{{"members":{{"member1":"{}"}}}}"#, h.hash("1357"));
+        let text = format!(
+            r#"{{"members":{{"member1":"{}"}},"imported":["member1"]}}"#,
+            h.hash("1357")
+        );
         std::fs::write(dir.path().join(PIN_HASHES_FILE), text).unwrap();
-        let store = PinStore::load(dir.path()).unwrap();
+        let mut store = PinStore::load(dir.path()).unwrap();
         assert!(store.member_hash("member1").is_some());
-        assert!(!store.is_imported("member1"));
+        store.set_member_hash("member2", h.hash("2468")).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join(PIN_HASHES_FILE)).unwrap();
+        assert!(!saved.contains("imported"), "{saved}");
     }
 
     /// #58, the owner's ruling (2026-10-24): a removed person is removed,
@@ -380,19 +401,18 @@ mod tests {
         assert_eq!(store.member_ids(), ["member1", "member2", "member3"]);
     }
 
-    /// #58: a removed member's hash and import mark are deleted and stay
+    /// #58: a removed member's hash is deleted and stay
     /// deleted; a member without a hash writes nothing; the engineer and a
     /// bad id are refused.
     #[test]
-    fn remove_member_deletes_the_hash_and_its_import_mark() {
+    fn remove_member_deletes_the_hash() {
         let dir = tempfile::tempdir().unwrap();
         let h = hasher();
         let mut store = PinStore::load(dir.path()).unwrap();
-        store.import_member_hash("member1", h.hash("1357")).unwrap();
+        store.set_member_hash("member1", h.hash("1357")).unwrap();
         store.set_member_hash("member2", h.hash("2468")).unwrap();
         assert!(store.remove_member("member1").unwrap());
         assert_eq!(store.member_hash("member1"), None);
-        assert!(!store.is_imported("member1"));
         let store = PinStore::load(dir.path()).unwrap();
         assert_eq!(store.member_hash("member1"), None, "after a reload too");
         assert!(h.verify("2468", store.member_hash("member2").unwrap()));
@@ -428,7 +448,7 @@ mod tests {
         std::fs::write(&file, &text).unwrap();
         let mut store = PinStore::load(dir.path()).unwrap();
         // The write's temporary file cannot be made: a directory is there.
-        let tmp = file.with_extension("tmp");
+        let tmp = file.with_extension("new");
         std::fs::create_dir(&tmp).unwrap();
         assert!(store.drop_archived().is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text, "unchanged");
@@ -457,54 +477,5 @@ mod tests {
             PinStore::load(dir.path()).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
-    }
-
-    #[test]
-    fn imports_fill_missing_hashes_and_replace_only_imported_ones() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = hasher();
-        let mut store = PinStore::load(dir.path()).unwrap();
-        assert!(store.import_member_hash("member1", h.hash("1111")).unwrap());
-        assert!(store.import_engineer_hash(h.hash("9999")).unwrap());
-        assert!(store.is_imported("member1") && store.is_imported(ENGINEER_ID));
-        let text = std::fs::read_to_string(dir.path().join(PIN_HASHES_FILE)).unwrap();
-        assert!(text.contains("\"imported\""), "{text}");
-        // A newer predecessor PIN replaces an imported hash.
-        let mut store = PinStore::load(dir.path()).unwrap();
-        assert!(store.import_member_hash("member1", h.hash("2222")).unwrap());
-        assert!(h.verify("2222", store.member_hash("member1").unwrap()));
-        assert!(
-            store
-                .import_member_hash("engineer", h.hash("1234"))
-                .is_err()
-        );
-        assert!(store.import_member_hash("a b", h.hash("1234")).is_err());
-        assert!(store.import_member_hash("member2", "1234".into()).is_err());
-        assert!(store.import_engineer_hash("1234".into()).is_err());
-    }
-
-    #[test]
-    fn a_later_import_never_overwrites_an_iemmixer_set_pin() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = hasher();
-        let mut store = PinStore::load(dir.path()).unwrap();
-        store.import_member_hash("member1", h.hash("1111")).unwrap();
-        store.import_engineer_hash(h.hash("9999")).unwrap();
-        // The member changes the PIN in iemmixer; the engineer is reset.
-        store.set_member_hash("member1", h.hash("3333")).unwrap();
-        store.set_engineer_hash(h.hash("8888")).unwrap();
-        assert!(!store.is_imported("member1") && !store.is_imported(ENGINEER_ID));
-        let mut store = PinStore::load(dir.path()).unwrap();
-        assert!(!store.import_member_hash("member1", h.hash("1111")).unwrap());
-        assert!(!store.import_engineer_hash(h.hash("9999")).unwrap());
-        let store = PinStore::load(dir.path()).unwrap();
-        assert!(h.verify("3333", store.member_hash("member1").unwrap()));
-        assert!(h.verify("8888", store.engineer_hash().unwrap()));
-        // A PIN set in iemmixer before any import is kept too.
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = PinStore::load(dir.path()).unwrap();
-        store.set_member_hash("member2", h.hash("4444")).unwrap();
-        assert!(!store.import_member_hash("member2", h.hash("1111")).unwrap());
-        assert!(h.verify("4444", store.member_hash("member2").unwrap()));
     }
 }

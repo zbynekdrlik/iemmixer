@@ -16,7 +16,7 @@ import { relaySockets, type Relay } from "./support/relay";
 import { USER_AGENT } from "./support/socket";
 import { PushLedger, SUBSCRIBE, UNSUBSCRIBE, bodyOf, browserEndpoint, endpointOf, isPostTo } from "./support/push";
 
-// Push unsubscribe on the real PC (S7, #10; row 717, reaperiem#188): the
+// Push unsubscribe on the real PC (#10; row 717, reaperiem#188): the
 // engineer's page subscribes to Web Push with the server's VAPID key, and
 // logging out in the settings revokes the subscription in the browser and on
 // the server. Playwright's contexts are incognito, where Chrome has no Push
@@ -97,7 +97,7 @@ const test = base.extend<{ device: Device }>({
  * then drops the endpoint, so the server prunes it at its next push even
  * when the revoke below fails), then the profile closes (after it, no
  * subscribe can be posted), then the server is told, only once
- * /api/version names the run's build (the predecessor answers 200 too).
+ * /api/version names the run's build (another build answers 200 too).
  * Returns what failed, in fixed words.
  */
 async function cleanUp(
@@ -153,7 +153,7 @@ function awaiting(page: Page, path: string, ms: number): Promise<Response> {
 test.describe("push unsubscribe on the real PC (S7)", () => {
   test("logout revokes a real Web Push subscription in the browser and on the server", async ({ device, request }) => {
     const { page } = device;
-    // The subscription goes only to the run's build: after "ide event" the predecessor answers at the same address.
+    // The subscription goes only to the run's build.
     await expectBuild(request);
     const subscribing = awaiting(page, SUBSCRIBE, SUBSCRIBE_MS);
     await openLive(page, "engineer");

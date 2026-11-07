@@ -1,4 +1,4 @@
-//! The UI ↔ server WebSocket protocol, version 3 (S5 design note §5): the
+//! The UI ↔ server WebSocket protocol, version 3: the
 //! mixer page's messages keyed by engine ids (an input or a heard mix; one
 //! namespace) instead of REAPER track numbers. Client commands carry a `cmd`
 //! tag, server events an `event` tag with their fields under `data`.
@@ -7,7 +7,7 @@
 //! version 2 knows neither, so the server serves 3 only and such a page
 //! reloads once, at the deploy (#61 review M4).
 //!
-//! Handshake (program spec §5.3): the page connects with `proto=UI_PROTO`;
+//! Handshake: the page connects with `proto=UI_PROTO`;
 //! the server's first message is [`ServerMsg::Hello`]; a page whose protocol
 //! is outside `min_client_proto..=proto` reloads.
 
@@ -89,10 +89,6 @@ pub struct ConsoleInfo {
     pub limiters: Vec<ConsoleMix>,
     pub pages: Vec<PageLink>,
     pub login: LoginFailures,
-    /// The site has the "Back to REAPER" switch (§4.3, `back_to_reaper`):
-    /// the console then shows its button.
-    #[serde(default)]
-    pub can_switch: bool,
 }
 
 /// Client → Server commands (sent via WebSocket)
@@ -721,8 +717,6 @@ mod tests {
                 state: crate::TunnelState::Down,
                 ready_connections: 0,
                 since_secs: 42,
-                last_restart_secs_ago: None,
-                last_restart_ok: None,
             }),
             "TunnelStatus",
         );
@@ -749,7 +743,6 @@ mod tests {
                     tunnel: 2,
                     engineer_budget_trips: 0,
                 },
-                can_switch: true,
             }),
             "Console",
         );
@@ -964,25 +957,10 @@ mod tests {
                     state: crate::TunnelState::Down,
                     ready_connections: 0,
                     since_secs: 42,
-                    last_restart_secs_ago: None,
-                    last_restart_ok: None,
                 }),
                 concat!(
                     r#"{"event":"TunnelStatus","data":{"state":"Down","ready_connections":0,"#,
-                    r#""since_secs":42,"last_restart_secs_ago":null,"last_restart_ok":null}}"#,
-                ),
-            ),
-            (
-                ServerMsg::TunnelStatus(TunnelStatusInfo {
-                    state: crate::TunnelState::Restarting,
-                    ready_connections: 2,
-                    since_secs: 30,
-                    last_restart_secs_ago: Some(7),
-                    last_restart_ok: Some(false),
-                }),
-                concat!(
-                    r#"{"event":"TunnelStatus","data":{"state":"Restarting","ready_connections":2,"#,
-                    r#""since_secs":30,"last_restart_secs_ago":7,"last_restart_ok":false}}"#,
+                    r#""since_secs":42}}"#,
                 ),
             ),
             (
@@ -1008,14 +986,12 @@ mod tests {
                         tunnel: 2,
                         engineer_budget_trips: 3,
                     },
-                    can_switch: true,
                 }),
                 concat!(
                     r#"{"event":"Console","data":{"inputs":[{"id":"mic1","name":"MEMBER1 mic","#,
                     r#""trim_db":0.0,"muted":false,"processing":true}],"limiters":[{"id":"member1","#,
                     r#""name":"Member1","active_seconds":1.5}],"pages":[{"id":"translator","#,
-                    r#""name":"Translator"}],"login":{"lan":1,"tunnel":2,"engineer_budget_trips":3},"#,
-                    r#""can_switch":true}}"#,
+                    r#""name":"Translator"}],"login":{"lan":1,"tunnel":2,"engineer_budget_trips":3}}}"#,
                 ),
             ),
             (

@@ -1,4 +1,4 @@
-//! `iem-soakclient`: the soak harness's binary (S7 design note §4). Its
+//! `iem-soakclient`: the soak harness's binary. Its
 //! decisions are the library's (`parse_args`, `credential`, `net::run`);
 //! this is the argv, environment, CPU Set and file glue. Exit codes: 0 the
 //! whole run with its final summary written, 1 a run that ended early (its
@@ -8,7 +8,7 @@
 //! name flags, not their values, and a run's end is a code. It ends no
 //! process: its sockets end with a WebSocket Close.
 //!
-//! `iem-soakclient token …` (S7 plan Task 23) is the PC's token for the
+//! `iem-soakclient token …` is the box's live gate's token for the
 //! live run ([`mint`]): 0 with the token in its `--out` file and only
 //! `token-written` on stdout, 1 with its code on stderr (`secret-unreadable`,
 //! `token-unwritable`, `clock-unreadable`), 2 on a usage error. The token is
@@ -22,7 +22,7 @@ use std::time::SystemTime;
 
 use iem_soakclient::mint;
 use iem_soakclient::net::{Limits, run};
-use iem_soakclient::{PIN_ENV, Reason, Summary, USAGE, credential, parse_args, write_summary};
+use iem_soakclient::{PIN_ENV, Summary, USAGE, credential, parse_args, write_summary};
 
 fn main() -> ExitCode {
     let argv: Option<Vec<String>> = std::env::args_os()
@@ -59,17 +59,7 @@ fn main() -> ExitCode {
         }
         written.set(ok);
     };
-    let summary = match place(&args.cpu_sets) {
-        Ok(()) => run(&args, &credential, &Limits::default(), &mut save),
-        Err(reason) => {
-            let summary = Summary {
-                error: Some(reason),
-                ..Summary::default()
-            };
-            save(&summary);
-            summary
-        }
-    };
+    let summary = run(&args, &credential, &Limits::default(), &mut save);
     if let Some(reason) = summary.error {
         eprintln!("iem-soakclient: {}", reason.code());
     }
@@ -106,20 +96,4 @@ fn token(argv: &[String]) -> ExitCode {
 fn usage(error: &str) -> ExitCode {
     eprintln!("iem-soakclient: {error}\n\n{USAGE}");
     ExitCode::from(2)
-}
-
-/// Confines this process to the housekeeping CPU Sets (S1c profile, P10),
-/// as the engine places itself on its own.
-#[cfg(windows)]
-fn place(ids: &[u32]) -> Result<(), Reason> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    iem_win::power::set_cpu_sets(ids).map_err(|_| Reason::CpuSets)
-}
-
-/// `parse_args` refuses `--cpu-sets` off Windows.
-#[cfg(not(windows))]
-fn place(_ids: &[u32]) -> Result<(), Reason> {
-    Ok(())
 }

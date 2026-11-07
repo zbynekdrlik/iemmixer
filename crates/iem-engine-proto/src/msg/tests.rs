@@ -1,5 +1,5 @@
 //! The protocol's tests: shapes, round trips, parsing and negotiation;
-//! `s7_tests` holds the S7 additions.
+//! `s7_tests` holds later additions.
 
 use serde::Deserialize;
 
@@ -73,15 +73,12 @@ fn every_cmd() -> Vec<Cmd> {
         },
         Cmd::ImportState {
             state: MixState::default(),
-            baseline: true,
         },
         Cmd::GetState,
         Cmd::GetTopology,
         Cmd::SaveNow,
         Cmd::Shutdown,
         Cmd::InjectFault,
-        Cmd::InjectSeh,
-        Cmd::InjectPark,
         Cmd::Ping,
         Cmd::Arm,
         Cmd::HilTestSignal {
@@ -92,7 +89,6 @@ fn every_cmd() -> Vec<Cmd> {
             card_tx: vec![72],
             listen: false,
         },
-        Cmd::ForceReopen,
     ]
 }
 
@@ -134,8 +130,8 @@ fn the_supervisor_role_round_trips() {
     );
 }
 
-/// `Status` as an engine before S6 sent it, and as a client before S6
-/// reads it.
+/// `Status` as an engine before the spare outputs sent it, and as a
+/// client before them reads it.
 #[derive(Deserialize)]
 struct OldStatus {
     callbacks: u64,
@@ -156,9 +152,7 @@ fn the_stream_figures_in_status_are_additive() {
         missed: 2,
         overruns: 3,
         resets: 1,
-        parked: true,
         held: true,
-        lock_failed: true,
         ..Status::default()
     };
     let json = serde_json::to_value(&status).unwrap();
@@ -166,9 +160,7 @@ fn the_stream_figures_in_status_are_additive() {
     assert_eq!(json["missed"], 2);
     assert_eq!(json["overruns"], 3);
     assert_eq!(json["resets"], 1);
-    assert_eq!(json["parked"], true);
     assert_eq!(json["held"], true);
-    assert_eq!(json["lock_failed"], true);
     assert_eq!(
         serde_json::from_value::<Status>(json.clone()).unwrap(),
         status
@@ -203,7 +195,7 @@ fn the_stream_figures_in_status_are_additive() {
     );
 }
 
-/// HIL's spare outputs in `Status` (S6): additive both ways, a partial
+/// HIL's spare outputs in `Status`: additive both ways, a partial
 /// entry reads with its defaults.
 #[test]
 fn the_hil_outputs_in_status_are_additive() {
@@ -228,7 +220,7 @@ fn the_hil_outputs_in_status_are_additive() {
     assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
 }
 
-/// The stream histograms in `Status` (S7 design note §3): sparse
+/// The stream histograms in `Status`: sparse
 /// `[[bucket, count], …]`, additive both ways, absent without a stream.
 #[test]
 fn the_histograms_in_status_are_additive_and_sparse() {
@@ -476,9 +468,6 @@ fn engine_messages_round_trip() {
         EngineMsg::DriverReleased {
             reason: "shutdown".into(),
         },
-        EngineMsg::DriverParked {
-            reason: "shutdown".into(),
-        },
         EngineMsg::Superseded,
     ];
     for m in msgs {
@@ -493,10 +482,9 @@ fn engine_messages_round_trip() {
     assert_eq!(band.gain_db, 0.0);
 }
 
-/// The guard reads the stream's end by these names, field by field
-/// (`iem_guard::effects::engine::parse`; #35).
+/// The stream's end goes out by this name, field by field (#35).
 #[test]
-fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
+fn the_stream_end_goes_out_as_driver_released() {
     let released = EngineMsg::DriverReleased {
         reason: "fault".into(),
     };
@@ -504,12 +492,25 @@ fn the_stream_ends_go_out_as_driver_released_and_driver_parked() {
         serde_json::to_string(&released).unwrap(),
         r#"{"type":"driver_released","reason":"fault"}"#
     );
-    let parked = EngineMsg::DriverParked {
-        reason: "shutdown".into(),
-    };
-    assert_eq!(
-        serde_json::to_string(&parked).unwrap(),
-        r#"{"type":"driver_parked","reason":"shutdown"}"#
+}
+
+/// An older client's `baseline` key on an import is ignored, never refused.
+#[test]
+fn an_import_with_the_old_baseline_key_still_parses() {
+    let msg = parse_client(
+        br#"{"type":"request","id":3,"cmd":{"op":"import_state","state":{},"baseline":true}}"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            msg,
+            ClientMsg::Request {
+                id: 3,
+                cmd: Cmd::ImportState { .. },
+                ..
+            }
+        ),
+        "{msg:?}"
     );
 }
 
@@ -618,18 +619,11 @@ fn ops_where(pick: fn(&Cmd) -> bool) -> Vec<&'static str> {
 
 #[test]
 fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change() {
-    // The fault injections are the guard's alone (review of PR #40,
+    // The fault injections are the supervisor's alone (review of PR #40,
     // #35): the controller is told `NotSupervisor`.
     assert_eq!(
         ops_where(Cmd::is_supervisor),
-        [
-            "inject_fault",
-            "inject_seh",
-            "inject_park",
-            "arm",
-            "hil_test_signal",
-            "force_reopen"
-        ]
+        ["inject_fault", "arm", "hil_test_signal"]
     );
     assert_eq!(
         ops_where(Cmd::supervisor_may),
@@ -641,12 +635,9 @@ fn the_supervisor_sends_its_own_commands_reads_stops_and_tests_but_no_mix_change
             "save_now",
             "shutdown",
             "inject_fault",
-            "inject_seh",
-            "inject_park",
             "ping",
             "arm",
-            "hil_test_signal",
-            "force_reopen"
+            "hil_test_signal"
         ]
     );
 }

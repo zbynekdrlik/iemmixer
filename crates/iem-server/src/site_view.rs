@@ -1,4 +1,4 @@
-//! The site as the UI sees it (S5 design note §3, §6): the configured members
+//! The site as the UI sees it: the configured members
 //! and input labels joined with the engine's topology. Built again whenever
 //! the engine announces a topology or the roster or its active lineup
 //! changes; ids the topology does not have are reported and left out, never

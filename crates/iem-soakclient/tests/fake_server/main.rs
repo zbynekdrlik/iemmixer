@@ -1,11 +1,11 @@
-//! The soak client against a fake server (S7 plan Task 6): the server's
+//! The soak client against a fake server: the server's
 //! login, `/api/site`, the mixer socket and the listen socket as the real
 //! server serves them, on `127.0.0.1:0`, one thread per connection. Every
 //! run is bounded: it runs on its own thread and the test waits for it with
 //! `recv_timeout`, so a run that never ends fails here instead of hanging.
 //! Timing is asserted only from below (a wait that must have happened) or
 //! against the run's own measured length, never as a fixed sleep. A run
-//! that must end early is a 30 s run waited for 5 or 6 s. The PC's own
+//! that must end early is a 30 s run waited for 5 or 6 s. The client's own
 //! engineer token (`--jwt-secret-file`) is tested in [`token`].
 
 use std::io::{self, Read, Write};
@@ -427,7 +427,6 @@ fn args(base: &str, direct: bool, seconds: u64) -> Args {
         out: PathBuf::from("unused.json"),
         expect_build: BUILD.to_owned(),
         jwt_secret_file: None,
-        cpu_sets: Vec::new(),
     }
 }
 

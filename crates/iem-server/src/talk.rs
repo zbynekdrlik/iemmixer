@@ -1,4 +1,4 @@
-//! The talkback lock (F18, X6, program spec §5.3): one talker at a time,
+//! The talkback lock (F18, X6): one talker at a time,
 //! held by a mixer session. Acquiring hands out a 128-bit talk id; the
 //! talkback socket binds by presenting it while the unbound lock lives; the
 //! lock is released on stop, when the holder's mixer socket closes, or after

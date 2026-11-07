@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,7 +8,7 @@ import { TALK_INIT, TALK_TONE } from "./live/support/audio";
 import { dbOf, median, spread } from "./live/support/series";
 import { toneWav } from "./support/wav";
 
-// The live talkback spec's settling (S7, #10), checked in the mock E2E job:
+// The live talkback spec's settling (#10), checked in the mock E2E job:
 // the page's own talkback.js and its worklet capture Chromium's fake
 // microphone playing the live spec's tone, with the page's constraints (AGC
 // and noise suppression), and TALK_INIT measures the frames the page hands
@@ -18,7 +18,7 @@ import { toneWav } from "./support/wav";
 // this test (a secure context, as getUserMedia and AudioWorklet need); the
 // talkback socket is held by the test, no server is involved.
 
-const MIC_WAV = toneWav(join(tmpdir(), "iemmixer-e2e-talkback-capture.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
+const MIC_WAV = toneWav(join(mkdtempSync(join(tmpdir(), "iemmixer-e2e-talkback-capture-")), "mic.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
 
 // Launch options are the worker's: top level, never in a describe.
 test.use({

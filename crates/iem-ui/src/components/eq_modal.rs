@@ -1334,8 +1334,7 @@ mod tests {
     /// The engine has four band kinds and the server names only those
     /// ("highpass", "lowshelf", "band", "highshelf"). Any other type, such as
     /// the predecessor's "lowpass" and "notch", is drawn as a peak with its
-    /// values, never as a low-pass or a notch (the importer refuses both, so
-    /// none reaches the page; iemmixer#25 §6).
+    /// values, never as a low-pass or a notch (iemmixer#25 §6).
     #[test]
     fn other_band_types_draw_as_peaks() {
         let peak = engine_params(&[band("band", 5000.0, 6.0, 0.5)]).bands[0];

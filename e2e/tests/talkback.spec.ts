@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./support/fixtures";
@@ -13,7 +14,7 @@ import { PageSocket } from "./support/wire";
 // trim off, which comes before the talkback in the input) and puts it back
 // after: what eng_mic's meter then shows is the talkback alone.
 
-const MIC_WAV = toneWav(join(tmpdir(), "iemmixer-e2e-talkback-1k.wav"), 1000, 0.9);
+const MIC_WAV = toneWav(join(mkdtempSync(join(tmpdir(), "iemmixer-e2e-talkback-1k-")), "mic.wav"), 1000, 0.9);
 
 // Launch options are the worker's: top level, never in a describe.
 test.use({

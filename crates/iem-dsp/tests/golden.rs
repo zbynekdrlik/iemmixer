@@ -1,4 +1,4 @@
-//! S1b golden parity (program spec §3.5): every ReaEQ vector (matrix, edges,
+//! S1b golden parity: every ReaEQ vector (matrix, edges,
 //! site EQs) ≤ 1e-9, the response ≤ 0.01 dB over 20 Hz–20 kHz, the measured pan
 //! table and the pan-dependent renders, and the mono downmix law. Each test
 //! prints `golden <category>: max …` lines for the CI parity report.
@@ -8,7 +8,7 @@ use std::f64::consts::PI;
 
 use iem_dsp::eq::{Band, BandKind, EqParams, Equalizer, response_db};
 use iem_dsp::pan::{gains, mono_downmix, send_gains};
-use iem_rpp::golden::{Goldens, s1b_dir};
+use iem_golden::golden::{Goldens, s1b_dir};
 use serde_json::Value;
 
 fn goldens() -> Goldens {

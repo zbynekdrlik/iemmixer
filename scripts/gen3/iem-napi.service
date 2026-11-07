@@ -1,6 +1,4 @@
-# The Gen 3 box's Dante interface's packet priority (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md choice 1, Task 9's
-# napi step); rules in .claude/rules/gen3.md. Installed and enabled by
+# The Gen 3 box's Dante interface's packet priority (#72 phase D); rules in .claude/rules/gen3.md. Installed and enabled by
 # scripts/gen3/provision-root.sh with its helper
 # /usr/local/lib/iemmixer/napi-priority (scripts/gen3/napi-priority): threaded
 # NAPI on the Dante interface, its NAPI threads SCHED_FIFO 60 on core 0 and
@@ -30,6 +28,20 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/iemmixer/iem-dante.env
 ExecStart=/usr/local/lib/iemmixer/napi-priority ${IEM_DANTE_IFACE}
+# Non-audio traffic on the Dante interface is limited (#72, 2026-11-01): 300 kB
+# of TCP from the box queued in the shared switch and took audio to 650 us at a
+# receiver; the stack's counters end at send and see none of it. Audio itself
+# goes past the qdisc (dstack v0.4.15, AF_PACKET); PTP stays unlimited. TSO and
+# GSO off: one 64 kB segment is 525 us on the wire. noqueue first empties the
+# root, so a restart does not stack the filters.
+ExecStartPost=/usr/sbin/ethtool -K ${IEM_DANTE_IFACE} tso off gso off
+ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} root noqueue
+ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} root handle 1: prio bands 3
+ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} parent 1:1 handle 10: pfifo limit 1000
+ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} parent 1:2 handle 20: tbf rate 100mbit burst 3028 limit 100000
+ExecStartPost=/usr/sbin/tc qdisc replace dev ${IEM_DANTE_IFACE} parent 1:3 handle 30: tbf rate 100mbit burst 3028 limit 100000
+ExecStartPost=/usr/sbin/tc filter add dev ${IEM_DANTE_IFACE} parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 319 0xffff flowid 1:1
+ExecStartPost=/usr/sbin/tc filter add dev ${IEM_DANTE_IFACE} parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 320 0xffff flowid 1:1
 # The helper's own waits (30 s for the interface, 5 s for its threads, 20 s
 # for its interrupts: 55 s) fit with the forks of each try (the review of PR
 # #84); a stop runs nothing (the values stay until the next boot) and is

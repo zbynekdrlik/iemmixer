@@ -3,7 +3,7 @@ import type { APIRequestContext } from "@playwright/test";
 import { expectBuild, live } from "./env";
 import { OPEN_MS, Wire, liveSocket } from "./socket";
 
-// The bursts (S7, #10): while the browser job runs, the PC fires the HIL test
+// The bursts (#10): while the browser job runs, the gate fires the HIL test
 // signal with the listen probe in bursts of 30 s every 60 s. The server tells
 // a `&hil=1` listen socket a burst's edges with `AudioStatus` `probe` (its
 // first probe frame) and `listening` (the first own frame after it). The live
@@ -87,7 +87,7 @@ export class BurstWatch {
     ws.on("message", (d: Buffer, binary: boolean) => this.take(d, binary));
     // "The server" is the far side: the server, or the tunnel between (live
     // run 3, #10). The code, the time and the last status tell them apart
-    // against the PC's server.log.
+    // against the server's journal.
     ws.on("close", (code: unknown) =>
       this.breaks(`the server closed the burst watch's socket (no reconnect): ${this.wire.closed(code)}; ${this.lastStatus()}`),
     );

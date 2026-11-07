@@ -1,5 +1,4 @@
-//! The engine's pipes from the server's side (program spec §2.3; S3 design
-//! note §3.6): names, and async framing — control frames are a `u32` LE length
+//! The engine's pipes from the server's side: names, and async framing — control frames are a `u32` LE length
 //! and that much JSON (≤ `MAX_FRAME`), media frames a 20-byte header and f32
 //! LE samples (`iem_engine_proto::media`).
 
@@ -33,22 +32,11 @@ pub fn media_pipe(pipe: &str) -> String {
     format!("{pipe}.media")
 }
 
-/// Connects to the engine's pipe `pipe`: a Unix socket path, or on Windows the
-/// name of a named pipe (`\\.\pipe\<pipe>`, the engine's namespaced name).
+/// Connects to the engine's pipe `pipe`: a Unix socket path.
 pub async fn connect(pipe: &str) -> io::Result<(Reader, Writer)> {
-    #[cfg(unix)]
-    {
-        let s = tokio::net::UnixStream::connect(pipe).await?;
-        let (r, w) = s.into_split();
-        Ok((Box::new(r), Box::new(w)))
-    }
-    #[cfg(windows)]
-    {
-        let path = format!(r"\\.\pipe\{pipe}");
-        let c = tokio::net::windows::named_pipe::ClientOptions::new().open(&path)?;
-        let (r, w) = tokio::io::split(c);
-        Ok((Box::new(r), Box::new(w)))
-    }
+    let s = tokio::net::UnixStream::connect(pipe).await?;
+    let (r, w) = s.into_split();
+    Ok((Box::new(r), Box::new(w)))
 }
 
 /// Fills `buf`; a clean end before the first byte is `Closed`.

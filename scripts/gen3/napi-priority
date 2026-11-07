@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# The Gen 3 box's Dante interface's packet priority (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md choice 1, Task 9's
-# napi step; rules in .claude/rules/gen3.md). The Linux counterpart of Waves
+# The Gen 3 box's Dante interface's packet priority (#72 phase D; rules in .claude/rules/gen3.md). The Linux counterpart of Waves
 # SoundGrid's in-kernel packet priority and of dantesync's pcap path on
 # Windows: the kernel stamps a PTP packet when it processes it, and the box's
 # SCHED_FIFO audio threads (45, 40) can push that processing back; measured on

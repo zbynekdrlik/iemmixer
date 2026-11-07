@@ -1,12 +1,6 @@
-//! The server stops gracefully (S6 design note §5.5): SIGTERM or SIGINT
+//! The server stops gracefully: SIGTERM or SIGINT
 //! closes the HTTP and the HTTPS listener at once, open requests get up to
 //! 5 s, the process exits 0 and the ports are free.
-//!
-//! Unix only. The Windows variant (the server started detached with its own
-//! console, the PC's exact shape, and stopped with a Ctrl-Break to that
-//! console through `iem_win::console::ctrl_break`) is still pending: it needs
-//! `iem-win` (S6 plan Task 2) and joins the `windows` CI job in Task 12.
-#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -256,9 +250,7 @@ fn start_https() -> (Server, u16) {
 }
 
 /// The certificate lives next to the site file, in the server's config
-/// directory (S6 design note §6: `iem-migrate band` writes it into the band
-/// directory, the folder of the guard's `server_config`), whatever the
-/// platform's config directory holds.
+/// directory, whatever the platform's config directory holds.
 #[cfg(feature = "tls")]
 #[test]
 fn the_certificate_next_to_the_site_serves_https() {
@@ -289,7 +281,7 @@ fn the_certificate_next_to_the_site_serves_https() {
     );
 }
 
-/// The HTTPS port (P9: the band's 443) closes with the HTTP one, while an
+/// The HTTPS port (the band's 443) closes with the HTTP one, while an
 /// open HTTP request still drains.
 #[cfg(feature = "tls")]
 #[test]

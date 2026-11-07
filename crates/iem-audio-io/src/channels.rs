@@ -1,5 +1,5 @@
-//! Topology card channels (numbered from 1) → card buffer indices (S6 design
-//! note §3). Built once per stream from `Topology::rx`/`tx` and the driver's
+//! Topology card channels (numbered from 1) → card buffer indices.
+//! Built once per stream from `Topology::rx`/`tx` and the driver's
 //! channel counts; a channel the card lacks refuses the stream.
 
 use core::fmt;
@@ -8,7 +8,7 @@ use core::fmt;
 pub struct ChannelMap {
     rx: Vec<usize>,
     tx: Vec<usize>,
-    /// Card input indices of the D5(b) loopback return (S6 test 5): the spare
+    /// Card input indices of the D5(b) loopback return: the spare
     /// card inputs the HIL spare outputs loop back to. Empty unless the engine
     /// opened them (`--test-signal`). They sit in the input buffer after the
     /// topology's `rx`, in this order.
@@ -77,7 +77,7 @@ impl ChannelMap {
         })
     }
 
-    /// Opens the D5(b) loopback return (S6 test 5): `hil_rx` are the spare card
+    /// Opens the D5(b) loopback return: `hil_rx` are the spare card
     /// input channels (numbered from 1, on the card), added after the
     /// topology's `rx`. A channel the card lacks refuses the stream, exactly
     /// like `rx`.
@@ -105,7 +105,7 @@ impl ChannelMap {
     }
 
     /// Card output index of engine output slot `k`: `Topology::tx` order,
-    /// then HIL's spare outputs (S6).
+    /// then HIL's spare outputs.
     pub fn tx(&self) -> &[usize] {
         &self.tx
     }

@@ -5,20 +5,16 @@
 # (IEM_DANTE_IFACE=). The device's test name and channel names are the ops
 # repository's device config.
 #
-# Phase B (plan Task 7): the device sends and receives audio flows, so it is
+# Phase B: the device sends and receives audio flows, so it is
 # never enabled at boot (deploy.sh disables it): a reboot of
-# the box, during an event or not, never brings its flows back unattended.
-# "ide event" stops it (iempc event: ssh <GEN3_HOST> sudo -n systemctl stop
-# iem-server iem-engine iem-dante, from plan Task 7 with the engine and the
-# server); nothing starts it again when the event ends: deploy.sh --start
-# device or `sudo systemctl start iem-dante` in dev time does.
+# the box never brings its flows back unattended: deploy.sh --start device or
+# `sudo systemctl start iem-dante` in dev time starts it.
 #
-# Phase C (plan Task 6): iem-engine.service hosts the same device inside the
+# Phase C: iem-engine.service hosts the same device inside the
 # engine; this unit stays the standalone device (deploy.sh --start device)
 # and never runs beside it.
 #
-# Phase D (plan docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md
-# Task 5, choices 3 and 5): it runs as the service user `iemmixer` (a system
+# Phase D: it runs as the service user `iemmixer` (a system
 # user without login or home, not site data), and a unit that stays down
 # raises one alarm (iem-alarm@.service).
 
@@ -75,8 +71,9 @@ RuntimeDirectoryMode=0750
 LimitRTPRIO=80
 # No capability: every port is above 1024 (ARC 4440, flow control 4455, CMC
 # 8800, mDNS 5353, the info requests 8700, the flows' ephemeral ports, and
-# dantesync's time server read from an ephemeral port). dantesync is the
-# box's one PTP owner: our device never opens UDP 319/320.
+# dantesync's time server read from an ephemeral port). Without
+# CAP_NET_BIND_SERVICE this standalone device's PTP follower cannot bind UDP 319:
+# it warns once and runs on dantesync's clock. The engine's unit has the capability.
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes

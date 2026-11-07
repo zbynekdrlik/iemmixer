@@ -29,7 +29,7 @@ impl PhotoStore {
     pub fn save(&self, member_id: &str, data: &[u8]) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.photos_dir)?;
         let path = self.member_path(member_id);
-        std::fs::write(&path, data)
+        crate::atomic_write_bytes(&path, data)
     }
 
     pub fn load(&self, member_id: &str) -> Option<Vec<u8>> {
@@ -96,6 +96,32 @@ mod tests {
     fn test_exists_false_before_save() {
         let (store, _dir) = test_store();
         assert!(!store.exists("oldmember1"));
+    }
+
+    /// A power cut in the middle of a save must leave the old photo or the
+    /// new one (#72): the new file is complete before it takes the name, so
+    /// the name moves to another inode instead of truncating the old file.
+    #[cfg(unix)]
+    #[test]
+    fn test_save_replaces_the_photo_whole() {
+        use std::os::unix::fs::MetadataExt;
+        let (store, dir) = test_store();
+        store.save("alice", b"old").unwrap();
+        let path = dir
+            .path()
+            .join(PHOTOS_DIR)
+            .join(format!("alice.{PHOTO_EXT}"));
+        let held = std::fs::File::open(&path).unwrap();
+        let before = held.metadata().unwrap().ino();
+        store.save("alice", b"new").unwrap();
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), before);
+        assert_eq!(store.load("alice").unwrap(), b"new");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(PHOTOS_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[test]

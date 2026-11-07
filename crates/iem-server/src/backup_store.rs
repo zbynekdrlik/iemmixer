@@ -1,7 +1,6 @@
 //! Backup files (F19): `<config dir>/backups/YYYYMMDD_HHMMSS_mmm.json` (UTC,
 //! with milliseconds; `_2`, `_3`, … appended when the name is taken: a save
-//! never overwrites a backup), backups v2 only; the predecessor's backups
-//! (moved to `legacy/backups/` by the migration) are not listed. Retention
+//! never overwrites a backup), backups v2 only. Retention
 //! prunes files older than the site's `backup_retention_days`.
 
 use crate::atomic_write;

@@ -1,5 +1,5 @@
-//! Randomised requests and command groups (S0/S2 hand-off: the engine caps
-//! every field from any sender; design note §4). `IEM_FUZZ_ITERS` and
+//! Randomised requests and command groups (the engine caps
+//! every field from any sender). `IEM_FUZZ_ITERS` and
 //! `IEM_FUZZ_SEED` scale and seed the run (the `fuzz` CI job raises them);
 //! the coverage-guided target lives in `fuzz/`.
 
@@ -228,7 +228,6 @@ fn command(rng: &mut Rng, g: &Topology, depth: u32) -> Cmd {
         11 => Cmd::StopTestSignal,
         12 => Cmd::ImportState {
             state: random_state(rng, g),
-            baseline: rng.chance(0.5),
         },
         13 => [Cmd::GetState, Cmd::Ping, Cmd::SaveNow, Cmd::InjectFault][rng.below(4)].clone(),
         14 => Cmd::SetGroup {

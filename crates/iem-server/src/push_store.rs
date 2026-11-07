@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(store.all()[0].endpoint, "https://legit.example/push/xyz");
     }
 
-    /// Notify mode's view of the store (the guard's alarms go to these
+    /// Notify mode's view of the store (the alarm unit's notices go to these
     /// subscriptions, #9 2026-09-28): what `load` would find, nothing written.
     #[test]
     fn read_finds_what_load_would_and_writes_nothing() {

@@ -2,8 +2,7 @@
 # The remote commands name this script's own constant paths, expanded here on purpose.
 # shellcheck disable=SC2029
 set -euo pipefail
-# Provisions the Gen 3 box from the dev box, then checks it (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9, choice 1;
+# Provisions the Gen 3 box from the dev box, then checks it (#72 phase D;
 # .claude/rules/gen3.md):
 #
 #   provision.sh --host <user@host> --ntp-from <iemmixer-ops/site/gen3-dantesync.json>
@@ -16,7 +15,7 @@ set -euo pipefail
 #   be installed from it: install-dantesync.sh, run first) and the [[people]]
 #   ids of this checkout's config/test-roster.toml (the sudo rule's
 #   {member}), and with --band-roster the band roster's ids too, each once
-#   (while 3.x serves the live gate mints a band member's token); no value is
+#   (the live gate mints a band member's token); no value is
 #   ever printed.
 # - On the box: `id -un` (the admin user, the sudo rule's; never root) and
 #   `systemctl is-active iem-server iem-engine iem-dante`: a unit of the stack

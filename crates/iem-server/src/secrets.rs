@@ -1,4 +1,4 @@
-//! Runtime secrets generated on the PC — never in git or the site config
+//! Runtime secrets generated on the box — never in git or the site config
 //! (program spec §5.3): the JWT signing key and the VAPID private key, one
 //! owner-only file each in `<config dir>/secrets/`. A file is created once and
 //! never overwritten; an empty or unreadable file is an error, not a reason to
@@ -43,9 +43,8 @@ pub fn load_or_create(dir: &Path) -> io::Result<Secrets> {
 }
 
 /// The VAPID private key from `dir`, read only: a missing key is an error,
-/// never made here. Only the server's start (and the band import) create
-/// the secrets; a notice sent before the first import must leave the
-/// directory as it is, so the predecessor's keys can still be taken.
+/// never made here. Only the server's start creates the secrets; a notice
+/// must leave the directory as it is.
 pub fn load_vapid(dir: &Path) -> io::Result<String> {
     let path = dir.join(VAPID_PRIVATE_FILE);
     match std::fs::read_to_string(&path) {
@@ -113,9 +112,62 @@ pub(crate) fn write_new_private(path: &Path, data: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// Replace `path` whole with `data`: a new owner-only (Unix) temporary file
+/// next to it, then a rename, so a crash never leaves half a secret. For the
+/// secrets that are meant to change (a rotated Cloudflare token, a renewed
+/// certificate key; #91, ported from fohmixer 9f3d440 `secrets.rs`). A
+/// temporary file a crashed write left is removed first; one that cannot be
+/// removed fails the exclusive create below.
+pub(crate) fn replace_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("new");
+    let _ = std::fs::remove_file(&tmp);
+    write_new_private(&tmp, data)?;
+    std::fs::rename(&tmp, path)?;
+    // The rename reaches the disk too, so a power cut never brings an old
+    // value back. The new file already serves, so a failed sync only warns.
+    if let Some(dir) = path.parent()
+        && let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all())
+    {
+        tracing::warn!(path = %path.display(), error = %e, "the file is saved, the folder's sync failed");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_private_replaces_the_whole_file_and_leaves_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.test");
+        replace_private(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        // A stale temporary file of a crashed write does not block the next one.
+        std::fs::write(dir.path().join("token.new"), b"stale").unwrap();
+        replace_private(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert!(!dir.path().join("token.new").exists());
+    }
+
+    #[test]
+    fn replace_private_reports_a_temporary_it_cannot_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("token.new")).unwrap();
+        assert!(replace_private(&dir.path().join("token.test"), b"x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_secret_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.test");
+        std::fs::write(&path, b"old").unwrap();
+        replace_private(&path, b"x").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn creates_both_secrets_once_and_reloads_them() {

@@ -1,4 +1,4 @@
-//! The Dante backend's decisions (Gen 3 phase C, plan Task 3): the channel
+//! The Dante backend's decisions (Gen 3 phase C): the channel
 //! map and its refusals, the timing, the device's options and errors, and
 //! the driver over a fake device and a stand-in pump thread.
 
@@ -104,6 +104,26 @@ fn a_device_at_another_rate_is_refused() {
 }
 
 #[test]
+fn a_device_block_above_the_engines_b_is_refused() {
+    let topo = test_site();
+    for block in [64, 128, 256] {
+        let mut cfg = device(132, 95);
+        cfg.block = block;
+        match check(&cfg, &topo, &[]) {
+            Err(EngineError::Card(why)) => {
+                assert!(why.contains(&format!("block {block}")), "{why}")
+            }
+            other => panic!("{block}: {other:?}"),
+        }
+    }
+    for block in BLOCKS {
+        let mut cfg = device(132, 95);
+        cfg.block = block;
+        assert!(check(&cfg, &topo, &[]).is_ok(), "block {block} runs");
+    }
+}
+
+#[test]
 fn the_timing_is_32_samples_the_devices_latency_and_1_ms() {
     let mut cfg = device(2, 2);
     let t = timing(&cfg);
@@ -112,6 +132,12 @@ fn the_timing_is_32_samples_the_devices_latency_and_1_ms() {
     cfg.latency_ns = 2_000_000;
     let t = timing(&cfg);
     assert_eq!((t.playout, t.offset()), (192, 320), "2 ms");
+    cfg.latency_ns = 333_333;
+    assert_eq!(
+        timing(&cfg).playout,
+        32,
+        "the RX's nearest whole samples, not 31 cut down"
+    );
 }
 
 #[test]
@@ -295,7 +321,7 @@ fn a_reported_signal_is_a_stop_ending() {
     r.reported.store(true, Ordering::Release);
     assert_eq!(r.driver.ending(), Some(Ending::Stop));
     assert_eq!(r.driver.ending(), Some(Ending::Stop), "it stays");
-    assert_eq!(Box::new(r.driver).stop(), StopOutcome::Released);
+    Box::new(r.driver).stop();
 }
 
 #[test]
@@ -311,7 +337,7 @@ fn a_device_that_ended_is_a_backend_ending() {
         r.driver.ending(),
         Some(Ending::Backend("flow control on UDP 4455 ended".into()))
     );
-    assert_eq!(Box::new(r.driver).stop(), StopOutcome::Released);
+    Box::new(r.driver).stop();
 }
 
 /// Runs `f` on a thread: its result, or a failure after [`BOUND`]
@@ -328,8 +354,7 @@ fn bounded<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
 fn stop_ends_the_pump_before_the_device() {
     let r = rig(None);
     let log = Arc::clone(&r.log);
-    let outcome = bounded(move || Box::new(r.driver).stop());
-    assert_eq!(outcome, StopOutcome::Released);
+    bounded(move || Box::new(r.driver).stop());
     assert_eq!(
         *log.lock().unwrap(),
         vec![
@@ -344,12 +369,11 @@ fn stop_ends_the_pump_before_the_device() {
 }
 
 #[test]
-fn a_device_that_fails_or_stays_is_still_released() {
+fn a_device_that_fails_or_stays_still_ends_the_stop() {
     for answer in [Stopped::Failed("goodbyes".into()), Stopped::StillRunning] {
         let r = rig_with(None, answer.clone());
         let log = Arc::clone(&r.log);
-        let outcome = bounded(move || Box::new(r.driver).stop());
-        assert_eq!(outcome, StopOutcome::Released, "{answer:?}");
+        bounded(move || Box::new(r.driver).stop());
         assert_eq!(log.lock().unwrap().len(), 2, "{answer:?}");
     }
 }
@@ -384,7 +408,7 @@ fn stats_are_the_pumps() {
     assert_eq!(h, r.stats.histograms());
     assert_eq!(h.process.iter().map(|e| e.1).sum::<u64>(), 3);
     assert!(h.top_us > 0, "{h:?}");
-    assert_eq!(Box::new(r.driver).stop(), StopOutcome::Released);
+    Box::new(r.driver).stop();
 }
 
 #[test]

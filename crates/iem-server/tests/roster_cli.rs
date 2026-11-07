@@ -1,5 +1,5 @@
 //! `iem-server roster check <file>` end to end (#58): a roster against the
-//! site file `IEMMIXER_CONFIG` names, before it is installed on the PC. One
+//! site file `IEMMIXER_CONFIG` names, before it is installed on the box. One
 //! JSON line `{"ok","problems","sha256","removes"}`; exit 0 when it can be installed,
 //! 1 when not, 2 for bad arguments.
 

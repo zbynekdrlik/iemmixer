@@ -1,6 +1,6 @@
 import type { Page, Request } from "@playwright/test";
 
-// The live push spec's support (S7, #10; row 717): a real Web Push
+// The live push spec's support (#10; row 717): a real Web Push
 // subscription of the engineer's page in a persistent Chromium profile. A
 // push endpoint is a capability (whoever holds it, with the keys, can reach
 // the browser), so no error here carries one, nor a URL (P6: the host is a

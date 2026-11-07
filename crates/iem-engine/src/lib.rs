@@ -1,5 +1,4 @@
-//! The iemmixer audio engine (S3; program spec §2, §3.3, §3.4; design note
-//! `docs/superpowers/specs/2026-09-26-s3-engine-core-design.md`):
+//! The iemmixer audio engine:
 //!
 //! - [`site`], [`topology`]: the `[engine]` table of `site.toml` (inputs,
 //!   groups, mixes), validated and compiled once per run (I4, #20);
@@ -7,17 +6,16 @@
 //! - [`cmd`]: the RT thread's command messages;
 //! - [`core`]: the pure control core, single writer of the state (I6);
 //! - [`rt`]: the RT processor, the fixed mix pipeline in one callback (I5, I7);
-//!   [`probe`]: its listen probe (S7);
+//!   [`probe`]: its listen probe;
 //! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4);
 //! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
 //!   start-up, the crash model without the driver and the offline renderer;
-//!   on Windows the private `asio` module starts the ASIO backend (S6); on
-//!   Linux `dante` hosts our own Dante device and drives the processor on
+//!   `dante` hosts our own Dante device and drives the processor on
 //!   its media clock (Gen 3 phase C, #72). Nothing in the engine measures
 //!   the stage to gate a switch (#38: only the owner's signal decides);
 //! - [`supervise`]: `iem-engine supervise`, a supervisor client of the
-//!   control pipe for the Gen 3 box, where no guard runs (the HIL test
+//!   control pipe for the Gen 3 box (the HIL test
 //!   signal, its stop, the engine's `Status`; Gen 3 phase H, #72).
 //!
 //! GPL-3.0-or-later: the engine links the MGA limiter port (D1) and, on
@@ -25,7 +23,7 @@
 
 #![forbid(unsafe_code)]
 // The rtsan CI job (nightly, `--cfg iem_rtsan`) marks `Processor::process`
-// as a real-time context (design note §3.8).
+// as a real-time context.
 #![cfg_attr(iem_rtsan, feature(sanitize))]
 #![cfg_attr(
     not(test),
@@ -37,8 +35,6 @@
     )
 )]
 
-#[cfg(windows)]
-mod asio;
 pub mod cmd;
 pub mod control;
 pub mod core;

@@ -3,7 +3,7 @@ import { test, expect, type Page } from "./support/live";
 import type { Relay } from "./support/relay";
 import { apiGet, expectBuild, live, openLive, type Who } from "./support/env";
 
-// The tunnel status on the real PC (S7, #10; rows 735 and 736, reaperiem#202):
+// The tunnel status on the real PC (#10; rows 735 and 736, reaperiem#202):
 // the page comes through the band's public host, so through the real
 // cloudflared, and the server polls cloudflared's /ready. While the tunnel
 // is Ok, the engineer's header shows the indicator „Vonkajší prístup: OK"
@@ -18,12 +18,12 @@ const OK_LABEL = "Vonkajší prístup: OK";
 /** The server pushes `TunnelStatus` when the page's socket opens. */
 const FRAME_MS = 10_000;
 
-type TunnelStatus = { state?: unknown; ready_connections?: unknown; since_secs?: unknown; last_restart_ok?: unknown };
+type TunnelStatus = { state?: unknown; ready_connections?: unknown; since_secs?: unknown };
 
 /**
  * GET /api/tunnel through the public host, as `who`; it must answer 200 with
- * a status. Only from the run's build: after "ide event" the predecessor
- * answers at the same address, and the failure then names that hop.
+ * a status. Only from the run's build: another server at that address
+ * fails, naming that hop.
  */
 async function tunnelStatus(request: APIRequestContext, who: Who): Promise<TunnelStatus> {
   await expectBuild(request);
@@ -83,7 +83,6 @@ test.describe("the tunnel status on the real PC, engineer (S7)", () => {
     const status = await tunnelStatus(request, "engineer");
     expectOk(status, "/api/tunnel");
     expect(typeof status.since_secs, "since_secs is part of the status").toBe("number");
-    expect("last_restart_ok" in status, "last_restart_ok is part of the status").toBe(true);
 
     await openLive(page, "engineer");
     const indicator = page.getByTestId("tunnel-status");

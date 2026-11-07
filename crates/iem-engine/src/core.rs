@@ -1,5 +1,4 @@
-//! The control core (program spec I6, §2.3, X2, X3, X13; S3 design note §3.3;
-//! the model of the #20 design note §3):
+//! The control core (program spec I6):
 //! the single writer of the mix state. `apply` is pure — no threads, no I/O —
 //! and turns one request into the new revision, the changed entities and one
 //! group of RT commands. Every field is capped here, whoever sent it.
@@ -22,7 +21,7 @@ mod state;
 
 pub use self::state::{MixRec, Reconciled, defaults_muted, reconcile, to_state};
 
-/// The HIL signal's outputs (`HilTestSignal.card_tx`; S6 design note §4,
+/// The HIL signal's outputs (`HilTestSignal.card_tx`;
 /// the owner's decision on #9 of 2026-09-28): the HIL slots of the listed
 /// card channels among the engine's spare outputs `hil` (the site's
 /// `[guard] hil_tx`, `Topology::hil_outputs`), each within the first
@@ -73,12 +72,8 @@ pub enum Effect {
     SendTopology,
     Save,
     Shutdown,
-    /// The whole state was replaced: broadcast `State`; save a baseline too.
-    Imported {
-        baseline: bool,
-    },
-    /// HIL's forced reopen: the backend reopens the card.
-    Reopen,
+    /// The whole state was replaced: broadcast `State`.
+    Imported,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,8 +174,8 @@ pub struct Core {
     /// The running test signal is the HIL one (card-masked): a plain one
     /// may not replace it until it ends.
     hil_test: bool,
-    /// HIL's spare card outputs the engine opened after the topology's TX
-    /// (S6): the HIL slots of `HilTestSignal`'s mask.
+    /// HIL's spare outputs the engine opened after the topology's TX: the
+    /// HIL slots of `HilTestSignal`'s mask.
     hil: Vec<u16>,
     rev: u64,
     flags: Flags,
@@ -203,7 +198,7 @@ impl Core {
     }
 
     /// The core of an engine that opened HIL's spare card outputs `hil`
-    /// (S6, checked by `Topology::hil_outputs`) after the topology's TX, in
+    /// (checked by `Topology::hil_outputs`) after the topology's TX, in
     /// that order.
     pub fn with_hil(mut self, hil: Vec<u16>) -> Self {
         self.hil = hil;

@@ -515,8 +515,8 @@ test.describe("Limiter (F12)", () => {
     await page.locator(".limiter-modal .limiter-close-btn").click();
   });
 
-  // The CI half of gen1 live/limiter-activity.spec.ts (the card half runs on
-  // the PC in S7): the engine's sine (−20 dBFS) with mic4's trim at +24 dB
+  // The CI half of gen1 live/limiter-activity.spec.ts (the real half runs on
+  // the box's live gate): the engine's sine (−20 dBFS) with mic4's trim at +24 dB
   // and its level in member4's mix at +12 dB is far above the −6 dB limit.
   test("the counter adds up while the limiter holds the sine down, and Reset zeros it (X14)", async ({
     page,

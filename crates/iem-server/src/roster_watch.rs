@@ -1272,10 +1272,7 @@ async fn transition(
 
 /// The import of `state` as the engine's whole running state.
 fn import(state: MixState) -> Cmd {
-    Cmd::ImportState {
-        state,
-        baseline: false,
-    }
+    Cmd::ImportState { state }
 }
 
 /// A new roster (`text`) in place of `old` (see [`apply_text`]): the states

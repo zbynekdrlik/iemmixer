@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use iem_core::roster::{valid_lineup_id, valid_person_id};
 
-use crate::lineup_store::{KINDS, LINEUPS_DIR, retrying};
+use crate::lineup_store::{KINDS, LINEUPS_DIR};
 use crate::photo_store::{PHOTO_EXT, PHOTOS_DIR, PhotoStore};
 use crate::pin_store::PinStore;
 
@@ -87,15 +87,15 @@ pub fn held_ids(config_dir: &Path) -> io::Result<BTreeSet<String>> {
 /// read, only deleted ([`drop_archive`]).
 pub const ARCHIVE_DIR: &str = "archive";
 
-/// Deletes the `archive/` folder an older server wrote, whatever it holds,
-/// tried again on a short-lived Windows error; `false` when there is none
+/// Deletes the `archive/` folder an older server wrote, whatever it holds;
+/// `false` when there is none
 /// (a file of that name is no archive and stays).
 pub fn drop_archive(config_dir: &Path) -> io::Result<bool> {
     let dir = config_dir.join(ARCHIVE_DIR);
     if !dir.is_dir() {
         return Ok(false);
     }
-    retrying(cfg!(windows), || fs::remove_dir_all(&dir))?;
+    fs::remove_dir_all(&dir)?;
     tracing::info!("the people archive an older server wrote is deleted");
     Ok(true)
 }
@@ -117,39 +117,20 @@ fn files_of(root: &Path, id: &str) -> io::Result<Vec<(String, &'static str, Path
 /// Removes `id`: their PIN hash first (no login while their files go),
 /// then their photo and every lineup's files of theirs. `false` when
 /// nothing of theirs was found (nothing is written). An id that is no
-/// lower-case person id (`roster::valid_person_id`; on case-insensitive
-/// NTFS `Member3`'s files are `member3`'s), or the engineer (by the PIN
+/// lower-case person id (`roster::valid_person_id`), or the engineer (by the PIN
 /// store), is refused (`InvalidInput`, the id not echoed) before anything
 /// is deleted. A photo or file that cannot be deleted is logged and the
 /// others are deleted all the same; then the first such error is returned,
-/// so the caller names the person as not removed. Each delete is tried
-/// again on a short-lived Windows error, as a lineup file's rename is
-/// (`lineup_store::retrying`: a scanner or the indexer holding the file);
-/// what is left after that is deleted by the next start or reload
+/// so the caller names the person as not removed; what is left is deleted by the next start or reload
 /// (`roster_watch::follow_people` looks through [`held_ids`]).
 pub fn remove_person(config_dir: &Path, pins: &mut PinStore, id: &str) -> io::Result<bool> {
-    remove_with(config_dir, pins, id, cfg!(windows), &|path| {
-        fs::remove_file(path)
-    })
-}
-
-/// [`remove_person`], each photo and file deleted by `remove`, tried
-/// again while it fails with a transient error (`windows`: the server's
-/// OS; tests pass `true` with a `remove` that fails as Windows does).
-pub(crate) fn remove_with(
-    config_dir: &Path,
-    pins: &mut PinStore,
-    id: &str,
-    windows: bool,
-    remove: &dyn Fn(&Path) -> io::Result<()>,
-) -> io::Result<bool> {
     if !valid_person_id(id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "a removal takes a lower-case person id only",
         ));
     }
-    let delete = |path: &Path| retrying(windows, || remove(path));
+    let delete = |path: &Path| fs::remove_file(path);
     let pin = pins.remove_member(id)?;
     let mut failed: Option<io::Error> = None;
     let photo = match PhotoStore::new(config_dir).remove(id, &delete) {

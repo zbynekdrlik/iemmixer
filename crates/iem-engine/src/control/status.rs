@@ -48,9 +48,7 @@ impl Control {
             missed: st.missed,
             overruns: st.overruns,
             resets: st.resets,
-            parked: st.parked,
             held: self.held,
-            lock_failed: self.driver.as_ref().is_some_and(|d| d.lock_failed()),
             hil: self
                 .core
                 .hil()
@@ -71,7 +69,7 @@ impl Control {
     }
 
     /// A meter frame's peaks of HIL's spare outputs join those since the
-    /// last `Status` (S6).
+    /// last `Status`.
     pub(super) fn note_hil(&mut self, peaks: &[f64]) {
         for (held, &p) in self.hil_peaks.iter_mut().zip(peaks) {
             *held = held.max(p);

@@ -1,6 +1,5 @@
 //! The PIN pepper: 32 random bytes created once per data directory.
-//! Windows: DPAPI-protected for the current user (`pepper.dpapi`).
-//! Linux with systemd's credentials folder (`$CREDENTIALS_DIRECTORY`, the
+//! With systemd's credentials folder (`$CREDENTIALS_DIRECTORY`, the
 //! Gen 3 box): the systemd credential `pepper`, sealed on the box and
 //! decrypted by systemd at each start, never created or written here; a
 //! plain test pepper beside it is an error, never a fall back.
@@ -19,32 +18,17 @@ use rand_core::{OsRng, RngCore};
 use crate::pin_hash::PEPPER_LEN;
 use crate::pin_store::{PIN_HASHES_FILE, PinStore};
 
-#[cfg(windows)]
-mod dpapi;
-// Windows protects the pepper with DPAPI directly (no wrappers here: Linux
-// CI cannot build them, so their mutants could never be caught).
-#[cfg(windows)]
-use dpapi::{protect, unprotect};
-
 /// File name of the stored pepper.
-#[cfg(windows)]
-pub const PEPPER_FILE: &str = "pepper.dpapi";
-/// File name of the stored pepper.
-#[cfg(not(windows))]
 pub const PEPPER_FILE: &str = "pepper.test";
 
-/// The systemd credential that holds the pepper on Linux: the server's unit
+/// The systemd credential that holds the pepper: the server's unit
 /// loads it (`LoadCredentialEncrypted=pepper:…`), the PIN commands get it
 /// through `systemd-run`.
 pub const CREDENTIAL: &str = "pepper";
 
-/// Load the pepper ([`load_from`]): on Linux from systemd's credentials
-/// folder when systemd gives this process one (`$CREDENTIALS_DIRECTORY`),
-/// else from `dir`. Windows keeps its DPAPI file.
+/// Load the pepper ([`load_from`]): from systemd's credentials folder when
+/// systemd gives this process one (`$CREDENTIALS_DIRECTORY`), else from `dir`.
 pub fn load_or_create(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
-    #[cfg(windows)]
-    let credentials: Option<PathBuf> = None;
-    #[cfg(not(windows))]
     let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
     load_from(dir, credentials.as_deref())
 }
@@ -134,8 +118,7 @@ fn from_file(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
                     format!(
                         "the PIN pepper {pepper} is missing but {store} holds PIN hashes made \
                          with it; no new pepper was created because it would invalidate every \
-                         PIN. Restore the pepper file (on Windows it only decrypts for the \
-                         account that created it), or start over: move {store} aside, then run \
+                         PIN. Restore the pepper file, or start over: move {store} aside, then run \
                          `iem-server pin set-engineer` and give members new PINs (engineer \
                          reset or `iem-server pin set-member <id>`)",
                         pepper = path.display(),
@@ -154,15 +137,13 @@ fn from_file(dir: &Path) -> io::Result<[u8; PEPPER_LEN]> {
     }
 }
 
-#[cfg(not(windows))]
 fn protect(data: &[u8]) -> io::Result<Vec<u8>> {
     tracing::warn!(
-        "PIN pepper stored unprotected in a test file: Windows protects it with DPAPI, Linux takes systemd's credential (CREDENTIALS_DIRECTORY)"
+        "PIN pepper stored unprotected in a test file: the box takes systemd's credential (CREDENTIALS_DIRECTORY)"
     );
     Ok(data.to_vec())
 }
 
-#[cfg(not(windows))]
 fn unprotect(data: &[u8]) -> io::Result<Vec<u8>> {
     Ok(data.to_vec())
 }
@@ -274,7 +255,6 @@ mod tests {
         assert!(path.is_dir());
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn test_platforms_store_the_raw_pepper() {
         let dir = tempfile::tempdir().unwrap();
@@ -283,16 +263,6 @@ mod tests {
             std::fs::read(dir.path().join(PEPPER_FILE)).unwrap(),
             pepper.to_vec()
         );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_stores_the_pepper_dpapi_protected() {
-        let dir = tempfile::tempdir().unwrap();
-        let pepper = load_or_create(dir.path()).unwrap();
-        let stored = std::fs::read(dir.path().join(PEPPER_FILE)).unwrap();
-        assert_ne!(stored, pepper.to_vec());
-        assert!(stored.len() > PEPPER_LEN);
     }
 
     /// A credentials folder holding `bytes` as the credential, as systemd

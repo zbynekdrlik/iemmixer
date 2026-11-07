@@ -1,5 +1,5 @@
-//! Round-trip latency of the D5(b) Dante loopback (S6 design note §10 test 5,
-//! iemmixer#9): the HIL test signal leaves on a spare card output, the owner
+//! Round-trip latency of the D5(b) Dante loopback
+//! (iemmixer#9): the HIL test signal leaves on a spare card output, the owner
 //! loops that output back to the matching spare card input in Dante, and this
 //! probe measures the delay from the first emitted sample to the first sample
 //! that returns above a threshold — in samples, then milliseconds.
@@ -28,7 +28,7 @@ pub const MIN_ROUND_TRIP: u64 = 16;
 
 /// How long the return must have been quiet (below [`ONSET`]) right before
 /// the emit for a measurement, in samples: 100 ms at 96 kHz, far longer than
-/// any real loopback (the PC measured 129 samples; Dante's largest latency
+/// any real loopback (129 samples measured; Dante's largest latency
 /// setting is 5 ms). A return that sounded within it may still carry that
 /// signal when the echo is due, so the run gives no measurement.
 pub const QUIET_BEFORE: u64 = 9_600;

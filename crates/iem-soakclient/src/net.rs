@@ -1,4 +1,4 @@
-//! The soak client's wire (S7 design note §4): `/api/site`, the build check
+//! The soak client's wire: `/api/site`, the build check
 //! (`/api/version`) and the PIN login over plain HTTP, the mixer and listen
 //! sockets each on its own thread, the run's clock on the calling thread. A
 //! socket read waits at most `read_timeout`, so a reading thread sees the
@@ -6,11 +6,10 @@
 //! bounds); the clock sleeps on a condition variable. No thread polls.
 //!
 //! Nothing is sent to a server before it names `--expect-build` in
-//! `/api/version`: after "ide event" the predecessor app answers at the
-//! band's usual address and takes the client's token (the PIN login's, or
-//! one the client signed: `iem-migrate band` copies the predecessor's JWT
-//! secret), and a `ListenStart` there would mute every other member's send
-//! to the engineer's mix. A secret file is read before any request.
+//! `/api/version`: another build at the band's usual address would take the
+//! client's token (the PIN login's, or one the client signed), and a
+//! `ListenStart` there would mute every other member's send to the
+//! engineer's mix. A secret file is read before any request.
 //!
 //! Each socket is opened once and never again (#10): by a second open the
 //! address may have changed hands since the check. A socket that cannot be
@@ -215,7 +214,7 @@ fn site_lan_url(http: &ureq::Agent, base: &str) -> Option<String> {
     serde_json::from_str::<Site>(&text).ok()?.lan_url
 }
 
-/// Plain HTTP on the LAN, as the guard's: one bound per request, any status
+/// Plain HTTP on the LAN: one bound per request, any status
 /// read as an answer, no redirect, no proxy (the sockets use none either).
 fn agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
@@ -300,7 +299,7 @@ fn watch(
 
 /// One socket for the whole run, opened once. Not opened, it ends the run
 /// at once (`server-gone`): a second try could reach whatever answers at
-/// that address by then (the predecessor app after "ide event"). Lost
+/// that address by then. Lost
 /// before the end, it ends the run (`connection-lost`). Either way it then
 /// ends as [`Role::finish`] says, as far as it still can.
 fn hold(shared: &Shared, url: &str, limits: &Limits, role: &mut Role) {

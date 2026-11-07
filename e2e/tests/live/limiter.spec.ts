@@ -2,7 +2,7 @@ import { test, expect, liveNumber, type Page } from "./support/live";
 import type { Cmd } from "./support/desk";
 import { live, openLive } from "./support/env";
 
-// The limiter counter on the real PC (S7, #10; row 611, X14): a burst drives
+// The limiter counter on the real PC (#10; row 611, X14): a burst drives
 // one member's mix over its limit, the counter counts, and Reset in the page
 // zeros it. The burst's sine (−20 dBFS) reaches the mix at unity with its
 // input dry and open, +12 dB from its level and +12.04 dB at 1 kHz from the

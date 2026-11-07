@@ -1,5 +1,5 @@
 use super::*;
-use crate::persist::tests::{sample, store};
+use crate::persist::tests::{sample, store, write_baseline};
 use crate::test_support::test_site;
 use iem_engine_proto::{InputId, InputState};
 
@@ -496,7 +496,7 @@ fn a_state_dir_that_cannot_be_listed_is_reported() {
 #[test]
 fn baseline_is_the_last_resort_before_defaults() {
     let (_d, s) = store();
-    s.save_baseline(&sample(9)).unwrap();
+    write_baseline(&s, &sample(9));
     fs::write(s.dir().join(CURRENT), b"{}").unwrap();
     let loaded = s.load(&test_site());
     assert_eq!(loaded.source, Source::Baseline);
@@ -507,7 +507,7 @@ fn baseline_is_the_last_resort_before_defaults() {
 #[test]
 fn an_unreadable_file_is_rejected_not_skipped_as_missing() {
     let (_d, s) = store();
-    s.save_baseline(&sample(4)).unwrap();
+    write_baseline(&s, &sample(4));
     // A directory where current.json belongs: reading it fails, not NotFound.
     fs::create_dir(s.dir().join(CURRENT)).unwrap();
     let loaded = s.load(&test_site());
@@ -547,7 +547,7 @@ fn a_boot_past_an_unreadable_current_json_continues_its_revision_above_it() {
     );
     let generation = s.generations().unwrap()[0].1.clone();
     fs::remove_file(generation).unwrap();
-    s.save_baseline(&sample(4)).unwrap();
+    write_baseline(&s, &sample(4));
     let loaded = s.load(&g);
     assert_eq!(
         (loaded.source, loaded.persisted.rev),
@@ -673,7 +673,7 @@ fn the_jump_alarm_names_every_file_passed_over_and_the_floor() {
 
 #[test]
 fn a_state_directory_with_an_older_engines_names_loads_as_before() {
-    // F3 round 4, finding 2: the state directory on the PC has names
+    // F3 round 4, finding 2: an older engine's state directory has names
     // without a revision (gen-<seq>.json, no marker). They load as
     // before, and past an unreadable current.json the revision jumps
     // from the state loaded, as no name shows one. The first save names
@@ -792,12 +792,6 @@ fn a_read_is_tried_again_only_for_an_error_that_may_pass() {
     }
     for kind in [IsADirectory, NotADirectory, PermissionDenied, Other] {
         assert!(!transient(&io::Error::from(kind)), "{kind:?}");
-    }
-    // Windows' sharing and lock violations; elsewhere these codes are
-    // other errors (EPIPE, EDOM on Linux).
-    for code in [SHARING_VIOLATION, LOCK_VIOLATION] {
-        let e = io::Error::from_raw_os_error(code);
-        assert_eq!(transient(&e), cfg!(windows), "{code}: {e}");
     }
 }
 

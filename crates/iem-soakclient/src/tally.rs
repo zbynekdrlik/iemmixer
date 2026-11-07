@@ -1,4 +1,4 @@
-//! The counts of one run and the summary they make (S7 design note §4): the
+//! The counts of one run and the summary they make: the
 //! socket threads count into a [`Tally`], and [`Tally::summary`] turns it
 //! into the [`Summary`] written every `write_every` and at the end. Pure:
 //! every time is passed in.

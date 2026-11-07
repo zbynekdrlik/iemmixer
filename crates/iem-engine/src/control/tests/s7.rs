@@ -1,7 +1,7 @@
-//! S7 HIL v2 (#10, plan Task 28): `Status` carries the last driver reopen's
+//! HIL v2 (#10): `Status` carries the last driver reopen's
 //! time and the faulting callback's time, and a fault sends one last
-//! `Status` before its alarm and the driver's release, so the guard keeps
-//! the faulting callback's time across the respawn.
+//! `Status` before its alarm and the driver's release, so a supervisor reads
+//! the faulting callback's time before the engine ends.
 
 use super::*;
 
@@ -15,9 +15,7 @@ impl Driver for Streams {
         self.0.clone()
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 }
 
 #[test]

@@ -11,7 +11,7 @@ use super::engine::{ErrCode, ErrorBody};
 pub enum Role {
     Control,
     Observe,
-    /// The guard's connection (S6 design note §4): `Shutdown`, `SaveNow`,
+    /// The supervisor's connection: `Shutdown`, `SaveNow`,
     /// `Arm`, the test signals and fault injection (under their launch
     /// flags) and reads; never a mix change. One at a time, beside the
     /// controller: a new supervisor supersedes the old one only.

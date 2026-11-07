@@ -1,27 +1,158 @@
 //! The server's part of the site file (`site.toml`): who the members are and
 //! which engine mix each hears, how the engine's inputs are shown, and the
-//! web, push, backup and tunnel settings (S5 design note §3). The engine
-//! reads the `[engine]` and `[card]` tables itself, the guard `[guard]`
-//! (S6); the server ignores them, and the retired `[activity]` (#38).
+//! web, push, backup and tunnel settings. The engine
+//! reads the `[engine]` table and `[guard] hil_tx` itself; the server only
+//! accepts them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
-use subtle::ConstantTimeEq;
-
-/// Constant-time string comparison to prevent timing attacks on PIN verification.
-/// Returns true if both strings are equal, false otherwise.
-#[inline]
-pub fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
 
 /// The UI's channel categories (the Mics, Stems and Tech tabs, F4). Inputs
 /// of an engine group are always `stems`.
 pub const CATEGORIES: [&str; 3] = ["mics", "stems", "tech"];
+
+/// An https origin with no path: `https://host` or `https://host:port`.
+/// Anything else could inject into the CSP header.
+fn valid_frame_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (rest, None),
+    };
+    let host_ok = !host.is_empty()
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    let port_ok =
+        port.is_none_or(|p| p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok());
+    host_ok && port_ok
+}
+
+/// Let's Encrypt's production directory: `[acme] directory`'s default.
+pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+/// `[acme] propagation_s`'s default: the wait between writing the DNS-01
+/// record and asking the CA to check it (seconds).
+pub const DEFAULT_PROPAGATION_S: u64 = 20;
+/// The longest allowed propagation wait (seconds).
+pub const MAX_PROPAGATION_S: u64 = 600;
+
+/// `[acme]` (#91): keep a certificate for `https_domain` from an ACME CA by
+/// DNS-01 through the Cloudflare DNS API (`iem_server::acme`). The
+/// Cloudflare token and the ACME account key are never in this file: they
+/// are sealed under the config dir (`iem-server cloudflare set-token`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcmeConfig {
+    /// The CA's directory URL (default [`LETS_ENCRYPT`]); https, or http
+    /// to a loopback address only (a test double).
+    #[serde(default = "default_acme_directory")]
+    pub directory: String,
+    /// The account's contact address (`owner@example.org`), optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    /// Seconds between writing the challenge record and the CA's check.
+    #[serde(default = "default_propagation_s")]
+    pub propagation_s: u64,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            directory: default_acme_directory(),
+            contact: None,
+            propagation_s: default_propagation_s(),
+        }
+    }
+}
+
+fn default_acme_directory() -> String {
+    LETS_ENCRYPT.to_string()
+}
+
+fn default_propagation_s() -> u64 {
+    DEFAULT_PROPAGATION_S
+}
+
+/// Whether a URL may be fetched by the server's ACME client: `https://…`,
+/// or `http://` to a loopback address (a test double), never plain http
+/// across a network.
+pub fn acme_url_allowed(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !rest.is_empty() && !rest.starts_with('/');
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((host, _)) => host,
+            None => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `name` is a DNS name like `mixer.example.org`: two labels or
+/// more of letters, digits and inner `-`.
+pub fn is_dns_name(name: &str) -> bool {
+    let labels: Vec<&str> = name.split('.').collect();
+    name.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|label| {
+            (1..=63).contains(&label.len())
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+/// Whether `address` is an e-mail address like `owner@example.org`.
+pub fn is_email(address: &str) -> bool {
+    match address.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && local
+                    .chars()
+                    .all(|c| c.is_ascii_graphic() && !matches!(c, '@' | '<' | '>' | ',' | ':'))
+                && is_dns_name(domain)
+        }
+        None => false,
+    }
+}
+
+/// A site file's parse error: its line and the parser's message, never the
+/// excerpt of the file `toml`'s own text holds, and never a value the message
+/// quotes (`invalid type: string "…"`). Logs and a deploy's output, which may
+/// be pasted, stay free of the site's values (P6).
+fn parse_error(content: &str, e: &toml::de::Error) -> String {
+    let message = e.message();
+    let mut parts = message.split('"');
+    let mut text = parts.next().unwrap_or_default().to_owned();
+    for (i, part) in parts.enumerate() {
+        text.push_str(if i % 2 == 0 { "\"…\"" } else { part });
+    }
+    match e.span() {
+        Some(span) => {
+            let before = content.get(..span.start).unwrap_or_default();
+            format!("line {}: {text}", before.matches('\n').count() + 1)
+        }
+        None => text,
+    }
+}
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,8 +162,7 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    /// The engine's control pipe: a socket path on Unix, a pipe name on
-    /// Windows; the media pipe is `<engine_pipe>.media`.
+    /// The engine's control pipe: a socket path; the media pipe is `<engine_pipe>.media`.
     /// `IEMMIXER_ENGINE_PIPE` overrides it.
     #[serde(default = "default_engine_pipe")]
     pub engine_pipe: String,
@@ -44,26 +174,6 @@ pub struct Config {
     /// How the engine's inputs are shown (names, tabs, owners).
     #[serde(default)]
     pub inputs: Vec<SiteInputMeta>,
-
-    /// Command line of the engineer's "Back to REAPER" switch (§4.3; S6
-    /// provides `iemmode event`): `POST /api/mode/event`, the button in the
-    /// engineer's console. Empty: no switch, no button.
-    #[serde(default)]
-    pub back_to_reaper: Vec<String>,
-
-    /// The retired `[activity]` table: the band-activity alarm read it until
-    /// the owner's decision of 2026-10-06 (#38: no input level stands for
-    /// the band playing). Every site written before has it, so it is still
-    /// accepted, whatever it holds, read by nobody and never written back.
-    #[serde(default, skip_serializing)]
-    pub activity: Option<serde::de::IgnoredAny>,
-
-    /// PIN changes in the web UI (P9, design note §5.4). Until the cutover
-    /// the predecessor is the only place a PIN changes and every entry into
-    /// `dev` brings its PINs over, so the guard writes `false` into every
-    /// `dev` and trial site: the change and reset route then answers 409.
-    #[serde(default = "default_pin_changes")]
-    pub pin_changes: bool,
 
     /// JWT signing key. Never read from the site file: the server loads it
     /// from `<config dir>/secrets/jwt_secret` (`iem_server::secrets`).
@@ -106,6 +216,16 @@ pub struct Config {
     #[serde(default)]
     pub lan_url: Option<String>,
 
+    /// Origins allowed to show the UI in a frame (CSP `frame-ancestors`),
+    /// e.g. "https://surface.example". Empty: no page may frame it.
+    #[serde(default)]
+    pub frame_ancestors: Vec<String>,
+
+    /// `[acme]` (#91): the server keeps `https_domain`'s certificate
+    /// itself. Absent: the certificate files are served as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme: Option<AcmeConfig>,
+
     /// Web Push contact (VAPID `sub` claim).
     #[serde(default = "default_vapid_subject")]
     pub vapid_subject: String,
@@ -129,19 +249,14 @@ pub struct Config {
     #[serde(default, skip_serializing)]
     pub engine: Option<toml::Table>,
 
-    /// The engine's ASIO card (`[card]`, S6): read by `iem-engine` and the
-    /// guard only.
-    #[serde(default, skip_serializing)]
-    pub card: Option<serde::de::IgnoredAny>,
-
-    /// The guard's own table (`[guard]`, S6): read by `iemmixer-guard` only.
+    /// The `[guard]` table: `iem-engine` reads its `hil_tx`.
     #[serde(default, skip_serializing)]
     pub guard: Option<serde::de::IgnoredAny>,
 }
 
 /// A member of the band (or the engineer): the id is the URL, the login
 /// tile and the JWT subject — the predecessor's ids, so nobody logs in
-/// again (P9); `mix` is the engine mix this person hears.
+/// again; `mix` is the engine mix this person hears.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SiteMember {
@@ -170,10 +285,6 @@ pub struct SiteInputMeta {
 
 fn default_port() -> u16 {
     80
-}
-
-fn default_pin_changes() -> bool {
-    true
 }
 
 fn default_engine_pipe() -> String {
@@ -215,9 +326,6 @@ impl Default for Config {
             engine_pipe: default_engine_pipe(),
             members: Vec::new(),
             inputs: Vec::new(),
-            back_to_reaper: Vec::new(),
-            activity: None,
-            pin_changes: default_pin_changes(),
             jwt_secret: String::new(),
             vapid_private_key: String::new(),
             tls: false,
@@ -227,12 +335,13 @@ impl Default for Config {
             https_domain: None,
             local_public_ip: None,
             lan_url: None,
+            frame_ancestors: Vec::new(),
+            acme: None,
             vapid_subject: default_vapid_subject(),
             backup_schedule: default_backup_schedule(),
             backup_retention_days: default_backup_retention_days(),
             tunnel_ready_url: default_tunnel_ready_url(),
             engine: None,
-            card: None,
             guard: None,
         }
     }
@@ -244,7 +353,7 @@ impl Config {
         let content =
             std::fs::read_to_string(path.as_ref()).map_err(|e| ConfigError::Io(e.to_string()))?;
         let config: Self =
-            toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))?;
+            toml::from_str(&content).map_err(|e| ConfigError::Parse(parse_error(&content, &e)))?;
         config.validate()?;
         Ok(config)
     }
@@ -289,7 +398,64 @@ impl Config {
                 out.push(format!("input '{}': owner '{o}' is not a member", i.id));
             }
         }
+        for a in &self.frame_ancestors {
+            if !valid_frame_origin(a) {
+                out.push(format!(
+                    "frame_ancestors: '{a}' is not an https origin (https://host or https://host:port)"
+                ));
+            }
+        }
+        if let Some(acme) = &self.acme {
+            out.extend(self.acme_problems(acme));
+        }
         out
+    }
+
+    /// The problems of the `[acme]` table: it needs `tls` and a DNS name in
+    /// `https_domain` (the certificate's name), an allowed directory, a
+    /// contact that is an address, a bounded propagation wait.
+    fn acme_problems(&self, acme: &AcmeConfig) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.tls {
+            out.push("[acme] needs tls = true: the certificate is for the HTTPS listener".into());
+        }
+        match &self.https_domain {
+            None => out.push("[acme] needs https_domain: the certificate is for that name".into()),
+            Some(name) if !is_dns_name(name) => out.push(format!(
+                "[acme] https_domain '{name}' is not a DNS name like mixer.example.org"
+            )),
+            Some(_) => {}
+        }
+        if !acme_url_allowed(&acme.directory) {
+            out.push(format!(
+                "[acme] directory '{}' is not an https URL",
+                acme.directory
+            ));
+        }
+        if let Some(contact) = &acme.contact
+            && !is_email(contact)
+        {
+            out.push(format!(
+                "[acme] contact '{contact}' is not an address like owner@example.org"
+            ));
+        }
+        if acme.propagation_s > MAX_PROPAGATION_S {
+            out.push(format!(
+                "[acme] propagation_s {} is above {MAX_PROPAGATION_S}",
+                acme.propagation_s
+            ));
+        }
+        out
+    }
+
+    /// The CSP `frame-ancestors` source list: the configured origins, or
+    /// `'none'` when there are none.
+    pub fn frame_ancestors_source(&self) -> String {
+        if self.frame_ancestors.is_empty() {
+            "'none'".to_string()
+        } else {
+            self.frame_ancestors.join(" ")
+        }
     }
 
     /// `Ok` when [`Config::problems`] is empty.
@@ -327,26 +493,8 @@ impl Config {
         crate::tunnel::SiteLinks {
             lan_url: self.lan_url.clone(),
             public_host: self.https_domain.clone(),
+            certificate: None,
         }
-    }
-
-    /// URL the tray's "Copy URL" shares: the public host over HTTPS, else the
-    /// LAN URL, else none.
-    pub fn share_url(&self) -> Option<String> {
-        self.https_domain
-            .as_ref()
-            .map(|domain| format!("https://{domain}"))
-            .or_else(|| self.lan_url.clone())
-    }
-
-    /// URL the tray's "Open Mixer" opens on the PC: the local server on the
-    /// site's port, never the LAN URL. The tray runs no server of its own
-    /// (F27): `iem-server` serves it. Loopback always reaches it (the HTTPS
-    /// redirect applies to the public host only), and its origin is a secure
-    /// context, so Copy URL's `navigator.clipboard` works in the same window;
-    /// a plain-http LAN address has no clipboard API.
-    pub fn mixer_url(&self) -> String {
-        format!("http://localhost:{}", self.port)
     }
 }
 
@@ -385,6 +533,184 @@ pub enum ConfigError {
 mod tests {
     use super::*;
 
+    fn acme_site(acme: &str) -> Config {
+        toml::from_str(&format!(
+            "tls = true\nhttps_domain = \"mixer.example.org\"\n[acme]\n{acme}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_acme_table_takes_its_defaults() {
+        let site = acme_site("");
+        assert_eq!(site.acme, Some(AcmeConfig::default()));
+        let acme = site.acme.clone().unwrap();
+        assert_eq!(acme.directory, LETS_ENCRYPT);
+        assert_eq!(
+            LETS_ENCRYPT,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(acme.propagation_s, 20);
+        assert_eq!(acme.contact, None);
+        assert!(site.validate().is_ok(), "{:?}", site.problems());
+        assert_eq!(Config::default().acme, None);
+        let explicit = acme_site(
+            "directory = \"http://127.0.0.1:9/dir\"\ncontact = \"owner@example.org\"\npropagation_s = 600\n",
+        );
+        let acme = explicit.acme.clone().unwrap();
+        assert_eq!(acme.directory, "http://127.0.0.1:9/dir");
+        assert_eq!(acme.contact.as_deref(), Some("owner@example.org"));
+        assert_eq!(acme.propagation_s, 600);
+        assert!(explicit.validate().is_ok(), "{:?}", explicit.problems());
+    }
+
+    #[test]
+    fn the_acme_table_refuses_unknown_keys_and_secrets() {
+        for key in [
+            "token = \"x\"",
+            "account_key = \"x\"",
+            "email = \"a@example.org\"",
+        ] {
+            let text = format!("tls = true\nhttps_domain = \"mixer.example.org\"\n[acme]\n{key}\n");
+            assert!(toml::from_str::<Config>(&text).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn acme_problems_name_every_offender() {
+        let mut site = acme_site(
+            "directory = \"http://10.0.0.10/dir\"\ncontact = \"nobody\"\npropagation_s = 601\n",
+        );
+        site.tls = false;
+        site.https_domain = None;
+        assert_eq!(
+            site.problems(),
+            vec![
+                "[acme] needs tls = true: the certificate is for the HTTPS listener".to_string(),
+                "[acme] needs https_domain: the certificate is for that name".to_string(),
+                "[acme] directory 'http://10.0.0.10/dir' is not an https URL".to_string(),
+                "[acme] contact 'nobody' is not an address like owner@example.org".to_string(),
+                "[acme] propagation_s 601 is above 600".to_string(),
+            ]
+        );
+        site.https_domain = Some("mixer.example.org&x=1".into());
+        assert!(
+            site.problems().contains(
+                &"[acme] https_domain 'mixer.example.org&x=1' is not a DNS name like mixer.example.org"
+                    .to_string()
+            ),
+            "{:?}",
+            site.problems()
+        );
+    }
+
+    #[test]
+    fn an_acme_url_is_https_or_http_on_loopback() {
+        for url in [
+            "https://acme-v02.api.letsencrypt.org/directory",
+            "http://127.0.0.1:9/directory",
+            "http://localhost:9/x",
+            "http://[::1]:9/x",
+            "http://127.1.2.3/",
+        ] {
+            assert!(acme_url_allowed(url), "{url}");
+        }
+        for url in [
+            "http://10.0.0.10:9/directory",
+            "http://example.org/",
+            "http://127.0.0.1@example.org/",
+            "http://[::1/",
+            "https://",
+            "https:///x",
+            "ftp://127.0.0.1/",
+            "/relative",
+            "",
+        ] {
+            assert!(!acme_url_allowed(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn dns_names_and_addresses() {
+        for name in ["mixer.example.org", "a-b.example.org", "x.y"] {
+            assert!(is_dns_name(name), "{name}");
+        }
+        for name in [
+            "example",
+            "",
+            ".example.org",
+            "example.org.",
+            "-a.example.org",
+            "a-.example.org",
+            "a b.example.org",
+            "a_b.example.org",
+            &format!("{}.org", "a".repeat(64)),
+            &format!("{}.org", ["a"; 127].join(".")),
+        ] {
+            assert!(!is_dns_name(name), "{name}");
+        }
+        assert!(is_dns_name(&format!("{}.org", "a".repeat(63))));
+        assert!(is_email("owner@example.org"));
+        for bad in [
+            "owner",
+            "@example.org",
+            "owner@",
+            "owner@example",
+            "a b@example.org",
+            "a@b@example.org",
+            "a<b@example.org",
+            "a:b@example.org",
+        ] {
+            assert!(!is_email(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn frame_ancestors_default_to_none() {
+        assert_eq!(Config::default().frame_ancestors_source(), "'none'");
+    }
+
+    #[test]
+    fn frame_ancestors_join_the_configured_origins() {
+        let c = Config {
+            frame_ancestors: vec![
+                "https://surface.example".into(),
+                "https://other.example:8443".into(),
+            ],
+            ..Config::default()
+        };
+        assert!(c.validate().is_ok());
+        assert_eq!(
+            c.frame_ancestors_source(),
+            "https://surface.example https://other.example:8443"
+        );
+    }
+
+    #[test]
+    fn a_frame_ancestor_that_is_not_an_https_origin_is_refused() {
+        for bad in [
+            "http://surface.example",
+            "https://surface.example/",
+            "https://surface.example/path",
+            "https://",
+            "https://.example",
+            "https://surface.example:",
+            "https://surface.example:+443",
+            "https://surface.example:70000",
+            "https://a.example; script-src *",
+            "https://a.example https://b.example",
+            "*",
+            "'self'",
+        ] {
+            let c = Config {
+                frame_ancestors: vec![bad.into()],
+                ..Config::default()
+            };
+            let err = c.validate().expect_err(bad).to_string();
+            assert!(err.contains("frame_ancestors"), "{bad}: {err}");
+        }
+    }
+
     fn site() -> Config {
         toml::from_str(include_str!("../../../config/test-site.toml")).expect("test site")
     }
@@ -422,23 +748,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_pipe_and_the_switch_have_defaults() {
+    fn engine_pipe_has_a_default() {
         let config: Config = toml::from_str("port = 81\n").unwrap();
         assert_eq!(config.engine_pipe, "iemmixer-engine");
         assert_eq!(Config::default().engine_pipe, "iemmixer-engine");
-        assert!(config.back_to_reaper.is_empty());
-        assert!(config.activity.is_none() && Config::default().activity.is_none());
-    }
-
-    #[test]
-    fn pin_changes_are_on_unless_the_site_freezes_them() {
-        assert!(Config::default().pin_changes);
-        assert!(toml::from_str::<Config>("port = 80\n").unwrap().pin_changes);
-        assert!(
-            !toml::from_str::<Config>("pin_changes = false\n")
-                .unwrap()
-                .pin_changes
-        );
     }
 
     #[test]
@@ -509,8 +822,6 @@ mod tests {
         assert_eq!(site.https_domain.as_deref(), Some("mixer.example.org"));
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(Config::default().engine.is_none());
-        assert!(site.card.is_some(), "the [card] table is accepted");
-        assert!(Config::default().card.is_none());
         assert_eq!(
             site.member("engineer").map(|m| m.mix.as_str()),
             Some("engineer")
@@ -520,67 +831,78 @@ mod tests {
             Some("Member3")
         );
         assert!(site.member("translator").is_none());
-        assert!(!site.back_to_reaper.is_empty());
-        assert!(!site.pin_changes, "the test site is a dev site: frozen");
         let example: Config = toml::from_str(include_str!("../../../config/iemmixer.example.toml"))
             .expect("config/iemmixer.example.toml");
         assert_eq!(example.members.len(), 2);
-        assert!(example.pin_changes);
         assert_eq!(example.problems(), Vec::<String>::new());
     }
 
-    /// The PC's one site file carries the guard's `[guard]` and the
-    /// engine's `[card]` beside the server's tables (S6): the server ignores
-    /// both, so a guard-started `iem-server` loads the same file.
+    /// The site file carries `[engine]` and `[guard] hil_tx` for the engine
+    /// beside the server's tables: the server accepts both tables and never
+    /// writes them back.
     #[test]
-    fn a_site_with_the_guard_and_card_tables_loads() {
-        // The test site carries the engine's key of `[guard]` (hil_tx, S6);
-        // the guard's own keys join that table.
-        let site_text = include_str!("../../../config/test-site.toml");
-        assert!(site_text.contains("\n[guard]"), "the test site's [guard]");
-        let text = site_text.replacen(
-            "\n[guard]",
-            "\n[guard]\nreaper_url = \"http://127.0.0.1:8080\"\nstage_tracks = [1, 2, 3]\non_pref_fail = \"start_reaper_with_alarm\"",
-            1,
-        );
+    fn a_site_with_the_engine_and_guard_tables_loads() {
+        let text = include_str!("../../../config/test-site.toml");
+        assert!(text.contains("\n[guard]"), "the test site's [guard]");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
-        std::fs::write(&path, &text).unwrap();
-        let site = Config::load(&path).expect("a site with [guard] and [card] loads");
-        assert!(site.card.is_some(), "the [card] table is accepted");
+        std::fs::write(&path, text).unwrap();
+        let site = Config::load(&path).expect("a site with [guard] and [engine] loads");
+        // Whatever else the table holds is not the server's to read.
+        std::fs::write(
+            &path,
+            text.replacen("\n[guard]", "\n[guard]\nother = [1, 2]", 1),
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_ok());
         assert!(site.engine.is_some(), "the [engine] table is accepted");
         assert!(site.guard.is_some(), "the [guard] table is accepted");
         assert_eq!(site.members.len(), 10);
-        // Never written back: the tables belong to the engine and the guard.
         let written = serde_json::to_string(&site).unwrap();
-        for table in ["\"guard\"", "\"card\"", "\"engine\""] {
+        for table in ["\"guard\"", "\"engine\""] {
             assert!(!written.contains(table), "{table} in {written}");
         }
-        // Another unknown table is still refused.
-        let other = format!("{text}\n[nonsense]\nx = 1\n");
-        std::fs::write(&path, other).unwrap();
-        assert!(matches!(Config::load(&path), Err(ConfigError::Parse(_))));
     }
 
-    /// #38 (owner, 2026-10-06): the band-activity alarm is gone and nothing
-    /// reads `[activity]` any more. Every site written before has the table
-    /// (the PC's private one too): it still loads, whatever the table holds,
-    /// and is never written back.
+    /// The retired site keys are errors now, like any unknown key:
+    /// `iem-server check-site` refuses them before a deploy stops anything.
     #[test]
-    fn a_site_with_the_retired_activity_table_loads() {
+    fn the_retired_site_keys_and_any_other_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("site.toml");
-        for table in [
-            // The shape every site had: the stage inputs and the thresholds.
-            "[activity]\ninputs = [\"mic1\", \"mic2\"]\nthreshold_dbfs = -50.0\nwindow_s = 300\nsustain_s = 120\n",
-            // Values and keys the alarm refused are no problem of the site's.
-            "[activity]\ninputs = [\"Stage Mic\"]\nthreshold_dbfs = 6.0\nwindow_s = 0\nsustain_s = 0\nwatch = \"all\"\n",
+        for (key, text) in [
+            ("back_to_reaper", "back_to_reaper = [\"zyxqw\"]\n"),
+            ("pin_changes", "pin_changes = false\n"),
+            ("card", "[card]\ndriver = \"zyxqw\"\n"),
+            ("activity", "[activity]\ninputs = [\"zyxqw\"]\n"),
+            ("nonsense", "[nonsense]\nx = \"zyxqw\"\n"),
         ] {
-            std::fs::write(&path, format!("port = 8081\n{table}")).unwrap();
-            let site = Config::load(&path).unwrap_or_else(|e| panic!("{table}: {e:?}"));
-            assert_eq!(site.port, 8081);
-            let written = serde_json::to_string(&site).unwrap();
-            assert!(!written.contains("activity"), "{written}");
+            std::fs::write(&path, format!("port = 80\n{text}")).unwrap();
+            match Config::load(&path) {
+                Err(ConfigError::Parse(e)) => {
+                    assert!(e.contains(key), "{key}: {e}");
+                    assert!(e.starts_with("line 2: "), "{key}: {e}");
+                    assert!(!e.contains("zyxqw"), "{key}: {e}");
+                }
+                other => panic!("{key}: {other:?}"),
+            }
+        }
+    }
+
+    /// A wrongly typed value stays out of the error too.
+    #[test]
+    fn a_parse_error_never_quotes_a_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("site.toml");
+        std::fs::write(&path, "tls = false\nport = \"zyxqw\"\n").unwrap();
+        match Config::load(&path) {
+            Err(ConfigError::Parse(e)) => {
+                assert!(e.starts_with("line 2: "), "{e}");
+                // Only the value goes: the parser's words after it stay.
+                assert!(e.contains("invalid type: string \"…\", expected "), "{e}");
+                assert!(!e.contains("zyxqw"), "{e}");
+            }
+            other => panic!("{other:?}"),
         }
     }
 
@@ -660,54 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn test_share_url_prefers_the_public_host_then_the_lan_url() {
-        let both = Config {
-            lan_url: Some("http://10.0.0.10".to_string()),
-            https_domain: Some("mixer.example.org".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(
-            both.share_url().as_deref(),
-            Some("https://mixer.example.org")
-        );
-        let lan_only = Config {
-            lan_url: Some("http://10.0.0.10".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(lan_only.share_url().as_deref(), Some("http://10.0.0.10"));
-        assert_eq!(Config::default().share_url(), None);
-    }
-
-    #[test]
-    fn test_mixer_url_is_the_local_server_on_the_site_port() {
-        let both = Config {
-            lan_url: Some("http://10.0.0.10".to_string()),
-            https_domain: Some("mixer.example.org".to_string()),
-            port: 8080,
-            ..Config::default()
-        };
-        assert_eq!(both.mixer_url(), "http://localhost:8080");
-        let https_lan = Config {
-            lan_url: Some("https://10.0.0.10".to_string()),
-            port: 8081,
-            ..Config::default()
-        };
-        assert_eq!(https_lan.mixer_url(), "http://localhost:8081");
-        assert_eq!(Config::default().mixer_url(), "http://localhost:80");
-    }
-
-    #[test]
     fn test_plaintext_pins_are_rejected_in_the_site_file() {
         for text in ["engineer_pin = \"2468\"\n", "[pins]\nmember1 = \"2468\"\n"] {
             assert!(toml::from_str::<Config>(text).is_err(), "{text}");
         }
-    }
-
-    #[test]
-    fn constant_time_eq_compares_whole_strings() {
-        assert!(constant_time_eq("1234", "1234"));
-        assert!(!constant_time_eq("1234", "1235"));
-        assert!(!constant_time_eq("123", "1234"));
     }
 
     /// The browser's `applicationServerKey`: the uncompressed SEC1 point of

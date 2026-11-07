@@ -1,4 +1,4 @@
-//! Stable ids (program spec I4, I6; #20 design note §5): inputs, groups and
+//! Stable ids (program spec I4, I6): inputs, groups and
 //! mixes share one namespace in the site file.
 
 use core::fmt;

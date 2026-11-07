@@ -1,9 +1,9 @@
-//! The engine's media pipe from the server (X3–X5; S5 design note §4): the
+//! The engine's media pipe from the server (X3–X5): the
 //! engine's two listen taps arrive as 20 ms 48 kHz stereo frames (stream 0
 //! the engineer's, stream 1 one other mix's) and are Opus-encoded here —
 //! CELT only (`RESTRICTED_LOWDELAY`), no FEC — for `/ws/audio`; talkback
 //! goes the other way as 20 ms 48 kHz mono frames on stream 16. The engine
-//! links no codec (I1). While a HIL signal with `listen` runs (S7, #10),
+//! links no codec (I1). While a HIL signal with `listen` runs (#10),
 //! streams 2 and 3 carry each listened slot's listen probe: [`route`] sends
 //! them to a probe channel per slot, which only `&hil=1` sessions subscribe
 //! (`listen_ws::feeds`), never counted in the listen diagnostics. Each of
@@ -74,7 +74,7 @@ impl ListenEncoder {
 }
 
 /// Where a media stream's frames go: a listen slot's own stream, or its
-/// listen probe (S7).
+/// listen probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
     pub slot: usize,
@@ -181,7 +181,7 @@ impl Stats {
 struct Inner {
     pipe: String,
     listen: [broadcast::Sender<Bytes>; 2],
-    /// Each slot's listen probe (S7), for `&hil=1` sessions only.
+    /// Each slot's listen probe, for `&hil=1` sessions only.
     probe: [broadcast::Sender<Bytes>; 2],
     talk_tx: mpsc::Sender<Vec<f32>>,
     talk_rx: Mutex<Option<mpsc::Receiver<Vec<f32>>>>,
@@ -244,7 +244,7 @@ impl MediaLink {
         self.inner.listen[slot.min(1)].subscribe()
     }
 
-    /// Opus frames of slot 0's or 1's listen probe (S7): only a `&hil=1`
+    /// Opus frames of slot 0's or 1's listen probe: only a `&hil=1`
     /// session subscribes (`listen_ws::feeds`).
     pub fn subscribe_probe(&self, slot: usize) -> broadcast::Receiver<Bytes> {
         self.inner.probe[slot.min(1)].subscribe()

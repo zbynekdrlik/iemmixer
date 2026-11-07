@@ -14,7 +14,7 @@ async function firstMember(request: APIRequestContext): Promise<string> {
   return members[0].id;
 }
 
-test.describe("Login protection (program spec §5.3)", () => {
+test.describe("Login protection", () => {
   test("backoff after three failures, then the right PIN works again (never a lockout)", async ({ request }) => {
     const headers = tunnelClient(11);
     const member = await firstMember(request);

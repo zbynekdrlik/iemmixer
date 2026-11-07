@@ -1,6 +1,5 @@
 """Tests for scripts/iem-pc/iempc_gen3_gate.py, `iempc gen3-gate hil` (#72
-phase H, plan docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md
-Tasks 2, 4 and 6): the Gen 3 box's HIL job and checks, its verdict and the
+phase H): the Gen 3 box's HIL job and checks, its verdict and the
 `hil/gen3` status. No box and no device exist in CI: a stand-in `ssh` first
 on PATH plays the box (its root and the admin's home in a temporary folder,
 systemd's view of the engine's unit and drop-in, the engine's supervisor
@@ -234,7 +233,7 @@ if words[:4] == SVC:
     if rest == [ENGINE, "check-site", "--site", SITE]:
         if os.environ.get("FAKE_CHECK_SITE_FAILS"):
             fail("iem-engine: site: [guard] hil_tx 94 is the TX of mix zyxqw", 2)
-        print(json.dumps({"topology": "ab12", "inputs": 32, "groups": 2, "mixes": 11, "card": False}))
+        print(json.dumps({"topology": "ab12", "inputs": 32, "groups": 2, "mixes": 11}))
         done()
     if rest == [ENGINE, "supervise", "status"]:
         if os.environ.get("FAKE_STATUS_FAILS"):
@@ -329,6 +328,8 @@ if line == f"{DANTE} ctl status":
     lag = st["since"] <= int(os.environ.get("FAKE_RX_LAG", "1"))
     channels = [{"rx": n, "status": 8 if lag else 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
                  "early": 0} for n in (101, 102, 103, 104)]
+    if os.environ.get("FAKE_RX_OFF"):
+        channels[3]["status"] = 1
     if looped():
         channels.append({"rx": 94, "status": 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
                          "early": 0})
@@ -406,16 +407,16 @@ class GateBase(Base):
     def setUp(self) -> None:
         super().setUp()
         text = ip.env_path().read_text(encoding="utf-8")
+        self.device_config = self.tmp / "ops-device.toml"
+        self.device_config.write_text(f'name = "{OURS.upper()}"\n', encoding="utf-8")   # any case: Dante names ignore it
         ip.env_path().write_text(text + f"GEN3_HOST={GEN3}\nGEN3_DANTE_IP={DANTE_IP}\n"
-                                 f"DANTE_IEM_NAME={OURS.upper()}\n", encoding="utf-8")
+                                 f"GEN3_DEVICE_CONFIG={self.device_config}\n", encoding="utf-8")
         self.patch(POLL_S=0.01)
         # A health that never comes fails in a second, not in the box's 90.
         bound = mock.patch.object(gate, "HEALTH_WAIT_S", 1.0)
         bound.start()
         self.addCleanup(bound.stop)
         ip.STATE_DIR.mkdir(parents=True, exist_ok=True)
-        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 3, "at": "2026-10-28T09:00:00+00:00"}),
-                                                    encoding="utf-8")
         self.box = self.tmp / "gen3"
         for folder in ("root/etc/systemd/system", "root/etc/iemmixer", "root/var/lib/iemmixer/site", "home"):
             (self.box / folder).mkdir(parents=True)
@@ -554,10 +555,9 @@ class GateTests(GateBase):
         # The budget: the job's begin, the panic's restart and the job's end.
         self.assertEqual(self.ledger(), [NOW] * 3)
         self.assert_private(err + json.dumps(docs))
-        self.assertEqual(self.pc.calls, [])   # no PC call
 
     def test_a_loop_already_there_is_kept_and_another_subscription_is_put_back(self) -> None:
-        # While 3.x serves, the mirror may already loop our RX 94 to our own TX 94: kept, nothing sent.
+        # A subscription may already loop our RX 94 to our own TX 94: kept, nothing sent.
         self.device.rows = {RET: (self.device.tx_name(RET), OURS, 9)}
         self.write_loop()
         code, docs, err = self.gate_run()
@@ -600,7 +600,7 @@ class GateTests(GateBase):
             self) -> None:
         # The review of PR #87: the begin, a crash and the panic's restart would be three starts in the unit's
         # window (systemd's counter reset at the begin), so one more crash before the end's reset-failed would
-        # leave the engine down while 3.x serves. No fault then: `panic` reads skipped, the gate fails all the same.
+        # leave the engine down. No fault then: `panic` reads skipped, the gate fails all the same.
         code, docs, err = self.gate_run(FAKE_CRASHES="1")
         self.assertEqual(code, 1, err)
         doc = docs[0]["gen3_gate"]["hil"]
@@ -713,7 +713,6 @@ class JobTests(GateBase):
         self.assertFalse(self.dropin_there())
         self.assertFalse(self.state()["hil"])
         self.assertEqual(self.posts(), [])
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
 
     def test_a_flag_before_the_begin_changes_nothing_on_the_box(self) -> None:
         original = gate.preflight
@@ -784,9 +783,8 @@ class ReviewTests(GateBase):
 
     def test_a_device_at_gen3_dante_ip_that_is_not_ours_gets_no_subscription(self) -> None:
         # A wrong GEN3_DANTE_IP, or an address that moved, would have the D5(b) loop change another Dante
-        # device's RX subscription. Our device answers with DANTE_IEM_NAME while 3.x serves (any case).
-        text = ip.env_path().read_text(encoding="utf-8")
-        ip.env_path().write_text(text + "DANTE_IEM_NAME=Zyxqw-Card\n", encoding="utf-8")
+        # device's RX subscription. Our device answers with the ops device config's name (any case).
+        self.device_config.write_text('name = "Zyxqw-Card"\n', encoding="utf-8")
         err = self.refused("no HIL gate: the device answering at GEN3_DANTE_IP is not our own")
         self.assertNotIn("Zyxqw-Card", err)
         self.assertEqual(self.device.rows, {})
@@ -817,7 +815,7 @@ class ReviewTests(GateBase):
 
 
 class PanicTests(GateBase):
-    """The panic check (Task 6 Step 3): the engine's own injected fault, systemd's own restart."""
+    """The panic check: the engine's own injected fault, systemd's own restart."""
 
     def panic_failed(self, **env: str) -> dict:
         """A run whose panic check fails: exit 1, `panic` its one failure, posted as a failure, the job ended."""
@@ -914,7 +912,6 @@ class PanicTests(GateBase):
         self.assertFalse(self.state()["fault"])
         self.assertEqual(self.posts(), [])
         self.assertEqual(self.ledger(), [NOW] * 2)   # the begin and the end, no fault
-        self.assertIn(["event", "--signal"], [args for _, args, _ in self.pc.calls])
 
 
 class PreflightTests(GateBase):
@@ -935,6 +932,7 @@ class PreflightTests(GateBase):
              "another drop-in changes the engine's unit"),
             ({"FAKE_CHECK_SITE_FAILS": "1"}, None, "iem-engine check-site refuses the installed site"),
             ({"FAKE_UNHEALTHY": "1"}, None, "the box is not healthy"),
+            ({"FAKE_RX_OFF": "1"}, None, "1 subscribed RX channels are not receiving"),
             ({}, text.replace("--dante-iface ${IEM_DANTE_IFACE}", "--dante-iface ${IEM_DANTE_IFACE} --test-signal"),
              "the installed engine unit's ExecStart already holds a HIL flag"),
             ({}, text.replace("StartLimitBurst=3\n", ""), "names no StartLimitBurst and StartLimitIntervalSec"),
@@ -952,6 +950,18 @@ class PreflightTests(GateBase):
                         encoding="utf-8")
         self.refused("the installed site names no [guard] hil_tx spare outputs")
 
+    def test_an_optional_rx_channel_that_does_not_receive_refuses_nothing(self) -> None:
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=104\n")
+        code, docs, err = self.gate_run(FAKE_RX_OFF="1")
+        self.assertNotIn("not receiving", err)
+        self.assertTrue(docs, err)
+
+    def test_a_bad_optional_rx_list_refuses_before_any_call(self) -> None:
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=one\n")
+        self.refused("GEN3_OPTIONAL_RX")
+
     def test_a_device_that_does_not_answer_its_arc_reads_refuses(self) -> None:
         with mock.patch.object(gen3_arc, "send", Network().send):
             self.refused("our device did not answer its ARC reads (TimeoutError)")
@@ -959,7 +969,7 @@ class PreflightTests(GateBase):
     def test_missing_keys_refuse_before_any_call(self) -> None:
         text = ip.env_path().read_text(encoding="utf-8")
         for drop, words in ((f"GEN3_DANTE_IP={DANTE_IP}\n", "no GEN3_DANTE_IP in the private env"),
-                            (f"DANTE_IEM_NAME={OURS.upper()}\n", "no DANTE_IEM_NAME in the private env"),
+                            (f"GEN3_DEVICE_CONFIG={self.device_config}\n", "no GEN3_DEVICE_CONFIG in the private env"),
                             (f"GEN3_HOST={GEN3}\n", "no GEN3_HOST in the private env")):
             with self.subTest(words=words):
                 ip.env_path().write_text(text.replace(drop, ""), encoding="utf-8")
@@ -967,23 +977,24 @@ class PreflightTests(GateBase):
                 self.assertEqual((code, docs, self.calls()), (1, [], []), err)
                 self.assertIn(words, err)
 
-    def test_the_command_is_dev_time_locked_a_box_command_and_runs_only_while_3x_serves(self) -> None:
-        spec = ip.COMMANDS["gen3-gate"]
-        self.assertEqual((spec.pc, spec.dev_time, spec.locked), (False, True, True))
-        self.assertIn("gen3-gate", ip.WHILE_3X_SERVES)
-        self.assertNotIn("gen3-gate", ip.WHILE_2X_SERVES)
-        side = ip.STATE_DIR / "gen3-side.json"
-        for record in (None, {"side": 2}):
-            with self.subTest(record=record):
-                if record is None:
-                    side.unlink()
-                else:
-                    side.write_text(json.dumps(record), encoding="utf-8")
+    def test_an_ops_device_config_without_a_name_refuses_before_any_call(self) -> None:
+        for text, words in (("name = [\n", "could not be read as TOML"), ("rate = 1\n", "names no device")):
+            with self.subTest(words=words):
+                self.device_config.write_text(text, encoding="utf-8")
                 code, docs, err = self.gate_run()
                 self.assertEqual((code, docs, self.calls()), (1, [], []), err)
-                self.assertIn("2.x serves the band (gen3-side.json): 'gen3-gate' runs only while 3.x serves", err)
-        side.write_text(json.dumps({"side": 3}), encoding="utf-8")
-        self.flag()
+                self.assertIn(words, err)
+        self.device_config.unlink()
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs, self.calls()), (1, [], []), err)
+        self.assertIn("could not be read as TOML", err)
+
+    def test_the_command_is_dev_time_locked_a_box_command_and_reads_no_side_record(self) -> None:
+        spec = ip.COMMANDS["gen3-gate"]
+        self.assertEqual((spec.dev_time, spec.locked), (True, True))
+        # The old record may still lie in the state folder: it neither refuses nor allows anything.
+        (ip.STATE_DIR / "gen3-side.json").write_text(json.dumps({"side": 2}), encoding="utf-8")
+        self.flag()   # the Spec's own refusal, before any call
         code, docs, err = self.gate_run()
         self.assertEqual((code, docs, self.calls()), (1, [], []), err)
         self.assertIn("'gen3-gate' runs only in dev time", err)
@@ -1070,7 +1081,7 @@ class PureTests(unittest.TestCase):
     def test_the_injected_panic_is_the_faulted_process_s_own_line(self) -> None:
         esc = chr(27)
         coloured = f"{esc}[31mERROR{esc}[0m the RT callback faulted: {gate.PANIC_TEXT}"
-        hook = f"thread 'dante-engine' panicked at crates/iem-engine/src/rt.rs:577:9:\n{gate.PANIC_TEXT}"
+        hook = f"thread 'dstack-engine' panicked at crates/iem-engine/src/rt.rs:577:9:\n{gate.PANIC_TEXT}"
         lines = "\n".join([
             "not json", json.dumps([1, 2]), json.dumps({"_PID": "4100", "MESSAGE": None}),
             json.dumps({"_PID": "999", "MESSAGE": gate.PANIC_TEXT}),             # another process's

@@ -1,6 +1,6 @@
 //! Sanitiser (X1): a node whose block holds a non-finite sample or one above
 //! 1e6 in magnitude is silenced for that block. The caller counts the trip,
-//! resets the node and raises the alarm (S3).
+//! resets the node and raises the alarm.
 
 /// Largest magnitude a node may output.
 pub const LIMIT: f64 = 1e6;

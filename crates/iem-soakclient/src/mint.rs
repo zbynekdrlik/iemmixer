@@ -1,9 +1,9 @@
-//! `iem-soakclient token` (S7 plan Task 23; the #10 decision of 2026-10-08:
-//! no band PIN in GitHub for the live run either). On the server's PC the
-//! ops `live.yml` job `pc-begin` mints the run's engineer token and one
+//! `iem-soakclient token` (the #10 decision of 2026-10-08:
+//! no band PIN in GitHub for the live run either). On the server's box
+//! `iempc gen3-gate live` mints the run's engineer token and one
 //! member token with the server's own JWT secret (`--jwt-secret-file`, read
 //! as [`read_secret`] reads it for the soak), valid for the run's length,
-//! and hands them to the browser job. Nothing logs in.
+//! and hands them to the browser specs. Nothing logs in.
 //!
 //! The token goes only to the `--out` file: a new file (an existing one is
 //! never written through or replaced), owner-only where the platform allows
@@ -217,9 +217,8 @@ pub fn run(args: &TokenArgs, now: u64) -> Result<(), MintError> {
 }
 
 /// Writes `token` alone to `path`, a NEW file: one that exists (a symlink
-/// too) is never written through or replaced. On Unix it is created
-/// owner-only (0600); on Windows it inherits its folder's ACL, so the ops
-/// job makes that folder its runner user's only. A file that could not be
+/// too) is never written through or replaced. It is created owner-only
+/// (0600). A file that could not be
 /// written whole is removed, so a part of a token never stays behind.
 pub fn write_token(path: &Path, token: &str) -> io::Result<()> {
     let mut options = OpenOptions::new();

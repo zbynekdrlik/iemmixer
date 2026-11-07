@@ -1,15 +1,12 @@
-"""`iempc gen3-gate hil` (#72 phase H, plan
-docs/superpowers/plans/2026-10-28-gen3-phase-h-box-gates.md Tasks 2, 4 and
-6): the Gen 3 box's own HIL gate, driven from the dev box over ssh while 3.x
-serves the band, its verdict posted as the commit status `hil/gen3` on the
+"""`iempc gen3-gate hil` (#72 phase H): the Gen 3 box's own HIL gate, driven from the dev box over ssh on the box
+that serves the band, its verdict posted as the commit status `hil/gen3` on the
 box's build.
 
 Dev time, locked, a box command (iempc's Spec: refused while EVENT-NOW
-exists, and while 2.x serves: iempc.WHILE_3X_SERVES, the inverse of
-WHILE_2X_SERVES). The box has no guard: the dev box's flag is the event gate,
-and "ide event" keeps 3.x running.
+exists). The box has no guard: the dev box's flag is the event gate, and
+"ide event" leaves the box running.
 
-**The box's HIL job** (Task 4; shared by the later `live` and `soak` gates:
+**The box's HIL job** (shared by the later `live` and `soak` gates:
 `begin_job` / `end_job`). The engine's HIL mode is its `--test-signal` flag
 (every mix TX written as zero during a burst, the sine only on the site's
 `[guard] hil_tx` spare outputs, their D5(b) returns opened). The job is a
@@ -36,7 +33,7 @@ with its spare outputs).
 reset (`reset-failed`) before each deliberate start, so a job never meets the
 unit's own limit; on top of that, every engine start this command asks for is
 kept in iempc's state (`gen3-gate.json`, wall-clock times; `iempc
-gen3-deploy` and `gen3-switch to-3` keep theirs there too, `note_starts`)
+gen3-deploy` keeps its own there too, `note_starts`)
 and a plan whose
 starts, with those of the unit's last interval, would pass the burst is
 refused before anything changes (a left job's end counts one; this run
@@ -45,22 +42,21 @@ engine's automatic restarts during a run (its `NRestarts`) are added and fail
 the verdict, but for the panic's one, which is the panic check's.
 
 **Before any change** (each a refusal, nothing changed): `GEN3_HOST`,
-`GEN3_DANTE_IP` and `DANTE_IEM_NAME` in the private env; a job left over (`test -e` of the
+`GEN3_DANTE_IP` and `GEN3_DEVICE_CONFIG` in the private env; a job left over (`test -e` of the
 drop-in); no other drop-in on the engine's unit (`DropInPaths`); the
 installed unit's ExecStart of the expected shape and its start limit; the
 installed device config's RX and TX counts and the installed site's `[guard]
 hil_tx` (read as the service user, numbers kept, nothing of either printed:
-Task 2's preflight), every spare output within the device's TX count and its
+the preflight), every spare output within the device's TX count and its
 D5(b) return within the RX count (else `--test-signal` exits 3 and the unit
 stays down with an alarm), and `iem-engine check-site` of that site exit 0
 (hil_tx against the topology, else exit 2); the box healthy; our device's RX
 table and the first spare output's TX name read over ARC by
-`GEN3_DANTE_IP` (gen3_arc), and its name `DANTE_IEM_NAME` (any case: our
-device holds it while 3.x serves; the loop never writes another device's
-subscription); a left job's end (its engine status unreadable: refused, the
+`GEN3_DANTE_IP` (gen3_arc), and its name the ops device config's (any case:
+the loop never writes another device's subscription); a left job's end (its engine status unreadable: refused, the
 drop-in kept); the budget.
 
-**The checks** (Task 6), in the job: health healthy and the RX flows back;
+**The checks**, in the job: health healthy and the RX flows back;
 the engine's spare outputs open (`supervise status`); versions (the
 engine's `--version`, the device's `--version` and the server's
 `/api/version` `git_hash` on the box, one SHA); the D5(b) loop (our spare
@@ -76,7 +72,7 @@ device; never a notice) and the engine enabled at boot (the alarm unit's
 gate); no automatic restart so far; then, only while the engine is healthy,
 its RX flows back, its spare outputs open and it never restarted by itself
 (else `panic` reads skipped: the gate fails on that other word), the panic
-(Task 6 Step 3, `panic`:
+(`panic`:
 the engine's own injected RT fault, `supervise inject-fault` once the flag
 is checked; systemd's own restart: within PANIC_WAIT_S the engine active as
 a new process with `NRestarts` exactly one higher, healthy, the RX flows
@@ -101,10 +97,10 @@ spare outputs' numbers and the site never reach stdout or stderr; a box call
 ssh itself failed (exit 255, its stderr names the host) is quoted as fixed
 words (`box_error`).
 
-`iempc gen3-gate live` (Task 5) is iempc_gen3_live.py: it builds on this
+`iempc gen3-gate live` is iempc_gen3_live.py: it builds on this
 module (the preflight without the ARC reads, the job, the budget, the status
 post) and `run` passes the call on to it. `iempc gen3-gate soak [--minutes
-N]` (Task 7) is iempc_gen3_soak.py: no HIL job (a left one is ended first),
+N]` is iempc_gen3_soak.py: no HIL job (a left one is ended first),
 the Box, the status post; `--minutes` is the soak's only.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
@@ -122,7 +118,7 @@ from dataclasses import dataclass, field
 import gen3_arc
 import iempc_gen3 as g3
 
-WORDS = g3.Words("gen3-gate", "the HIL gate")
+WORDS = g3.Words("gen3-gate")
 CONTEXT = "hil/gen3"
 # The HIL job: a runtime drop-in of the engine's unit (gone at the next boot).
 DROPIN = "/run/systemd/system/iem-engine.service.d/iem-hil.conf"
@@ -138,7 +134,7 @@ EXEC_HEAD = f"{ENGINE_BIN} run "
 # The engine's flags for a job. By default (the live gate's job) the test
 # signal only: no step of it drives a fault, and an engine under
 # --fault-injection takes one from any supervisor. The HIL gate's job adds the
-# fault injection for its panic check (Task 6 Step 3); the job's end restarts
+# fault injection for its panic check; the job's end restarts
 # the engine without either.
 TEST_FLAGS = ("--test-signal",)
 PANIC_FLAGS = ("--test-signal", "--fault-injection")
@@ -146,9 +142,9 @@ FLAG_WORDS = ("--test-signal", "--fault-injection")
 AS_SERVICE = g3.AS_SERVICE
 SUDO = ("sudo", "-n")
 SUPERVISE = (*AS_SERVICE, ENGINE_BIN, "supervise")
-# The gate's one burst, HIL v1's (hil-v1.ps1): fixed, as the sudo rule names it.
+# The gate's one burst: fixed, as the sudo rule names it.
 BURST_INPUT, BURST_DBFS, BURST_SECONDS = "mic1", -30, 10
-LEVEL_DB = 0.5   # HIL v1's tolerance for the spare outputs' level
+LEVEL_DB = 0.5   # the tolerance for the spare outputs' level
 CALL_S = 30   # one ssh call: the connect, then the box's own bounded command
 RESTART_S = 60   # `systemctl restart`: the engine's bounded stop (10 s), then its start
 HEALTH_WAIT_S = 90.0   # healthy after a restart: the clock's 30 s grace and more
@@ -305,6 +301,27 @@ def receiving(status: dict) -> set[int]:
     return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") == g3.RECEIVING}
 
 
+def optional_rx(ip, env: dict) -> frozenset[int]:
+    """GEN3_OPTIONAL_RX in iempc's private env, RX channels by number with
+    commas: sources a musician carries away (owner, 2026-10-31 on #72). They
+    fail no gate, off or with holes."""
+    words = [w.strip() for w in env.get("GEN3_OPTIONAL_RX", "").split(",") if w.strip()]
+    if not all(w.isdecimal() for w in words):
+        raise ip.Refused("gen3-gate: GEN3_OPTIONAL_RX is not a list of RX channel numbers (nothing was called)")
+    return frozenset(int(w) for w in words)
+
+
+def not_receiving(status: dict, optional: frozenset[int] = frozenset()) -> set[int]:
+    """The required RX channels with a subscription that do not show Receiving
+    (pure): a required source that is off or gone; 0 is a channel without one."""
+    try:
+        rows = g3.rows(status, "channels")
+    except ValueError:
+        return set()
+    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") not in (0, None, g3.RECEIVING)
+            and c["rx"] not in optional}
+
+
 def hil_peaks(status) -> dict[int, float] | None:
     """The engine's spare outputs and their peaks from a supervise status
     (`Status.hil`); None without that list."""
@@ -399,7 +416,7 @@ class Burst:
 
 
 def signal_judged(outputs: list[int], b: Burst) -> dict:
-    """The spare outputs' level and silence (pure; HIL v1's Test-IemHilSignal):
+    """The spare outputs' level and silence (pure):
     each one's loudest peak over the statuses that carried the burst, the
     last status silent."""
     loudest = {tx: max((p.get(tx, 0.0) for p in b.during), default=0.0) for tx in outputs}
@@ -515,6 +532,7 @@ class Box:
 
     def __init__(self, ip, ctx, host: str, name: str = "HIL") -> None:
         self.ip, self.ctx, self.host, self.name = ip, ctx, host, name
+        self.optional = optional_rx(ip, ctx.env)
 
     def call(self, words: list[str], *, change: bool = False, event: str | None = None, stdin: str = "",
              timeout: float = CALL_S) -> str:
@@ -643,14 +661,20 @@ def dante_ip(ip, env: dict[str, str]) -> str:
 
 
 def own_name(ip, env: dict[str, str]) -> str:
-    """DANTE_IEM_NAME, the IEM card's usual name: our device holds it while
-    3.x serves (the takeover), and the D5(b) loop writes only to the device
-    answering at GEN3_DANTE_IP with it."""
-    value = env.get("DANTE_IEM_NAME", "")
-    if not value:
-        raise ip.Refused("gen3-gate: no DANTE_IEM_NAME in the private env (the IEM card's usual name, which our "
-                         "device holds while 3.x serves: the D5(b) loop's self-subscription goes only to the device "
-                         "answering with it)")
+    """Our device's name, the `name` of the ops device config GEN3_DEVICE_CONFIG:
+    the D5(b) loop writes only to the device answering at GEN3_DANTE_IP with
+    it. Its value is never printed."""
+    path = env.get("GEN3_DEVICE_CONFIG", "")
+    if not path:
+        raise ip.Refused("gen3-gate: no GEN3_DEVICE_CONFIG in the private env (the ops device config: the D5(b) "
+                         "loop's self-subscription goes only to the device answering with its name)")
+    try:
+        with open(path, "rb") as f:
+            value = tomllib.load(f).get("name")
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ip.Refused(f"gen3-gate: GEN3_DEVICE_CONFIG could not be read as TOML ({type(e).__name__})") from None
+    if not isinstance(value, str) or not value:
+        raise ip.Refused("gen3-gate: GEN3_DEVICE_CONFIG names no device (its `name`)")
     return value
 
 
@@ -660,7 +684,7 @@ def refuse_foreign(ip, facts: Facts, name: str) -> None:
     device's RX subscription. Neither name is printed."""
     if facts.own.casefold() != name.casefold():
         raise ip.Refused("no HIL gate: the device answering at GEN3_DANTE_IP is not our own (its name is not "
-                         "DANTE_IEM_NAME of the private env, which our device holds while 3.x serves): check "
+                         "the ops device config's): check "
                          "GEN3_DANTE_IP; no subscription was written (nothing was changed)")
 
 
@@ -711,6 +735,10 @@ def preflight(box: Box, dante: str | None) -> Facts:
     before = box.device_status()
     if before is None:
         raise ip.Refused(f"{no}: the Gen 3 device's status could not be read (nothing was changed)")
+    off = not_receiving(before, box.optional)
+    if off:   # owner, 2026-10-31 on #72: a required device off is a failure, never a pass
+        raise ip.Refused(f"{no}: {len(off)} subscribed RX channels are not receiving: a required device is off or "
+                         "gone, get it switched on (nothing was changed)")
     facts = Facts(left=left == "left", line=line, burst=burst, interval=interval, hil_tx=hil_tx, dante=dante or "",
                   own="", ret_before=None, ret_tx_name="", receiving=receiving(before))
     if dante is None:
@@ -885,7 +913,7 @@ def restore_loop(job: Job, c: Checks | None) -> None:
     if c is not None:
         c.loop_restored = False
     warn("the spare return's subscription did not read back as before the run: put our device's RX table back "
-         "(iempc gen3-mirror, while 3.x serves)")
+         "(by hand, over ARC)")
 
 
 # ---- the burst ----
@@ -1007,7 +1035,7 @@ def alarm_started_at(box: Box) -> str | None:
 
 
 def panic(job: Job, c: Checks) -> None:
-    """The panic check (Task 6 Step 3; HIL v1's: an RT panic, its exit, one
+    """The panic check (HIL v1's: an RT panic, its exit, one
     respawn): the engine's own injected fault (`supervise inject-fault`, the
     engine under --fault-injection; the flag checked right before it), then
     systemd's own restart (Restart=on-failure; the fault's exit 70): within
@@ -1084,8 +1112,7 @@ def in_job(job: Job, c: Checks) -> None:
     # The fault only into an engine the job left as it should be: its begin,
     # an automatic restart and the panic's would be three starts in the unit's
     # window (systemd's counter was reset at the begin), so one more crash
-    # before the end's reset-failed would leave the engine down while 3.x
-    # serves.
+    # before the end's reset-failed would leave the engine down.
     if c.hil_on and c.health and c.rx_back and c.unit_restarts == 0 and not c.restarts_unread:
         panic(job, c)
     else:
@@ -1120,7 +1147,7 @@ def post_status(ip, sha: str, doc: dict) -> bool:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate hil|live|soak` (dev time, locked, while 3.x serves)."""
+    """`iempc gen3-gate hil|live|soak|reboot|reset` (dev time, locked)."""
     if ctx.args.gate != "soak" and getattr(ctx.args, "minutes", None) is not None:
         raise ip.Refused("gen3-gate: --minutes is the soak gate's only (nothing was called)")
     if ctx.args.gate == "live":
@@ -1129,8 +1156,11 @@ def run(ctx, ip) -> int:
     if ctx.args.gate == "soak":
         import iempc_gen3_soak   # it imports this module: imported here, never at the top
         return iempc_gen3_soak.run(ctx, ip)
+    if ctx.args.gate in ("reboot", "reset"):
+        import iempc_gen3_reboot   # it imports this module: imported here, never at the top
+        return iempc_gen3_reboot.run(ctx, ip, ctx.args.gate)
     if ctx.args.gate != "hil":
-        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak)")
+        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak, reboot, reset)")
     host = g3.gen3_host(ip, ctx.env, WORDS)
     dante = dante_ip(ip, ctx.env)
     name = own_name(ip, ctx.env)

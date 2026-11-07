@@ -1,5 +1,4 @@
-//! The topology compiled once per run from the site (program spec I4; #20
-//! design note §3, §4, §6): validated, inputs with their group, groups with
+//! The topology compiled once per run from the site (program spec I4): validated, inputs with their group, groups with
 //! their inputs, the ungrouped inputs every mix sums directly, and mixes in
 //! declaration order with the earlier mixes each one hears. There is no graph
 //! to sort: a mix may hear whole only mixes declared before it. Its peers
@@ -396,7 +395,7 @@ impl Topology {
     }
 
     /// Why card channel `ch` may not carry the HIL signal because a mix
-    /// sends on it (S6; the owner's decision on #9 of 2026-09-28: the HIL
+    /// sends on it (the owner's decision on #9 of 2026-09-28: the HIL
     /// signal never reaches a channel a band member hears).
     pub fn mix_tx_refusal(&self, ch: u16) -> Option<String> {
         self.mix_on_tx(ch).map(|m| {
@@ -407,17 +406,17 @@ impl Topology {
         })
     }
 
-    /// HIL's spare card outputs (`[guard] hil_tx`; S6 design note §4, the
+    /// HIL's spare card outputs (`[guard] hil_tx`; the
     /// owner's decision on #9 of 2026-09-28): card channels from 1 that no
     /// mix uses, each named once, at most [`MAX_HIL`]. `run` opens them
     /// after the topology's TX under the test-signal flag, and the
     /// same-numbered card inputs after the topology's RX as their D5(b)
-    /// loopback returns (S6 test 5), so no `hil_tx` may be a topology input;
+    /// loopback returns, so no `hil_tx` may be a topology input;
     /// `check-site` refuses a site whose `hil_tx` breaks the rule.
     /// `[engine] channels` is no bound (the highest channel the topology
-    /// uses, not the card's channel count, which `[card]` does not hold): the
-    /// card's own counts are checked when the stream opens (`ChannelMap`, a
-    /// channel the card lacks refuses it, exit 3). The card needs an input
+    /// uses, not the device's channel count): the device's own counts are
+    /// checked when the stream opens (`ChannelMap`, a channel it lacks
+    /// refuses it, exit 3). The device needs an input
     /// for every `hil_tx` too: with fewer inputs than the highest one, every
     /// HIL stream is refused ([`hil_return_refusal`] names that input).
     pub fn hil_outputs(&self, hil_tx: &[u16]) -> Result<Vec<u16>, SiteError> {
@@ -437,8 +436,8 @@ impl Topology {
             if let Some(why) = self.mix_tx_refusal(ch) {
                 return Err(SiteError::HilTx(why));
             }
-            // The loopback return opens the same-numbered card input (S6 test
-            // 5): it must not be a band input, or the round-trip probe would
+            // The loopback return opens the same-numbered card input:
+            // it must not be a band input, or the round-trip probe would
             // lock onto that input instead of the echo (iemmixer#9 review).
             if self.rx.contains(&ch) {
                 return Err(SiteError::HilTx(format!(
@@ -518,7 +517,7 @@ impl Topology {
 }
 
 /// Why the card refused the stream, when the channel it lacks is a D5(b)
-/// loopback return (S6 test 5), in words that name that input; `None` for
+/// loopback return, in words that name that input; `None` for
 /// any other channel refusal, whose own text stands. `ChannelMap` marks a
 /// return channel with the side `"hil-return rx"`.
 pub fn hil_return_refusal(e: &MapError) -> Option<String> {

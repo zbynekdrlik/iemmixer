@@ -15,8 +15,8 @@ import { Relay } from "./live/support/relay";
 import { closeFacts } from "./live/support/socket";
 import { PushLedger, bodyOf, endpointOf, isPostTo, postedEndpoint } from "./live/support/push";
 
-// The live specs' support (S7, #10), run in the mock E2E job: the live specs
-// themselves run only from the ops live run, against the real PC. The burst
+// The live specs' support (#10), run in the mock E2E job: the live specs
+// themselves run only from `iempc gen3-gate live`, against the box. The burst
 // watch, the desk and its mixer socket run here on local stand-ins for the
 // public host's sockets (the burst's edges, the frames and the server's
 // answers are fed in); every series is synthetic with a known answer. Only
@@ -156,7 +156,7 @@ test("a burst's edge after a stall is no burst begun: it needs 5 s of the slot's
 });
 
 // Live run 3 (#10, 2026-10-09): runner sockets closed from the far side while
-// the PC's server.log shows no disconnect of their sessions, and a watch saw
+// the server's log showed no disconnect of their sessions, and a watch saw
 // no burst for 163 s while bursts came. A failure now carries what the socket
 // saw (numbers, fixed words and the UTC time to match the server's log; never
 // the far side's reason text), so the next run tells the tunnel from the
@@ -248,7 +248,7 @@ test("a far-side close of the runner's mixer socket names its code and times", (
   expect(() => mixer.check()).toThrow(CLOSE_FACTS);
 });
 
-/** The engine's talkback gain into its input (program spec A4). */
+/** The engine's talkback gain into its input. */
 const TALKBACK_GAIN = 0.379934;
 
 /** `n` copies of `value`. */

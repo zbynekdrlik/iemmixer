@@ -9,8 +9,7 @@ import { login } from "./support/session";
 // the "use the LAN address" banner while the tunnel is broken, and the
 // Reconnecting banner of a page opened on the public host a LAN hint.
 //
-// In CI cloudflared is absent, so the tunnel is Down (or, 2 min after a
-// failed restart, Restarting). For Ok, a stub answers /ready at
+// In CI cloudflared is absent, so the tunnel is Down. For Ok, a stub answers /ready at
 // `tunnel_ready_url` (the default http://127.0.0.1:20241/ready; the test site
 // sets none) until the tunnel is Down again. The public host
 // (`https_domain`, mixer.example.org) is mapped onto the CI server by
@@ -36,21 +35,14 @@ const ENGINEER_PAGE_CONSOLE = {
 } as const;
 
 type TunnelStatus = {
-  state: "Ok" | "Down" | "Restarting";
+  state: "Ok" | "Down";
   ready_connections: number;
   since_secs: number;
-  last_restart_secs_ago: number | null;
-  last_restart_ok: boolean | null;
 };
 
 /** The indicator text for a status (iem_core::tunnel's approved texts). */
 function engineerLabel(s: TunnelStatus): string {
-  if (s.state !== "Ok" && s.last_restart_ok === false) return "Vonkajší prístup: nefunguje — oprava zlyhala";
-  return {
-    Ok: "Vonkajší prístup: OK",
-    Down: "Vonkajší prístup: nefunguje",
-    Restarting: "Vonkajší prístup: nefunguje — opravujem",
-  }[s.state];
+  return { Ok: "Vonkajší prístup: OK", Down: "Vonkajší prístup: nefunguje" }[s.state];
 }
 
 async function tunnelStatus(page: Page): Promise<TunnelStatus> {
@@ -99,12 +91,12 @@ test.describe("Tunnel status while cloudflared is absent", () => {
   test("the engineer's indicator shows the state /api/tunnel reports", async ({ page }) => {
     await page.goto("/");
     const first = await tunnelStatus(page);
-    expect(["Down", "Restarting"]).toContain(first.state);
+    expect(first.state).toBe("Down");
     expect(first.ready_connections).toBe(0);
 
     await openAt(page, "engineer", { engineer: true });
     const indicator = page.getByTestId("tunnel-status");
-    // The state can move on (Down → Restarting after 2 min): compare with a fresh read.
+    // Compare with a fresh read.
     await expect
       .poll(async () => {
         const s = await tunnelStatus(page);
@@ -191,7 +183,6 @@ test.describe("Tunnel status with a ready cloudflared", () => {
     const status = await tunnelOk(page);
     expect(status.ready_connections).toBe(4);
     expect(typeof status.since_secs).toBe("number");
-    expect("last_restart_ok" in status, "last_restart_ok is part of the status").toBe(true);
 
     await openAt(page, "engineer", { engineer: true });
     const indicator = page.getByTestId("tunnel-status");

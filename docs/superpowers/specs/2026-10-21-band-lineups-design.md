@@ -150,7 +150,7 @@ From the epic's findings comments (HEAD `59b2995`):
 - Dante: only the IEM card; never a subscription.
 - Login, PIN hashing, tokens and the login guard as today (`.claude/rules/security-baseline.md`).
 - **Two-step rollout.** A build that reads both today's format (`[[members]]` in the site, declare-before-use mixes) and the new one (the roster, mutual hearing) ships and becomes the pin before any data on the PC changes. The previous pin must always be able to run the PC's data (`.claude/rules/engine.md`, persistence: never run a bundle older than the data's format).
-- **CPU.** The engine's worst case already reaches 81.6 % of the period at p99.9 on the hosted runner (S3 bench, run 36246425178, `docs/superpowers/plans/2026-09-26-s3-engine-core.md`), and a whole-band switch is that kind of load; mutual hearing adds work, so it is measured on the PC (bench and soak) before it reaches prod.
+- **CPU.** The engine's worst case already reaches 81.6 % of the period at p99.9 on the hosted runner (bench, run 36246425178), and a whole-band switch is that kind of load; mutual hearing adds work, so it is measured on the PC (bench and soak) before it reaches prod.
 
 ## 13. Tests
 

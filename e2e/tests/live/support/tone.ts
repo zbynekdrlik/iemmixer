@@ -1,4 +1,4 @@
-// The live specs' tone estimate (S7, #10): what the player plays, read from
+// The live specs' tone estimate (#10): what the player plays, read from
 // the samples an AnalyserNode holds (`audio.ts` `readTone`). Pure, and tested
 // on synthetic sines in the mock run (`tests/tone.spec.ts`).
 

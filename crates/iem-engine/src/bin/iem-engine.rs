@@ -1,5 +1,5 @@
-//! `iem-engine`: the iemmixer audio engine (S3: NullRt and offline render;
-//! S6: the ASIO backend and the site check; Gen 3 phase C: the Dante backend
+//! `iem-engine`: the iemmixer audio engine (NullRt and offline render;
+//! the site check; Gen 3 phase C: the Dante backend
 //! on Linux; phase H: `supervise`, the box's supervisor client). See
 //! `iem-engine --help`.
 
@@ -18,12 +18,12 @@ fn code(e: &EngineError) -> u8 {
         EngineError::Site(_) | EngineError::Usage(_) => 2,
         EngineError::Card(_) => 3,
         EngineError::Fault { .. } => 70,
-        // EX_TEMPFAIL: the guard tries again without counting a crash.
+        // EX_TEMPFAIL: the state directory is held; systemd starts it again.
         EngineError::StateBusy(_) => 75,
     }
 }
 
-/// One JSON line on stdout (the guard and `iemmode` read it).
+/// One JSON line on stdout.
 fn print_json(value: &impl serde::Serialize) -> Result<(), EngineError> {
     let line = serde_json::to_string(value).map_err(std::io::Error::other)?;
     println!("{line}");
@@ -51,7 +51,6 @@ fn main() -> ExitCode {
             Exit::Shutdown { .. } => 0,
             // The Dante device stopped serving: restarted by the unit.
             Exit::Backend(_) => 1,
-            Exit::Card(_) => 3,
             Exit::Fault(_) => 70,
         }),
         Ok(Command::Render(a)) => render(&a).map(|()| 0),
@@ -67,7 +66,7 @@ fn main() -> ExitCode {
                 }
                 Err(failure) => {
                     eprintln!("iem-engine supervise: {failure}");
-                    ExitCode::from(failure.code())
+                    ExitCode::FAILURE
                 }
             };
         }

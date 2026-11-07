@@ -1,4 +1,4 @@
-//! `iem-engine supervise` (Gen 3 phase H, #72; plan Task 3) against the
+//! `iem-engine supervise` (Gen 3 phase H, #72) against the
 //! control loop: `Control::run` on a thread of its own, its connections
 //! taken by the engine's own acceptor (`engine::accept_control`) on a Unix
 //! socket, and the client's `run` connecting to that socket by its path, as

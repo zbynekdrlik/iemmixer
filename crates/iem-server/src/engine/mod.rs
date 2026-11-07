@@ -1,4 +1,4 @@
-//! The engine seen from the server (S5 design note §4): the control pipe
+//! The engine seen from the server: the control pipe
 //! client and its mirror of the engine's state, the pipes' framing, and (with
 //! `audio`) the media pipe with Opus.
 

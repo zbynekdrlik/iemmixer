@@ -1,4 +1,4 @@
-//! Saving the state (design note §3.6): the scheduled save, the
+//! Saving the state: the scheduled save, the
 //! baseline, and their alarms.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,15 +60,6 @@ impl Control {
                 AlarmCode::SaveFailed,
                 format!("saving the state failed: {e}"),
             ),
-        }
-    }
-
-    pub(super) fn save_baseline(&mut self) {
-        if let Err(e) = self.store.save_baseline(&self.persisted()) {
-            self.alarm(
-                AlarmCode::SaveFailed,
-                format!("saving the baseline failed: {e}"),
-            );
         }
     }
 }

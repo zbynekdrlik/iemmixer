@@ -4,7 +4,7 @@
 //! pacing is best effort (the host scheduler decides), and a thread more than
 //! eight periods behind resynchronises instead of bursting. Every interval
 //! between two callbacks and every callback's own time go into the stream
-//! histograms (S7, [`crate::hist`]).
+//! histograms ([`crate::hist`]).
 
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -44,7 +44,7 @@ struct Shared {
     callbacks: AtomicU64,
     late: AtomicU64,
     max_ns: AtomicU64,
-    /// The faulting callback's own time, ns (S7 HIL v2); stored before
+    /// The faulting callback's own time, ns (HIL v2); stored before
     /// `faulted`, so a reader that sees the fault sees it.
     fault_ns: AtomicU64,
     fault: Mutex<Option<String>>,
@@ -54,7 +54,7 @@ pub struct NullRt<P: Process + 'static> {
     thread: JoinHandle<P>,
     shared: Arc<Shared>,
     /// The stream histograms, allocated before the pacing thread starts and
-    /// shared with it (S7).
+    /// shared with it.
     hists: Arc<StreamHists>,
     /// The frames per callback the pacing thread delivers.
     frames: u32,
@@ -96,23 +96,18 @@ impl<P: Process + 'static> NullRt<P> {
             frames: self.frames,
             callbacks: s.callbacks.load(Ordering::Acquire),
             late: s.late.load(Ordering::Acquire),
-            // No card: no missed periods, overruns, resets or parked stream.
-            missed: 0,
-            overruns: 0,
-            resets: 0,
-            parked: false,
             faulted: s.faulted.load(Ordering::Acquire),
             running: s.running.load(Ordering::Acquire),
             max_process_ns: s.max_ns.load(Ordering::Acquire),
             fault: s.fault.lock().ok().and_then(|f| f.clone()),
-            // No card: no reopen.
-            last_reopen_us: 0,
             // Read after `faulted`, which is stored after it.
             fault_callback_ns: s.fault_ns.load(Ordering::Acquire),
+            // No card: no missed periods, overruns, resets or reopen.
+            ..StreamStats::default()
         }
     }
 
-    /// The stream histograms since the start (S7): every interval between two
+    /// The stream histograms since the start: every interval between two
     /// callbacks' starts and every callback's own time.
     pub fn histograms(&self) -> HistSnapshot {
         self.hists.snapshot()
@@ -289,14 +284,8 @@ mod tests {
         assert!(during.running);
         assert!(!during.faulted);
         assert_eq!(
-            (
-                during.frames,
-                during.missed,
-                during.overruns,
-                during.resets,
-                during.parked
-            ),
-            (32, 0, 0, 0, false)
+            (during.frames, during.missed, during.overruns, during.resets),
+            (32, 0, 0, 0)
         );
         let p = rt.stop().unwrap();
         let expected = t0.elapsed().as_secs_f64() * f64::from(SR) / 32.0;
@@ -386,7 +375,7 @@ mod tests {
         }
     }
 
-    /// HIL v2 (S7, #10): the faulting callback's own time, from its entry to
+    /// HIL v2 (#10): the faulting callback's own time, from its entry to
     /// the caught panic; 0 until a callback faults. NullRt never reopens.
     #[test]
     fn a_panic_records_the_faulting_callbacks_own_time() {
@@ -447,7 +436,7 @@ mod tests {
         assert!(rt.stop().unwrap().calls >= 100);
     }
 
-    /// S7: every interval between two callbacks (one fewer than the
+    /// Every interval between two callbacks (one fewer than the
     /// callbacks) and every callback's own time land in the stream
     /// histograms, two periods at 32 samples wide.
     #[test]
@@ -480,7 +469,7 @@ mod tests {
         assert!(rt.stop().unwrap().calls >= 100);
     }
 
-    /// S7, exact once the thread has ended: three callbacks ran (the third
+    /// Exact once the thread has ended: three callbacks ran (the third
     /// panicked), so three callback times and the two intervals between their
     /// starts; the faulting callback's time counts too.
     #[test]

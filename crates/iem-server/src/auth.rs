@@ -1,6 +1,6 @@
 //! Authentication: PIN login → JWT, PIN changes, token checks.
 //!
-//! Login protection (program spec §5.3): admission by `LoginGuard` before any
+//! Login protection: admission by `LoginGuard` before any
 //! hashing, a bounded hashing gate, argon2id verification of PIN hashes,
 //! failure-only budgets, never a lockout.
 
@@ -149,44 +149,6 @@ pub(crate) fn subject_gone() -> (StatusCode, Json<ApiError>) {
     (StatusCode::UNAUTHORIZED, Json(ApiError::unauthorized()))
 }
 
-/// Checks the engineer PIN like a login (admission before hashing, the
-/// hashing gate, failure budgets); the "Back to REAPER" switch needs it.
-pub async fn verify_engineer_pin(
-    state: &AppState,
-    peer: SocketAddr,
-    headers: &HeaderMap,
-    pin: &str,
-) -> Result<(), Rejection> {
-    let client = state.login_guard.client(peer.ip(), headers);
-    let now = Instant::now();
-    if let Err(wait) = state.login_guard.check(&client, ENGINEER_ID, now) {
-        return Err(Rejection::from(too_many_attempts(wait)));
-    }
-    let hash = state
-        .pin_store
-        .read()
-        .await
-        .engineer_hash()
-        .map(str::to_owned);
-    let pin = pin.to_string();
-    let ok = with_hasher(state, move |hasher| {
-        hasher.verify_optional(&pin, hash.as_deref())
-    })
-    .await?;
-    if ok {
-        state.login_guard.record_success(&client, ENGINEER_ID);
-        Ok(())
-    } else {
-        record_failure(state, &client, ENGINEER_ID, now);
-        tracing::warn!(origin = ?client.origin, "engineer PIN check failed");
-        Err(Rejection::from(error_response(
-            StatusCode::UNAUTHORIZED,
-            "INVALID_PIN",
-            "Invalid PIN",
-        )))
-    }
-}
-
 fn record_failure(state: &AppState, client: &ClientKey, member: &str, now: Instant) {
     if state.login_guard.record_failure(client, member, now)
         == FailureEffect::EngineerBudgetExhausted
@@ -300,9 +262,6 @@ fn issue_token(
 ///   the engineer PIN with `member = "engineer"`.
 /// - **Members**: change their own PIN (`old_pin` required, `member` ignored);
 ///   a wrong current PIN counts against the login budgets.
-/// - **Before the cutover** (`pin_changes = false`, every `dev` and trial
-///   site; P9): 409 with [`iem_core::PIN_CHANGES_FROZEN`] for everyone, before
-///   any PIN is checked; nothing changes.
 pub async fn change_pin(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -316,14 +275,6 @@ pub async fn change_pin(
     };
     if !subject_known(&state, &claims) {
         return Err(Rejection::from(subject_gone().into_response()));
-    }
-    if !state.site_config.pin_changes {
-        tracing::info!(by = %claims.sub, "PIN change refused: PINs change in the predecessor until the cutover");
-        return Err(Rejection::from(error_response(
-            StatusCode::CONFLICT,
-            "PIN_CHANGES_FROZEN",
-            iem_core::PIN_CHANGES_FROZEN,
-        )));
     }
     if !is_valid_pin_format(&req.new_pin) {
         return Err(Rejection::from(error_response(

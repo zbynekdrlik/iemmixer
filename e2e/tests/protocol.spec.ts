@@ -3,7 +3,7 @@ import { MixerSocket } from "./support/mixer-socket";
 import { login } from "./support/session";
 import { probeListen, soundInput, upgradeStatus, wsBase } from "./support/wire";
 
-// The UI protocol v3 on the wire (program spec §5.3): the hello handshake,
+// The UI protocol v3 on the wire: the hello handshake,
 // the reload close for a page without a protocol, the talk-id binding of
 // the talkback socket (X6), listening over /ws/audio and who may open it,
 // the listen diagnostics (F28), and the X11 limiter.

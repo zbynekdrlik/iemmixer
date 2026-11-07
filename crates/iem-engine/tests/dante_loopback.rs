@@ -1,6 +1,5 @@
 //! A mix through our own Dante device on loopback, bit for bit (Gen 3
-//! phase C, plan `docs/superpowers/plans/2026-10-26-gen3-phase-c-engine-on-linux.md`
-//! Task 4): the engine's real `Processor` inside the device's pump
+//! phase C): the engine's real `Processor` inside the device's pump
 //! (`iem_dante::stream::Pump`) on the channels `iem_engine::dante::check`
 //! maps, the device's TX and RX on 127.0.0.1, our own flow-control server
 //! granting our own RX one flow of our own TX (the self-loop: RX 1 and RX 2
@@ -132,9 +131,21 @@ fn device(dir: &Path) -> Device {
         tx_latency_ns: None,
         tx_margin_ns: TX_MARGIN_NS,
         tx_fpp_max: FPP_MAX,
+        playout_override: Default::default(),
+        subscribe: Default::default(),
+        timing: Default::default(),
+        arc_port: iem_dante::arc::PORT,
+        cmc_port: iem_dante::cmc::PORT,
+        flows_port: iem_dante::flows::control::PORT,
+        process_id: 0,
+        rx_port_base: None,
         arc_rx_fpp: directory::FPP,
         pump_cpu: None,
         io_cpu: None,
+        rx_cpu: None,
+        flow_slots: iem_dante::media::rx::MAX_FLOWS,
+        spin_tail_ns: Default::default(),
+        spin_escape_ms: None,
         state_file: dir.join("state.toml"),
     })
     .unwrap()

@@ -1,4 +1,4 @@
-//! The listen probe (S7 design note §6; #10). While a HIL signal with
+//! The listen probe (#10). While a HIL signal with
 //! `listen` runs, each listened slot's probe tap carries the spare outputs'
 //! own samples (`render_hil`'s expression: the sine clamped to `TEST_CAP`,
 //! times the output fade), stereo with both channels equal, at the slot's

@@ -1,17 +1,16 @@
 //! Web Push to the engineer's devices: the mixer app (the PWA) on the
-//! engineer page subscribes them (`push_subscriptions.json`), and
-//! `iem-migrate band` carries the predecessor's over with its VAPID keys.
+//! engineer page subscribes them (`push_subscriptions.json`).
 //! They are the one audience, the one the predecessor's alerts reached
 //! (owner decision, #9 2026-09-28: "I added the PWA, allowed notifications
 //! and everything worked"): SOS (F20) and the technical alarms — the
-//! guard's through `iem-server notify --to alarm`, the running server's
+//! alarm unit's through `iem-server notify --to alarm`, the running server's
 //! refused scheduled backup through [`push_alarm`]. (The band-activity
 //! notice was removed by the owner's decision of 2026-10-06, #38: no input
 //! level stands for the band playing.)
 //!
 //! Notify mode sends once and exits; `iem-server notify --count alarm`
-//! prints how many subscriptions an alarm would go to (the guard's precheck
-//! needs at least one for `live` and trials). Both only read.
+//! prints how many subscriptions an alarm would go to (the box's HIL gate
+//! needs at least one). Both only read.
 
 use std::path::Path;
 
@@ -24,7 +23,7 @@ use crate::push_store::{PushStore, PushSubscription};
 /// devices, the one audience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    /// A technical alarm (the guard's).
+    /// A technical alarm (the alarm unit's).
     Alarm,
 }
 
@@ -40,8 +39,8 @@ impl Audience {
 
 /// The push payload of an alarm or notice (the service worker shows title
 /// and body). Its tag comes from the text: the same notice again replaces
-/// itself on the phone, a different one shows on its own (the guard's and
-/// the server's alarms reach the same devices).
+/// itself on the phone, a different one shows on its own (the alarm unit's
+/// and the server's alarms reach the same devices).
 pub fn alarm_payload(title: &str, body: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(title.len().to_le_bytes());
@@ -181,7 +180,7 @@ mod tests {
     }
 
     /// The engineer's phone shows every different notice on its own (the
-    /// guard's and the server's alarms reach the same devices, #9
+    /// alarm unit's and the server's alarms reach the same devices, #9
     /// 2026-09-28); the same notice again replaces itself.
     #[test]
     fn each_different_notice_has_its_own_tag() {
@@ -373,10 +372,9 @@ mod tests {
         assert!(count_cli(&site).is_err());
     }
 
-    /// A notice never creates the runtime secrets: before the first band
-    /// import the site has none, and a JWT or VAPID key made here would stop
-    /// `iem-migrate band` from taking the predecessor's (P9; found on the
-    /// PC on 2026-09-28, when the guard's first alarm ran this).
+    /// A notice never creates the runtime secrets: the server makes them at
+    /// its start, and a JWT or VAPID key made here would stand in for
+    /// the band's.
     #[tokio::test]
     async fn a_notice_never_creates_the_secrets() {
         let dir = tempfile::tempdir().unwrap();

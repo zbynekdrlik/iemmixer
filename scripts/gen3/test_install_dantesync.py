@@ -1,5 +1,5 @@
 """Tests for scripts/gen3/install-dantesync.sh and dantesync_probe.py (#72
-phase B, plan Task 2): the install runs against a stand-in `ssh` and `scp`
+phase B): the install runs against a stand-in `ssh` and `scp`
 first on PATH that play the box in a temporary folder (its home and its
 root), the release comes from a local folder through curl's file:// URLs;
 the probe runs against stand-in time and status servers on loopback. Every
@@ -334,6 +334,15 @@ class InstallTests(unittest.TestCase):
         self.assertIn("dantesync already holds UDP 319/320: updating it", r.stdout)
         self.assertEqual(self.installed("/usr/local/bin/dantesync"), self.binary)
 
+    def test_the_engine_s_follower_beside_dantesync_does_not_refuse(self) -> None:
+        # dstack v0.6.23: the engine's in-process follower shares 319/320.
+        sockets = ('UNCONN 0 0 0.0.0.0:319 0.0.0.0:* users:(("dantesync",pid=812,fd=6))\n'
+                   'UNCONN 0 0 0.0.0.0:319 0.0.0.0:* users:(("iem-engine",pid=900,fd=40))\n'
+                   'UNCONN 0 0 0.0.0.0:320 0.0.0.0:* users:(("iem-engine",pid=900,fd=41))\n')
+        r = self.install(FAKE_SS=sockets)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.installed("/usr/local/bin/dantesync"), self.binary)
+
     def test_a_ptp_daemon_on_the_box_refuses_before_any_copy(self) -> None:
         for daemons in ("ptp4l", "phc2sys", "statime", "ptp4l.service", "phc2sys statime.service"):
             with self.subTest(daemons=daemons):
@@ -477,7 +486,7 @@ class InstallTests(unittest.TestCase):
 
 def dsyx_reply(request_id: int, locked: bool = True, mode: int = 4, freq_ppb: int = -750, ext: int = 2) -> bytes:
     """A reply laid out as dantesync's build_response and encode_extension
-    write it (crates/iem-dante/src/clock/dsyx.rs); ext 0: the 64-byte base
+    write it (dstack crates/dante-stack/src/clock/dsyx.rs); ext 0: the 64-byte base
     alone."""
     base = bytearray(64)
     base[0:4] = b"DSYR"

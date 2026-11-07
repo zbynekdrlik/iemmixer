@@ -1,4 +1,4 @@
-//! The listen probe's gate for one `&hil=1` session (S7 design note §6, #10):
+//! The listen probe's gate for one `&hil=1` session (#10):
 //! probe frames go out as they come; the slot's own (silent) frames wait
 //! until no probe frame came for [`PROBE_HOLD`], so the player gets one
 //! stream. The first probe frame opens a burst and the first slot frame

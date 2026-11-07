@@ -212,7 +212,7 @@ test.describe("Service Worker — PWA with hashed asset caching", () => {
     expect(cacheInfo.keys.filter((k) => !TRUNK_ASSET.test(k))).toEqual([]);
   });
 
-  // The guard's and the server's alarms reach the same engineer devices (#9
+  // The alarm unit's and the server's alarms reach the same engineer devices (#9
   // 2026-09-28): the served worker shows each different notice on its own
   // (the payload's tag), and a payload without one keeps the old tag. An
   // alarm stays until it is tapped.

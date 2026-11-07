@@ -1,5 +1,5 @@
 [graph]
-targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "wasm32-unknown-unknown"]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 all-features = true
 
 [advisories]
@@ -24,27 +24,34 @@ unused-allowed-license = "allow"
 crate = "aws-lc-sys"
 allow = ["OpenSSL"]
 
-# D1(a): the MGA JS Limiter port is GPL-3.0-or-later; only the engine links it (S3)
+# D1(a): the MGA JS Limiter port is GPL-3.0-or-later; only the engine links it
 [[licenses.exceptions]]
 crate = "iem-limiter-mga"
 allow = ["GPL-3.0-or-later"]
 
-# D1(a): the engine links the limiter, so the engine binary is GPL (S3)
+# D1(a): the engine links the limiter, so the engine binary is GPL
 [[licenses.exceptions]]
 crate = "iem-engine"
 allow = ["GPL-3.0-or-later"]
 
-# D1(a): the migration CLI links the engine (site, graph, persist), so it is GPL (S4)
-[[licenses.exceptions]]
-crate = "iem-migrate"
-allow = ["GPL-3.0-or-later"]
-
 # Gen 3 (#72, design §3): our Dante device adapts parts of teodly/inferno
 # (GPL-3.0-or-later OR AGPL-3.0-or-later), so it is GPL; from phase C the GPL engine
-# links it on Linux (its Dante backend, plan 2026-10-26 Task 3; already GPL through the
-# limiter); the server, the UI and the guard never do (only iem-server's tests run the engine)
+# links it on Linux (its Dante backend; already GPL through the
+# limiter); the server and the UI never do (only iem-server's tests run the engine)
 [[licenses.exceptions]]
-crate = "iem-dante"
+crate = "dstack"
+allow = ["GPL-3.0-or-later"]
+
+# The Gen 3 box's device binary: a thin wrapper that links dstack (#72).
+[[licenses.exceptions]]
+crate = "iem-dante-dev"
+allow = ["GPL-3.0-or-later"]
+
+# The audio contract shared with the Dante device (#72, 2026-10-30), from dstack:
+# linked through iem-audio-io by the GPL engine only (iem-server and the UI
+# do not depend on iem-audio-io).
+[[licenses.exceptions]]
+crate = "dstack-audio-io"
 allow = ["GPL-3.0-or-later"]
 
 [bans]
@@ -55,3 +62,6 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# All Dante code lives in dstack (#72, owner 2026-10-30), consumed by git tag;
+# dstack's dsync-ptp comes from dsync by git tag too (since dstack v0.5.4).
+allow-git = ["https://github.com/zbynekdrlik/dstack", "https://github.com/zbynekdrlik/dsync"]

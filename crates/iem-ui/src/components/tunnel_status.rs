@@ -23,7 +23,12 @@ pub fn TunnelIndicator(status: ReadSignal<Option<TunnelStatusInfo>>) -> impl Int
         let modifier = state().map(TunnelState::css_class).unwrap_or("ok");
         format!("tunnel-status {modifier}")
     };
-    let label = move || status.get().map(|s| s.engineer_label()).unwrap_or_default();
+    let label = move || {
+        status
+            .get()
+            .map(|s| s.state.engineer_label())
+            .unwrap_or_default()
+    };
     view! {
         <Show when=has_status fallback=|| ()>
             <div class=class data-testid="tunnel-status" role="status">
@@ -33,7 +38,7 @@ pub fn TunnelIndicator(status: ReadSignal<Option<TunnelStatusInfo>>) -> impl Int
     }
 }
 
-/// Band-member banner shown while the tunnel is Down/Restarting: tells people
+/// Band-member banner shown while the tunnel is Down: tells people
 /// on the venue network to open the local address instead.
 #[component]
 pub fn TunnelBanner(status: ReadSignal<Option<TunnelStatusInfo>>) -> impl IntoView {

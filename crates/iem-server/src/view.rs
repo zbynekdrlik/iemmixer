@@ -1,4 +1,4 @@
-//! The UI's view of the engine (S5 design note §5, §6): channels of a mixer
+//! The UI's view of the engine: channels of a mixer
 //! page from the mirror, the UI updates a change produces for a page, and
 //! the engine commands a UI command becomes — with the server's permissions
 //! (the engine does no authorisation, it only caps values). Pure: no I/O.
@@ -537,7 +537,7 @@ pub fn eq_bands(eq: &Eq) -> Vec<EqBand> {
 
 /// `eq` with one band value set; `param` is freq_hz, gain_db, bw_oct or
 /// enabled. A gain change also switches a band with a gain on, as ReaEQ did
-/// under the predecessor (FG-2, P9: the band must not notice the switch); the
+/// under the predecessor (FG-2: the band must not notice the switch); the
 /// high-pass has no gain, so its switch stays as it is (no low cut from a
 /// gain drag or Reset).
 pub fn apply_band(eq: &Eq, band: u8, param: &str, value: f32) -> Result<Eq, ViewError> {

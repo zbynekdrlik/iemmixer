@@ -38,15 +38,14 @@ fn run_arguments_parse() {
 
 #[test]
 fn the_backend_the_hold_and_the_s6_commands_parse() {
-    let Command::Run(cfg) = parse_args(&args(
-        "run --site s --state-dir d --pipe p --backend asio --hold",
-    ))
-    .unwrap() else {
+    let Command::Run(cfg) =
+        parse_args(&args("run --site s --state-dir d --pipe p --hold")).unwrap()
+    else {
         panic!()
     };
     assert_eq!(
         (cfg.backend, cfg.hold, cfg.block, cfg.signal),
-        (Backend::Asio, true, 32, InputSignal::Silence)
+        (Backend::NullRt, true, 32, InputSignal::Silence)
     );
     let Command::Run(cfg) = parse_args(&args(
         "run --site s --state-dir d --pipe p --backend nullrt --block 64 --sine 440",
@@ -77,11 +76,11 @@ fn the_backend_the_hold_and_the_s6_commands_parse() {
             "needs a value",
         ),
         (
-            "run --site s --state-dir d --pipe p --backend asio --block 32",
+            "run --site s --state-dir d --pipe p --backend dante --dante-config c --dante-iface i --block 32",
             "nullrt backend",
         ),
         (
-            "run --site s --state-dir d --pipe p --backend asio --sine 440",
+            "run --site s --state-dir d --pipe p --backend dante --dante-config c --dante-iface i --sine 440",
             "nullrt backend",
         ),
         (
@@ -166,7 +165,7 @@ fn dante_refuses_block_and_sine() {
         .unwrap_err();
         assert!(e.contains("nullrt backend"), "{extra}: {e}");
         assert!(
-            e.contains("Dante device at its config's block"),
+            e.contains("Dante device runs at its config's block"),
             "{extra}: {e}"
         );
     }
@@ -174,7 +173,7 @@ fn dante_refuses_block_and_sine() {
 
 #[test]
 fn dante_flags_need_the_dante_backend() {
-    for backend in ["", "--backend nullrt", "--backend asio"] {
+    for backend in ["", "--backend nullrt"] {
         for flag in [
             "--dante-config dev.toml",
             "--dante-iface eth9",
@@ -209,11 +208,13 @@ fn version_names_the_build() {
     assert!(USAGE.contains("iem-engine --version"));
 }
 
-/// The device's default control socket is where `iem-dante-dev ctl` looks.
+/// The device's control socket is the box's, where `iem-dante-dev ctl`
+/// looks, never dstack's own default.
 #[cfg(target_os = "linux")]
 #[test]
-fn the_dante_control_socket_is_the_devices() {
-    assert_eq!(DANTE_CONTROL, iem_dante::ctl::SOCKET);
+fn the_dante_control_socket_is_the_boxs() {
+    assert_eq!(DANTE_CONTROL, "/run/iem-dante/control.sock");
+    assert_ne!(DANTE_CONTROL, iem_dante::ctl::SOCKET);
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -278,22 +279,6 @@ fn a_dante_run_refuses_a_missing_device_and_an_unreadable_config() {
     );
 }
 
-#[test]
-fn the_memory_lock_is_due_once_five_seconds_in() {
-    assert_eq!((LOCK_AFTER, LOCK_EXTRA_MB), (Duration::from_secs(5), 64));
-    let t0 = Instant::now();
-    assert!(!lock_due(t0, t0, false));
-    assert!(!lock_due(
-        t0,
-        t0 + LOCK_AFTER - Duration::from_millis(1),
-        false
-    ));
-    assert!(lock_due(t0, t0 + LOCK_AFTER, false));
-    assert!(lock_due(t0, t0 + Duration::from_secs(60), false));
-    assert!(!lock_due(t0, t0 + LOCK_AFTER, true), "once");
-    assert!(!lock_due(t0 + LOCK_AFTER, t0, false));
-}
-
 /// The test site with `edit` applied, as a file in `dir`.
 fn edited_site(dir: &Path, name: &str, edit: impl FnOnce(String) -> String) -> PathBuf {
     let path = dir.join(name);
@@ -301,14 +286,37 @@ fn edited_site(dir: &Path, name: &str, edit: impl FnOnce(String) -> String) -> P
     path
 }
 
-/// The test site without its `[card]` table (the keys go to a table
-/// nothing reads).
-fn without_card(text: String) -> String {
-    text.replace("[card]", "[spare]")
+/// `[engine]` errors reach a deploy's output: its values stay out.
+#[test]
+fn a_site_parse_error_names_the_line_and_no_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = edited_site(dir.path(), "bad.toml", |t| {
+        format!("{t}\n[engine.bad]\nzz = 1\n").replacen(
+            "[engine]",
+            "[engine]\nchannels = \"zyxqw\"",
+            1,
+        )
+    });
+    let e = check_site(&bad).unwrap_err().to_string();
+    assert!(e.contains("line "), "{e}");
+    assert!(!e.contains("zyxqw"), "{e}");
+}
+
+/// Only the value goes: the parser's words after it stay.
+#[test]
+fn a_wrongly_typed_site_value_is_blanked_and_the_reason_stays() {
+    let e = crate::site::parse_hil_tx("[guard]\nhil_tx = \"zyxqw\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("line 2: invalid type: string \"…\", expected "),
+        "{e}"
+    );
+    assert!(!e.contains("zyxqw"), "{e}");
 }
 
 #[test]
-fn check_site_names_the_topology_and_the_card() {
+fn check_site_names_the_topology() {
     let summary = check_site(&crate::test_support::test_site_path()).unwrap();
     assert_eq!(
         summary,
@@ -317,25 +325,12 @@ fn check_site_names_the_topology_and_the_card() {
             inputs: 24,
             groups: 1,
             mixes: 11,
-            card: true,
         }
     );
     let json = serde_json::to_value(&summary).unwrap();
     assert_eq!(json["topology"].as_str().map(str::len), Some(64));
-    assert_eq!(
-        (json["inputs"].as_u64(), json["card"].as_bool()),
-        (Some(24), Some(true))
-    );
+    assert_eq!(json["inputs"].as_u64(), Some(24));
     let dir = tempfile::tempdir().unwrap();
-    let bare = edited_site(dir.path(), "bare.toml", without_card);
-    assert!(!check_site(&bare).unwrap().card);
-    let bad_card = edited_site(dir.path(), "card.toml", |t| {
-        t.replace("frames = 32", "frames = 64")
-    });
-    assert!(matches!(
-        check_site(&bad_card),
-        Err(EngineError::Site(SiteError::CardFrames(64)))
-    ));
     let bad_map = edited_site(dir.path(), "map.toml", |t| {
         t.replace("tx = [93]", "tx = [92]")
     });
@@ -445,48 +440,6 @@ fn a_run_opens_the_hil_outputs_only_with_the_test_signal_flag() {
     assert_eq!(run_hil(Flags::default(), &unread, &topo), Ok(Vec::new()));
     let none = text.replace("hil_tx = [94, 95]", "");
     assert_eq!(run_hil(on, &none, &topo), Ok(Vec::new()));
-}
-
-#[cfg(not(windows))]
-#[test]
-fn off_windows_the_card_is_a_usage_error_before_any_state() {
-    let site = crate::test_support::test_site_path();
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = RunConfig::new(
-        site,
-        dir.path().join("state"),
-        dir.path().join("p.sock").to_string_lossy().into_owned(),
-    );
-    cfg.backend = Backend::Asio;
-    let e = run_bounded(cfg).unwrap_err();
-    assert!(
-        matches!(&e, EngineError::Usage(m) if m.contains("Windows")),
-        "{e}"
-    );
-    assert!(
-        !dir.path().join("state").exists(),
-        "refused before the state"
-    );
-}
-
-/// The hosted Windows runner has no ASIO driver: the synthetic card of
-/// the test site is refused (exit 3) by `run`.
-#[cfg(windows)]
-#[test]
-fn without_the_driver_the_card_is_refused() {
-    let site = crate::test_support::test_site_path();
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = RunConfig::new(
-        site,
-        dir.path().join("state"),
-        format!("iem-engine-asio-test-{}", std::process::id()),
-    );
-    cfg.backend = Backend::Asio;
-    // The first open scans every process's modules (I3) before the
-    // driver list; a hung driver call is refused after 15 s
-    // (`iem_audio_io::asio`'s open bound), so the bound is above it.
-    let e = run_bounded_for(cfg, Duration::from_secs(20)).unwrap_err();
-    assert!(matches!(&e, EngineError::Card(_)), "{e}");
 }
 
 #[test]
@@ -603,17 +556,9 @@ fn run_refuses_a_bad_block_and_a_bad_site() {
         run_bounded(cfg.clone()),
         Err(EngineError::Site(SiteError::Io(_)))
     ));
-    // The asio backend needs the site's [card] table.
-    cfg.site = edited_site(dir.path(), "bare.toml", without_card);
-    cfg.backend = Backend::Asio;
-    assert!(matches!(
-        run_bounded(cfg.clone()),
-        Err(EngineError::Site(SiteError::NoCardTable))
-    ));
     // With the test-signal flag the run opens the site's HIL outputs:
     // a hil_tx that names a mix's TX stops it before any state or pipe
     // (the owner's decision on #9, 2026-09-28).
-    cfg.backend = Backend::NullRt;
     cfg.flags.test_signal = true;
     cfg.site = edited_site(dir.path(), "mix-tx.toml", |t| {
         t.replace("hil_tx = [94, 95]", "hil_tx = [94, 72]")

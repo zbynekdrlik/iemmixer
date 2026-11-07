@@ -19,7 +19,7 @@ pub enum ErrCode {
     NoSource,
     NotController,
     TooLarge,
-    /// A supervisor command from another role (S6).
+    /// A supervisor command from another role.
     NotSupervisor,
 }
 
@@ -181,13 +181,6 @@ pub enum EngineMsg {
     Alarm(Alarm),
     /// The stream stopped and the card is released (the engine ends next).
     DriverReleased {
-        reason: String,
-    },
-    /// The stream stopped parked (#35): a callback stayed in it, or the
-    /// parked-engine test's hold kept the card, so nothing was released and
-    /// the card is free only once the engine's process has ended. Sent
-    /// instead of `DriverReleased`, at the same point.
-    DriverParked {
         reason: String,
     },
     Superseded,

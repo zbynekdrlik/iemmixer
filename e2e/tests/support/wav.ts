@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 
 // Chromium's fake microphone plays a WAV file
 // (`--use-file-for-fake-audio-capture=<file>`): the mock talkback spec and the
-// live one (S7, #10) write theirs with `toneWav`.
+// live one (#10) write theirs with `toneWav`.
 
 /** A loop-safe tone (a whole number of cycles) as 16-bit mono PCM WAV. */
 export function toneWav(file: string, hz: number, amplitude: number, rate = 48_000): string {

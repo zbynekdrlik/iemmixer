@@ -1,8 +1,7 @@
-//! Engine start-up and the offline renderer (design note §1, §3.7): load the
-//! site and the state, start the backend (NullRt, on Windows the ASIO card
-//! of the site's `[card]` table, S6, or on Linux our own Dante device, Gen 3
-//! phase C), open the pipes, run the control loop; or render a WAV file
-//! through the processor with `Offline`; or, S6, check a site
+//! Engine start-up and the offline renderer: load the
+//! site and the state, start the backend (NullRt, or our own Dante device,
+//! Gen 3 phase C), open the pipes, run the control loop; or render a WAV file
+//! through the processor with `Offline`; or check a site
 //! (`check-site`). Nothing listens to the stage before a switch (#38: only
 //! the owner's signal decides).
 
@@ -12,10 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iem_audio_io::hist::HistSnapshot;
-use iem_audio_io::owner::StopOutcome;
 use iem_audio_io::{InputSignal, NullRt, NullRtConfig, Offline, StreamStats, wav};
 use iem_engine_proto::media::stream;
 use iem_engine_proto::{Alarm, AlarmCode, MixState, write_media};
@@ -32,7 +30,7 @@ use crate::media::{Frame, TalkbackFeed, TapFramer};
 use crate::persist::{Source, StateLock, Store, decode};
 use crate::pipe::{Conn, Framer, control_name, listen, media_name, read_loop};
 use crate::rt::{FADE_IN_MS, Options, Processor, RtHandles};
-use crate::site::{self, SiteError, load, parse, parse_card, parse_hil_tx};
+use crate::site::{self, SiteError, load, parse, parse_hil_tx};
 use crate::topology::{Topology, compile};
 
 /// Largest block the engine accepts.
@@ -48,14 +46,14 @@ pub enum EngineError {
     Usage(String),
     #[error("the render faulted at frame {frame}: {message}")]
     Fault { frame: u64, message: String },
-    /// The card is refused (exit 3, S6 design note §4): a holder of the
-    /// driver module (I3), no such driver, a refused format or channel
-    /// map, the preference window, a measured period other than 32.
+    /// The card is refused (exit 3): the Dante device
+    /// lacks a site channel, or the rate is other than 96 kHz
+    /// (`dante::check`).
     #[error("card refused: {0}")]
     Card(String),
     /// Another process held the state directory past [`STATE_WAIT`]
-    /// (exit 75, #32 minor-4): the guard starts the engine again without
-    /// counting a crash.
+    /// (exit 75, #32 minor-4): an engine that just ended, most likely;
+    /// systemd starts this one again.
     #[error("{0}")]
     StateBusy(String),
 }
@@ -65,8 +63,6 @@ pub enum EngineError {
 pub enum Backend {
     /// Paced real time with synthetic inputs (CI, E2E, soak).
     NullRt,
-    /// The ASIO card of the site's `[card]` table (Windows).
-    Asio,
     /// Our own Dante device in the engine's process, the engine on its
     /// media clock (Linux, Gen 3 phase C: `crate::dante`).
     Dante,
@@ -94,7 +90,8 @@ pub struct DanteArgs {
 }
 
 /// The device's control socket unless `--dante-control` names another:
-/// `iem_dante::ctl::SOCKET`, where `iem-dante-dev ctl` looks.
+/// where `iem-dante-dev ctl` looks (`iem_dante_dev::SOCKET`; dstack's own
+/// default is another path since its v0.5.6).
 pub const DANTE_CONTROL: &str = "/run/iem-dante/control.sock";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +105,7 @@ pub struct RunConfig {
     /// X2: solos clear this long after the controller left.
     pub solo_grace: Duration,
     pub backend: Backend,
-    /// `--hold`: silent until the supervisor's `Arm` (S6).
+    /// `--hold`: silent until the supervisor's `Arm`.
     pub hold: bool,
     /// The Dante device of `--backend dante` (its `--dante-*` flags).
     pub dante: Option<DanteArgs>,
@@ -155,7 +152,7 @@ pub enum Command {
 pub const USAGE: &str = "\
 usage:
   iem-engine run --site <site.toml> --state-dir <dir> --pipe <name>
-                 [--backend nullrt|asio|dante] [--hold] [--block <frames>] [--sine <hz>]
+                 [--backend nullrt|dante] [--hold] [--block <frames>] [--sine <hz>]
                  [--test-signal] [--fault-injection]
                  [--dante-config <device.toml> (--dante-iface <name> | --dante-ip <IPv4>)
                   [--dante-control <socket>]]
@@ -167,21 +164,18 @@ usage:
   iem-engine --version
 
 run: the engine at 96 kHz on the paced NullRt backend (--block, --sine), or
-with --backend asio (Windows) on the card of the site's [card] table at its
-32 samples, or with --backend dante (Linux) on our own Dante device, hosted
+with --backend dante (Linux) on our own Dante device, hosted
 in this process, at its device config's block (32 unless it sets 16) on its
 media clock (the site's RX and TX
 channel numbers are the device's; --dante-control defaults to
 /run/iem-dante/control.sock); --hold keeps every output silent until the
 supervisor's Arm. SIGTERM or SIGINT under --backend dante saves, fades and
-stops the device. --pipe is a socket path on Unix and a pipe name on
-Windows (the media pipe is <name>.media).
+stops the device. --pipe is a socket path (the media pipe is <name>.media).
 render: the input WAV must be 96 kHz with one channel per RX channel of the
 site; the output has one channel per TX channel.
-check-site: validates the site (I4; [card] and [guard] hil_tx too) and
+check-site: validates the site (I4; [guard] hil_tx too) and
 prints its topology hash and counts.
-supervise (the Gen 3 box, where no guard runs; refused off Unix, where the
-guard is the supervisor): one call as the engine's supervisor over its
+supervise: one call as the engine's supervisor over its
 control socket (--pipe, default /run/iemmixer/engine.sock), which replaces
 any supervisor before it. test-signal: the HIL test signal on every spare
 output the engine opened (an engine run with --test-signal; at most -20
@@ -214,9 +208,8 @@ fn block(v: &str) -> Result<usize, String> {
 fn backend(v: &str) -> Result<Backend, String> {
     match v {
         "nullrt" => Ok(Backend::NullRt),
-        "asio" => Ok(Backend::Asio),
         "dante" => Ok(Backend::Dante),
-        _ => Err(format!("--backend is nullrt, asio or dante, not {v:?}")),
+        _ => Err(format!("--backend is nullrt or dante, not {v:?}")),
     }
 }
 
@@ -327,8 +320,8 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         "run" => {
             if chosen != Backend::NullRt && (size.is_some() || signal.is_some()) {
                 return Err(
-                    "--block and --sine are for the nullrt backend: the card runs at its [card] \
-                     frames, the Dante device at its config's block"
+                    "--block and --sine are for the nullrt backend: the Dante device runs at its \
+                     config's block"
                         .to_owned(),
                 );
             }
@@ -367,18 +360,6 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     }
 }
 
-/// The ASIO backend locks its memory after this long of streaming (S1c
-/// hand-off): the working set has settled by then.
-pub const LOCK_AFTER: Duration = Duration::from_secs(5);
-/// How far it raises the minimum working set first (MiB).
-pub const LOCK_EXTRA_MB: usize = 64;
-
-/// Whether the memory lock is due: once, `LOCK_AFTER` after the stream
-/// started.
-pub fn lock_due(started: Instant, now: Instant, done: bool) -> bool {
-    !done && now.saturating_duration_since(started) >= LOCK_AFTER
-}
-
 struct NullRtDriver(NullRt<Processor>);
 
 impl Driver for NullRtDriver {
@@ -386,12 +367,10 @@ impl Driver for NullRtDriver {
         self.0.stats()
     }
 
-    /// NullRt holds no card: its stop always releases.
-    fn stop(self: Box<Self>) -> StopOutcome {
+    fn stop(self: Box<Self>) {
         if self.0.stop().is_none() {
             warn!("the NullRt thread ended outside its guarded callback");
         }
-        StopOutcome::Released
     }
 
     fn histograms(&self) -> Option<HistSnapshot> {
@@ -487,7 +466,7 @@ fn accept_media(
     }
 }
 
-/// Drains the listen taps, then the listen probe's taps (S7: streams 2 and
+/// Drains the listen taps, then the listen probe's taps (streams 2 and
 /// 3), into 48 kHz frames for the current media client; a client that takes
 /// nothing for `pipe::SEND_TIMEOUT` is dropped (`Conn::writer`), so `run`,
 /// which joins this thread, still returns. A probe framer keeps a burst's
@@ -559,21 +538,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     let dante = dante_args(&cfg)?;
     let text = site::read(&cfg.site)?;
     let topo = Arc::new(compile(&parse(&text)?)?);
-    let card = match cfg.backend {
-        Backend::NullRt | Backend::Dante => None,
-        Backend::Asio => Some(parse_card(&text)?.ok_or(SiteError::NoCardTable)?),
-    };
-    #[cfg(not(windows))]
-    if card.is_some() {
-        return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned()));
-    }
     let hil = run_hil(cfg.flags, &text, &topo)?;
-    // Crash dialogs off, the RT panic hook and the SEH filter, priority and
-    // power throttling, before the card opens (S6 design note §3).
-    #[cfg(windows)]
-    if let Some(card) = &card {
-        crate::asio::prepare(card);
-    }
     let (peers, shadowed) = topo.peering();
     info!(
         "site {}: {} inputs, {} groups, {} mixes, {peers} peers, {shadowed} shadowed mixes, topology {}",
@@ -654,7 +619,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
         cfg.flags,
     )
     .with_hil(hil.clone());
-    // The D5(b) loopback return (S6 test 5): under `--test-signal` the engine
+    // The D5(b) loopback return: under `--test-signal` the engine
     // also opens the spare card inputs the HIL spare outputs loop back to, so
     // it can measure the round-trip. One return per HIL output.
     let hil_rx = hil.len();
@@ -680,12 +645,12 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
     } = handles;
     let control_listener = listen(control_name(&cfg.pipe)?)?;
     let media_listener = listen(media_name(&cfg.pipe)?)?;
-    let (driver, block): (Box<dyn Driver>, usize) = match (card, dante) {
+    let (driver, block): (Box<dyn Driver>, usize) = match dante {
         #[cfg(target_os = "linux")]
-        (None, Some(device)) => crate::dante::start(&device, &topo, &hil, processor)?,
+        Some(device) => crate::dante::start(&device, &topo, &hil, processor)?,
         #[cfg(not(target_os = "linux"))]
-        (None, Some(_)) => return Err(EngineError::Usage(DANTE_ON_LINUX.to_owned())),
-        (None, None) => {
+        Some(_) => return Err(EngineError::Usage(DANTE_ON_LINUX.to_owned())),
+        None => {
             let nullrt = NullRt::start(
                 NullRtConfig {
                     sample_rate: SAMPLE_RATE,
@@ -703,10 +668,6 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             let driver: Box<dyn Driver> = Box::new(NullRtDriver(nullrt));
             (driver, cfg.block)
         }
-        #[cfg(windows)]
-        (Some(card), _) => crate::asio::start(&card, &topo, &hil, processor)?,
-        #[cfg(not(windows))]
-        (Some(_), _) => return Err(EngineError::Usage(ASIO_ON_WINDOWS.to_owned())),
     };
     if cfg.hold {
         info!("held: every output is silent until the supervisor's Arm");
@@ -759,7 +720,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
 /// holds it (#32 minor-4): an engine that just ended may hold its lock a
 /// moment after its exit (a lock's release can lag the process end).
 /// With the load's read pauses (2 s at most) the engine still listens well
-/// within the guard's READY_S (10 s).
+/// within 10 s of its start.
 pub const STATE_WAIT: Duration = Duration::from_secs(3);
 
 /// Takes the state directory (`Store::lock_within` [`STATE_WAIT`]); still
@@ -773,9 +734,6 @@ fn lock_state(store: &Store) -> Result<StateLock, EngineError> {
         }
     })
 }
-
-#[cfg(not(windows))]
-const ASIO_ON_WINDOWS: &str = "the asio backend runs on Windows only";
 
 const DANTE_ON_LINUX: &str = "the dante backend runs on Linux only";
 
@@ -803,11 +761,9 @@ pub struct SiteSummary {
     pub inputs: usize,
     pub groups: usize,
     pub mixes: usize,
-    /// Whether the site has a (valid) `[card]` table.
-    pub card: bool,
 }
 
-/// HIL's spare outputs for `run` (S6): the site's `[guard] hil_tx`, checked
+/// HIL's spare outputs for `run`: the site's `[guard] hil_tx`, checked
 /// by `Topology::hil_outputs`, with the test-signal flag only. Without it
 /// no HIL signal can start, so a live engine never reads the key and opens
 /// no card output outside the topology.
@@ -818,7 +774,7 @@ fn run_hil(flags: Flags, text: &str, topo: &Topology) -> Result<Vec<u16>, SiteEr
     topo.hil_outputs(&parse_hil_tx(text)?)
 }
 
-/// Loads and compiles a site, checks its `[card]` table and HIL's spare
+/// Loads and compiles a site and checks HIL's spare
 /// outputs (`[guard] hil_tx`: card channels from 1 that no mix
 /// uses and no input is, `Topology::hil_outputs`; the card's own output and
 /// input counts, the latter for the loopback returns, are checked when the
@@ -826,7 +782,6 @@ fn run_hil(flags: Flags, text: &str, topo: &Topology) -> Result<Vec<u16>, SiteEr
 pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
     let text = site::read(path)?;
     let topo = compile(&parse(&text)?)?;
-    let card = parse_card(&text)?;
     // The HIL signal goes only to spare outputs, never to a band member
     // (the owner's decision on #9 of 2026-09-28).
     topo.hil_outputs(&parse_hil_tx(&text)?)?;
@@ -835,7 +790,6 @@ pub fn check_site(path: &Path) -> Result<SiteSummary, EngineError> {
         inputs: topo.inputs.len(),
         groups: topo.groups.len(),
         mixes: topo.mixes.len(),
-        card: card.is_some(),
     })
 }
 

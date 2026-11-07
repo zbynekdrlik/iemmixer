@@ -74,9 +74,7 @@ impl Driver for Idle {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 }
 
 struct Rig {
@@ -203,13 +201,13 @@ fn status_reports_microseconds_counters_and_the_backlog() {
         missed: 0,
         overruns: 0,
         resets: 0,
-        parked: false,
         faulted: false,
         running: true,
         max_process_ns: 2_500_000,
         fault: None,
         last_reopen_us: 0,
         fault_callback_ns: 0,
+        ..StreamStats::default()
     };
     let s = r.c.status_msg(&st);
     assert_eq!((s.callbacks, s.late, s.faulted), (7, 1, false));
@@ -226,24 +224,21 @@ fn status_carries_the_measured_period_the_stream_counters_and_the_hold() {
         missed: 2,
         overruns: 3,
         resets: 4,
-        parked: true,
         running: true,
         ..StreamStats::default()
     };
     let s = r.c.status_msg(&st);
     assert_eq!((s.frames, s.missed, s.overruns, s.resets), (32, 2, 3, 4));
-    assert!(s.parked, "parked");
     assert!(s.held, "held until Arm");
-    assert!(!s.lock_failed);
     let s = rig().c.status_msg(&StreamStats {
         frames: 64,
         ..StreamStats::default()
     });
     assert_eq!((s.frames, s.missed, s.overruns, s.resets), (64, 0, 0, 0));
-    assert!(!s.parked && !s.held);
+    assert!(!s.held);
 }
 
-/// HIL v1 proves the test signal from the engine (S6): each `Status`
+/// HIL v1 proves the test signal from the engine: each `Status`
 /// carries every spare output's peak since the previous one, the
 /// largest of the meter frames between them, which starts again after
 /// it; an engine without spare outputs lists none.
@@ -275,12 +270,9 @@ fn status_carries_the_hil_outputs_peaks_since_the_previous_status() {
     assert!(quiet.c.hil_peaks.is_empty());
 }
 
-/// A backend with scripted hooks: its ticks and forced reopens counted,
-/// an ending, a lock failure.
+/// A backend with a scripted ending.
 struct Scripted {
-    ticks: Arc<AtomicU64>,
     ending: Option<Ending>,
-    lock_failed: bool,
 }
 
 impl Driver for Scripted {
@@ -291,44 +283,18 @@ impl Driver for Scripted {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
-
-    fn tick(&mut self, _now: Instant) {
-        self.ticks.fetch_add(1, Ordering::Relaxed);
-    }
+    fn stop(self: Box<Self>) {}
 
     fn ending(&self) -> Option<Ending> {
         self.ending.clone()
     }
-
-    fn lock_failed(&self) -> bool {
-        self.lock_failed
-    }
-
-    /// Counted with the ticks, [`REOPEN`] apiece, so one counter shows
-    /// both.
-    fn force_reopen(&self) -> bool {
-        self.ticks.fetch_add(REOPEN, Ordering::Relaxed);
-        true
-    }
 }
 
-/// What one forced reopen adds to a scripted backend's counter.
-const REOPEN: u64 = 1 << 32;
-
-fn scripted(ending: Option<Ending>, lock_failed: bool) -> (Box<dyn Driver>, Arc<AtomicU64>) {
-    let ticks = Arc::new(AtomicU64::new(0));
-    let d = Scripted {
-        ticks: Arc::clone(&ticks),
-        ending,
-        lock_failed,
-    };
-    (Box::new(d), ticks)
+fn scripted(ending: Option<Ending>) -> Box<dyn Driver> {
+    Box::new(Scripted { ending })
 }
 
-/// A running backend with stream histograms (S7).
+/// A running backend with stream histograms.
 struct Measured(HistSnapshot);
 
 impl Driver for Measured {
@@ -339,9 +305,7 @@ impl Driver for Measured {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        StopOutcome::Released
-    }
+    fn stop(self: Box<Self>) {}
 
     fn histograms(&self) -> Option<HistSnapshot> {
         Some(self.0.clone())
@@ -349,7 +313,7 @@ impl Driver for Measured {
 }
 
 /// `Status` carries the stream's two histograms and their overflow
-/// bucket (S7 design note §3); a backend without them, or no backend,
+/// bucket; a backend without them, or no backend,
 /// none and 0.
 #[test]
 fn status_carries_both_histograms_and_their_top() {
@@ -376,65 +340,12 @@ fn status_carries_both_histograms_and_their_top() {
 }
 
 #[test]
-fn the_backend_is_ticked_and_its_lock_failure_is_reported() {
+fn a_backend_without_an_ending_keeps_the_run_going() {
     let mut r = rig();
-    let (d, ticks) = scripted(None, true);
-    r.c.driver = Some(d);
+    r.c.driver = Some(scripted(None));
     assert!(r.c.tick(Instant::now()).is_none());
     assert!(r.c.tick(Instant::now()).is_none());
-    assert_eq!(ticks.load(Ordering::Relaxed), 2);
-    assert!(r.c.status_msg(&StreamStats::default()).lock_failed);
-    // NullRt (and any backend that does not say otherwise) locks nothing.
-    assert!(!rig().c.status_msg(&StreamStats::default()).lock_failed);
-    assert!(!Idle.lock_failed());
     assert_eq!(Idle.ending(), None);
-}
-
-#[test]
-fn a_session_end_takes_the_shutdown_path() {
-    let mut r = rig();
-    r.status.faded_out.store(true, Ordering::Release);
-    r.c.driver = Some(scripted(Some(Ending::Session), false).0);
-    assert_eq!(
-        r.c.tick(Instant::now()),
-        Some(Exit::Shutdown { faded: true })
-    );
-    assert!(r.dir.path().join("state/current.json").exists(), "saved");
-    assert!(r.c.driver.is_none(), "released");
-    // The shutdown's fade is asked where the refused card's "no fade" check
-    // looks: on the RT ring or waiting in `pending` (already faded, the wait
-    // loop never flushes it).
-    let mut asked = Vec::new();
-    while let Ok(cmd) = r.ring.pop() {
-        asked.push(cmd.op);
-    }
-    asked.extend(r.c.pending.iter().flatten().copied());
-    assert!(
-        asked
-            .iter()
-            .any(|op| matches!(op, crate::cmd::RtOp::FadeOut)),
-        "the fade was not asked"
-    );
-}
-
-#[test]
-fn a_card_refused_while_running_ends_with_exit_3_and_no_fade() {
-    let mut r = rig();
-    let why = "the preferred buffer was not restored";
-    r.c.driver = Some(scripted(Some(Ending::Card(why.into())), false).0);
-    assert_eq!(r.c.tick(Instant::now()), Some(Exit::Card(why.into())));
-    // No fade was asked of the callback, neither sent nor waiting: read
-    // from the ring, not timed (the state save's file I/O took 538 ms on a
-    // hosted Windows runner, main run 38532263136).
-    let fade = |op: &crate::cmd::RtOp| matches!(op, crate::cmd::RtOp::FadeOut);
-    let mut sent = Vec::new();
-    while let Ok(cmd) = r.ring.pop() {
-        sent.push(cmd.op);
-    }
-    assert!(!sent.iter().any(fade), "a fade was sent");
-    assert!(!r.c.pending.iter().flatten().any(fade), "a fade waits");
-    assert!(r.dir.path().join("state/current.json").exists(), "saved");
-    assert!(r.c.driver.is_none(), "released");
 }
 
 /// The fade-outs asked of the callback, sent or still waiting.
@@ -453,7 +364,7 @@ fn fades_asked(r: &mut Rig) -> usize {
 fn a_stop_ending_saves_fades_and_exits_shutdown() {
     let mut r = rig();
     r.status.faded_out.store(true, Ordering::Release);
-    r.c.driver = Some(scripted(Some(Ending::Stop), false).0);
+    r.c.driver = Some(scripted(Some(Ending::Stop)));
     assert_eq!(
         r.c.tick(Instant::now()),
         Some(Exit::Shutdown { faded: true })
@@ -469,7 +380,7 @@ fn a_stop_ending_saves_fades_and_exits_shutdown() {
 fn a_backend_ending_saves_and_exits_backend() {
     let mut r = rig();
     let why = "flow control on UDP 4455 ended";
-    r.c.driver = Some(scripted(Some(Ending::Backend(why.into())), false).0);
+    r.c.driver = Some(scripted(Some(Ending::Backend(why.into()))));
     assert_eq!(r.c.tick(Instant::now()), Some(Exit::Backend(why.into())));
     assert!(r.dir.path().join("state/current.json").exists(), "saved");
     assert!(r.c.driver.is_none(), "released");
@@ -514,9 +425,8 @@ fn a_save_that_moves_a_save_tmp_aside_raises_an_alarm_naming_it() {
     assert_eq!(r.c.alarms.len(), 1, "{:?}", r.c.alarms);
 }
 
-/// Connections need a socket pair. Unix only: the harness's client
-/// reads with a socket receive timeout, which Windows pipes do not have;
-/// `tests/pipes.rs` runs the engine's pipes on Windows.
+/// Connections need a socket pair: the harness's client reads with a socket
+/// receive timeout.
 #[cfg(unix)]
 mod peers;
 
@@ -525,6 +435,6 @@ mod peers;
 #[cfg(unix)]
 mod supervise;
 
-/// S7 HIL v2 (#10, plan Task 28): the reopen's time and the faulting
+/// HIL v2 (#10): the reopen's time and the faulting
 /// callback's time in `Status`.
 mod s7;

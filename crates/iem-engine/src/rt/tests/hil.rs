@@ -1,11 +1,11 @@
-//! Unit tests of the RT processor for S6 (split from `rt/tests.rs`, #32):
+//! Unit tests of the RT processor for HIL (split from `rt/tests.rs`, #32):
 //! the held output, the reopen fade-in, HIL's spare outputs and the D5(b)
 //! loopback return.
 
 use super::*;
 use iem_engine_proto::ErrCode;
 
-/// `rig_hil` that also opens the D5(b) loopback return (S6 test 5): one
+/// `rig_hil` that also opens the D5(b) loopback return: one
 /// return input per spare output, after the topology's rx.
 fn rig_loopback(site: &str, cmds: &[Cmd], flags: Flags, opts: Options, hil: Vec<u16>) -> Rig {
     let topo = Arc::new(compile(&parse(site).unwrap()).unwrap());
@@ -18,7 +18,7 @@ fn rig_loopback(site: &str, cmds: &[Cmd], flags: Flags, opts: Options, hil: Vec<
     Rig { core, p, h }
 }
 
-/// `--hold` (S6 design note §4).
+/// `--hold`.
 const HELD: Options = Options {
     fade_in_ms: 500.0,
     hold: true,
@@ -92,7 +92,7 @@ fn discontinuity_restarts_the_fade_in() {
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), as `run` opens
 /// them under the test-signal flag.
 pub(super) const SPARE: [u16; 2] = [94, 95];
-/// The D5(b) loopback round-trip (S6 test 5): the HIL sine leaves on the
+/// The D5(b) loopback round-trip: the HIL sine leaves on the
 /// spare outputs; a synthetic loopback returns it on the spare inputs one
 /// block later; the probe measures exactly that delay, and it clears when a
 /// new signal starts.
@@ -171,7 +171,7 @@ fn the_loopback_round_trip_is_measured() {
     );
 }
 
-/// S6 test 5 (#32 D3): a return that already carries a signal when the HIL
+/// The D5(b) loopback (#32 D3): a return that already carries a signal when the HIL
 /// signal starts cannot tell its echo apart; the probe reports no
 /// round-trip, never the 16-sample minimum.
 #[test]
@@ -274,7 +274,7 @@ pub(super) const AT_ONCE: Options = Options {
     hold: false,
 };
 
-/// The HIL signal (S6; the owner's decision on #9 of 2026-09-28) sounds
+/// The HIL signal (the owner's decision on #9 of 2026-09-28) sounds
 /// only on the engine's spare outputs after the topology's TX: on the
 /// masked ones its sine itself, capped at the test-signal level, while it
 /// runs (TTL and fade-out); zero on the others. Every mix renders and

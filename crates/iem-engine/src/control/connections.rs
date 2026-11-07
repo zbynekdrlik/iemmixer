@@ -1,4 +1,4 @@
-//! The connections (design note §3.3): hello and roles, replies, the
+//! The connections: hello and roles, replies, the
 //! broadcasts, and the alarms replayed to each new connection.
 
 use std::io::Write;
@@ -143,7 +143,7 @@ impl Control {
             self.controller = Some(id);
             self.controller_lost = None;
         }
-        // A new supervisor (a restarted guard) replaces the old one only.
+        // A new supervisor replaces the old one only.
         if role == Role::Supervisor
             && let Some(old) = self.supervisor.filter(|old| *old != id)
         {

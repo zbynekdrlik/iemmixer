@@ -1,7 +1,7 @@
-//! A real engine for the server's tests (S5 design note §7): `iem-engine`'s
+//! A real engine for the server's tests: `iem-engine`'s
 //! `run` on a thread with the NullRt backend, the test site and a pipe in a
 //! temporary directory; no mock of the engine. Unix only (the engine's pipe
-//! readers need socket timeouts; S6 reworks Windows).
+//! readers need socket timeouts).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -133,8 +133,8 @@ impl EngineHarness {
         }
     }
 
-    /// `cmd` through a supervisor connection of its own (the guard's role,
-    /// S6; e.g. a HIL signal under `--test-signal`), in the pattern of
+    /// `cmd` through a supervisor connection of its own (the supervisor role,
+    /// e.g. a HIL signal under `--test-signal`), in the pattern of
     /// [`Self::shutdown`]: read until the engine answered it; the answer's
     /// error, if any. Bounded: each read ≤ 1 s, no read starts after 5 s
     /// (so ≤ 6 s in all).

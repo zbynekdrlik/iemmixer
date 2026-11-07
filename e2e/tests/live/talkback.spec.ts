@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect, liveNumber, type Page } from "./support/live";
@@ -7,7 +8,7 @@ import { live, openLive } from "./support/env";
 import { SILENT_PEAK, continuity, talkbackLevel } from "./support/series";
 import { toneWav } from "../support/wav";
 
-// The engineer's talkback on the real PC (S7, #10; rows 731 and the A4
+// The engineer's talkback on the real PC (#10; rows 731 and the A4
 // level): Chromium's fake microphone plays a 1 kHz tone at half scale, the
 // page encodes it onto /ws/talkback through the runner's relay, and the
 // server plays it into the engine's talkback input (LIVE_TALKBACK_INPUT).
@@ -18,7 +19,7 @@ import { toneWav } from "../support/wav";
 // before it ends (`desk.during`), and Talk is held at most 8 s. Numbers leave
 // a test only as `live_number` annotations (`live_verdict.py`).
 
-const MIC_WAV = toneWav(join(tmpdir(), "iemmixer-live-talkback-1k-half.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
+const MIC_WAV = toneWav(join(mkdtempSync(join(tmpdir(), "iemmixer-live-talkback-1k-half-")), "mic.wav"), TALK_TONE.hz, TALK_TONE.amplitude);
 
 // Launch options are the worker's: top level, never in a describe.
 test.use({
@@ -49,7 +50,7 @@ const START_MS = 1_800;
 const SETTLE_MS = TALK_TONE.settleMs;
 /** The window both series are read in. */
 const WINDOW_MS = 3_000;
-/** The engine adds the talkback at 0.379934 (program spec A4): −8.406 dB. */
+/** The engine adds the talkback at 0.379934: −8.406 dB. */
 const TALKBACK_DB = 20 * Math.log10(0.379934);
 const TALKBACK_TOLERANCE_DB = 0.3;
 /** The encoder's frame peaks stray at most this far in the window. */

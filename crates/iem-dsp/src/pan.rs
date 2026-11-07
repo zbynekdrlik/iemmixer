@@ -1,4 +1,4 @@
-//! Measured pan law (S1b `pan_law`, program spec A5 as amended on #5) and the
+//! Measured pan law (S1b `pan_law`) and the
 //! mono downmix (A10). The gains have the exact sine-taper direction
 //! atan2(gR, gL) = (p + 1)·π/4; the magnitude sqrt(gL² + gR²) is tabulated at
 //! |p| = 0, 0.05, …, 1 (even in p) and interpolated with Catmull-Rom. One law for

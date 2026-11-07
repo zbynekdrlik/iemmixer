@@ -1,4 +1,4 @@
-//! Control-pipe frames (§2.3, design note §3.6): a little-endian `u32` length
+//! Control-pipe frames (§2.3): a little-endian `u32` length
 //! and that many bytes of JSON, at most [`MAX_FRAME`]. A peer that announces a
 //! larger frame is refused before its body is read.
 

@@ -3,7 +3,7 @@ import { pause } from "./support/desk";
 import { live } from "./support/env";
 import { dbOf, median } from "./support/series";
 
-// Meters on the real card (S7, #10; a #25 repeat): the engineer's page gets a
+// Meters on the real card (#10; a #25 repeat): the engineer's page gets a
 // Meters frame about every 100 ms, and inside a burst the burst's input shows
 // the burst's level. The input goes dry and open (processing and mute off)
 // only inside the burst, while every mix's TX is zero, and goes back before
@@ -30,7 +30,7 @@ test.describe("meters on the real PC (S7)", () => {
     const read = await desk.during(async () => {
       const before = await engineer.consoleInput(testInput);
       if (!before) throw new Error("LIVE_TEST_INPUT is not an input of the console");
-      // Dry and open: the burst's sine reaches the input meter as the PC
+      // Dry and open: the burst's sine reaches the input meter as the engine
       // plays it, with no trim, EQ or mute of the site's in the way.
       desk.change(
         engineer,

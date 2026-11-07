@@ -1,5 +1,4 @@
-//! The mix state the engine owns (program spec §2.4, I6; #20 design note §3,
-//! §5) and its transient state (solo, listen, test signal: never persisted).
+//! The mix state the engine owns (program spec I6) and its transient state (solo, listen, test signal: never persisted).
 //! Values are in dB, Hz, octaves and pan −1…1; the engine caps every field on
 //! arrival.
 //!

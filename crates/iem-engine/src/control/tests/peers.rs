@@ -3,6 +3,7 @@ use crate::pipe::{control_name, listen};
 use iem_engine_proto::{ClientMsg, Cmd, ErrCode, InputId, MixId, MixState, PROTO, read_frame};
 use interprocess::local_socket::Stream;
 use interprocess::local_socket::prelude::*;
+use std::sync::atomic::AtomicBool;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -166,7 +167,7 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
         dbfs: -40.0,
         ttl_s: 1.0,
     };
-    let supervisor: [(u64, Cmd, Option<ErrCode>); 11] = [
+    let supervisor: [(u64, Cmd, Option<ErrCode>); 10] = [
         (12, Cmd::Ping, None),
         (13, Cmd::GetState, None),
         (14, Cmd::GetTopology, None),
@@ -177,7 +178,6 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
         // Fault injection reaches the core, which refuses it without
         // the flag: never `NotController`.
         (18, Cmd::InjectFault, Some(ErrCode::Forbidden)),
-        (22, Cmd::InjectPark, Some(ErrCode::Forbidden)),
         (19, set_mix(), Some(ErrCode::NotController)),
         (
             20,
@@ -190,7 +190,6 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
             21,
             Cmd::ImportState {
                 state: MixState::default(),
-                baseline: false,
             },
             Some(ErrCode::NotController),
         ),
@@ -200,18 +199,16 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
     }
     // The controller may not arm, start the HIL signal or inject a
     // fault (an engine keeps `--fault-injection` until it restarts,
-    // after its HIL job too, so only the guard, which allows them
-    // inside a job, sends them; review of PR #40, #35); an observer
+    // so only a supervisor, `iem-engine supervise` in the box's HIL
+    // gate, sends them; review of PR #40, #35); an observer
     // may do none of it either.
     r.c.handle(request_from(1, 30, Cmd::Arm));
     r.c.handle(request_from(1, 31, hil()));
     r.c.handle(request_from(1, 32, set_mix()));
     r.c.handle(request_from(1, 33, Cmd::InjectFault));
-    r.c.handle(request_from(1, 34, Cmd::InjectSeh));
-    r.c.handle(request_from(1, 35, Cmd::InjectPark));
     r.c.handle(request_from(3, 40, Cmd::Arm));
     r.c.handle(request_from(3, 41, hil()));
-    r.c.handle(request_from(3, 42, Cmd::InjectPark));
+    r.c.handle(request_from(3, 42, Cmd::InjectFault));
     // The supervisor reads the meters like everyone.
     r.meters.input_buffer_mut().seq = 5;
     r.meters.publish();
@@ -245,14 +242,7 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
         )
     );
     // Refused for its role before the core reads the flag.
-    assert_eq!(
-        (ctl[&33], ctl[&34], ctl[&35]),
-        (
-            Some(ErrCode::NotSupervisor),
-            Some(ErrCode::NotSupervisor),
-            Some(ErrCode::NotSupervisor)
-        )
-    );
+    assert_eq!(ctl[&33], Some(ErrCode::NotSupervisor));
     let obs = codes(&obs_got.join().unwrap());
     assert_eq!(
         (obs[&40], obs[&41], obs[&42]),
@@ -262,44 +252,6 @@ fn the_supervisor_may_stop_save_arm_and_test_but_never_mix() {
             Some(ErrCode::NotController)
         )
     );
-}
-
-/// HIL's forced reopen (S6 design note §7): the supervisor's, under
-/// the fault-injection flag, reaches the backend; the controller's is
-/// refused, and so is one without the flag.
-#[test]
-fn a_forced_reopen_reaches_the_backend_from_the_supervisor_only() {
-    for (fault_injection, reopens, sup_code) in
-        [(true, REOPEN, None), (false, 0, Some(ErrCode::Forbidden))]
-    {
-        let mut r = rig_with(
-            crate::core::Flags {
-                test_signal: false,
-                fault_injection,
-            },
-            false,
-        );
-        let (d, count) = scripted(None, false);
-        r.c.driver = Some(d);
-        let (ctl, ctl_client) = peer_named(r.dir.path(), "ctl");
-        let (sup, sup_client) = peer_named(r.dir.path(), "sup");
-        let (ctl_got, sup_got) = (reader(ctl_client), reader(sup_client));
-        r.c.handle(CtlMsg::Connected { id: 1, conn: ctl });
-        r.c.handle(CtlMsg::Connected { id: 2, conn: sup });
-        r.c.handle(hello_as(1, Role::Control));
-        r.c.handle(hello_as(2, Role::Supervisor));
-        r.c.handle(request_from(1, 7, Cmd::ForceReopen));
-        assert_eq!(count.load(Ordering::Relaxed), 0, "the controller's");
-        r.c.handle(request_from(2, 8, Cmd::ForceReopen));
-        assert_eq!(count.load(Ordering::Relaxed), reopens);
-        drop(r);
-        let ctl = codes(&ctl_got.join().unwrap());
-        assert_eq!(ctl[&7], Some(ErrCode::NotSupervisor));
-        let sup = codes(&sup_got.join().unwrap());
-        assert_eq!(sup[&8], sup_code, "fault injection {fault_injection}");
-    }
-    // NullRt has no card: the request is answered, nothing reopens.
-    assert!(!Idle.force_reopen());
 }
 
 #[test]
@@ -397,8 +349,8 @@ fn nothing_after_a_shutdown_request_is_handled() {
     );
 }
 
-/// A backend whose stop ends as scripted (#35).
-struct Stops(StopOutcome);
+/// A backend that counts its stop.
+struct Stops(Arc<AtomicBool>);
 
 impl Driver for Stops {
     fn stats(&self) -> StreamStats {
@@ -408,57 +360,40 @@ impl Driver for Stops {
         }
     }
 
-    fn stop(self: Box<Self>) -> StopOutcome {
-        self.0
+    fn stop(self: Box<Self>) {
+        self.0.store(true, Ordering::Release);
     }
 }
 
-/// The stream's end says what happened (#35): a stream that stayed
-/// parked (a callback stuck in it, or the parked-engine test's hold)
-/// released nothing, so the engine says `DriverParked`, never
-/// `DriverReleased`; a released one says `DriverReleased`. Either is
-/// the last word before the engine closes the connection, and the
-/// run ends as a shutdown either way.
+/// The stream's end is the last word before the engine closes the
+/// connection, sent once the backend has stopped (#35).
 #[test]
-fn a_stop_that_leaves_the_stream_parked_says_so_never_released() {
-    let reason = || "shutdown".to_owned();
-    for (outcome, end) in [
-        (
-            StopOutcome::Released,
-            EngineMsg::DriverReleased { reason: reason() },
-        ),
-        (
-            StopOutcome::Parked,
-            EngineMsg::DriverParked { reason: reason() },
-        ),
-    ] {
-        let mut r = rig();
-        r.c.driver = Some(Box::new(Stops(outcome)));
-        r.status.faded_out.store(true, Ordering::Release);
-        let (conn, client) = peer(r.dir.path());
-        let got = reader(client);
-        r.c.handle(CtlMsg::Connected { id: 1, conn });
-        r.c.handle(hello());
-        r.c.handle(request(2, Cmd::Shutdown));
-        assert_eq!(
-            r.c.tick(Instant::now()),
-            Some(Exit::Shutdown { faded: true }),
-            "{outcome:?}"
-        );
-        assert!(r.c.driver.is_none(), "{outcome:?}: stopped");
-        let msgs = got.join().unwrap();
-        let ends: Vec<&EngineMsg> = msgs
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m,
-                    EngineMsg::DriverReleased { .. } | EngineMsg::DriverParked { .. }
-                )
-            })
-            .collect();
-        assert_eq!(ends, vec![&end], "{outcome:?}");
-        assert_eq!(msgs.last(), Some(&end), "{outcome:?}: the last word");
-    }
+fn a_stop_says_driver_released_as_its_last_word() {
+    let end = EngineMsg::DriverReleased {
+        reason: "shutdown".to_owned(),
+    };
+    let stopped = Arc::new(AtomicBool::new(false));
+    let mut r = rig();
+    r.c.driver = Some(Box::new(Stops(Arc::clone(&stopped))));
+    r.status.faded_out.store(true, Ordering::Release);
+    let (conn, client) = peer(r.dir.path());
+    let got = reader(client);
+    r.c.handle(CtlMsg::Connected { id: 1, conn });
+    r.c.handle(hello());
+    r.c.handle(request(2, Cmd::Shutdown));
+    assert_eq!(
+        r.c.tick(Instant::now()),
+        Some(Exit::Shutdown { faded: true })
+    );
+    assert!(r.c.driver.is_none());
+    assert!(stopped.load(Ordering::Acquire), "the backend stopped");
+    let msgs = got.join().unwrap();
+    let ends: Vec<&EngineMsg> = msgs
+        .iter()
+        .filter(|m| matches!(m, EngineMsg::DriverReleased { .. }))
+        .collect();
+    assert_eq!(ends, vec![&end]);
+    assert_eq!(msgs.last(), Some(&end), "the last word");
 }
 
 #[test]
@@ -481,25 +416,4 @@ fn stopping_the_test_signal_clears_its_deadline() {
     r.c.handle(request(3, Cmd::StopTestSignal));
     assert_eq!(r.c.test_deadline, None);
     assert!(r.c.core.transient().test_signal.is_none());
-}
-
-#[test]
-fn an_import_as_baseline_writes_the_baseline() {
-    let mut r = rig();
-    let (conn, client) = peer(r.dir.path());
-    let _got = reader(client);
-    r.c.handle(CtlMsg::Connected { id: 1, conn });
-    r.c.handle(hello());
-    let import = |baseline: bool| Cmd::ImportState {
-        state: MixState::default(),
-        baseline,
-    };
-    let baseline = r.dir.path().join("state/baseline.json");
-    r.c.handle(request(2, import(false)));
-    assert_eq!(r.c.core.rev(), 1);
-    assert!(!baseline.exists(), "a plain import keeps the baseline");
-    r.c.handle(request(3, import(true)));
-    let saved = crate::persist::decode(&std::fs::read(&baseline).unwrap()).unwrap();
-    assert_eq!((saved.rev, r.c.core.rev()), (2, 2));
-    assert_eq!(saved.topology_hash, r.c.core.topology().hash);
 }

@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Faithful port of the MGA JS Limiter (`loser/MGA_JSLimiterST`), the output
-//! limiter of every member bus (program spec A13, X14; S2 design note §3.4).
+//! limiter of every member bus.
 //!
 //! - [`Mga`] is the JSFX itself with its four sliders: two staggered peak-hold
 //!   windows of `sr/128` samples, the asymmetric stereo link, instant attack,

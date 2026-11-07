@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
-"""The live verdict (S7 design note §6; plan Task 22). Pure, stdlib only.
+"""The live verdict. Pure, stdlib only.
 
-`report` is the ops live.yml report job's step: it reads the run's record
-directory and prints one JSON object, `{"conclusion", "summary",
-"first_failure", "numbers"}`, whose summary is posted as `live/iem-pc`. The
-record directory (the jobs' artifacts; PowerShell's files may carry a BOM and
-CRLF):
+`report` reads the run's record directory and prints one JSON object,
+`{"conclusion", "summary", "first_failure", "numbers"}`; `iempc gen3-gate live`
+(iempc_gen3_live.py) writes the records and calls it. The record directory
+(a file may carry a BOM and CRLF), by the jobs' record names:
 
 - begin.json (pc-begin): `{"reason": BEGIN_REASONS, "push_before": count}`;
 - pc.json (pc): `{"reason": PC_REASONS}`;
-- bursts.jsonl (pc): one `{"t", "exit"}` per `iemmode test-signal … --listen`,
+- bursts.jsonl (pc): one `{"t", "exit"}` per test-signal burst with --listen,
   its exit code;
 - evidence.json (pc-end): `{"job_end": JOB_END, "client_log": CLIENT_LOG,
-  "push_after": count}`; job_end is `left-dev` when the PC was out of dev;
+  "push_after": count}`; job_end is `left-dev` when the flag cut the run;
 - results.json (browser): Playwright's JSON report of
   playwright.live.config.ts.
 
-A cut PC side is `cancelled`, never red ("ide event"): a cancelled pc-begin,
-pc or pc-end job; one of them that failed and left no record (the guard stops
-the runner at "ide event", and GitHub's conclusion for that job and whether its
-`always()` upload still runs are UNVERIFIED, plan Task 10, as for the soak);
+A cut box side is `cancelled`, never red ("ide event"): a cancelled pc-begin,
+pc or pc-end job; one of them that failed and left no record;
 a begin record `left-dev` or `not-free`, a pc record `left-dev`, a job end
-`left-dev`. A PC job that succeeded or was skipped and left no record, and an
-unreadable record, are red; so is a cancelled browser job alone (a hosted
-runner the event does not touch). Known limit, as the soak's: a PC job that
-ran out of its `timeout-minutes` reads as cancelled if GitHub reports a
-timeout so (UNVERIFIED). Else the checks, in order; the first that fails leads
+`left-dev`. One of those jobs that succeeded or was skipped and left no record,
+and an unreadable record, are red; so is a cancelled browser job alone. Else
+the checks, in order; the first that fails leads
 a red summary (`red: <it>; <numbers>`), each step inside a check in the order
 written:
 
@@ -33,7 +28,7 @@ written:
  2. the pc job: its reason `browser-done`, at least one burst, every burst
     exit 0, then the pc job success;
  3. every expected title passed: the titles read from the spec files (the
-    parity checker's `test(` rule, check_parity_manifest.PW_TEST), each with
+    `test(` rule, PW_TEST), each with
     at least as many tests in the report as it appears in the specs (another
     project or a repeat adds some), every one passed (status `expected`,
     expected status `passed`); then no other test in the report that did not
@@ -59,10 +54,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parent.parent
-if str(SCRIPTS) not in sys.path:
-    sys.path.append(str(SCRIPTS))
-from check_parity_manifest import PW_TEST  # noqa: E402  (the parity checker's `test(` rule)
+# A Playwright `test(` call and its title, in any of the three quotes.
+PW_TEST = re.compile(r"""(?<![\w.$])test\(\s*(["'`])((?:\\.|(?!\1).)*)\1""", re.S)
 
 BEGIN_REASONS = frozenset({"ready", "not-free", "left-dev", "bundle-not-active", "engine-not-up", "no-client",
                            "token-failed", "push-count-failed"})
@@ -74,7 +67,7 @@ NUMBER_KEYS = ("listen_hz", "listen_dbfs", "first_audio_ms", "talkback_db", "lim
 LIVE_NUMBER = "live_number"
 # A decimal in ASCII digits only: float() alone also reads "nan", "1_000" and other scripts' digits.
 NUMBER = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
-EXIT_MIN, EXIT_MAX = -(2 ** 31), 2 ** 32 - 1  # PowerShell's signed exit code, Windows' DWORD
+EXIT_MIN, EXIT_MAX = -(2 ** 31), 2 ** 32 - 1  # an exit code, signed or unsigned, within 32 bits
 CLIENT_LOG = frozenset({"found", "missing", "unreadable"})
 JOB_END = frozenset({"ok", "failed", "left-dev"})
 RESULTS = ("success", "failure", "cancelled", "skipped")  # a job's `needs.<job>.result`
@@ -252,7 +245,7 @@ CHECKS = (_begin_ready, _pc, _titles_passed, _client_log, _push, _job_end)
 
 
 def _cancelled(r: _Run) -> str | None:
-    """Why the PC side was cut ("ide event" never makes red), else None."""
+    """Why the box side was cut ("ide event" never makes red), else None."""
     for key in PC_SIDE:
         if r.jobs.get(key) == "cancelled":
             return f"the {JOBS[key]} job was cancelled"
@@ -340,8 +333,7 @@ def report(results: object, begin: object, pc: object, evidence: object, bursts:
 
 
 def file_titles(text: str) -> list[str]:
-    """A spec file's `test(` titles in source order, unescaped as check_parity_manifest's
-    playwright_titles does (which returns them as a set)."""
+    """A spec file's `test(` titles in source order, unescaped."""
     return [re.sub(r"\\(.)", r"\1", m.group(2)) for m in PW_TEST.finditer(text)]
 
 

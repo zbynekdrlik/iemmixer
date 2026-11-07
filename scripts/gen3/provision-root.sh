@@ -2,9 +2,7 @@
 # sudoers and dpkg-query formats are literal text here, never shell expansions.
 # shellcheck disable=SC2016
 set -euo pipefail
-# The Gen 3 box's provisioning, run as root on the box (#72 phase D, plan
-# docs/superpowers/plans/2026-10-26-gen3-phase-d-the-box.md Task 9, choices 1,
-# 4 and 5; rules in .claude/rules/gen3.md). provision.sh copies it with
+# The Gen 3 box's provisioning, run as root on the box (#72 phase D; rules in .claude/rules/gen3.md). provision.sh copies it with
 # sudo-lines.txt, iem-napi.service, napi-priority and the two values into the
 # admin's ~/.cache/iem-gen3-provision and runs it there:
 #
@@ -32,7 +30,7 @@ set -euo pipefail
 #             admin in its group (the device's control socket, health, the
 #             live guard).
 #   folders   /etc/iemmixer 0755, /etc/credstore.encrypted 0700 root,
-#             /var/lib/iemmixer/mint 0700 iemmixer (gen3-mix's tokens).
+#             /var/lib/iemmixer/mint 0700 iemmixer (the gates' tokens).
 #   state     the stack's state the service user's: /var/lib/iemmixer and
 #             /var/lib/iem-dante 0750 iemmixer:iemmixer (made when missing;
 #             one that is a link refused), and when anything under them is
@@ -82,6 +80,8 @@ set -euo pipefail
 #             stack); irqbalance masked (it would move the interrupt off its
 #             core); run now and read back once deploy.sh has written the
 #             Dante interface (/etc/iemmixer/iem-dante.env).
+#   idle      /etc/tmpfiles.d/iemmixer-idle.conf: no deep CPU idle (C6, C8,
+#             C10) at every boot, and now when a CPU may still enter one
 #   display   /etc/tmpfiles.d/iemmixer-display.conf: the display drivers'
 #             output polling off (drm_kms_helper's poll N) at every boot,
 #             applied with systemd-tmpfiles and read back when the box has
@@ -125,6 +125,7 @@ SWAPFILE=/swapfile
 NAPI_HELPER=/usr/local/lib/iemmixer/napi-priority
 NAPI_UNIT=/etc/systemd/system/iem-napi.service
 DISPLAY_CONF=/etc/tmpfiles.d/iemmixer-display.conf
+IDLE_CONF=/etc/tmpfiles.d/iemmixer-idle.conf
 POLL_PARAM=/sys/module/drm_kms_helper/parameters/poll
 ENVFILE=/etc/iemmixer/iem-dante.env
 SUDOERS=/etc/sudoers.d/iemmixer-gen3
@@ -349,7 +350,7 @@ render_sudoers() {
 # provision run (never edit it here): each command exactly as a Gen 3 tool
 # sends it through `sudo -n`, its program by the absolute path sudo's
 # secure_path finds, NOPASSWD. Until phase G the admin also keeps its own
-# passwordless rule (plan Task 9).
+# passwordless rule.
 HEAD
   while IFS= read -r raw || [ -n "$raw" ]; do
     line="$(trim "$raw")"
@@ -463,6 +464,19 @@ cat > "$work/iemmixer-display.conf" << 'EOF'
 # Applied at every boot by systemd-tmpfiles. Written by
 # scripts/gen3/provision-root.sh.
 w /sys/module/drm_kms_helper/parameters/poll - - - - N
+EOF
+cat > "$work/iemmixer-idle.conf" << 'EOF'
+# The Gen 3 box (#72, 2026-10-31): no deep CPU idle. With the package asleep the
+# NIC's DMA waits for the wake: a Dante receiver read our packets up to 490 us
+# old against 240 us with these states off, and no counter of ours sees it.
+# States 2 to 4 are C6, C8 and C10 on the N100. Applied at every boot by
+# systemd-tmpfiles. Written by scripts/gen3/provision-root.sh.
+w /sys/devices/system/cpu/cpu*/cpuidle/state2/disable - - - - 1
+w /sys/devices/system/cpu/cpu*/cpuidle/state3/disable - - - - 1
+w /sys/devices/system/cpu/cpu*/cpuidle/state4/disable - - - - 1
+# The engine holds the CPU wake latency through this device (2026-11-01):
+# root's alone by default, and then it warns and leaves C1E open.
+z /dev/cpu_dma_latency 0660 root iemmixer - -
 EOF
 cat > "$work/iemmixer-workqueue.conf" << EOF
 # The Gen 3 box (#72 phase F): unbound kernel work off the CPUs the kernel
@@ -843,9 +857,11 @@ step_display() {
 }
 
 step_stack() {
+  # Only the retired standalone device. The engine and the server are the
+  # deploy's: enabled while the box serves the band, and a reboot must serve.
   local unit
   local -a todo=()
-  for unit in "${STACK_UNITS[@]}"; do
+  for unit in iem-dante.service; do
     unit_states "$unit"
     if is_enabled; then todo+=("$unit"); fi
   done
@@ -874,7 +890,26 @@ step_sudoers() {
   changed=1
 }
 
-for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display stack sudoers; do
+step_idle() {
+  put_file 0644 root root "$IDLE_CONF" "$work/iemmixer-idle.conf"
+  local f
+  if [ -e "$R/dev/cpu_dma_latency" ] && [ "$(stat -c %a -- "$R/dev/cpu_dma_latency")" != 660 ]; then
+    systemd-tmpfiles --create "$R$IDLE_CONF" ||
+      die "systemd-tmpfiles --create $IDLE_CONF failed (exit $?)"
+    changed=1
+    return 0
+  fi
+  for f in "$R"/sys/devices/system/cpu/cpu*/cpuidle/state[234]/disable; do
+    [ -e "$f" ] || continue
+    [ "$(cat -- "$f")" != 1 ] || continue
+    systemd-tmpfiles --create "$R$IDLE_CONF" ||
+      die "systemd-tmpfiles --create $IDLE_CONF failed (exit $?)"
+    changed=1
+    return 0
+  done
+}
+
+for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display idle stack sudoers; do
   changed=0
   "step_${step//-/_}"
   if [ "$changed" = 1 ]; then
