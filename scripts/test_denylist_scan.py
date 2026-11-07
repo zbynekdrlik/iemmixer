@@ -156,6 +156,49 @@ class DenylistScanTests(ScanTestCase):
         self.assertIn("committer email is not an allowed identity", out)
         self.assertNotIn("author email is not an allowed identity", out)
 
+    def test_the_hash_does_not_cover_the_same_name_with_another_email(self) -> None:
+        git(self.repo, "config", "user.name", "zyxname-bot")
+        git(self.repo, "config", "user.email", "2+other@example.org")
+        self.commit({"a.txt": "clean\n"})
+        ids = self.hashed_identity_file("zyxname-bot", "1+zyxname-bot@example.org")
+        code, out = self.scan("--identities", str(ids), "--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("commit metadata", out)
+        self.assertIn("author email is not an allowed identity", out)
+
+    def test_the_hash_of_the_author_leaves_the_committer_read_as_a_term(self) -> None:
+        git(self.repo, "config", "user.name", "zyxname-bot")
+        git(self.repo, "config", "user.email", "1+zyxname-bot@example.org")
+        self.commit({"a.txt": "clean\n"})
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "--amend", "--no-edit", "--reset-author"],
+                       check=True, env={**os.environ, "GIT_COMMITTER_NAME": "zyxname-other",
+                                        "GIT_COMMITTER_EMAIL": "stranger@example.net"})
+        ids = self.hashed_identity_file("zyxname-bot", "1+zyxname-bot@example.org")
+        code, out = self.scan("--identities", str(ids), "--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("commit metadata", out)
+
+    def test_a_hashed_email_holding_a_line_separator_is_neither_allowed_nor_exempt(self) -> None:
+        email = "1+zyxname-bot\u2028@example.org"
+        git(self.repo, "config", "user.name", "zyxname-bot")
+        git(self.repo, "config", "user.email", email)
+        self.commit({"a.txt": "clean\n"})
+        ids = self.hashed_identity_file("zyxname-bot", email)
+        code, out = self.scan("--identities", str(ids), "--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("commit metadata", out)
+        self.assertIn("author email is not an allowed identity", out)
+
+    def test_an_email_equal_to_a_hash_line_is_not_an_allowed_email(self) -> None:
+        key = ds.identity_key("zyxname-bot", "1+zyxname-bot@example.org")
+        git(self.repo, "config", "user.email", key)
+        self.commit({"a.txt": "clean\n"})
+        ids = self.tmp / "ids.txt"
+        ids.write_text(key + "\n", encoding="utf-8")
+        code, out = self.scan("--identities", str(ids), "--commits", "HEAD")
+        self.assertEqual(code, 1)
+        self.assertIn("author email is not an allowed identity", out)
+
     def test_a_plain_allowed_email_is_still_read_as_a_term(self) -> None:
         git(self.repo, "config", "user.email", "zyxname@example.org")
         self.commit({"a.txt": "clean\n"})
