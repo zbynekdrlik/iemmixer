@@ -540,10 +540,18 @@ def scan_commit_diff(scanner: Scanner, repo: Path, sha: str, seen: set[str], blo
     return hits
 
 
+IDENTITY_KEY_PREFIX = "sha256:"
+
+
 def identity_key(name: str, email: str) -> str:
     """The line of the identity list that allows this exact name and email (email case aside)."""
     pair = f"{name}\n{email.lower()}".encode("utf-8", "surrogateescape")
-    return f"sha256:{hashlib.sha256(pair).hexdigest()}"
+    return f"{IDENTITY_KEY_PREFIX}{hashlib.sha256(pair).hexdigest()}"
+
+
+def email_allowed(email: str, identities: set[str]) -> bool:
+    """A listed email; a hash line is a public string, never an email anyone may use."""
+    return email.lower() in identities and not email.lower().startswith(IDENTITY_KEY_PREFIX)
 
 
 def commit_identities(repo: Path, sha: str) -> list[tuple[str, str, str]]:
@@ -565,7 +573,7 @@ def identity_problems(repo: Path, sha: str, identities: set[str]) -> list[Identi
     separator is whitespace to strip() and would make a stranger's email equal an allowed one."""
     return [IdentityProblem(sha[:12], role) for role, name, email in commit_identities(repo, sha)
             if LINE_SEPARATORS.intersection(email)
-            or (email.lower() not in identities and identity_key(name, email) not in identities)]
+            or (not email_allowed(email, identities) and identity_key(name, email) not in identities)]
 
 
 def metadata_text(repo: Path, sha: str, identities: set[str] | None) -> str:
