@@ -184,11 +184,13 @@ pub async fn login(
         )
     };
     let pin = req.pin.clone();
+    // The member's own PIN first: a member who picked the engineer's PIN
+    // value logs in as themselves, never as the engineer (#72).
     let matched = with_hasher(&state, move |hasher| {
-        if hasher.verify_optional(&pin, engineer_hash.as_deref()) {
-            PinMatch::Engineer
-        } else if hasher.verify_optional(&pin, member_hash.as_deref()) {
+        if hasher.verify_optional(&pin, member_hash.as_deref()) {
             PinMatch::Member
+        } else if hasher.verify_optional(&pin, engineer_hash.as_deref()) {
+            PinMatch::Engineer
         } else {
             PinMatch::None
         }
