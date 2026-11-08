@@ -138,10 +138,12 @@ pub(crate) fn member_exists(state: &AppState, member: &str) -> bool {
 }
 
 /// Whether a token's subject is still somebody: the engineer, or a member
-/// who logs in ([`member_exists`]). The token of a person who left stops
-/// working with the roster that removed them (#58).
+/// who logs in ([`member_exists`]), with a token issued at or after the
+/// subject's last PIN change ([`crate::token_floor`], #72). The token of a
+/// person who left stops working with the roster that removed them (#58).
 pub(crate) fn subject_known(state: &AppState, claims: &AuthClaims) -> bool {
-    claims.engineer || member_exists(state, &claims.sub)
+    (claims.engineer || member_exists(state, &claims.sub))
+        && state.token_floor.admits(&claims.sub, claims.iat)
 }
 
 /// 401 for a token whose subject is nobody now ([`subject_known`]).
@@ -269,7 +271,7 @@ pub async fn change_pin(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<ChangePinRequest>,
-) -> Result<StatusCode, Rejection> {
+) -> Result<Response, Rejection> {
     let claims = {
         let config = state.config.read().await;
         extract_claims_from_header(&headers, &config.jwt_secret)
@@ -351,8 +353,30 @@ pub async fn change_pin(
             "Failed to save PIN",
         )
     })?;
-    tracing::info!(member = %target, by = %claims.sub, "PIN changed");
-    Ok(StatusCode::OK)
+    // Every token of the target issued before now ends here: another device
+    // that held the old PIN is logged out (#72). A failed save leaves those
+    // tokens valid, so the change answers 500 though the PIN is new.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    state.token_floor.raise(&target, now).map_err(|e| {
+        tracing::error!(error = %e, member = %target, "the PIN changed, but its old tokens were not ended");
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            "Failed to end the old logins",
+        )
+    })?;
+    tracing::info!(member = %target, by = %claims.sub, "PIN changed, older tokens ended");
+    // The device that changed its own PIN stays logged in: a new token.
+    if target == claims.sub {
+        let config = state.config.read().await;
+        let token = issue_token(&config, &target, claims.engineer)
+            .map_err(|e| Rejection::from(e.into_response()))?;
+        return Ok(token.into_response());
+    }
+    Ok(StatusCode::OK.into_response())
 }
 
 /// Extract claims from Authorization header

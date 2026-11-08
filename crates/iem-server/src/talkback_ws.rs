@@ -37,6 +37,9 @@ pub async fn ws_talkback(
         let config = state.config.read().await;
         claims_of(query.token.as_deref(), &config.jwt_secret)?
     };
+    if !crate::auth::subject_known(&state, &claims) {
+        return Err(crate::auth::subject_gone());
+    }
     if !claims.engineer {
         return Err((
             StatusCode::FORBIDDEN,

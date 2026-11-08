@@ -50,8 +50,13 @@ pub(super) async fn push_subscribe(
         }
     };
     drop(config);
-    // Suppress unused variable warning (claims used only for engineer check)
-    let _ = claims;
+    // A token a PIN change ended subscribes nothing (#72).
+    if !auth::subject_known(&state, &claims) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "engineer access required" })),
+        );
+    }
 
     // Parse subscription
     let endpoint = body["endpoint"].as_str().unwrap_or("").to_string();

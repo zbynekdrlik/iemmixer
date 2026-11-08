@@ -46,6 +46,7 @@ pub mod solo;
 pub mod talk;
 #[cfg(feature = "tls")]
 pub mod tls_cert;
+pub mod token_floor;
 pub mod tunnel_watch;
 pub mod view;
 pub mod ws_alive;
@@ -225,6 +226,8 @@ pub struct AppState {
     auto_snapshots: Arc<Mutex<HashMap<String, String>>>,
     /// Argon2id PIN hashes (`<config dir>/secrets/pin_hashes.json`)
     pub pin_store: Arc<RwLock<pin_store::PinStore>>,
+    /// Each subject's last PIN change: older login tokens are refused (#72).
+    pub token_floor: Arc<token_floor::TokenFloor>,
     /// argon2id hasher keyed with the pepper (`<config dir>/secrets/`)
     pub pin_hasher: pin_hash::PinHasher,
     /// Login failure budgets
@@ -266,6 +269,7 @@ impl AppState {
         let secrets_dir = config_dir.join(secrets::SECRETS_DIR);
         let pepper = pepper::load_or_create(&secrets_dir)?;
         let mut pin_store = pin_store::PinStore::load(&secrets_dir)?;
+        let token_floor = token_floor::TokenFloor::load(&secrets_dir)?;
         // A roster is checked against the site's own `[engine]` table, as
         // `iem-server roster check` does (a site config built in code has
         // none, and one the engine could not read either is only logged:
@@ -338,6 +342,7 @@ impl AppState {
             alerts: Arc::new(Mutex::new(HashMap::new())),
             auto_snapshots: Arc::new(Mutex::new(HashMap::new())),
             pin_store: Arc::new(RwLock::new(pin_store)),
+            token_floor: Arc::new(token_floor),
             pin_hasher: pin_hash::PinHasher::new(pepper),
             login_guard: Arc::new(login_guard::LoginGuard::for_host(host)),
             hash_gate: Arc::new(login_guard::HashGate::new(

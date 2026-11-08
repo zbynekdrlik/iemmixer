@@ -40,8 +40,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 # The server folder's band items: a file by its path, a folder whole.
-SERVER_FILES = ("secrets/jwt_secret", "secrets/vapid_private", "secrets/pin_hashes.json", "roster.toml",
-                "push_subscriptions.json", "push_subs_v2_migrated", "alarm_subscriptions.json")
+SERVER_FILES = ("secrets/jwt_secret", "secrets/vapid_private", "secrets/pin_hashes.json", "secrets/token_floor.json",
+                "roster.toml", "push_subscriptions.json", "push_subs_v2_migrated", "alarm_subscriptions.json")
 SERVER_FOLDERS = ("lineups", "photos", "presets", "snapshots", "customizations", "backups")
 # The engine folder's state files (persist.rs): no lock, no temporary or damaged file.
 ENGINE_PREFIXES = ("gen-",)

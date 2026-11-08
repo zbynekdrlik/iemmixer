@@ -50,6 +50,9 @@ pub async fn ws_audio(
         let config = state.config.read().await;
         claims_of(query.token.as_deref(), &config.jwt_secret)?
     };
+    if !crate::auth::subject_known(&state, &claims) {
+        return Err(crate::auth::subject_gone());
+    }
     if !claims.engineer {
         tracing::warn!(sub = %claims.sub, "Audio WS denied: not engineer");
         return Err((
