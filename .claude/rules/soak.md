@@ -91,6 +91,6 @@ The gate is `scripts/iem-pc/iempc_gen3_soak.py` (`.claude/rules/gen3.md`, "The b
 ## Reading a failed box soak
 
 - The box runs at 96 kHz: one sample is 10.4 µs, so samples divided by 96 give ms. The conversion at 48 kHz gave twice the real value and went out to other sessions on 2026-11-06.
-- `iem-dante-dev ctl status` keeps counters since the flow started, and a flow id changes when its sender reconnects. Split a soak's `rx_late` and `rx_holes` by flow and second with a per-second delta of those counters, started before the soak. The deltas must add up to the gate's numbers; each channel's holes count once per channel.
+- `iem-dante-dev ctl status` keeps counters since the flow started, and a flow id changes when its sender reconnects. Split a soak's `rx_late` by flow and its `rx_holes` by channel (the gate counts them that way), each by second, with a per-second delta of those counters started before the soak. The deltas must add up to the gate's numbers; a hole counts once, on its channel.
 - A late burst at the box alone proves nothing about where it came from. Compare the second at the flow's other receivers, in Dante Controller's history: the same event at all of them is the sender's side. An event only here is ours.
 - The gate is not loosened for an announced outage: it stays a failure, recorded with its window.
