@@ -745,3 +745,42 @@ async fn the_engineers_rotation_ends_older_engineer_tokens() {
     );
     assert_eq!(change(&app, &fresh, reset).await.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn a_floor_that_cannot_be_saved_undoes_the_change() {
+    // A 500 means nothing changed: the old PIN still logs in, the new one not.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(test_state(dir.path()).await, LAN);
+    let floor = dir
+        .path()
+        .join(crate::secrets::SECRETS_DIR)
+        .join(crate::token_floor::TOKEN_FLOOR_FILE);
+    std::fs::create_dir_all(&floor).unwrap();
+    let resp = change(
+        &app,
+        &bearer("engineer", true),
+        serde_json::json!({ "new_pin": NEW_PIN, "member": "member1" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        login_as(&app, "member1", MEMBER_PIN, &[]).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_as(&app, "member1", NEW_PIN, &[]).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // member2 had no PIN: still none.
+    let resp = change(
+        &app,
+        &bearer("engineer", true),
+        serde_json::json!({ "new_pin": NEW_PIN, "member": "member2" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        login_as(&app, "member2", NEW_PIN, &[]).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}

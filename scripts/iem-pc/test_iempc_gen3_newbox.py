@@ -236,6 +236,24 @@ class BackupTests(Base):
         left = sorted(p.name for p in root.iterdir())
         self.assertEqual(left, sorted([".20260101T000000.incoming", "notes", *old[1:], doc["stamp"]]))
 
+    def test_the_backup_just_written_and_a_link_are_never_deleted(self) -> None:
+        # A clock stepped back writes a stamp older than the kept ones: it still stays; a link named like a
+        # stamp is no backup folder.
+        root = nb.backups(self.ip)
+        root.mkdir(mode=0o700)
+        newer = [f"2099{m:02d}01T043000" for m in range(1, 13)] + [f"2099{m:02d}02T043000" for m in range(1, 13)]
+        newer += [f"2099{m:02d}03T043000" for m in range(1, nb.KEEP_BACKUPS - 24 + 1)]
+        for stamp in newer:
+            (root / stamp).mkdir()
+        target = Path(self.tmp.name) / "elsewhere"
+        target.mkdir()
+        (root / "20000101T000000").symlink_to(target)
+        self.assertEqual(nb.run_backup(self.ctx(), self.ip), 0)
+        doc = self.ip.emitted[-1]["gen3_backup"]
+        self.assertEqual(doc["pruned"], 0)
+        self.assertTrue((root / doc["stamp"]).is_dir())
+        self.assertTrue(target.is_dir())
+
     def test_a_stamp_is_no_path(self) -> None:
         with self.assertRaises(Ip.Refused):
             nb.load_backup(self.ip, nb.backups(self.ip), "../secret")

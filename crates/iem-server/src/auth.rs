@@ -178,6 +178,9 @@ pub async fn login(
     if !req.member.is_empty() && !member_exists(&state, &req.member) {
         return Err(Rejection::from(member_not_found()));
     }
+    // The token's time is taken before the hashes are read: a PIN change
+    // that lands between this read and the token ends the token too (#72).
+    let issued = unix_now();
     let (engineer_hash, member_hash) = {
         let store = state.pin_store.read().await;
         (
@@ -202,11 +205,13 @@ pub async fn login(
     match matched {
         PinMatch::Engineer => {
             state.login_guard.record_success(&client, &req.member);
-            issue_token(&config, ENGINEER_ID, true).map_err(|e| Rejection::from(e.into_response()))
+            issue_token_at(&config, ENGINEER_ID, true, issued)
+                .map_err(|e| Rejection::from(e.into_response()))
         }
         PinMatch::Member => {
             state.login_guard.record_success(&client, &req.member);
-            issue_token(&config, &req.member, false).map_err(|e| Rejection::from(e.into_response()))
+            issue_token_at(&config, &req.member, false, issued)
+                .map_err(|e| Rejection::from(e.into_response()))
         }
         PinMatch::None => {
             record_failure(&state, &client, &req.member, now);
@@ -220,17 +225,30 @@ pub async fn login(
     }
 }
 
-/// Issue a JWT token for the given member/engineer
+/// Seconds since 1970 (0 before it).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Issue a JWT token for the given member/engineer, issued now.
 fn issue_token(
     config: &iem_core::Config,
     member_id: &str,
     engineer: bool,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ApiError>)> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    issue_token_at(config, member_id, engineer, unix_now())
+}
 
+/// [`issue_token`] with its `iat` (and the expiry from it) at `now`.
+fn issue_token_at(
+    config: &iem_core::Config,
+    member_id: &str,
+    engineer: bool,
+    now: u64,
+) -> Result<Json<LoginResponse>, (StatusCode, Json<ApiError>)> {
     // Use shorter expiry for engineer tokens (elevated access)
     let expiry_secs = if engineer {
         ENGINEER_TOKEN_EXPIRY_SECS
@@ -337,13 +355,17 @@ pub async fn change_pin(
     };
     let new_pin = req.new_pin.clone();
     let phc = with_hasher(&state, move |hasher| hasher.hash(&new_pin)).await?;
-    let saved = {
-        let mut store = state.pin_store.write().await;
-        if target == ENGINEER_ID {
-            store.set_engineer_hash(phc)
-        } else {
-            store.set_member_hash(&target, phc)
-        }
+    let mut store = state.pin_store.write().await;
+    let before = if target == ENGINEER_ID {
+        store.engineer_hash()
+    } else {
+        store.member_hash(&target)
+    }
+    .map(str::to_owned);
+    let saved = if target == ENGINEER_ID {
+        store.set_engineer_hash(phc)
+    } else {
+        store.set_member_hash(&target, phc)
     };
     saved.map_err(|e| {
         tracing::error!(error = %e, member = %target, "failed to save the PIN hash");
@@ -354,20 +376,28 @@ pub async fn change_pin(
         )
     })?;
     // Every token of the target issued before now ends here: another device
-    // that held the old PIN is logged out (#72). A failed save leaves those
-    // tokens valid, so the change answers 500 though the PIN is new.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    state.token_floor.raise(&target, now).map_err(|e| {
-        tracing::error!(error = %e, member = %target, "the PIN changed, but its old tokens were not ended");
-        error_response(
+    // that held the old PIN is logged out (#72). The store stays locked to here, so no login reads the new hash before
+    // its floor holds; a floor that cannot be saved puts the old PIN back
+    // and answers 500: nothing changed.
+    let now = unix_now();
+    if let Err(e) = state.token_floor.raise(&target, now) {
+        tracing::error!(error = %e, member = %target, "the old tokens could not be ended: the PIN change is undone");
+        let undone = match (target == ENGINEER_ID, before) {
+            (true, Some(old)) => store.set_engineer_hash(old),
+            (false, Some(old)) => store.set_member_hash(&target, old),
+            (false, None) => store.remove_member(&target).map(|_| ()),
+            (true, None) => Ok(()),
+        };
+        if let Err(e) = undone {
+            tracing::error!(error = %e, member = %target, "the old PIN could not be put back");
+        }
+        return Err(Rejection::from(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "IO_ERROR",
-            "Failed to end the old logins",
-        )
-    })?;
+            "Failed to save PIN",
+        )));
+    }
+    drop(store);
     tracing::info!(member = %target, by = %claims.sub, "PIN changed, older tokens ended");
     // The device that changed its own PIN stays logged in: a new token.
     if target == claims.sub {

@@ -110,6 +110,28 @@ test.describe("A member changes their PIN", () => {
     }
   });
 
+  test("a PIN change logs out the member's other open page (#72)", async ({ page, browser }) => {
+    // Another browser of the member, its page open before the change: its own storage, so it keeps the old
+    // token. Its open socket is closed at the server's next ping (10 s) and the page goes to the login.
+    const other = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      const otherPage = await other.newPage();
+      await openMixer(otherPage, MEMBER);
+      await page.waitForTimeout(1_100);
+      await page.setExtraHTTPHeaders(tunnelClient(24));
+      await openMixer(page, MEMBER);
+      await openDialog(page);
+      expect(await submit(page, [MEMBER_PIN, NEW_PIN, NEW_PIN])).toBe(200);
+      await closeSuccess(page);
+      await expect(otherPage).toHaveURL(/\/login/, { timeout: 25_000 });
+      // The page that changed it is still in.
+      await expect(page.getByTestId("global-volume-fader")).toBeVisible();
+    } finally {
+      await other.close();
+      await putBack(page);
+    }
+  });
+
   test("a wrong current PIN changes nothing and the dialog says so", async ({ page }) => {
     await page.setExtraHTTPHeaders(tunnelClient(22));
     try {

@@ -186,10 +186,11 @@ def save_backup(ip, root: Path, stamp: str, raw: bytes, manifest: dict[str, str]
     load_backup(ip, root, stamp)
 
 
-def prune_backups(root: Path) -> int:
-    """Deletes the stamp folders older than the newest KEEP_BACKUPS; anything else in `root` stays. Their count."""
-    stamps = sorted(p for p in root.iterdir() if p.is_dir() and STAMP.fullmatch(p.name))
-    old = stamps[:-KEEP_BACKUPS]
+def prune_backups(root: Path, kept: str) -> int:
+    """Deletes the stamp folders older than the newest KEEP_BACKUPS, never `kept` (the one just written, also
+    when a clock step sorts it first) and never a link; anything else in `root` stays. Their count."""
+    stamps = sorted(p for p in root.iterdir() if STAMP.fullmatch(p.name) and p.is_dir() and not p.is_symlink())
+    old = [p for p in stamps[:-KEEP_BACKUPS] if p.name != kept]
     for folder in old:
         shutil.rmtree(folder)
     return len(old)
@@ -203,7 +204,7 @@ def run_backup(ctx, ip) -> int:
     stamp = time.strftime("%Y%m%dT%H%M%S")
     save_backup(ip, backups(ip), stamp, raw, manifest, value)
     del value
-    pruned = prune_backups(backups(ip))
+    pruned = prune_backups(backups(ip), stamp)
     ip.emit({"gen3_backup": {"stamp": stamp, "members": len(manifest), "bytes": len(raw), "pepper": "kept",
                              "pruned": pruned}})
     return 0

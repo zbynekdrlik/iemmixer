@@ -64,7 +64,7 @@ pub async fn ws_audio(
         ));
     }
     let hil = asks_for_probe(&query);
-    Ok(ws.on_upgrade(move |socket| session(socket, state, hil)))
+    Ok(ws.on_upgrade(move |socket| session(socket, state, claims, hil)))
 }
 
 /// `&hil=1`: the session also takes its slot's listen probe. Any other
@@ -239,7 +239,7 @@ impl Feeds {
     }
 }
 
-async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
+async fn session(mut socket: WebSocket, state: AppState, claims: iem_core::AuthClaims, hil: bool) {
     tracing::info!(hil, "Audio WebSocket connected");
     let mut current: Option<(MixId, String)> = None;
     let mut feed: Option<Feeds> = None;
@@ -312,6 +312,16 @@ async fn session(mut socket: WebSocket, state: AppState, hil: bool) {
                     break;
                 }
                 Due::Ping => {
+                    // A token a PIN change ended ends its listening too (#72).
+                    if !crate::auth::subject_known(&state, &claims) {
+                        tracing::info!(hil, "Audio WebSocket token ended: closing");
+                        let close = Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: crate::mixer_ws::CLOSE_RELOAD,
+                            reason: "reload".into(),
+                        }));
+                        let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(close)).await;
+                        break;
+                    }
                     if !ws_alive::send(socket.send(ws_alive::ping())).await {
                         break;
                     }
