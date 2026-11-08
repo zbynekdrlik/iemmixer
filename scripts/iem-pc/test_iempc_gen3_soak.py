@@ -434,12 +434,12 @@ class CriteriaTests(SoakBase):
         code, docs, err = self.gate_run(FAKE_CLIENT_EXIT="1")
         self.assertEqual(self.calls()[-4:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY])
 
-    def test_listen_gaps_are_counted_not_judged(self) -> None:
-        # Owner on #72, 2026-10-29: the browser listen is low priority; its gaps never fail the gate.
+    def test_a_listen_gap_fails_the_harness(self) -> None:
+        # #88: the listen ran 30 min with no gap at three times the gate's reads (2026-11-08); a gap fails it now.
         code, docs, err = self.gate_run(FAKE_GAPS="3")
-        self.assertEqual(code, 0, err)
+        self.assertEqual(code, 1, err)
         doc = self.line(docs)
-        self.assertEqual((doc["failed"], doc["harness"]["problems"], doc["harness"]["gaps"]), ([], [], 3))
+        self.assertEqual((doc["failed"], doc["harness"]["problems"], doc["harness"]["gaps"]), (["harness"], ["gaps 3"], 3))
 
     def test_reads_that_fail_or_leave_a_hole_fail_polls(self) -> None:
         code, docs, err = self.gate_run(FAKE_STATUS_FAILS="1")

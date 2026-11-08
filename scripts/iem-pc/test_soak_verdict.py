@@ -59,16 +59,16 @@ class Harness(unittest.TestCase):
 
     def test_the_gen3_box_gate_judges_the_summary_with_a_meter_frame(self):
         # iempc gen3-gate soak (#72 phase H): the summary's checks with a meter frame (the box's real server sends
-        # them), and the numbers for the gate's line. Gaps are counted, not judged (owner on #72, 2026-10-29: the
-        # browser listen is low priority).
+        # them), and the numbers for the gate's line. Every listen gap fails it (#88: 0 gaps in 30 min at three
+        # times the gate's reads, 2026-11-08).
         box = harness(seconds=7200.4, frames=360_000, expected_frames=360_000, meter_frames=72_000)
         self.assertEqual(sv.box_check(box, 7200), ([], {"frames": 360_000, "expected_frames": 360_000, "gaps": 0,
                                                          "reconnects": 0, "decode_errors": 0, "meter_frames": 72_000,
                                                          "seconds": 7200.4}))
-        self.assertEqual(sv.box_check({**box, "gaps": 8}, 7200), ([], {"frames": 360_000, "expected_frames": 360_000,
-                                                                        "gaps": 8, "reconnects": 0, "decode_errors": 0,
-                                                                        "meter_frames": 72_000, "seconds": 7200.4}))
-        self.assertEqual(sv.box_check({**box, "gaps": 8, "reconnects": 1}, 7200)[0], ["reconnects 1"])
+        self.assertEqual(sv.box_check({**box, "gaps": 1}, 7200), (["gaps 1"], {"frames": 360_000, "expected_frames": 360_000,
+                                                                              "gaps": 1, "reconnects": 0, "decode_errors": 0,
+                                                                              "meter_frames": 72_000, "seconds": 7200.4}))
+        self.assertEqual(sv.box_check({**box, "gaps": 8, "reconnects": 1}, 7200)[0], ["gaps 8", "reconnects 1"])
         self.assertEqual(sv.box_check({**box, "meter_frames": 0}, 7200)[0], ["no meter frames"])
         self.assertEqual(sv.box_check({**box, "frames": 350_000}, 7200)[0], ["frames 97.22 % of expected"])
         self.assertEqual(sv.box_check({**box, "seconds": 7199.9}, 7200)[0], ["harness ran 7199.9 s of 7200 s"])
