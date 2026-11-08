@@ -219,6 +219,23 @@ class BackupTests(Base):
         with self.assertRaises(Ip.StepError):
             nb.load_backup(self.ip, nb.backups(self.ip), stamp)
 
+    def test_only_the_newest_backups_are_kept(self) -> None:
+        # About 0.8 MB of the band's secrets a night: the newest KEEP_BACKUPS stay, older stamps go, anything
+        # that is not a stamp is left alone.
+        root = nb.backups(self.ip)
+        root.mkdir(mode=0o700)
+        old = [f"202601{d:02d}T043000" for d in range(1, nb.KEEP_BACKUPS + 1)]
+        for stamp in old:
+            (root / stamp).mkdir()
+            (root / stamp / "pepper").write_bytes(b"x")
+        (root / "notes").mkdir()
+        (root / ".20260101T000000.incoming").mkdir()
+        self.assertEqual(nb.run_backup(self.ctx(), self.ip), 0)
+        doc = self.ip.emitted[-1]["gen3_backup"]
+        self.assertEqual(doc["pruned"], 1)
+        left = sorted(p.name for p in root.iterdir())
+        self.assertEqual(left, sorted([".20260101T000000.incoming", "notes", *old[1:], doc["stamp"]]))
+
     def test_a_stamp_is_no_path(self) -> None:
         with self.assertRaises(Ip.Refused):
             nb.load_backup(self.ip, nb.backups(self.ip), "../secret")
