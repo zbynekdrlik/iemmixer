@@ -16,7 +16,7 @@ name = "iem-dante-dev"
 path = "src/main.rs"
 
 [dependencies]
-iem-dante = { package = "dstack", git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.52" }
+iem-dante = { package = "dstack", git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.53" }
 # The box's health (#72, taken from dstack at its v0.2.0): its line and
 # the server's /api/version reply. Both already in the closure through
 # dstack.
