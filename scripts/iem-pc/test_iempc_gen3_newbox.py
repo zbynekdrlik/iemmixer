@@ -253,6 +253,7 @@ class BackupTests(Base):
         self.assertEqual(doc["pruned"], 0)
         self.assertTrue((root / doc["stamp"]).is_dir())
         self.assertTrue(target.is_dir())
+        self.assertTrue((root / "20000101T000000").is_symlink())
 
     def test_a_stamp_is_no_path(self) -> None:
         with self.assertRaises(Ip.Refused):

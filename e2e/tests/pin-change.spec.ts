@@ -1,5 +1,5 @@
 import type { Page, Response } from "@playwright/test";
-import { test, expect } from "./support/fixtures";
+import { collectConsole, test, expect } from "./support/fixtures";
 import { ENGINEER_PIN, MEMBER_PIN, wrongPin } from "./support/pins";
 import { login, openMixer } from "./support/session";
 
@@ -115,7 +115,9 @@ test.describe("A member changes their PIN", () => {
     // token. Its open socket is closed at the server's next ping (10 s) and the page goes to the login.
     const other = await browser.newContext({ baseURL: test.info().project.use.baseURL });
     try {
+      await other.setExtraHTTPHeaders(tunnelClient(25));
       const otherPage = await other.newPage();
+      const otherConsole = collectConsole(otherPage, [/status of 401/]);
       await openMixer(otherPage, MEMBER);
       await page.waitForTimeout(1_100);
       await page.setExtraHTTPHeaders(tunnelClient(24));
@@ -126,6 +128,7 @@ test.describe("A member changes their PIN", () => {
       await expect(otherPage).toHaveURL(/\/login/, { timeout: 25_000 });
       // The page that changed it is still in.
       await expect(page.getByTestId("global-volume-fader")).toBeVisible();
+      expect(otherConsole, "the other page's console").toEqual([]);
     } finally {
       await other.close();
       await putBack(page);

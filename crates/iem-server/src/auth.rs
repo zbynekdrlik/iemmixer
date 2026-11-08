@@ -178,12 +178,14 @@ pub async fn login(
     if !req.member.is_empty() && !member_exists(&state, &req.member) {
         return Err(Rejection::from(member_not_found()));
     }
-    // The token's time is taken before the hashes are read: a PIN change
-    // that lands between this read and the token ends the token too (#72).
-    let issued = unix_now();
-    let (engineer_hash, member_hash) = {
+    // The token's time is taken under the store's read guard: a change
+    // done before it gives a time at or after the change's floor, a change
+    // after it (a later second) ends this token too (#72; within one second
+    // the token survives, `token_floor`'s documented whole-second limit).
+    let (issued, engineer_hash, member_hash) = {
         let store = state.pin_store.read().await;
         (
+            unix_now(),
             store.engineer_hash().map(str::to_owned),
             store.member_hash(&req.member).map(str::to_owned),
         )
@@ -355,48 +357,32 @@ pub async fn change_pin(
     };
     let new_pin = req.new_pin.clone();
     let phc = with_hasher(&state, move |hasher| hasher.hash(&new_pin)).await?;
+    // The floor first, then the hash, both under the store's write guard so
+    // no login reads the new hash before its floor holds (#72). A floor that
+    // cannot be saved changes nothing; a hash that cannot be saved after it
+    // leaves the old PIN working and the older tokens ended.
     let mut store = state.pin_store.write().await;
-    let before = if target == ENGINEER_ID {
-        store.engineer_hash()
-    } else {
-        store.member_hash(&target)
-    }
-    .map(str::to_owned);
-    let saved = if target == ENGINEER_ID {
-        store.set_engineer_hash(phc)
-    } else {
-        store.set_member_hash(&target, phc)
-    };
-    saved.map_err(|e| {
-        tracing::error!(error = %e, member = %target, "failed to save the PIN hash");
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            "Failed to save PIN",
-        )
-    })?;
-    // Every token of the target issued before now ends here: another device
-    // that held the old PIN is logged out (#72). The store stays locked to here, so no login reads the new hash before
-    // its floor holds; a floor that cannot be saved puts the old PIN back
-    // and answers 500: nothing changed.
-    let now = unix_now();
-    if let Err(e) = state.token_floor.raise(&target, now) {
-        tracing::error!(error = %e, member = %target, "the old tokens could not be ended: the PIN change is undone");
-        let undone = match (target == ENGINEER_ID, before) {
-            (true, Some(old)) => store.set_engineer_hash(old),
-            (false, Some(old)) => store.set_member_hash(&target, old),
-            (false, None) => store.remove_member(&target).map(|_| ()),
-            (true, None) => Ok(()),
-        };
-        if let Err(e) = undone {
-            tracing::error!(error = %e, member = %target, "the old PIN could not be put back");
-        }
+    if let Err(e) = state.token_floor.raise(&target, unix_now()) {
+        tracing::error!(error = %e, member = %target, "the old tokens could not be ended: the PIN is not changed");
         return Err(Rejection::from(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "IO_ERROR",
             "Failed to save PIN",
         )));
     }
+    let saved = if target == ENGINEER_ID {
+        store.set_engineer_hash(phc)
+    } else {
+        store.set_member_hash(&target, phc)
+    };
+    saved.map_err(|e| {
+        tracing::error!(error = %e, member = %target, "failed to save the PIN hash (its older tokens are ended)");
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            "Failed to save PIN",
+        )
+    })?;
     drop(store);
     tracing::info!(member = %target, by = %claims.sub, "PIN changed, older tokens ended");
     // The device that changed its own PIN stays logged in: a new token.
