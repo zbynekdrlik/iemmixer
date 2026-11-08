@@ -4,7 +4,7 @@
 It judges an iem-soakclient summary, in order:
 
 - the client ran to its end, and for the seconds asked;
-- no more gaps than allowed (`None`: gaps are counted, not judged);
+- no more gaps than allowed (`None`: gaps are counted, not judged; the box's gate allows 0);
 - no reconnect;
 - at least FRAMES_PERCENT of the expected listen frames (with gaps measured
   between frames, gaps alone cannot tell a thinned stream from a full one);
@@ -12,9 +12,8 @@ It judges an iem-soakclient summary, in order:
   proof that the client reads its Meters).
 
 `harness` is CI's e2e step: it prints the problems and exits 1 when there are
-any. `box_check` is the Gen 3 box's soak gate (`iempc gen3-gate soak`); its gaps
-are counted, not judged (owner on #72, 2026-10-29: the browser listen is low
-priority, #88).
+any. `box_check` is the Gen 3 box's soak gate (`iempc gen3-gate soak`); any
+listen gap fails it (#88).
 
 What it prints holds numbers and fixed words only (P6): never a member id, a
 host or a SHA. The client's reason codes are printed only when they are known
@@ -88,8 +87,8 @@ def _ci_check(summary: object, min_seconds: float, max_gaps: int | None) -> tupl
 
 def box_check(summary: object, min_seconds: float) -> tuple[list[str], dict]:
     """The Gen 3 box's soak gate (`iempc gen3-gate soak`, iempc_gen3_soak.py): the summary's checks and its numbers.
-    Gaps are counted, not judged (owner on #72, 2026-10-29: the browser listen is low priority, #88)."""
-    return _ci_check(summary, min_seconds, None)
+    Every listen gap fails it (#88)."""
+    return _ci_check(summary, min_seconds, 0)
 
 
 def read_json(path: Path) -> object:

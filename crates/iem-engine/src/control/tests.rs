@@ -207,7 +207,6 @@ fn status_reports_microseconds_counters_and_the_backlog() {
         fault: None,
         last_reopen_us: 0,
         fault_callback_ns: 0,
-        ..StreamStats::default()
     };
     let s = r.c.status_msg(&st);
     assert_eq!((s.callbacks, s.late, s.faulted), (7, 1, false));

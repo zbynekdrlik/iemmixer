@@ -68,7 +68,7 @@ The gate is `scripts/iem-pc/iempc_gen3_soak.py` (`.claude/rules/gen3.md`, "The b
   - `error`: the reason code, or null.
 - **The verdict** (`soak_verdict.py`, pure, stdlib) judges a summary, in order; every check runs, so the problems stay complete (`test_harness_problems_for_the_ci_step`):
   1. the harness is complete and ran the seconds asked;
-  2. no more gaps than allowed (`None`, the box's gate: counted, not judged);
+  2. no more gaps than allowed (`None`: counted, not judged; the box's gate allows 0, #88);
   3. no reconnect;
   4. at least 99 % of the expected listen frames, and at least one frame (gaps are measured between frames, so gaps alone cannot tell a thinned stream from a full one);
   5. a meter frame (only for a readable summary).
@@ -82,8 +82,15 @@ The gate is `scripts/iem-pc/iempc_gen3_soak.py` (`.claude/rules/gen3.md`, "The b
   - The soak's page socket on the member's mix keeps that mix's solo past the 10 s grace (`solo.rs`: `SoloJanitor` counts any page connection on the mix). Not changed.
   - The member listen tap is one slot (`listen_ws.rs`): while the client listens to its member's mix, an engineer's Listen to another member's mix answers `no_source`.
   - So the box's gate listens to a member who is not active (`SOAK_MEMBER`), and CI's to member9 after Playwright.
-- **The Gen 3 box's soak gate reuses the client and the verdict** (#72 phase H; `iempc gen3-gate soak`, `iempc_gen3_soak.py`, `.claude/rules/gen3.md` "The box's soak gate"): the same `iem-soakclient` as the service user in a transient unit on the box (`--direct` at its own server, `--jwt-secret-file` the box server's key, `--expect-build` the box's build), 10 to 120 minutes, and `soak_verdict.box_check` on its summary (`_ci_check` with `max_gaps` `None`: the listen gaps are counted, not judged, owner on #72, 2026-10-29, #88), beside the dev box's reads of the box's own counters. A change to the client's summary or to the checks reaches that gate too.
+- **The Gen 3 box's soak gate reuses the client and the verdict** (#72 phase H; `iempc gen3-gate soak`, `iempc_gen3_soak.py`, `.claude/rules/gen3.md` "The box's soak gate"): the same `iem-soakclient` as the service user in a transient unit on the box (`--direct` at its own server, `--jwt-secret-file` the box server's key, `--expect-build` the box's build), 10 to 120 minutes, and `soak_verdict.box_check` on its summary (`_ci_check` with `max_gaps` 0: any listen gap fails it, #88; it was counted only until 2026-11-08), beside the dev box's reads of the box's own counters. A change to the client's summary or to the checks reaches that gate too.
 
 ## The 72 h NullRt soak: dropped (owner, 2026-10-10)
 
 - An event lasts at most 2 h; the owner dropped the 72 h NullRt soak as waste. The tool (`scripts/soak/`), its tests and the CI artifact are removed. A 5.2 h run before the stop showed no memory growth and flat fds and threads (numbers on #10, 2026-10-10). `iempc gen3-gate soak`, up to 120 minutes, is the long run now.
+
+## Reading a failed box soak
+
+- The box runs at 96 kHz: one sample is 10.4 µs, so samples divided by 96 give ms. The conversion at 48 kHz gave twice the real value and went out to other sessions on 2026-11-06.
+- `iem-dante-dev ctl status` keeps counters since the flow started, and a flow id changes when its sender reconnects. Split a soak's `rx_late` by flow and its `rx_holes` by channel (the gate counts them that way), each by second, with a per-second delta of those counters started before the soak. The deltas must add up to the gate's numbers; a hole counts once, on its channel.
+- A late burst at the box alone proves nothing about where it came from. Compare the second at the flow's other receivers, in Dante Controller's history: the same event at all of them is the sender's side. An event only here is ours.
+- The gate is not loosened for an announced outage: it stays a failure, recorded with its window.
