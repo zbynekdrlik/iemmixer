@@ -33,6 +33,9 @@ pub const CLOSE_RELOAD: u16 = 4001;
 /// `/api/lineup` and connects again, or shows which band plays. Never a
 /// reload.
 pub const CLOSE_LINEUP: u16 = 4003;
+/// The close of a session whose token was ended (a PIN change, #72): the
+/// page forgets its token and opens the login.
+pub const CLOSE_SIGNED_OUT: u16 = 4004;
 
 /// Query parameters of the page and media sockets.
 #[derive(Debug, serde::Deserialize)]
@@ -406,8 +409,8 @@ async fn session(
                     if !crate::auth::subject_known(&state, &claims) {
                         tracing::info!(page = %page.id, session, "WebSocket token ended: closing");
                         let close = Message::Close(Some(CloseFrame {
-                            code: CLOSE_RELOAD,
-                            reason: "reload".into(),
+                            code: CLOSE_SIGNED_OUT,
+                            reason: "signed out".into(),
                         }));
                         let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(close)).await;
                         break;

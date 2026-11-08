@@ -923,6 +923,18 @@ fn connect_websocket(
                 let _ = set_lineup.try_update(LineupView::reread);
                 read_lineup(page_state, page_id_close.clone());
             }
+            // #72: a PIN change ended the token. No reload loop: the page
+            // forgets the token and opens the login for its page.
+            OnClose::SignedOut => {
+                let _ = set_connected.try_set(false);
+                crate::auth::clear_auth();
+                if let Some(window) = web_sys::window() {
+                    let id = page_id_close.clone();
+                    let _ = window
+                        .location()
+                        .set_href(&format!("/login?member={id}&next=/{id}"));
+                }
+            }
             OnClose::Failed => {
                 let _ = set_connected.try_set(false);
             }

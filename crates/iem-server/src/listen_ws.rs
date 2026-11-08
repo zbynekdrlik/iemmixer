@@ -316,8 +316,8 @@ async fn session(mut socket: WebSocket, state: AppState, claims: iem_core::AuthC
                     if !crate::auth::subject_known(&state, &claims) {
                         tracing::info!(hil, "Audio WebSocket token ended: closing");
                         let close = Message::Close(Some(axum::extract::ws::CloseFrame {
-                            code: crate::mixer_ws::CLOSE_RELOAD,
-                            reason: "reload".into(),
+                            code: crate::mixer_ws::CLOSE_SIGNED_OUT,
+                            reason: "signed out".into(),
                         }));
                         let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(close)).await;
                         break;
