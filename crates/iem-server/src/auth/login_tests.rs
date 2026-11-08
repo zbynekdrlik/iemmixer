@@ -136,6 +136,30 @@ async fn engineer_pin_works_from_any_member_login() {
 }
 
 #[tokio::test]
+async fn a_member_whose_pin_equals_the_engineers_gets_a_member_session() {
+    // A member who picks the engineer's PIN value (about 1 in 10,000) must
+    // not get an engineer session from their own login (#72, from #86):
+    // their own PIN is the match for their own name.
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path()).await;
+    let same = state.pin_hasher.hash(ENGINEER_PIN);
+    state
+        .pin_store
+        .write()
+        .await
+        .set_member_hash("member1", same)
+        .unwrap();
+    let app = app(state, LAN);
+    let body = json_body(login_as(&app, "member1", ENGINEER_PIN, &[]).await).await;
+    assert_eq!(body["engineer"], false);
+    assert_eq!(body["member"], "member1");
+    // The engineer PIN still opens the engineer from any other member login.
+    let body = json_body(login_as(&app, "member2", ENGINEER_PIN, &[]).await).await;
+    assert_eq!(body["engineer"], true);
+    assert_eq!(body["member"], "engineer");
+}
+
+#[tokio::test]
 async fn engineer_login_needs_the_engineer_pin() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(test_state(dir.path()).await, LAN);
