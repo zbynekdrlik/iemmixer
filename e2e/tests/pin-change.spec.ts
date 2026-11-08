@@ -69,9 +69,22 @@ test.describe("A member changes their PIN", () => {
     await page.setExtraHTTPHeaders(tunnelClient(21));
     try {
       await openMixer(page, MEMBER);
+      // Another device of the member, logged in before the change (#72): a
+      // token's time is whole seconds, so the change comes a second later.
+      const otherDevice = await login(page, MEMBER);
+      await page.waitForTimeout(1_100);
       await openDialog(page);
       expect(await submit(page, [MEMBER_PIN, NEW_PIN, NEW_PIN])).toBe(200);
       await closeSuccess(page);
+
+      // The other device is logged out; this page took a new token and stays in, a reload too.
+      const ended = await page.request.post("/api/auth/change-pin", {
+        headers: { Authorization: `Bearer ${otherDevice.token}` },
+        data: { old_pin: NEW_PIN, new_pin: NEW_PIN },
+      });
+      expect(ended.status()).toBe(401);
+      await page.reload();
+      await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
 
       await page.locator(".settings-btn").click();
       await page.locator(".settings-modal .logout-btn").click();
