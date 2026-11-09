@@ -251,6 +251,11 @@ async fn rig(tx1: Source, tx2: Source) -> Rig {
         assert!(media.tx.set_source(tx, Source::Engine));
     }
 
+    // Our server grants a new flow only once our TX clock is ready (dstack
+    // #20): the TX pass sets that flag, and this rig steps the TX itself
+    // only after the flow, so it sets the flag first. The manual clock is
+    // ready (a test that wants it not ready says so after the rig).
+    media.tx.set_clock_ready(true);
     // Our client asks our server for the flow: all four channels in one.
     let resolver = OwnAt {
         own: Own::new(&device.state, &device.cfg, Ipv4Addr::LOCALHOST),
