@@ -1157,3 +1157,18 @@ class PureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReceivingTests(unittest.TestCase):
+    """Which RX channels a status shows receiving (#72: dstack v0.6.54 receives multicast)."""
+
+    def status(self, *pairs: tuple[int, int]) -> dict:
+        return {"channels": [{"rx": rx, "status": code} for rx, code in pairs]}
+
+    def test_a_multicast_channel_receives(self) -> None:
+        # dstack's SubStatus: 9 Subscribed (unicast), reported 0x0101_0009 with the receiver detail; 10 Subscribed
+        # (multicast), reported bare. Any receiver detail in the high 16 bits is the same status.
+        st = self.status((1, 0x0101_0009), (3, 10), (4, 0x0301_0009), (5, 0x0100_000A), (6, 8), (7, 1), (8, 0))
+        self.assertEqual(gate.receiving(st), {1, 3, 4, 5})
+        self.assertEqual(gate.not_receiving(st), {6, 7})
+        self.assertEqual(gate.not_receiving(st, frozenset({6})), {7})

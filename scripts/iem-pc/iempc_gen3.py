@@ -18,6 +18,14 @@ from pathlib import Path
 DANTE_BIN = "/opt/iemmixer/bin/iem-dante-dev"
 SSH = ("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 RECEIVING = 0x0101_0009   # ARC 0x3000's Receiving, as the status's `channels` name it
+# dstack's SubStatus values that carry audio (the status word's low 16 bits; the high 16 are a receiver detail):
+# 9 Subscribed (unicast), 10 Subscribed (multicast, dstack v0.6.54, #72).
+RECEIVING_VALUES = (9, 10)
+
+
+def is_receiving(code: object) -> bool:
+    """Whether a channel's status word shows a subscription that receives (pure)."""
+    return type(code) is int and (code & 0xFFFF) in RECEIVING_VALUES
 CTL_S = 30   # one ctl call over ssh: the connect, then the socket's own 1 s
 
 
