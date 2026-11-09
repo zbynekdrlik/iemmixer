@@ -111,8 +111,8 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "dstack"
-version = "0.6.54"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.54#f4c497a7304ee06215964697a7f42389e2b79917"
+version = "0.6.56"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.56#2f0caab96ded6aaea0c04bb64c8c60733b0415b0"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -134,8 +134,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.54"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.54#f4c497a7304ee06215964697a7f42389e2b79917"
+version = "0.6.56"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.56#2f0caab96ded6aaea0c04bb64c8c60733b0415b0"
 
 [[package]]
 name = "dsync-ptp"
@@ -219,18 +219,18 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.62"
+version = "2.0.0-dev.63"
 dependencies = [
  "dstack-audio-io",
 ]
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.62"
+version = "2.0.0-dev.63"
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.62"
+version = "2.0.0-dev.63"
 dependencies = [
  "dstack",
  "iem-audio-io",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.62"
+version = "2.0.0-dev.63"
 dependencies = [
  "serde",
  "serde_json",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.62"
+version = "2.0.0-dev.63"
 
 [[package]]
 name = "if-addrs"
@@ -378,7 +378,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.54#f4c497a7304ee06215964697a7f42389e2b79917"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.56#2f0caab96ded6aaea0c04bb64c8c60733b0415b0"
 dependencies = [
  "fastrand",
  "flume",
