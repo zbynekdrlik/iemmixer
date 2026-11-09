@@ -298,7 +298,7 @@ def receiving(status: dict) -> set[int]:
         rows = g3.rows(status, "channels")
     except ValueError:
         return set()
-    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") == g3.RECEIVING}
+    return {c["rx"] for c in rows if type(c.get("rx")) is int and g3.is_receiving(c.get("status"))}
 
 
 def optional_rx(ip, env: dict) -> frozenset[int]:
@@ -318,8 +318,8 @@ def not_receiving(status: dict, optional: frozenset[int] = frozenset()) -> set[i
         rows = g3.rows(status, "channels")
     except ValueError:
         return set()
-    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") not in (0, None, g3.RECEIVING)
-            and c["rx"] not in optional}
+    return {c["rx"] for c in rows if type(c.get("rx")) is int and c.get("status") not in (0, None)
+            and not g3.is_receiving(c.get("status")) and c["rx"] not in optional}
 
 
 def hil_peaks(status) -> dict[int, float] | None:
