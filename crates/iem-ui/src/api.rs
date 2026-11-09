@@ -410,11 +410,19 @@ pub async fn change_pin(old_pin: &str, new_pin: &str, member: &str) -> Result<()
         .await
         .map_err(|e| format!("Network error: {}", e))?;
 
-    if resp.ok() {
-        Ok(())
-    } else {
-        Err(change_pin_error(resp.status()))
+    if !resp.ok() {
+        return Err(change_pin_error(resp.status()));
     }
+    // A change of the page's own PIN ends every older token, this page's too,
+    // and answers a new one (#72); a reset of someone else's PIN answers none.
+    if let Ok(auth) = resp.json::<LoginResponse>().await {
+        crate::auth::save_auth(&crate::auth::AuthState {
+            token: auth.token,
+            member: auth.member,
+            engineer: auth.engineer,
+        });
+    }
+    Ok(())
 }
 
 /// The PIN dialog's text for a refused change (`status` = HTTP status).

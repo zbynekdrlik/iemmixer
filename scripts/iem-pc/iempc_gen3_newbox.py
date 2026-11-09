@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -95,6 +96,8 @@ SSH_LOST = 255
 # verify_box.py's checks a box no deploy has reached fails, by design.
 BEFORE_DEPLOY = {"units", "napi"}
 STAMP = re.compile(r"[0-9]{8}T[0-9]{6}")
+# The nightly backups kept (#72): about 0.8 MB of the band's secrets each; older stamps are deleted.
+KEEP_BACKUPS = 30
 HOST = re.compile(r"[A-Za-z0-9_.@-]{1,128}")
 NEW_BOX_KEYS = ("GEN3_HOST", "GEN3_DEVICE_CONFIG", "GEN3_SITE_FILE", "GEN3_ROSTER_FILE", "GEN3_DANTESYNC_CONFIG",
                 "GEN3_DANTESYNC_VERSION", "GEN3_DANTESYNC_SHA256", "GEN3_CLOUDFLARED_VERSION",
@@ -183,6 +186,16 @@ def save_backup(ip, root: Path, stamp: str, raw: bytes, manifest: dict[str, str]
     load_backup(ip, root, stamp)
 
 
+def prune_backups(root: Path, kept: str) -> int:
+    """Deletes the stamp folders older than the newest KEEP_BACKUPS, never `kept` (the one just written, also
+    when a clock step sorts it first) and never a link; anything else in `root` stays. Their count."""
+    stamps = sorted(p for p in root.iterdir() if STAMP.fullmatch(p.name) and p.is_dir() and not p.is_symlink())
+    old = [p for p in stamps[:-KEEP_BACKUPS] if p.name != kept]
+    for folder in old:
+        shutil.rmtree(folder)
+    return len(old)
+
+
 def run_backup(ctx, ip) -> int:
     """`iempc gen3-backup`."""
     host = g3.gen3_host(ip, ctx.env, BACKUP_WORDS)
@@ -191,7 +204,9 @@ def run_backup(ctx, ip) -> int:
     stamp = time.strftime("%Y%m%dT%H%M%S")
     save_backup(ip, backups(ip), stamp, raw, manifest, value)
     del value
-    ip.emit({"gen3_backup": {"stamp": stamp, "members": len(manifest), "bytes": len(raw), "pepper": "kept"}})
+    pruned = prune_backups(backups(ip), stamp)
+    ip.emit({"gen3_backup": {"stamp": stamp, "members": len(manifest), "bytes": len(raw), "pepper": "kept",
+                             "pruned": pruned}})
     return 0
 
 

@@ -635,3 +635,152 @@ async fn a_removed_person_may_not() {
         StatusCode::OK
     );
 }
+
+/// A bearer token of `member` issued `ago` seconds before now.
+fn bearer_issued_ago(member: &str, engineer: bool, ago: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = AuthClaims {
+        sub: member.to_string(),
+        engineer,
+        exp: now + 3600,
+        iat: now - ago,
+    };
+    format!(
+        "Bearer {}",
+        jwt::encode_hs256(&claims, SECRET.as_bytes()).unwrap()
+    )
+}
+
+#[tokio::test]
+async fn an_engineers_reset_ends_the_members_older_tokens_only() {
+    // #72 (from #86): another device that knew the old PIN stays logged in no longer.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(test_state(dir.path()).await, LAN);
+    let member1_before = bearer_issued_ago("member1", false, 10);
+    let member2_before = bearer_issued_ago("member2", false, 10);
+    let resp = change(
+        &app,
+        &bearer("engineer", true),
+        serde_json::json!({ "new_pin": NEW_PIN, "member": "member1" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let tried = serde_json::json!({ "old_pin": NEW_PIN, "new_pin": MEMBER_PIN });
+    assert_eq!(
+        change(&app, &member1_before, tried.clone()).await.status(),
+        StatusCode::UNAUTHORIZED,
+        "member1's token from before the reset is ended"
+    );
+    // member2's token is untouched: it reaches the PIN check (member2 has no PIN, so 401 INVALID_PIN, not
+    // the token's 401): told apart by the error code.
+    let other = change(
+        &app,
+        &member2_before,
+        serde_json::json!({ "old_pin": "1111", "new_pin": NEW_PIN }),
+    )
+    .await;
+    assert_eq!(json_body(other).await["code"], "INVALID_PIN");
+    // A login with the new PIN gives a token that works.
+    let token = json_body(login_as(&app, "member1", NEW_PIN, &[]).await).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        change(&app, &format!("Bearer {token}"), tried)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_members_own_change_ends_its_other_tokens_and_hands_back_a_new_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(test_state(dir.path()).await, LAN);
+    let other_device = bearer_issued_ago("member1", false, 10);
+    let resp = change(
+        &app,
+        &bearer_issued_ago("member1", false, 5),
+        serde_json::json!({ "old_pin": MEMBER_PIN, "new_pin": NEW_PIN }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(
+        (body["member"].as_str(), body["engineer"].as_bool()),
+        (Some("member1"), Some(false))
+    );
+    let fresh = format!("Bearer {}", body["token"].as_str().unwrap());
+    let back = serde_json::json!({ "old_pin": NEW_PIN, "new_pin": MEMBER_PIN });
+    assert_eq!(
+        change(&app, &other_device, back.clone()).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(change(&app, &fresh, back).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_engineers_rotation_ends_older_engineer_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(test_state(dir.path()).await, LAN);
+    let other_device = bearer_issued_ago("engineer", true, 10);
+    let resp = change(
+        &app,
+        &bearer_issued_ago("engineer", true, 5),
+        serde_json::json!({ "new_pin": NEW_PIN, "member": "engineer" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let fresh = format!(
+        "Bearer {}",
+        json_body(resp).await["token"].as_str().unwrap()
+    );
+    let reset = serde_json::json!({ "new_pin": WRONG_PIN, "member": "member2" });
+    assert_eq!(
+        change(&app, &other_device, reset.clone()).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(change(&app, &fresh, reset).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_floor_that_cannot_be_saved_undoes_the_change() {
+    // A 500 means nothing changed: the old PIN still logs in, the new one not.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(test_state(dir.path()).await, LAN);
+    let floor = dir
+        .path()
+        .join(crate::secrets::SECRETS_DIR)
+        .join(crate::token_floor::TOKEN_FLOOR_FILE);
+    std::fs::create_dir_all(&floor).unwrap();
+    let resp = change(
+        &app,
+        &bearer("engineer", true),
+        serde_json::json!({ "new_pin": NEW_PIN, "member": "member1" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        login_as(&app, "member1", MEMBER_PIN, &[]).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_as(&app, "member1", NEW_PIN, &[]).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    // member2 had no PIN: still none.
+    let resp = change(
+        &app,
+        &bearer("engineer", true),
+        serde_json::json!({ "new_pin": NEW_PIN, "member": "member2" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        login_as(&app, "member2", NEW_PIN, &[]).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}

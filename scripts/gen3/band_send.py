@@ -30,8 +30,8 @@ import zipfile
 from pathlib import Path
 
 # The same lists as band_receive.py.
-SERVER_FILES = ("secrets/jwt_secret", "secrets/vapid_private", "secrets/pin_hashes.json", "roster.toml",
-                "push_subscriptions.json", "push_subs_v2_migrated", "alarm_subscriptions.json")
+SERVER_FILES = ("secrets/jwt_secret", "secrets/vapid_private", "secrets/pin_hashes.json", "secrets/token_floor.json",
+                "roster.toml", "push_subscriptions.json", "push_subs_v2_migrated", "alarm_subscriptions.json")
 SERVER_FOLDERS = ("lineups", "photos", "presets", "snapshots", "customizations", "backups")
 ENGINE_NAME = re.compile(r"current\.json|baseline\.json|current\.json\.rev-[0-9]+|gen-.*\.json")
 

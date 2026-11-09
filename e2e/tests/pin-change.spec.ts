@@ -1,5 +1,5 @@
 import type { Page, Response } from "@playwright/test";
-import { test, expect } from "./support/fixtures";
+import { collectConsole, test, expect } from "./support/fixtures";
 import { ENGINEER_PIN, MEMBER_PIN, wrongPin } from "./support/pins";
 import { login, openMixer } from "./support/session";
 
@@ -69,9 +69,22 @@ test.describe("A member changes their PIN", () => {
     await page.setExtraHTTPHeaders(tunnelClient(21));
     try {
       await openMixer(page, MEMBER);
+      // Another device of the member, logged in before the change (#72): a
+      // token's time is whole seconds, so the change comes a second later.
+      const otherDevice = await login(page, MEMBER);
+      await page.waitForTimeout(1_100);
       await openDialog(page);
       expect(await submit(page, [MEMBER_PIN, NEW_PIN, NEW_PIN])).toBe(200);
       await closeSuccess(page);
+
+      // The other device is logged out; this page took a new token and stays in, a reload too.
+      const ended = await page.request.post("/api/auth/change-pin", {
+        headers: { Authorization: `Bearer ${otherDevice.token}` },
+        data: { old_pin: NEW_PIN, new_pin: NEW_PIN },
+      });
+      expect(ended.status()).toBe(401);
+      await page.reload();
+      await expect(page.getByTestId("global-volume-fader")).toBeVisible({ timeout: 15_000 });
 
       await page.locator(".settings-btn").click();
       await page.locator(".settings-modal .logout-btn").click();
@@ -93,6 +106,31 @@ test.describe("A member changes their PIN", () => {
       const back = await page.request.post("/api/auth", { data: { member: MEMBER, pin: MEMBER_PIN } });
       expect(back.status()).toBe(200);
     } finally {
+      await putBack(page);
+    }
+  });
+
+  test("a PIN change logs out the member's other open page (#72)", async ({ page, browser }) => {
+    // Another browser of the member, its page open before the change: its own storage, so it keeps the old
+    // token. Its open socket is closed at the server's next ping (10 s) and the page goes to the login.
+    const other = await browser.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      await other.setExtraHTTPHeaders(tunnelClient(25));
+      const otherPage = await other.newPage();
+      const otherConsole = collectConsole(otherPage, [/status of 401/]);
+      await openMixer(otherPage, MEMBER);
+      await page.waitForTimeout(1_100);
+      await page.setExtraHTTPHeaders(tunnelClient(24));
+      await openMixer(page, MEMBER);
+      await openDialog(page);
+      expect(await submit(page, [MEMBER_PIN, NEW_PIN, NEW_PIN])).toBe(200);
+      await closeSuccess(page);
+      await expect(otherPage).toHaveURL(/\/login/, { timeout: 25_000 });
+      // The page that changed it is still in.
+      await expect(page.getByTestId("global-volume-fader")).toBeVisible();
+      expect(otherConsole, "the other page's console").toEqual([]);
+    } finally {
+      await other.close();
       await putBack(page);
     }
   });

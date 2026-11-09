@@ -173,6 +173,9 @@ pub(super) fn reconnect_step(
 /// changed (#58; the server's `mixer_ws::CLOSE_LINEUP`). 4001 is
 /// `handshake::CLOSE_RELOAD`, 4002 the server's close of a silent client.
 pub(super) const CLOSE_LINEUP: u16 = 4003;
+/// The server ended the socket because its token was ended (a PIN change,
+/// #72; `iem_server::mixer_ws::CLOSE_SIGNED_OUT`).
+pub(super) const CLOSE_SIGNED_OUT: u16 = 4004;
 
 /// What the page does when its mixer socket closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +187,9 @@ pub(super) enum OnClose {
     /// then connects again or shows the notice. Never a reload, never a
     /// failed socket, never "Reconnecting".
     Lineup,
+    /// The token was ended (4004, #72): the page forgets it and goes to the
+    /// login. Never a failed socket, never a reload.
+    SignedOut,
     /// Any other close: a failed socket, which the reconnect tick retries.
     Failed,
 }
@@ -192,7 +198,7 @@ impl OnClose {
     /// Whether the close counts as a failed socket (the backoff, and the
     /// token check after [`MAX_WS_FAILURES`]).
     pub(super) fn counts(self) -> bool {
-        self != Self::Lineup
+        !matches!(self, Self::Lineup | Self::SignedOut)
     }
 }
 
@@ -201,6 +207,7 @@ pub(super) fn on_close(code: u16) -> OnClose {
     match code {
         crate::handshake::CLOSE_RELOAD => OnClose::Reload,
         CLOSE_LINEUP => OnClose::Lineup,
+        CLOSE_SIGNED_OUT => OnClose::SignedOut,
         _ => OnClose::Failed,
     }
 }
@@ -671,6 +678,13 @@ mod tests {
             assert_eq!(on_close(code), OnClose::Failed, "{code}");
             assert!(on_close(code).counts(), "{code}");
         }
+    }
+
+    #[test]
+    fn a_signed_out_close_goes_to_the_login_and_counts_no_failure() {
+        assert_eq!(CLOSE_SIGNED_OUT, 4004);
+        assert_eq!(on_close(CLOSE_SIGNED_OUT), OnClose::SignedOut);
+        assert!(!OnClose::SignedOut.counts());
     }
 
     fn lineup(id: &str) -> iem_core::LineupRef {

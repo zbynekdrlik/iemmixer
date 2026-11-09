@@ -457,6 +457,9 @@ pub async fn require_engineer(
         let config = state.config.read().await;
         crate::mixer_ws::claims_of(token, &config.jwt_secret)?
     };
+    if !auth::subject_known(state, &claims) {
+        return Err(auth::subject_gone());
+    }
     if !claims.engineer {
         return Err((
             StatusCode::FORBIDDEN,

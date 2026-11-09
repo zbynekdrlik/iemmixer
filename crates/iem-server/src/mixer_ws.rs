@@ -33,6 +33,9 @@ pub const CLOSE_RELOAD: u16 = 4001;
 /// `/api/lineup` and connects again, or shows which band plays. Never a
 /// reload.
 pub const CLOSE_LINEUP: u16 = 4003;
+/// The close of a session whose token was ended (a PIN change, #72): the
+/// page forgets its token and opens the login.
+pub const CLOSE_SIGNED_OUT: u16 = 4004;
 
 /// Query parameters of the page and media sockets.
 #[derive(Debug, serde::Deserialize)]
@@ -126,13 +129,13 @@ pub async fn ws_mixer(
         ));
     }
     let viewer = Viewer {
-        sub: claims.sub,
+        sub: claims.sub.clone(),
         engineer: claims.engineer,
     };
     let proto = query.proto;
     Ok(ws.on_upgrade(move |socket| async move {
         match proto {
-            Some(p) => session(socket, state, page, viewer, network_mode, p).await,
+            Some(p) => session(socket, state, page, viewer, claims, network_mode, p).await,
             None => {
                 tracing::info!(page = %page.id, "WS without a protocol: asking the page to reload");
                 close_reload(socket).await;
@@ -323,6 +326,7 @@ async fn session(
     state: AppState,
     page: Page,
     viewer: Viewer,
+    claims: iem_core::AuthClaims,
     network_mode: String,
     proto: u16,
 ) {
@@ -400,6 +404,17 @@ async fn session(
                     break;
                 }
                 Due::Ping => {
+                    // A token a PIN change (or a removal) ended ends its open
+                    // session too (#72): the page reloads and logs in again.
+                    if !crate::auth::subject_known(&state, &claims) {
+                        tracing::info!(page = %page.id, session, "WebSocket token ended: closing");
+                        let close = Message::Close(Some(CloseFrame {
+                            code: CLOSE_SIGNED_OUT,
+                            reason: "signed out".into(),
+                        }));
+                        let _ = ws_alive::within(ws_alive::CLOSE_WITHIN, socket.send(close)).await;
+                        break;
+                    }
                     if !ws_alive::send(socket.send(ws_alive::ping())).await {
                         break;
                     }

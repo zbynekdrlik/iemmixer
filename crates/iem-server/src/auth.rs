@@ -138,10 +138,12 @@ pub(crate) fn member_exists(state: &AppState, member: &str) -> bool {
 }
 
 /// Whether a token's subject is still somebody: the engineer, or a member
-/// who logs in ([`member_exists`]). The token of a person who left stops
-/// working with the roster that removed them (#58).
+/// who logs in ([`member_exists`]), with a token issued at or after the
+/// subject's last PIN change ([`crate::token_floor`], #72). The token of a
+/// person who left stops working with the roster that removed them (#58).
 pub(crate) fn subject_known(state: &AppState, claims: &AuthClaims) -> bool {
-    claims.engineer || member_exists(state, &claims.sub)
+    (claims.engineer || member_exists(state, &claims.sub))
+        && state.token_floor.admits(&claims.sub, claims.iat)
 }
 
 /// 401 for a token whose subject is nobody now ([`subject_known`]).
@@ -176,9 +178,14 @@ pub async fn login(
     if !req.member.is_empty() && !member_exists(&state, &req.member) {
         return Err(Rejection::from(member_not_found()));
     }
-    let (engineer_hash, member_hash) = {
+    // The token's time is taken under the store's read guard: a change
+    // done before it gives a time at or after the change's floor, a change
+    // after it (a later second) ends this token too (#72; within one second
+    // the token survives, `token_floor`'s documented whole-second limit).
+    let (issued, engineer_hash, member_hash) = {
         let store = state.pin_store.read().await;
         (
+            unix_now(),
             store.engineer_hash().map(str::to_owned),
             store.member_hash(&req.member).map(str::to_owned),
         )
@@ -200,11 +207,13 @@ pub async fn login(
     match matched {
         PinMatch::Engineer => {
             state.login_guard.record_success(&client, &req.member);
-            issue_token(&config, ENGINEER_ID, true).map_err(|e| Rejection::from(e.into_response()))
+            issue_token_at(&config, ENGINEER_ID, true, issued)
+                .map_err(|e| Rejection::from(e.into_response()))
         }
         PinMatch::Member => {
             state.login_guard.record_success(&client, &req.member);
-            issue_token(&config, &req.member, false).map_err(|e| Rejection::from(e.into_response()))
+            issue_token_at(&config, &req.member, false, issued)
+                .map_err(|e| Rejection::from(e.into_response()))
         }
         PinMatch::None => {
             record_failure(&state, &client, &req.member, now);
@@ -218,17 +227,30 @@ pub async fn login(
     }
 }
 
-/// Issue a JWT token for the given member/engineer
+/// Seconds since 1970 (0 before it).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Issue a JWT token for the given member/engineer, issued now.
 fn issue_token(
     config: &iem_core::Config,
     member_id: &str,
     engineer: bool,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<ApiError>)> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    issue_token_at(config, member_id, engineer, unix_now())
+}
 
+/// [`issue_token`] with its `iat` (and the expiry from it) at `now`.
+fn issue_token_at(
+    config: &iem_core::Config,
+    member_id: &str,
+    engineer: bool,
+    now: u64,
+) -> Result<Json<LoginResponse>, (StatusCode, Json<ApiError>)> {
     // Use shorter expiry for engineer tokens (elevated access)
     let expiry_secs = if engineer {
         ENGINEER_TOKEN_EXPIRY_SECS
@@ -269,7 +291,7 @@ pub async fn change_pin(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<ChangePinRequest>,
-) -> Result<StatusCode, Rejection> {
+) -> Result<Response, Rejection> {
     let claims = {
         let config = state.config.read().await;
         extract_claims_from_header(&headers, &config.jwt_secret)
@@ -335,24 +357,42 @@ pub async fn change_pin(
     };
     let new_pin = req.new_pin.clone();
     let phc = with_hasher(&state, move |hasher| hasher.hash(&new_pin)).await?;
-    let saved = {
-        let mut store = state.pin_store.write().await;
-        if target == ENGINEER_ID {
-            store.set_engineer_hash(phc)
-        } else {
-            store.set_member_hash(&target, phc)
-        }
+    // The floor first, then the hash, both under the store's write guard so
+    // no login reads the new hash before its floor holds (#72). A floor that
+    // cannot be saved changes nothing; a hash that cannot be saved after it
+    // leaves the old PIN working and the older tokens ended.
+    let mut store = state.pin_store.write().await;
+    if let Err(e) = state.token_floor.raise(&target, unix_now()) {
+        tracing::error!(error = %e, member = %target, "the old tokens could not be ended: the PIN is not changed");
+        return Err(Rejection::from(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "IO_ERROR",
+            "Failed to save PIN",
+        )));
+    }
+    let saved = if target == ENGINEER_ID {
+        store.set_engineer_hash(phc)
+    } else {
+        store.set_member_hash(&target, phc)
     };
     saved.map_err(|e| {
-        tracing::error!(error = %e, member = %target, "failed to save the PIN hash");
+        tracing::error!(error = %e, member = %target, "failed to save the PIN hash (its older tokens are ended)");
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "IO_ERROR",
             "Failed to save PIN",
         )
     })?;
-    tracing::info!(member = %target, by = %claims.sub, "PIN changed");
-    Ok(StatusCode::OK)
+    drop(store);
+    tracing::info!(member = %target, by = %claims.sub, "PIN changed, older tokens ended");
+    // The device that changed its own PIN stays logged in: a new token.
+    if target == claims.sub {
+        let config = state.config.read().await;
+        let token = issue_token(&config, &target, claims.engineer)
+            .map_err(|e| Rejection::from(e.into_response()))?;
+        return Ok(token.into_response());
+    }
+    Ok(StatusCode::OK.into_response())
 }
 
 /// Extract claims from Authorization header
