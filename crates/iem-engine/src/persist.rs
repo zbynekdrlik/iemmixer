@@ -493,9 +493,10 @@ mod tests {
     use crate::test_support::test_site;
     use iem_engine_proto::{InputId, InputState, Level, Mix};
 
-    /// A `baseline.json` as an older engine left it.
+    /// A valid `baseline.json` as an older engine left it: no load reads
+    /// it (#72, 6761755454).
     pub(super) fn write_baseline(s: &Store, p: &Persisted) {
-        fs::write(s.dir().join(BASELINE), encode(p).unwrap()).unwrap();
+        fs::write(s.dir().join("baseline.json"), encode(p).unwrap()).unwrap();
     }
 
     pub(super) fn sample(rev: u64) -> Persisted {

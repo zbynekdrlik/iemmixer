@@ -39,6 +39,7 @@ class SendTests(unittest.TestCase):
         (self.engine / "current.json.rev-7").write_text("")
         (self.engine / "engine.lock").write_text("")
         (self.engine / "save.tmp").write_text("half")
+        (self.engine / "baseline.json").write_text("{}")   # an older engine's: no load reads it (#72)
 
     def sent(self) -> dict:
         return band_send.send(self.site, self.engine)
