@@ -10,9 +10,15 @@ receiver's own count since it started) summed read to read per (receiver
 key, slot), a count that went back counted from 0 (its device started
 again), a flow's first read counting the late packets of its listen; and
 every listen's peak past the receiver's latency. Red (`late` or `over`
-above 0) is the gate's `receiver_late`; no read that heard a receiver of our
-TX at all is its `receiver_unread` (a gate that read nothing never passes on
-it). Accepted limit: a receiver slot reused by another sender between two
+above 0) is the gate's `receiver_late`. `receiver_unread`: no read heard a
+receiver of our TX at all, or a read did not hear every receiver of our TX
+it found (its late packets would go uncounted), or more reads failed than
+gave a line (a gate that cannot read never passes on it). A device whose ARC
+read failed, or one without a heartbeat id, is counted (`unread_max`,
+`no_id_max`) and fails nothing: it may receive nothing of ours, and the
+band's network holds such devices (a wireless microphone receiver). The
+peaks compare in whole µs: a sample is above 10 µs at 96 kHz, so the floor
+never hides a peak a sample past the latency. Accepted limit: a receiver slot reused by another sender between two
 reads counts that sender's late packets against us (a false fail, never a
 miss).
 
@@ -51,7 +57,10 @@ class Flow:
 
 @dataclass(frozen=True)
 class Read:
+    receivers: int
     heard: int
+    unread: int
+    no_id: int
     flows: tuple[Flow, ...]
 
 
@@ -72,7 +81,7 @@ def parse(doc) -> Read | None:
         if peak is not None and not _count(peak):
             return None
         flows.append(Flow(f["key"], f["slot"], f["latency_us"], f["beats"], peak, f["late"], f["late_total"]))
-    return Read(r["heard"], tuple(flows))
+    return Read(r["receivers"], r["heard"], r["unread"], r["no_id"], tuple(flows))
 
 
 @dataclass
@@ -80,6 +89,9 @@ class Tally:
     reads: int = 0   # reads that gave a line
     failed: int = 0   # reads that gave none
     heard_max: int = 0   # the most receivers of our TX one read heard
+    unheard: int = 0   # reads that did not hear every receiver of our TX they found
+    unread_max: int = 0   # the most devices one read could not read over ARC (information)
+    no_id_max: int = 0   # the most devices one read found without a heartbeat id (information)
     flows_max: int = 0   # the most of our flows at them one read heard
     late: int = 0
     over: int = 0   # listens whose peak passed the receiver's latency, a flow each
@@ -92,6 +104,10 @@ class Tally:
             return
         self.reads += 1
         self.heard_max = max(self.heard_max, read.heard)
+        self.unread_max = max(self.unread_max, read.unread)
+        self.no_id_max = max(self.no_id_max, read.no_id)
+        if read.heard < read.receivers:
+            self.unheard += 1
         heard = [f for f in read.flows if f.beats > 0]
         self.flows_max = max(self.flows_max, len(heard))
         for f in heard:
@@ -112,10 +128,10 @@ class Tally:
         out = []
         if self.late or self.over:
             out.append("receiver_late")
-        if self.heard_max == 0:
+        if self.heard_max == 0 or self.unheard or self.failed > self.reads:
             out.append("receiver_unread")
         return out
 
     def numbers(self) -> dict:
-        return {"reads": self.reads, "failed": self.failed, "heard_max": self.heard_max,
-                "flows_max": self.flows_max, "late": self.late, "over": self.over, "margin_us": self.margin_us}
+        return {"reads": self.reads, "failed": self.failed, "heard_max": self.heard_max, "unheard": self.unheard,
+                "unread_max": self.unread_max, "no_id_max": self.no_id_max, "flows_max": self.flows_max, "late": self.late, "over": self.over, "margin_us": self.margin_us}

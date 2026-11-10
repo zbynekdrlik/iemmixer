@@ -86,7 +86,9 @@ reset-failed), the env file and the summary removed on the box.
   every RECEIVERS_EVERY_S, from the watch's start: each receiver's own
   heartbeat), counted a late packet of a flow of ours, or a listen's peak
   passed the receiver's latency (gen3_receivers, #72);
-- receiver_unread: no receivers read heard a receiver of our TX.
+- receiver_unread: no receivers read heard a receiver of our TX, a read did
+  not hear every receiver of our TX it found, or more reads failed than gave
+  a line.
 Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
 Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in
 samples (`lateness_max`). A rise is summed read to read; a count that went
@@ -142,7 +144,7 @@ WAIT_MARGIN_S = RUN_MARGIN_S + 60   # the dev box's own bound past the run
 STATUS_EVERY_S = 1.0
 HEALTH_EVERY_S = 10.0
 RECEIVERS_EVERY_S = 60.0   # the receivers' read: discovery, ARC reads and a 5 s listen
-RECEIVERS_CALL_S = 60   # one receivers read's ssh bound (a silent device costs its ARC wait)
+RECEIVERS_CALL_S = 30   # one receivers read's ssh bound, half of POLL_HOLE_S: a read never opens a status hole
 POLL_HOLE_S = 60.0
 RECORDS = "gen3-soak"
 UNIT_PROPS = "LoadState,ActiveState,SubState,Result,ExecMainStatus"

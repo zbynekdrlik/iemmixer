@@ -130,7 +130,8 @@ exclude_re = [
   # discovery on the box's Dante network, reads other devices' ARC and
   # listens to the heartbeat group for its seconds; no build machine holds
   # Dante receivers. Every decision stays mutated: `parse`,
-  # `parse_command`, `our_slots`, `key_of`, `report`, `Report::line`
+  # `parse_command`, `candidates`, `subscribes`, `our_slots`, `key_of`,
+  # `report`, `Report::line`
   # (receivers/tests.rs, real heartbeat records through dstack's parse),
   # and lib.rs's `run_receivers` (tests/cli.rs runs the binary).
   "iem-dante-dev/src/receivers\\.rs.*\\bglue::read\\b",

@@ -19,15 +19,15 @@ def flow(key: str = KEY, slot: int = 3, latency_us: int = 250, beats: int = 5, p
             "late_total": late_total}
 
 
-def line(*flows: dict, heard: int = 1) -> dict:
-    return {"receivers": {"devices": 4, "unread": 0, "no_id": 0, "receivers": 1, "heard": heard,
+def line(*flows: dict, heard: int = 1, receivers: int = 1, unread: int = 0, no_id: int = 0) -> dict:
+    return {"receivers": {"devices": 4, "unread": unread, "no_id": no_id, "receivers": receivers, "heard": heard,
                           "flows": list(flows), "red": False}}
 
 
 class ParseTests(unittest.TestCase):
     def test_a_line_reads_into_its_flows(self) -> None:
-        read = gr.parse(line(flow(), flow(OTHER, slot=1, peak_us=None), heard=2))
-        self.assertEqual(read, gr.Read(2, (gr.Flow(KEY, 3, 250, 5, 120, 0, 7),
+        read = gr.parse(line(flow(), flow(OTHER, slot=1, peak_us=None), heard=2, receivers=3, unread=4, no_id=5))
+        self.assertEqual(read, gr.Read(3, 2, 4, 5, (gr.Flow(KEY, 3, 250, 5, 120, 0, 7),
                                            gr.Flow(OTHER, 1, 250, 5, None, 0, 7))))
 
     def test_anything_else_is_no_read(self) -> None:
@@ -55,8 +55,8 @@ class TallyTests(unittest.TestCase):
 
     def test_steady_receivers_pass_with_their_margin(self) -> None:
         t = self.tally(line(flow(peak_us=120)), line(flow(peak_us=200, late_total=7)))
-        self.assertEqual(t.numbers(), {"reads": 2, "failed": 0, "heard_max": 1, "flows_max": 1, "late": 0,
-                                       "over": 0, "margin_us": 50})
+        self.assertEqual(t.numbers(), {"reads": 2, "failed": 0, "heard_max": 1, "unheard": 0, "unread_max": 0,
+                                       "no_id_max": 0, "flows_max": 1, "late": 0, "over": 0, "margin_us": 50})
         self.assertEqual(t.failures(), [])
 
     def test_a_receiver_s_late_count_is_summed_read_to_read_per_slot(self) -> None:
@@ -73,15 +73,25 @@ class TallyTests(unittest.TestCase):
         self.assertEqual((t.over, t.margin_us, t.failures()), (2, -50, ["receiver_late"]))
 
     def test_a_flow_not_heard_is_not_judged(self) -> None:
-        t = self.tally(line(flow(beats=0, late=4, late_total=50, peak_us=999), heard=0))
+        t = self.tally(line(flow(beats=0, late=4, late_total=50, peak_us=999), heard=0, receivers=1))
         self.assertEqual((t.late, t.over, t.flows_max, t.margin_us), (0, 0, 0, None))
         self.assertEqual(t.failures(), ["receiver_unread"])
 
+    def test_a_receiver_of_ours_not_heard_fails_unread_a_device_not_read_only_counts(self) -> None:
+        t = self.tally(line(flow()), line(flow(), flow(OTHER, beats=0), heard=1, receivers=2))
+        self.assertEqual((t.unheard, t.failures()), (1, ["receiver_unread"]))
+        t = self.tally(line(flow(), unread=2, no_id=3), line(flow(), unread=1))
+        self.assertEqual((t.unread_max, t.no_id_max, t.failures()), (2, 3, []))
+
+    def test_more_failed_reads_than_lines_fail_unread(self) -> None:
+        self.assertEqual(self.tally(line(flow()), None).failures(), [])
+        self.assertEqual(self.tally(line(flow()), None, None).failures(), ["receiver_unread"])
+
     def test_no_read_that_heard_a_receiver_fails_unread(self) -> None:
         self.assertEqual(gr.Tally().failures(), ["receiver_unread"])
-        t = self.tally(None, line(heard=0), None)
+        t = self.tally(None, line(heard=0, receivers=0), None)
         self.assertEqual((t.reads, t.failed, t.heard_max, t.failures()), (1, 2, 0, ["receiver_unread"]))
-        t = self.tally(None, line(flow(late=3)))
+        t = self.tally(line(flow(late=3)), None)
         self.assertEqual(t.failures(), ["receiver_late"])
         self.assertEqual(t.heard_max, 1)
 

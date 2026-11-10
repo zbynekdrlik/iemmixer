@@ -257,8 +257,8 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "pump_late": 0, "pump_missed": 0, "pump_overruns": 0, "pump_rebootstraps": 0, "pump_stalled": 0,
         "max_process_us": 210, "clock_not_ready": 0, "holdovers": 0, "in_holdover": 0, "re_anchors": 0,
         "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0,
-        "receivers": {"reads": 2, "failed": 0, "heard_max": 1, "flows_max": 1, "late": 0, "over": 0,
-                      "margin_us": 130},
+        "receivers": {"reads": 2, "failed": 0, "heard_max": 1, "unheard": 0, "unread_max": 0, "no_id_max": 0,
+                      "flows_max": 1, "late": 0, "over": 0, "margin_us": 130},
         "unit_restarts": 0,
         "left_job": 0, "left_soak": 0, "failed": []}
 
@@ -417,7 +417,7 @@ class CriteriaTests(SoakBase):
         cases = (("late", ["receiver_late"], {"late": 2, "over": 0}),
                  ("over", ["receiver_late"], {"late": 0, "over": 1, "margin_us": -10}),
                  ("none", [], {"late": 0, "heard_max": 1}),
-                 ("silent", [], {"late": 0, "heard_max": 1, "flows_max": 1}),
+                 ("silent", ["receiver_unread"], {"late": 0, "heard_max": 1, "flows_max": 1, "unheard": 1}),
                  ("fails", [], {"reads": 1, "failed": 1}))
         for fault, failed, numbers in cases:
             with self.subTest(fault=fault):
@@ -429,7 +429,7 @@ class CriteriaTests(SoakBase):
                     self.assertEqual(doc["receivers"][key], value, key)
                 if failed:
                     self.assertEqual(self.posts()[0][-1],
-                                     "description=the Gen 3 box's soak failed: receiver_late")
+                                     f"description=the Gen 3 box's soak failed: {failed[0]}")
                 self.assert_private(err + json.dumps(docs))
 
     def test_a_soak_that_never_hears_a_receiver_of_our_tx_fails_receiver_unread(self) -> None:

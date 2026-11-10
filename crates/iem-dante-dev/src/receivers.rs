@@ -20,16 +20,18 @@
 //! Nothing is ever written to another device.
 //!
 //! One JSON line ([`Report::line`]), numbers only: no device name, address
-//! or id; a receiver is an opaque `key` (a hash of its heartbeat id, stable
-//! within one build) so a gate can follow a slot from read to read. Exit 0
+//! or id; a receiver is an opaque `key` (a hash of its heartbeat id salted
+//! with the box's boot id, stable within one build and boot) so a gate can
+//! follow a slot from read to read. Exit 0
 //! with the line (red or not: the line's `red`), 1 when the read could not
 //! run (no socket, our own ARC silent), 2 for the command line.
 
 use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use iem_dante::arc::control::{RxChannel, RxFlow};
+use iem_dante::discover::Device;
 use iem_dante::latency::Latency;
 use serde::Serialize;
 
@@ -125,11 +127,7 @@ pub struct Ours {
 pub fn our_slots(ours: &str, channels: &[RxChannel], flows: &[RxFlow]) -> Vec<Ours> {
     let fed: BTreeSet<u16> = channels
         .iter()
-        .filter(|c| {
-            c.tx_device
-                .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case(ours))
-        })
+        .filter(|c| is_ours(c, ours))
         .map(|c| c.channel)
         .collect();
     let mut out: Vec<Ours> = flows
@@ -153,12 +151,45 @@ pub struct Target {
     pub flows: Vec<Ours>,
 }
 
-/// A receiver's opaque key: a hash of its heartbeat id, 16 hex digits
-/// (the same within one build; never the id itself).
-pub fn key_of(device_id: &[u8; 8]) -> String {
+/// A receiver's opaque key: a hash of `salt` and its heartbeat id, 16 hex
+/// digits (the same for one salt and build; never the id itself). The read
+/// salts it with the box's boot id, so a key read off the box cannot be
+/// turned back into a device id by trying ids alone.
+pub fn key_of(salt: &[u8], device_id: &[u8; 8]) -> String {
     let mut h = DefaultHasher::new();
+    salt.hash(&mut h);
     device_id.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// The devices to read: every device of `devices` but ours (`ours`, its
+/// name, case aside) that has a heartbeat id, as (its ARC, its id); and how
+/// many others had none.
+pub fn candidates(devices: &[Device], ours: &str) -> (Vec<(SocketAddrV4, [u8; 8])>, usize) {
+    let mut no_id = 0;
+    let mut out = Vec::new();
+    for d in devices
+        .iter()
+        .filter(|d| !d.name.eq_ignore_ascii_case(ours))
+    {
+        match d.device_id {
+            Some(id) => out.push((d.arc, id)),
+            None => no_id += 1,
+        }
+    }
+    (out, no_id)
+}
+
+/// Whether an RX channel of `channels` subscribes to the device `ours`
+/// (Dante's names, case aside): only then are the device's flows read.
+pub fn subscribes(channels: &[RxChannel], ours: &str) -> bool {
+    channels.iter().any(|c| is_ours(c, ours))
+}
+
+fn is_ours(c: &RxChannel, ours: &str) -> bool {
+    c.tx_device
+        .as_deref()
+        .is_some_and(|d| d.eq_ignore_ascii_case(ours))
 }
 
 /// One flow of ours at one receiver, as the line shows it.
@@ -210,8 +241,10 @@ impl Report {
 
 /// The report of a read: `devices`, `unread` and `no_id` counted by the
 /// read, `targets` the receivers of our TX, `heard` what the heartbeats
-/// gave (any devices; the targets' are taken by id).
+/// gave (any devices; the targets' are taken by id), keys salted with
+/// `salt` ([`key_of`]).
 pub fn report(
+    salt: &[u8],
     devices: usize,
     unread: usize,
     no_id: usize,
@@ -225,7 +258,7 @@ pub fn report(
         if got.is_some_and(|l| l.beats > 0) {
             heard_n += 1;
         }
-        let key = key_of(&t.device_id);
+        let key = key_of(salt, &t.device_id);
         for o in &t.flows {
             let slot = got.and_then(|l| l.slots.iter().find(|s| s.slot == o.slot));
             flows.push(FlowReport {
@@ -261,6 +294,7 @@ pub use glue::read;
 mod glue {
     use std::net::SocketAddrV4;
     use std::sync::atomic::{AtomicBool, AtomicU16};
+    use std::sync::mpsc::RecvTimeoutError;
     use std::time::{Duration, Instant};
 
     use iem_dante::arc::client::{REPLY_TIMEOUT, ReadError, Udp};
@@ -269,10 +303,12 @@ mod glue {
     use iem_dante::discover::Discovery;
     use iem_dante::latency::{Heard, Listener};
 
-    use super::{Options, Report, Target, our_slots, report};
+    use super::{Options, Report, Target, candidates, our_slots, report, subscribes};
 
     /// How long discovery lists the devices before they are read.
     pub const DISCOVER: Duration = Duration::from_secs(3);
+    /// The keys' salt: the box's boot id (empty when it cannot be read).
+    pub const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 
     /// One read (see the module); `Err` with a fixed text when it cannot
     /// run.
@@ -292,28 +328,18 @@ mod glue {
         let devices = discovery.devices();
         // Its threads end within its own bound; a slow stop changes no read.
         let _ = discovery.stop();
-        let (mut unread, mut no_id) = (0, 0);
+        let (to_read, no_id) = candidates(&devices, &ours);
+        let mut unread = 0;
         let mut targets = Vec::new();
-        for d in devices
-            .iter()
-            .filter(|d| !d.name.eq_ignore_ascii_case(&ours))
-        {
-            let Some(device_id) = d.device_id else {
-                no_id += 1;
-                continue;
-            };
-            let flows = arc(d.arc)
+        for (at, device_id) in to_read {
+            let flows = arc(at)
                 .map_err(|e| ReadError::Io {
                     op: 0,
                     kind: e.kind(),
                 })
                 .and_then(|mut u| {
                     let channels = rx_channels(&mut u)?;
-                    if channels.iter().any(|c| {
-                        c.tx_device
-                            .as_deref()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(&ours))
-                    }) {
+                    if subscribes(&channels, &ours) {
                         Ok(our_slots(&ours, &channels, &rx_flows(&mut u)?))
                     } else {
                         Ok(Vec::new())
@@ -335,11 +361,18 @@ mod glue {
                     heard.add(&beat);
                 }
                 Ok(_) => {}
-                Err(_) => break,
+                Err(RecvTimeoutError::Timeout) => break,
+                // The listener's thread ended on a socket error: no read,
+                // never silence.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("the heartbeat listener stopped".into());
+                }
             }
         }
         drop(listener);
+        let salt = std::fs::read(BOOT_ID).unwrap_or_default();
         Ok(report(
+            &salt,
             devices.len(),
             unread,
             no_id,

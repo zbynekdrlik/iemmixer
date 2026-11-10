@@ -3,6 +3,7 @@
 
 use super::*;
 use iem_dante::latency::SlotLatency;
+use std::net::SocketAddrV4;
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -133,6 +134,7 @@ fn heard(id: u8, beats: u32, slots: Vec<SlotLatency>) -> Latency {
 #[test]
 fn a_report_follows_each_receiver_s_own_slots() {
     let r = report(
+        b"zyxsalt",
         6,
         1,
         2,
@@ -149,8 +151,8 @@ fn a_report_follows_each_receiver_s_own_slots() {
             ),
         ],
     );
-    let k1 = key_of(&[1; 8]);
-    let k2 = key_of(&[2; 8]);
+    let k1 = key_of(b"zyxsalt", &[1; 8]);
+    let k2 = key_of(b"zyxsalt", &[2; 8]);
     assert_eq!(
         r,
         Report {
@@ -197,6 +199,7 @@ fn a_report_follows_each_receiver_s_own_slots() {
 fn red_is_a_late_packet_in_the_listen_or_a_peak_past_the_latency() {
     let one = |s: SlotLatency| {
         report(
+            b"zyxsalt",
             1,
             0,
             0,
@@ -213,6 +216,7 @@ fn red_is_a_late_packet_in_the_listen_or_a_peak_past_the_latency() {
     assert!(!one(slot(2, &[], 0, 0)).red);
     assert_eq!(one(slot(2, &[10], 0, 0)).heard, 1);
     let silent = report(
+        b"zyxsalt",
         1,
         0,
         0,
@@ -263,7 +267,14 @@ fn a_report_from_real_heartbeat_records_bins_the_receiver_s_own_numbers() {
     for b in [beat(1, [0, 48], [0, 5]), beat(2, [0, 24], [0, 6])] {
         h.add(&iem_dante::latency::parse(&b).expect("a heartbeat"));
     }
-    let r = report(1, 0, 0, &[target(4, &[(2, 250_000)])], &h.result());
+    let r = report(
+        b"zyxsalt",
+        1,
+        0,
+        0,
+        &[target(4, &[(2, 250_000)])],
+        &h.result(),
+    );
     assert_eq!(r.flows[0].peak_us, Some(500));
     assert_eq!(r.flows[0].late, 1);
     assert_eq!(r.flows[0].late_total, 6);
@@ -271,26 +282,63 @@ fn a_report_from_real_heartbeat_records_bins_the_receiver_s_own_numbers() {
     assert!(r.red);
 }
 
+fn device(name: &str, last: u8, id: Option<u8>) -> Device {
+    Device {
+        name: name.to_string(),
+        arc: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, last), 4440),
+        dbc: None,
+        device_id: id.map(|i| [i; 8]),
+        txt: Default::default(),
+    }
+}
+
+#[test]
+fn every_other_device_with_a_heartbeat_id_is_read() {
+    let devices = [
+        device("ZYXBOX", 10, Some(1)),
+        device("qxwcard", 11, Some(2)),
+        device("qxwrack", 12, None),
+        device("qxwmic", 13, None),
+        device("zyxbox-2", 14, Some(3)),
+    ];
+    let at = |last| SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, last), 4440);
+    assert_eq!(
+        candidates(&devices, "zyxbox"),
+        (vec![(at(11), [2; 8]), (at(14), [3; 8])], 2)
+    );
+    assert_eq!(candidates(&[], "zyxbox"), (vec![], 0));
+}
+
+#[test]
+fn only_a_device_with_a_channel_subscribed_to_us_has_its_flows_read() {
+    let channels = [channel(1, Some("qxwother")), channel(2, Some("ZyxBox"))];
+    assert!(subscribes(&channels, "zyxbox"));
+    assert!(!subscribes(&channels[..1], "zyxbox"));
+    assert!(!subscribes(&[channel(3, None)], "zyxbox"));
+}
+
 #[test]
 fn a_key_is_sixteen_hex_digits_of_a_hash_never_the_id() {
-    let k = key_of(&[0xab; 8]);
+    let k = key_of(b"zyxsalt", &[0xab; 8]);
     assert_eq!(k.len(), 16);
     assert!(k.chars().all(|c| c.is_ascii_hexdigit()), "{k}");
-    assert_eq!(k, key_of(&[0xab; 8]));
-    assert_ne!(k, key_of(&[0xac; 8]));
+    assert_eq!(k, key_of(b"zyxsalt", &[0xab; 8]));
+    assert_ne!(k, key_of(b"zyxsalt", &[0xac; 8]));
     assert!(!k.contains("abab"), "{k}");
+    assert_ne!(k, key_of(b"zyxother", &[0xab; 8]), "another salt");
 }
 
 #[test]
 fn the_line_is_numbers_and_keys_only() {
     let r = report(
+        b"zyxsalt",
         2,
         0,
         0,
         &[target(1, &[(3, 1_000_000)])],
         &[heard(1, 4, vec![slot(3, &[120], 0, 2)])],
     );
-    let key = key_of(&[1; 8]);
+    let key = key_of(b"zyxsalt", &[1; 8]);
     assert_eq!(
         r.line(),
         format!(
