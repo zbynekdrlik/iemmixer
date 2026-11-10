@@ -115,35 +115,35 @@ impl ChannelMap {
 mod tests {
     use super::*;
 
-    // Synthetic card: 132 inputs, 93 outputs (the test site's RX 101–132 and
-    // TX 71–93 end exactly on the last channel).
-    const IN: usize = 132;
-    const OUT: usize = 93;
+    // Synthetic card: 32 inputs, 23 outputs (the test site's RX 1–32 and
+    // TX 1–23 end exactly on the last channel).
+    const IN: usize = 32;
+    const OUT: usize = 23;
 
     #[test]
     fn the_loopback_return_follows_the_topology_rx() {
-        let m = ChannelMap::new(&[101, 102], &[71], IN, OUT)
+        let m = ChannelMap::new(&[1, 2], &[1], IN, OUT)
             .unwrap()
-            .with_hil_return(&[110, 111], IN)
+            .with_hil_return(&[10, 11], IN)
             .unwrap();
         // Return card inputs come after the topology's rx, in order.
-        assert_eq!(m.rx(), &[100, 101]);
-        assert_eq!(m.hil_rx(), &[109, 110]);
-        assert_eq!(m.all_rx(), vec![100, 101, 109, 110]);
+        assert_eq!(m.rx(), &[0, 1]);
+        assert_eq!(m.hil_rx(), &[9, 10]);
+        assert_eq!(m.all_rx(), vec![0, 1, 9, 10]);
         // A return channel the card lacks refuses the stream, like rx.
         assert_eq!(
-            ChannelMap::new(&[101], &[71], IN, OUT)
+            ChannelMap::new(&[1], &[1], IN, OUT)
                 .unwrap()
-                .with_hil_return(&[133], IN),
+                .with_hil_return(&[33], IN),
             Err(MapError::Missing {
                 side: "hil-return rx",
-                channel: 133,
+                channel: 33,
                 card: IN,
             })
         );
         // No return by default.
         assert!(
-            ChannelMap::new(&[101], &[71], IN, OUT)
+            ChannelMap::new(&[1], &[1], IN, OUT)
                 .unwrap()
                 .hil_rx()
                 .is_empty()
@@ -152,18 +152,15 @@ mod tests {
 
     #[test]
     fn card_numbers_count_from_one() {
-        let rx: Vec<u16> = (101..=132).collect();
-        let tx: Vec<u16> = (71..=93).collect();
+        let rx: Vec<u16> = (1..=32).collect();
+        let tx: Vec<u16> = (1..=23).collect();
         let m = ChannelMap::new(&rx, &tx, IN, OUT).unwrap();
-        let want_rx: Vec<usize> = (100..=131).collect();
-        let want_tx: Vec<usize> = (70..=92).collect();
+        let want_rx: Vec<usize> = (0..=31).collect();
+        let want_tx: Vec<usize> = (0..=22).collect();
         assert_eq!((m.rx(), m.tx()), (&want_rx[..], &want_tx[..]));
         // Topology order, not card order.
-        let m = ChannelMap::new(&[1, 132, 101], &[93, 71], IN, OUT).unwrap();
-        assert_eq!(
-            (m.rx(), m.tx()),
-            (&[0usize, 131, 100][..], &[92usize, 70][..])
-        );
+        let m = ChannelMap::new(&[1, 32, 10], &[23, 1], IN, OUT).unwrap();
+        assert_eq!((m.rx(), m.tx()), (&[0usize, 31, 9][..], &[22usize, 0][..]));
         let empty = ChannelMap::new(&[], &[], 0, 0).unwrap();
         assert!(empty.rx().is_empty() && empty.tx().is_empty());
     }
@@ -175,22 +172,22 @@ mod tests {
             Err(MapError::Zero { side: "rx" })
         );
         assert_eq!(
-            ChannelMap::new(&[], &[71, 0], IN, OUT),
+            ChannelMap::new(&[], &[1, 0], IN, OUT),
             Err(MapError::Zero { side: "tx" })
         );
         assert_eq!(
-            ChannelMap::new(&[101, 133], &[], IN, OUT),
+            ChannelMap::new(&[1, 33], &[], IN, OUT),
             Err(MapError::Missing {
                 side: "rx",
-                channel: 133,
+                channel: 33,
                 card: IN
             })
         );
         assert_eq!(
-            ChannelMap::new(&[], &[94], IN, OUT),
+            ChannelMap::new(&[], &[24], IN, OUT),
             Err(MapError::Missing {
                 side: "tx",
-                channel: 94,
+                channel: 24,
                 card: OUT
             })
         );
@@ -203,16 +200,16 @@ mod tests {
             })
         );
         // The last channel of each side is on the card.
-        assert!(ChannelMap::new(&[132], &[93], IN, OUT).is_ok());
+        assert!(ChannelMap::new(&[32], &[23], IN, OUT).is_ok());
     }
 
     #[test]
     fn each_side_is_checked_against_its_own_count() {
         assert_eq!(
-            ChannelMap::new(&[93], &[132], IN, OUT),
+            ChannelMap::new(&[23], &[32], IN, OUT),
             Err(MapError::Missing {
                 side: "tx",
-                channel: 132,
+                channel: 32,
                 card: OUT
             })
         );
@@ -232,11 +229,11 @@ mod tests {
         assert_eq!(
             MapError::Missing {
                 side: "rx",
-                channel: 133,
+                channel: 33,
                 card: IN
             }
             .to_string(),
-            "rx channel 133 is not on the card (132 channels)"
+            "rx channel 33 is not on the card (32 channels)"
         );
     }
 }

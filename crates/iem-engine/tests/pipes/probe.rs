@@ -1,5 +1,5 @@
 //! The listen probe through the pipes (#10): NullRt under
-//! `--test-signal` on the test site (`[guard] hil_tx` 94/95). While a HIL
+//! `--test-signal` on the test site (`[guard] hil_tx` 61/62). While a HIL
 //! signal with `listen` runs, the media pipe carries the probe streams 2 and
 //! 3 at the signal's level and the listen streams 0 and 1 only silence (the
 //! owner's rule, #9 2026-09-28).
@@ -46,7 +46,7 @@ fn a_listen_probe_goes_out_on_the_probe_streams_and_the_taps_stay_silent() {
         hz: 1000.0,
         dbfs: -20.0,
         ttl_s: 3.0,
-        card_tx: vec![94, 95],
+        card_tx: vec![61, 62],
         listen: true,
     };
     let r = sup.request(20, probe);

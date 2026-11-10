@@ -20,8 +20,8 @@ enum OldCmd {
     },
 }
 
-const PLAIN: &str = r#"{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-20.0,"ttl_s":30.0,"card_tx":[94,95]}"#;
-const PROBE: &str = r#"{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-20.0,"ttl_s":30.0,"card_tx":[94,95],"listen":true}"#;
+const PLAIN: &str = r#"{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-20.0,"ttl_s":30.0,"card_tx":[61,62]}"#;
+const PROBE: &str = r#"{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-20.0,"ttl_s":30.0,"card_tx":[61,62],"listen":true}"#;
 
 fn hil(listen: bool) -> Cmd {
     Cmd::HilTestSignal {
@@ -29,7 +29,7 @@ fn hil(listen: bool) -> Cmd {
         hz: 1000.0,
         dbfs: -20.0,
         ttl_s: 30.0,
-        card_tx: vec![94, 95],
+        card_tx: vec![61, 62],
         listen,
     }
 }
@@ -53,7 +53,7 @@ fn the_listen_flag_of_the_hil_signal_is_additive() {
         hz: 1000.0,
         dbfs: -20.0,
         ttl_s: 30.0,
-        card_tx: vec![94, 95],
+        card_tx: vec![61, 62],
     };
     assert_eq!(serde_json::from_str::<OldCmd>(PROBE).unwrap(), old);
     assert_eq!(serde_json::from_str::<OldCmd>(PLAIN).unwrap(), old);

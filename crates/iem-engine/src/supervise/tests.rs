@@ -280,7 +280,7 @@ fn each_outcome_is_one_json_line() {
     );
     let status = Status {
         callbacks: 9,
-        hil: vec![HilOut { tx: 94, peak: 0.5 }],
+        hil: vec![HilOut { tx: 61, peak: 0.5 }],
         loopback_samples: 32,
         ..Status::default()
     };
@@ -426,7 +426,7 @@ fn request_of(cmd: Cmd) -> ClientMsg {
 #[test]
 fn the_burst_goes_to_every_spare_output_the_status_names() {
     for listen in [false, true] {
-        let mut s = Script::of(&[hello(), status(1, &[94, 95]), reply(1, 7, None)], false);
+        let mut s = Script::of(&[hello(), status(1, &[61, 62]), reply(1, 7, None)], false);
         let got = exchange(&mut s, &burst("mic1", -30.0, 30, listen), SHORT);
         assert_eq!(
             got,
@@ -447,7 +447,7 @@ fn the_burst_goes_to_every_spare_output_the_status_names() {
                     hz: 1000.0,
                     dbfs: -30.0,
                     ttl_s: 30.0,
-                    card_tx: vec![94, 95],
+                    card_tx: vec![61, 62],
                     listen,
                 }),
             ],
@@ -502,9 +502,9 @@ fn stop_sends_one_command_and_status_reads_the_next_status() {
     let mut s = Script::of(
         &[
             hello(),
-            status(1, &[94]),
+            status(1, &[61]),
             reply(1, 4, None),
-            status(2, &[94]),
+            status(2, &[61]),
         ],
         false,
     );
@@ -520,7 +520,7 @@ fn stop_sends_one_command_and_status_reads_the_next_status() {
 /// call names the engine's code only, never its text.
 #[test]
 fn inject_fault_sends_one_command_and_names_the_engines_refusal() {
-    let mut s = Script::of(&[hello(), status(1, &[94, 95]), reply(1, 5, None)], false);
+    let mut s = Script::of(&[hello(), status(1, &[61, 62]), reply(1, 5, None)], false);
     assert_eq!(
         exchange(&mut s, &Ask::InjectFault, SHORT),
         Ok(Outcome::Injected { rev: 5 })
@@ -578,12 +578,12 @@ fn a_call_ends_on_silence_an_end_a_new_supervisor_or_a_broken_pipe() {
     );
     assert!(t0.elapsed() >= SHORT.status, "{:?}", t0.elapsed());
     assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
-    let mut s = Script::of(&[hello(), status(1, &[94])], false);
+    let mut s = Script::of(&[hello(), status(1, &[61])], false);
     assert_eq!(
         exchange(&mut s, &Ask::Status, SHORT),
         Err(Failure::NoReply(SHORT.reply))
     );
-    let mut s = Script::of(&[hello(), reply(1, 1, None), status(1, &[94])], false);
+    let mut s = Script::of(&[hello(), reply(1, 1, None), status(1, &[61])], false);
     assert!(exchange(&mut s, &Ask::Status, SHORT).is_ok());
     let mut s = Script::of(&[hello(), reply(1, 1, None)], false);
     assert_eq!(

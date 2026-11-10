@@ -46,11 +46,12 @@ fn channel_numbers_map_to_the_same_device_channels() {
         &[],
     )
     .unwrap();
-    // Site RX 101 is our RX channel 101, index 100; TX 71 is index 70.
-    assert_eq!(topo.rx[0], 101);
-    assert_eq!(map.rx[0], 100);
-    let tx71 = topo.tx.iter().position(|&c| c == 71).unwrap();
-    assert_eq!(map.tx[tx71], 70);
+    // Site RX 1 is our RX channel 1, index 0; TX 23 (the translator) is
+    // index 22.
+    assert_eq!(topo.rx[0], 1);
+    assert_eq!(map.rx[0], 0);
+    let tx23 = topo.tx.iter().position(|&c| c == 23).unwrap();
+    assert_eq!(map.tx[tx23], 22);
     assert_eq!(map.rx, indices(&topo.rx), "every input, in topology order");
     assert_eq!(map.tx, indices(&topo.tx), "every output, in topology order");
 }
@@ -58,12 +59,12 @@ fn channel_numbers_map_to_the_same_device_channels() {
 #[test]
 fn hil_returns_follow_the_topology_rx() {
     let topo = test_site();
-    let hil = [94, 95];
-    let map = check(&device(132, 95), &topo, &hil).unwrap();
+    let hil = [61, 62];
+    let map = check(&device(64, 64), &topo, &hil).unwrap();
     let mut rx = indices(&topo.rx);
-    rx.extend([93, 94]);
+    rx.extend([60, 61]);
     let mut tx = indices(&topo.tx);
-    tx.extend([93, 94]);
+    tx.extend([60, 61]);
     assert_eq!(map.rx, rx, "the returns after the topology's RX");
     assert_eq!(map.tx, tx, "the spare outputs after the topology's TX");
     assert_eq!(map.rx.len(), topo.rx.len() + 2);
@@ -76,38 +77,38 @@ fn a_site_channel_the_device_lacks_is_a_card_refusal() {
         Err(EngineError::Card(why)) => why,
         other => panic!("{other:?}"),
     };
-    let why = card(check(&device(131, 93), &topo, &[]));
-    assert!(why.contains("rx channel 132"), "{why}");
-    assert!(why.contains("131 channels"), "{why}");
-    let why = card(check(&device(132, 92), &topo, &[]));
-    assert!(why.contains("tx channel 93"), "{why}");
+    let why = card(check(&device(31, 23), &topo, &[]));
+    assert!(why.contains("rx channel 32"), "{why}");
+    assert!(why.contains("31 channels"), "{why}");
+    let why = card(check(&device(32, 22), &topo, &[]));
+    assert!(why.contains("tx channel 23"), "{why}");
     // A spare output the device lacks, and its loopback return.
-    let why = card(check(&device(132, 94), &topo, &[94, 95]));
-    assert!(why.contains("tx channel 95"), "{why}");
-    let why = card(check(&device(132, 140), &topo, &[133]));
+    let why = card(check(&device(64, 63), &topo, &[63, 64]));
+    assert!(why.contains("tx channel 64"), "{why}");
+    let why = card(check(&device(64, 70), &topo, &[65]));
     assert!(why.contains("HIL loopback return"), "{why}");
-    assert!(why.contains("133"), "{why}");
+    assert!(why.contains("65"), "{why}");
 }
 
 #[test]
 fn a_device_at_another_rate_is_refused() {
     let topo = test_site();
     for rate in [48_000, 192_000] {
-        let mut cfg = device(132, 95);
+        let mut cfg = device(64, 64);
         cfg.sample_rate = rate;
         match check(&cfg, &topo, &[]) {
             Err(EngineError::Card(why)) => assert!(why.contains(&format!("{rate} Hz")), "{why}"),
             other => panic!("{rate}: {other:?}"),
         }
     }
-    assert!(check(&device(132, 95), &topo, &[]).is_ok(), "96 kHz runs");
+    assert!(check(&device(64, 64), &topo, &[]).is_ok(), "96 kHz runs");
 }
 
 #[test]
 fn a_device_block_above_the_engines_b_is_refused() {
     let topo = test_site();
     for block in [64, 128, 256] {
-        let mut cfg = device(132, 95);
+        let mut cfg = device(64, 64);
         cfg.block = block;
         match check(&cfg, &topo, &[]) {
             Err(EngineError::Card(why)) => {
@@ -117,7 +118,7 @@ fn a_device_block_above_the_engines_b_is_refused() {
         }
     }
     for block in BLOCKS {
-        let mut cfg = device(132, 95);
+        let mut cfg = device(64, 64);
         cfg.block = block;
         assert!(check(&cfg, &topo, &[]).is_ok(), "block {block} runs");
     }

@@ -2,7 +2,8 @@
 (0x1002 its name, 0x1000 its counts, 0x3000 its RX pages) and subscription
 writes (0x3010). netaudio 0.4.2 refuses a self-subscription and a channel
 name with a space (.claude/rules/gen3.md), and it pages RX by whole pages of
-16, so it never reads the last 8 of our device's 136; both are done here.
+16, so it would miss a partial last page (the last 8 of our device's 136 RX
+before the cut to 64 on #72); both are done here.
 
 Every request is a 10-byte header (0x27ff, the length, a sequence, the
 opcode, a word that is 0 in a request and the status in a reply: 1 done,

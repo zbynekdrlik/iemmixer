@@ -195,7 +195,7 @@ fn the_binary_checks_a_site() {
     let dir = tempfile::tempdir().unwrap();
     let bad = dir.path().join("site.toml");
     let text = std::fs::read_to_string(common::site_path()).unwrap();
-    std::fs::write(&bad, text.replace("tx = [93]", "tx = [92]")).unwrap();
+    std::fs::write(&bad, text.replace("tx = [23]", "tx = [22]")).unwrap();
     let refused = check(bad.as_path());
     assert_eq!(refused.status.code(), Some(2));
     assert!(refused.stdout.is_empty());

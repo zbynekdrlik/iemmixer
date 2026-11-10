@@ -332,11 +332,11 @@ fn check_site_names_the_topology() {
     assert_eq!(json["inputs"].as_u64(), Some(24));
     let dir = tempfile::tempdir().unwrap();
     let bad_map = edited_site(dir.path(), "map.toml", |t| {
-        t.replace("tx = [93]", "tx = [92]")
+        t.replace("tx = [23]", "tx = [22]")
     });
     assert!(matches!(
         check_site(&bad_map),
-        Err(EngineError::Site(SiteError::ChannelReused { ch: 92 }))
+        Err(EngineError::Site(SiteError::ChannelReused { ch: 22 }))
     ));
     assert!(matches!(
         check_site(&dir.path().join("missing.toml")),
@@ -375,31 +375,31 @@ fn check_site_takes_spare_hil_outputs_and_refuses_a_mixs_tx() {
     let dir = tempfile::tempdir().unwrap();
     let with = |name: &str, tx: &str| {
         edited_site(dir.path(), name, |t| {
-            t.replace("hil_tx = [94, 95]", &format!("hil_tx = {tx}"))
+            t.replace("hil_tx = [61, 62]", &format!("hil_tx = {tx}"))
         })
     };
-    // The test site's pair (94/95), TX 89/90 between the members and the
-    // engineer, the map's first and last channels, channels above
-    // `[engine] channels` (160), none at all.
+    // The test site's pair (61/62), TX 33/40 above every topology channel,
+    // the first channel above the topology's inputs and the map's last,
+    // channels above `[engine] channels` (64), none at all.
     assert!(check_site(&crate::test_support::test_site_path()).is_ok());
-    for spare in ["[89, 90]", "[1, 160]", "[161, 500]", "[]"] {
+    for spare in ["[33, 40]", "[33, 64]", "[65, 500]", "[]"] {
         assert!(check_site(&with("spare.toml", spare)).is_ok(), "{spare}");
     }
     let mix_tx = |ch: u16, mix: &str| {
         format!("card output {ch} is mix {mix}'s TX: the HIL signal goes only to spare outputs")
     };
     for (tx, why) in [
-        ("[94, 72]", mix_tx(72, "member1")),
-        ("[88]", mix_tx(88, "member9")),
-        ("[92, 94]", mix_tx(92, "engineer")),
-        ("[93]", mix_tx(93, "translator")),
+        ("[61, 2]", mix_tx(2, "member1")),
+        ("[18]", mix_tx(18, "member9")),
+        ("[22, 61]", mix_tx(22, "engineer")),
+        ("[23]", mix_tx(23, "translator")),
         (
             "[0]",
             "card output 0: card channels count from 1".to_owned(),
         ),
-        ("[94, 95, 94]", "card output 94 is listed twice".to_owned()),
+        ("[61, 62, 61]", "card output 61 is listed twice".to_owned()),
         (
-            "[94, 95, 96, 97, 98, 99, 100, 101, 102]",
+            "[33, 34, 35, 36, 37, 38, 39, 40, 41]",
             "9 card outputs: at most 8".to_owned(),
         ),
     ] {
@@ -424,21 +424,21 @@ fn a_run_opens_the_hil_outputs_only_with_the_test_signal_flag() {
         test_signal: true,
         fault_injection: false,
     };
-    assert_eq!(run_hil(on, &text, &topo), Ok(vec![94, 95]));
+    assert_eq!(run_hil(on, &text, &topo), Ok(vec![61, 62]));
     assert_eq!(run_hil(Flags::default(), &text, &topo), Ok(Vec::new()));
-    let mix_tx = text.replace("hil_tx = [94, 95]", "hil_tx = [72]");
+    let mix_tx = text.replace("hil_tx = [61, 62]", "hil_tx = [2]");
     assert!(matches!(
         run_hil(on, &mix_tx, &topo),
         Err(SiteError::HilTx(m)) if m.contains("member1")
     ));
     assert_eq!(run_hil(Flags::default(), &mix_tx, &topo), Ok(Vec::new()));
-    let unread = text.replace("hil_tx = [94, 95]", "hil_tx = \"x\"");
+    let unread = text.replace("hil_tx = [61, 62]", "hil_tx = \"x\"");
     assert!(matches!(
         run_hil(on, &unread, &topo),
         Err(SiteError::Toml(_))
     ));
     assert_eq!(run_hil(Flags::default(), &unread, &topo), Ok(Vec::new()));
-    let none = text.replace("hil_tx = [94, 95]", "");
+    let none = text.replace("hil_tx = [61, 62]", "");
     assert_eq!(run_hil(on, &none, &topo), Ok(Vec::new()));
 }
 
@@ -561,7 +561,7 @@ fn run_refuses_a_bad_block_and_a_bad_site() {
     // (the owner's decision on #9, 2026-09-28).
     cfg.flags.test_signal = true;
     cfg.site = edited_site(dir.path(), "mix-tx.toml", |t| {
-        t.replace("hil_tx = [94, 95]", "hil_tx = [94, 72]")
+        t.replace("hil_tx = [61, 62]", "hil_tx = [61, 2]")
     });
     assert!(matches!(
         run_bounded(cfg),

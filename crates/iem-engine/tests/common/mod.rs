@@ -45,7 +45,7 @@ const INTERVALS: [u64; 4] = [333_333, 347_000, 500_000, 700_000];
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), opened after
 /// the topology's TX as `run` does under the test-signal flag, and
 /// their loopback returns after the topology's RX.
-pub const HIL: [u16; 2] = [94, 95];
+pub const HIL: [u16; 2] = [61, 62];
 
 pub fn site_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/test-site.toml")

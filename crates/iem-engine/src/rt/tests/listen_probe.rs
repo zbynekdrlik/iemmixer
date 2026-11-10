@@ -103,7 +103,7 @@ fn a_listen_probe_carries_the_spare_outputs_sine_on_both_probe_taps() {
     let mut r = probe_rig(AT_ONCE, &BOTH, &signal(true));
     let tx = r.p.topo.tx.len();
     let heard = hear(&mut r, RUN);
-    // Spare output 94 (HIL slot 0) as f32: what each probe's left carries.
+    // Spare output 61 (HIL slot 0) as f32: what each probe's left carries.
     let spare: Vec<f32> = heard.out[tx][..END].iter().map(|y| *y as f32).collect();
     assert!(heard.out[tx][END..].iter().all(|y| *y == 0.0));
     for (k, probe) in heard.probes.iter().enumerate() {

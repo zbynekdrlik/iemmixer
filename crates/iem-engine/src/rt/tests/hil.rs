@@ -91,7 +91,7 @@ fn discontinuity_restarts_the_fade_in() {
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`), as `run` opens
 /// them under the test-signal flag.
-pub(super) const SPARE: [u16; 2] = [94, 95];
+pub(super) const SPARE: [u16; 2] = [61, 62];
 /// The D5(b) loopback round-trip: the HIL sine leaves on the
 /// spare outputs; a synthetic loopback returns it on the spare inputs one
 /// block later; the probe measures exactly that delay, and it clears when a
@@ -310,14 +310,14 @@ fn hil_test_signal_reaches_only_the_masked_spare_outputs() {
     };
     // Above the test-signal cap (−20 dBFS), or naming a mix's TX: refused.
     assert_eq!(
-        r.core.apply(&hil(-19.0, vec![95])).unwrap_err().code,
+        r.core.apply(&hil(-19.0, vec![62])).unwrap_err().code,
         ErrCode::BadValue
     );
     assert_eq!(
-        r.core.apply(&hil(-30.0, vec![95, 72])).unwrap_err().code,
+        r.core.apply(&hil(-30.0, vec![62, 2])).unwrap_err().code,
         ErrCode::Forbidden
     );
-    r.at(0, &hil(-30.0, vec![95]));
+    r.at(0, &hil(-30.0, vec![62]));
     // mic1 (RX index 0) is silent on the card: only the sine replaces it.
     // mic2 (RX index 1) carries 0.3 into member3.
     let mut first = Planar::new(topo.rx.len(), 6_400);
@@ -379,14 +379,14 @@ fn hil_test_signal_reaches_only_the_masked_spare_outputs() {
     // Then the outputs are the mixes again and the spare outputs zero.
     let after = end - 6_400 + 1_000;
     let normal = 0.3 * g0() * g0();
-    for ch in [slot(75), slot(76)] {
+    for ch in [slot(5), slot(6)] {
         assert!(
             close(out2.channel(ch)[after], normal, 1e-12),
             "{}",
             out2.channel(ch)[after]
         );
     }
-    assert_eq!(out2.channel(slot(72))[after], 0.0, "mic1 is silent again");
+    assert_eq!(out2.channel(slot(2))[after], 0.0, "mic1 is silent again");
     for ch in [tx, tx + 1] {
         assert!(
             out2.channel(ch)[end - 6_400..].iter().all(|v| *v == 0.0),
@@ -406,7 +406,7 @@ fn the_spare_outputs_are_silent_without_a_hil_signal_and_while_held() {
     let open = [level("member1", src_in("mic1"), 0.0)];
     let mut r = rig_hil(&site, &open, TEST_FLAG, AT_ONCE, SPARE.to_vec());
     let (tx, rxn) = (r.p.topo.tx.len(), r.p.topo.rx.len());
-    let m1 = r.p.topo.tx.iter().position(|c| *c == 71).unwrap();
+    let m1 = r.p.topo.tx.iter().position(|c| *c == 1).unwrap();
     r.at(
         0,
         &Cmd::StartTestSignal {
