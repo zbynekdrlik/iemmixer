@@ -670,7 +670,7 @@ mod tests {
         ] {
             assert_eq!(on(ch), Some(id), "{ch}");
         }
-        for ch in [0, 19, 20, 24, 32, 63, 64, 65] {
+        for ch in [0, 19, 20, 24, 32, 61, 62, 64, 65] {
             assert_eq!(on(ch), None, "{ch}");
         }
     }

@@ -60,7 +60,7 @@ UNIT_LINE = ("/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/i
 # journal and systemd's one restart; `stays` no restart and no line; `twice`
 # two restarts; `alarm` the alarm unit started too; `silent` no line.
 # loop.json (written by the FakeDante beside) says whether our RX 61 hears our
-# own TX 63. FAKE_* change one answer each. For `gen3-gate live`
+# own TX 61. FAKE_* change one answer each. For `gen3-gate live`
 # (test_iempc_gen3_live): the service user's mint folder (root/var/lib/
 # iemmixer/mint: the mint writes a new owner-only file, never over one), the
 # live burst (each one a line of bursts.log), the server's journal
@@ -1109,7 +1109,7 @@ class PureTests(unittest.TestCase):
                                                                    "in 600 s")
 
     def test_the_counts_cover_the_spare_outputs_and_their_returns(self) -> None:
-        self.assertIsNone(gate.counts_refusal([61, 62], 64, 64))
+        self.assertIsNone(gate.counts_refusal([61, 62], 62, 62))
         self.assertIn("no TX channel", gate.counts_refusal([61, 62], 64, 61))
         self.assertIn("no RX channel", gate.counts_refusal([61, 62], 61, 64))
         self.assertEqual(gate.device_counts(device_config(3, 2)), (3, 2))
