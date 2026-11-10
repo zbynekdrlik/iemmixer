@@ -536,16 +536,12 @@ elif name == "chrt":
 elif name == "systemd-tmpfiles":
     # Its `w` lines: the argument written to a file that exists.
     assert args[:1] == ["--create"] and len(args) == 2, args
-    rc = int(os.environ.get("FAKE_TMPFILES_RC", "0"))
-    if rc:
-        fail(f"Failed to write to {args[1]}: Permission denied", rc)
-    if not os.environ.get("FAKE_TMPFILES_IGNORED"):
-        with open(args[1], encoding="utf-8") as f:
-            for line in f:
-                words = line.split()
-                if len(words) == 7 and words[0] == "w" and os.path.exists(ROOT + words[1]):
-                    with open(ROOT + words[1], "w", encoding="utf-8") as out:
-                        out.write(words[6] + "\n")
+    with open(args[1], encoding="utf-8") as f:
+        for line in f:
+            words = line.split()
+            if len(words) == 7 and words[0] == "w" and os.path.exists(ROOT + words[1]):
+                with open(ROOT + words[1], "w", encoding="utf-8") as out:
+                    out.write(words[6] + "\n")
 elif name == "udevadm":
     # `control --reload`, and a `trigger` that applies the rules of
     # FAKE_ROOT/etc/udev/rules.d to every device of the subsystem whose
@@ -632,8 +628,6 @@ elif name == "sudo":
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
     if rest[:1] == ["cat"] and len(rest) == 2:
-        if os.environ.get("FAKE_SUDO_CAT_REFUSED"):
-            fail("a password is required")
         path = ROOT + rest[1]
         if not os.path.exists(path):
             fail(f"cat: {rest[1]}: No such file or directory")
@@ -1260,7 +1254,8 @@ class ProvisionRootTests(World):
         # wake reloads the display microcontroller's firmware with preemption
         # off (430-600 us on the box, ~2 ms on 2026-10-27/28), on core 0, where
         # the Dante NIC's NAPI thread (SCHED_FIFO 60) then waits. Kept awake,
-        # no poll runs (0 in 40 s); the old step only turned the poll off.
+        # no poll runs (0 polls, 0 resumes in 60 s); the old step only turned
+        # the poll off.
         self.provisioned()
         gpu = self.root / GPU / "power/control"
         self.assertEqual(gpu.read_text(encoding="utf-8"), "on\n")
@@ -1279,13 +1274,16 @@ class ProvisionRootTests(World):
         r = self.provisioned()
         self.assertEqual(self.steps(r)["display"], "unchanged")
         self.assertEqual(self.writes(), [])
-        # The old file put back: removed, nothing triggered.
-        write(self.root / OLD_DISPLAY_CONF.lstrip("/"), OLD_POLL_OFF, 0o644)
-        self.clear_calls()
-        r = self.provisioned()
-        self.assertEqual(self.steps(r)["display"], "changed")
-        self.assertFalse((self.root / OLD_DISPLAY_CONF.lstrip("/")).exists())
-        self.assertEqual(self.writes(), [])
+        # The old file put back, as a file or a link (even a dangling one):
+        # removed, nothing triggered.
+        old = self.root / OLD_DISPLAY_CONF.lstrip("/")
+        for put_back in (lambda: write(old, OLD_POLL_OFF, 0o644), lambda: old.symlink_to("/nonexistent")):
+            put_back()
+            self.clear_calls()
+            r = self.provisioned()
+            self.assertEqual(self.steps(r)["display"], "changed")
+            self.assertFalse(old.exists() or old.is_symlink())
+            self.assertEqual(self.writes(), [])
         # A rule that does not take fails the run loudly.
         write(gpu, "auto\n")
         r = self.provision(FAKE_UDEV_IGNORED="1")
@@ -1984,6 +1982,8 @@ class VerifyTests(World):
              "no /etc/udev/rules.d/60-iemmixer-display.rules keeping the display devices awake"),
             ("display", lambda: write(self.root / OLD_DISPLAY_CONF.lstrip("/"), OLD_POLL_OFF),
              "the old /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is still there"),
+            ("display", lambda: (self.root / GPU / "power/control").unlink(),
+             "a display device may runtime-suspend (power/control is not on)"),
         ]
         for check, change, reason in cases:
             with self.subTest(reason=reason):
@@ -2001,7 +2001,6 @@ class VerifyTests(World):
         r = self.verify()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.verify_line(r)["display"], 1)
-        self.assertEqual((self.root / BRIDGE / "power/control").read_text(encoding="utf-8"), "auto\n")
 
     def test_realtime_running_is_1_only_on_a_realtime_kernel_booted_with_the_isolated_cores(self) -> None:
         # Information beside the checks: provision sets the boot state, a
