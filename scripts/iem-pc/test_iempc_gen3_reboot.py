@@ -81,12 +81,28 @@ def behind(us: int) -> list[dict]:
     return [{**f, "lateness_min_ns": max(0, f["lateness_min_ns"] - us * 1000)} for f in FLOWS]
 
 
+# A healthy box's RX flows (#72, 2.0.0-dev.68): two low-latency senders
+# (4 frames a packet) arrive within their stamp's sample and read 0 steadily.
+LIVE = [{"flow": 1, "lateness_min_ns": 153_388}, {"flow": 2, "lateness_min_ns": 119_238},
+        {"flow": 3, "lateness_min_ns": 0}, {"flow": 4, "lateness_min_ns": 684_812},
+        {"flow": 5, "lateness_min_ns": 360_379}, {"flow": 6, "lateness_min_ns": 0}]
+
+
+def live_behind(us: int) -> list[dict]:
+    return [{**f, "lateness_min_ns": max(0, f["lateness_min_ns"] - us * 1000)} for f in LIVE]
+
+
+def base_of(rx: list[dict]):
+    """The TX judge's baseline from a ready clock's RX flows."""
+    return rb.tx_baseline({"clock": {"ready": 1}, "rx": rx})
+
+
 def proved_seen(**over) -> rb.Seen:
     box, s = FakeBox(**over), rb.Seen(back_s=30.0)
     original = rb.soak.box_build
     rb.soak.box_build = lambda _box: over.get("sha", SHA)
     try:
-        rb.prove(box, s, rb.time.monotonic(), "sums", SHA, over.get("base", BASE_NS))
+        rb.prove(box, s, rb.time.monotonic(), "sums", SHA, over.get("base", base_of(FLOWS)))
     finally:
         rb.soak.box_build = original
     return s
@@ -135,12 +151,34 @@ class ProveTests(unittest.TestCase):
         self.assertEqual((doc["tx_late_us"], doc["tx_future"], doc["tx_reads"]), (-300.0, 0, s.tx_reads))
         self.assertGreaterEqual(s.tx_reads, 3)   # the clock's wait, the RX wait and the watch
 
-    def test_a_packet_from_our_future_fails_even_within_the_bound(self):
+    def test_a_flow_pushed_to_0_fails_even_within_the_bound(self):
         # The judge clamps a packet stamped after our now to 0, so a small
-        # baseline cannot show the whole shift: any 0 is a clock behind.
-        s = proved_seen(base=100_000, reads=[FLOWS, [{"flow": 1, "lateness_min_ns": 0}], FLOWS])
-        self.assertEqual((s.tx_late_us, s.tx_future), (-100.0, 1))
+        # baseline cannot show the whole shift: more flows at 0 than before
+        # the restart is a clock behind, whatever the least of the rest.
+        s = proved_seen(base=base_of([{"flow": 1, "lateness_min_ns": 100_000}]),
+                        reads=[FLOWS, [{"flow": 1, "lateness_min_ns": 0}], FLOWS])
+        self.assertEqual((s.tx_late_us, s.tx_future), (280.0, 1))
         self.assertIn("tx_late", rb.failed(s, 9))
+
+    def test_flows_at_0_before_the_restart_are_normal(self):
+        # #72, 2.0.0-dev.68: a low-latency sender reads 0 on a healthy box.
+        # Its 0 carries no clock information: the box is judged by the rest.
+        base = base_of(LIVE)
+        self.assertIsNotNone(base)
+        for rx in (LIVE, live_behind(100), live_behind(-400), LIVE[2:]):
+            with self.subTest(rx=rx):
+                self.assertNotIn("tx_late", proved(rx=rx, base=base))
+        s = proved_seen(rx=live_behind(100), base=base)
+        self.assertEqual((s.tx_late_us, s.tx_future), (-100.0, 0))
+
+    def test_a_clock_behind_that_pushes_flows_to_0_fails(self):
+        # 200 us behind: the flows at 153 and 119 us clamp to 0 and the least
+        # of the rest (160 us) RISES over the baseline; the count catches it.
+        s = proved_seen(rx=live_behind(200), base=base_of(LIVE))
+        self.assertGreater(s.tx_late_us, 0)
+        self.assertGreater(s.tx_future, 0)
+        self.assertIn("tx_late", rb.failed(s, 9))
+        self.assertIn("tx_late", proved(rx=live_behind(700), base=base_of(LIVE)))
 
     def test_the_watch_reads_until_ready_plus_tx_watch_s(self):
         # A fake clock: each wait poll is 10 s. The clock goes ready at
@@ -168,7 +206,7 @@ class ProveTests(unittest.TestCase):
         rb.soak.box_build, rb.time.monotonic = (lambda _box: SHA), (lambda: now[0])
         try:
             s = rb.Seen(back_s=30.0)
-            rb.prove(Clocked(), s, 0.0, "sums", SHA, BASE_NS)
+            rb.prove(Clocked(), s, 0.0, "sums", SHA, base_of(FLOWS))
         finally:
             rb.soak.box_build, rb.time.monotonic = original
         self.assertEqual(s.ready_s, 100.0)
@@ -200,13 +238,17 @@ class PureTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertIsNone(rb.least_lateness(bad))
 
-    def test_the_baseline_is_a_judged_read_never_one_from_our_future(self):
-        ready = {"clock": {"ready": 1}}
-        self.assertEqual(rb.tx_baseline({**ready, "rx": FLOWS}), BASE_NS)
-        for rx in ([], [{"flow": 1, "lateness_min_ns": 0}, *FLOWS]):
+    def test_the_baseline_needs_a_flow_above_0_and_takes_flows_at_0(self):
+        # #72, 2.0.0-dev.68: the gate refused the healthy box because two
+        # low-latency flows read 0. A box with no flow above 0 has nothing
+        # to judge.
+        self.assertIsNotNone(base_of(LIVE))
+        self.assertIsNotNone(base_of([{"flow": 1, "lateness_min_ns": 0}, *FLOWS]))
+        for rx in ([], [{"flow": 1, "lateness_min_ns": 0}], [{"flow": 1}]):
             with self.subTest(rx=rx):
-                self.assertIsNone(rb.tx_baseline({**ready, "rx": rx}))
+                self.assertIsNone(base_of(rx))
         self.assertIsNone(rb.tx_baseline(None))
+        self.assertIsNone(rb.tx_baseline({"clock": {"ready": 0}, "rx": FLOWS}))
 
     def test_a_journal_recovery_is_no_filesystem_error(self):
         self.assertEqual(rb.fs_errors("EXT4-fs (sda2): recovery complete\nEXT4-fs (sda2): orphan cleanup\n"), 0)
