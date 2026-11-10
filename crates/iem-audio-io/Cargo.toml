@@ -10,7 +10,7 @@ description = "iemmixer audio backends: the Process trait, deterministic Offline
 [dependencies]
 # The audio contract shared with the Dante device (Block, Process, StreamStats,
 # Planar, Fault, panic_message, hist, telemetry), #72.
-dstack-audio-io = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.68" }
+dstack-audio-io = { git = "https://github.com/zbynekdrlik/dstack", tag = "v0.6.70" }
 
 [dev-dependencies]
 # tests/rt.rs: the stream histograms and the telemetry neither allocate nor
