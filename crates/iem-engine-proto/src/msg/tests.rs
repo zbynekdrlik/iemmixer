@@ -86,7 +86,7 @@ fn every_cmd() -> Vec<Cmd> {
             hz: 1000.0,
             dbfs: -30.0,
             ttl_s: 10.0,
-            card_tx: vec![72],
+            card_tx: vec![2],
             listen: false,
         },
     ]
@@ -112,7 +112,7 @@ fn the_supervisor_role_round_trips() {
         }
     );
     let hil = parse_client(
-        br#"{"type":"request","id":3,"cmd":{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-30.0,"ttl_s":5.0,"card_tx":[72,71]}}"#,
+        br#"{"type":"request","id":3,"cmd":{"op":"hil_test_signal","input":"mic1","hz":1000.0,"dbfs":-30.0,"ttl_s":5.0,"card_tx":[2,1]}}"#,
     )
     .unwrap();
     let ClientMsg::Request {
@@ -123,7 +123,7 @@ fn the_supervisor_role_round_trips() {
     else {
         panic!("{hil:?}")
     };
-    assert_eq!((id, card_tx), (3, vec![72, 71]));
+    assert_eq!((id, card_tx), (3, vec![2, 1]));
     assert_eq!(
         serde_json::to_string(&ErrCode::NotSupervisor).unwrap(),
         r#""not_supervisor""#
@@ -200,13 +200,13 @@ fn the_stream_figures_in_status_are_additive() {
 #[test]
 fn the_hil_outputs_in_status_are_additive() {
     let status = Status {
-        hil: vec![HilOut { tx: 94, peak: 0.25 }, HilOut { tx: 95, peak: 0.0 }],
+        hil: vec![HilOut { tx: 61, peak: 0.25 }, HilOut { tx: 62, peak: 0.0 }],
         ..Status::default()
     };
     let json = serde_json::to_value(&status).unwrap();
     assert_eq!(
         json["hil"],
-        serde_json::json!([{"tx": 94, "peak": 0.25}, {"tx": 95, "peak": 0.0}])
+        serde_json::json!([{"tx": 61, "peak": 0.25}, {"tx": 62, "peak": 0.0}])
     );
     assert_eq!(
         serde_json::from_value::<Status>(json.clone()).unwrap(),
@@ -216,8 +216,8 @@ fn the_hil_outputs_in_status_are_additive() {
     assert_eq!(old.callbacks, 0);
     let from_old: Status = serde_json::from_str(r#"{"callbacks":4}"#).unwrap();
     assert!(from_old.hil.is_empty());
-    let partial: Status = serde_json::from_str(r#"{"hil":[{"tx":94}]}"#).unwrap();
-    assert_eq!(partial.hil, vec![HilOut { tx: 94, peak: 0.0 }]);
+    let partial: Status = serde_json::from_str(r#"{"hil":[{"tx":61}]}"#).unwrap();
+    assert_eq!(partial.hil, vec![HilOut { tx: 61, peak: 0.0 }]);
 }
 
 /// The stream histograms in `Status`: sparse

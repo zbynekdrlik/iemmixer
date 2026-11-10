@@ -95,7 +95,7 @@ fn rig() -> Rig {
 }
 
 /// HIL's spare outputs of the test site (`[guard] hil_tx`).
-const SPARE: [u16; 2] = [94, 95];
+const SPARE: [u16; 2] = [61, 62];
 
 /// Like `run`, the engine opens HIL's spare outputs under the
 /// test-signal flag only.
@@ -246,13 +246,13 @@ fn status_carries_the_hil_outputs_peaks_since_the_previous_status() {
     let mut r = rig();
     let st = StreamStats::default();
     let out = |tx: u16, peak: f32| HilOut { tx, peak };
-    assert_eq!(r.c.status_msg(&st).hil, vec![out(94, 0.0), out(95, 0.0)]);
+    assert_eq!(r.c.status_msg(&st).hil, vec![out(61, 0.0), out(62, 0.0)]);
     r.c.note_hil(&[0.01, 0.0]);
     r.c.note_hil(&[0.03, 0.02]);
     r.c.note_hil(&[0.02, 0.01]);
     r.c.note_hil(&[0.5]);
-    assert_eq!(r.c.next_status(&st).hil, vec![out(94, 0.5), out(95, 0.02)]);
-    assert_eq!(r.c.next_status(&st).hil, vec![out(94, 0.0), out(95, 0.0)]);
+    assert_eq!(r.c.next_status(&st).hil, vec![out(61, 0.5), out(62, 0.02)]);
+    assert_eq!(r.c.next_status(&st).hil, vec![out(61, 0.0), out(62, 0.0)]);
     // The control loop feeds them from each meter frame it reads and
     // starts again after each Status it sends.
     let t0 = Instant::now();

@@ -634,7 +634,7 @@ mod tests {
                 hz: 1000.0,
                 dbfs: -20.0,
                 ttl_s: 1.0,
-                card_tx: vec![94, 95],
+                card_tx: vec![61, 62],
                 listen: true,
             })
             .expect("the engine runs the listen probe");

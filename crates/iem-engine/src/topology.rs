@@ -660,17 +660,17 @@ mod tests {
         let t = test_site();
         let on = |ch: u16| t.mix_on_tx(ch).map(|m| m.id.0.as_str());
         for (ch, id) in [
-            (71, "member1"),
-            (72, "member1"),
-            (73, "member2"),
-            (88, "member9"),
-            (91, "engineer"),
-            (92, "engineer"),
-            (93, "translator"),
+            (1, "member1"),
+            (2, "member1"),
+            (3, "member2"),
+            (18, "member9"),
+            (21, "engineer"),
+            (22, "engineer"),
+            (23, "translator"),
         ] {
             assert_eq!(on(ch), Some(id), "{ch}");
         }
-        for ch in [0, 1, 70, 89, 90, 94, 95, 101, 160, 161] {
+        for ch in [0, 19, 20, 24, 32, 61, 62, 64, 65] {
             assert_eq!(on(ch), None, "{ch}");
         }
     }
@@ -685,37 +685,37 @@ mod tests {
     #[test]
     fn hil_outputs_are_spare_card_channels() {
         let t = test_site();
-        assert_eq!(t.hil_outputs(&[94, 95]), Ok(vec![94, 95]));
-        assert_eq!(t.hil_outputs(&[160, 1, 89]), Ok(vec![160, 1, 89]));
-        assert_eq!(t.hil_outputs(&[161, 500]), Ok(vec![161, 500]));
+        assert_eq!(t.hil_outputs(&[61, 62]), Ok(vec![61, 62]));
+        assert_eq!(t.hil_outputs(&[64, 33, 50]), Ok(vec![64, 33, 50]));
+        assert_eq!(t.hil_outputs(&[65, 500]), Ok(vec![65, 500]));
         assert_eq!(t.hil_outputs(&[u16::MAX]), Ok(vec![u16::MAX]));
         assert_eq!(t.hil_outputs(&[]), Ok(Vec::new()));
-        // Eight spare outputs, none a topology input (101–132) or a mix TX.
-        let eight: Vec<u16> = vec![94, 95, 96, 97, 98, 99, 100, 160];
+        // Eight spare outputs, none a topology input (1–32) or a mix TX.
+        let eight: Vec<u16> = vec![63, 64, 33, 34, 35, 36, 37, 38];
         assert_eq!(t.hil_outputs(&eight), Ok(eight.clone()));
         let refused = |tx: &[u16]| match t.hil_outputs(tx) {
             Err(SiteError::HilTx(why)) => why,
             other => panic!("{tx:?}: {other:?}"),
         };
         assert_eq!(
-            refused(&[94, 71]),
-            "card output 71 is mix member1's TX: the HIL signal goes only to spare outputs"
+            refused(&[63, 1]),
+            "card output 1 is mix member1's TX: the HIL signal goes only to spare outputs"
         );
         assert_eq!(
-            refused(&[93]),
-            "card output 93 is mix translator's TX: the HIL signal goes only to spare outputs"
+            refused(&[23]),
+            "card output 23 is mix translator's TX: the HIL signal goes only to spare outputs"
         );
         assert_eq!(
-            refused(&[94, 0]),
+            refused(&[63, 0]),
             "card output 0: card channels count from 1"
         );
-        assert_eq!(refused(&[95, 94, 95]), "card output 95 is listed twice");
+        assert_eq!(refused(&[64, 63, 64]), "card output 64 is listed twice");
         // A channel that is also a band input: the loopback return would read it.
         assert_eq!(
-            refused(&[101]),
-            "card channel 101 is a topology input: its loopback return would read the band"
+            refused(&[32]),
+            "card channel 32 is a topology input: its loopback return would read the band"
         );
-        let nine: Vec<u16> = (94..103).collect();
+        let nine: Vec<u16> = (33..42).collect();
         assert_eq!(refused(&nine), "9 card outputs: at most 8");
     }
 
@@ -725,24 +725,24 @@ mod tests {
     #[test]
     fn a_card_without_a_loopback_return_input_is_named() {
         use iem_audio_io::channels::ChannelMap;
-        let short = ChannelMap::new(&[1], &[1], 93, 96)
-            .and_then(|m| m.with_hil_return(&[94, 95], 93))
+        let short = ChannelMap::new(&[1], &[1], 62, 64)
+            .and_then(|m| m.with_hil_return(&[63, 64], 62))
             .unwrap_err();
         assert_eq!(
             hil_return_refusal(&short).as_deref(),
             Some(
-                "the HIL loopback return needs card input 94, which the card lacks \
-                 (93 inputs): under --test-signal the engine opens the card input of \
+                "the HIL loopback return needs card input 63, which the card lacks \
+                 (62 inputs): under --test-signal the engine opens the card input of \
                  each [guard] hil_tx output as its return"
             )
         );
         // Any other channel refusal keeps its own text.
-        let rx = ChannelMap::new(&[133], &[71], 132, 96).unwrap_err();
+        let rx = ChannelMap::new(&[65], &[1], 64, 64).unwrap_err();
         assert_eq!(hil_return_refusal(&rx), None);
-        let tx = ChannelMap::new(&[101], &[97], 132, 96).unwrap_err();
+        let tx = ChannelMap::new(&[1], &[65], 64, 64).unwrap_err();
         assert_eq!(hil_return_refusal(&tx), None);
-        let zero = ChannelMap::new(&[101], &[71], 132, 96)
-            .and_then(|m| m.with_hil_return(&[0], 132))
+        let zero = ChannelMap::new(&[1], &[1], 64, 64)
+            .and_then(|m| m.with_hil_return(&[0], 64))
             .unwrap_err();
         assert_eq!(hil_return_refusal(&zero), None);
     }
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(a.hash, test_site().hash);
         assert_eq!(a.hash.len(), 64);
         let text = test_site_text();
-        let more = format!("{text}\n[[engine.mixes]]\nid = \"spare\"\ntx = [150]\n");
+        let more = format!("{text}\n[[engine.mixes]]\nid = \"spare\"\ntx = [40]\n");
         let b = compile(&parse(&more).unwrap()).unwrap();
         assert_eq!(b.mixes.len(), 12);
         assert_ne!(a.hash, b.hash);

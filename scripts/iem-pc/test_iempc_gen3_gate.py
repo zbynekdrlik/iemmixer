@@ -7,7 +7,7 @@ client with the HIL test signal and its D5(b) probe, the device's status,
 health, the builds, the alarm count), and gen3_arc.send reaches a FakeDante
 (test_gen3_arc) as our own device, whose RX table the D5(b) loop changes.
 FakeGh (iempc_test_support) takes the status post. Every value is synthetic
-(P6): the test site's spare outputs 94 and 95, invented names, documentation
+(P6): the test site's spare outputs 61 and 62, invented names, documentation
 addresses."""
 from __future__ import annotations
 
@@ -35,11 +35,11 @@ REPO = HERE.parent.parent
 GEN3 = "tester@gen3.test"
 DANTE_IP = "192.0.2.20"
 OURS = "zyxqw-gen3"
-SPARES = (94, 95)   # the test site's [guard] hil_tx
-RET = SPARES[0]   # the D5(b) loop's return: our RX 94 hears our TX 94
+SPARES = (61, 62)   # the test site's [guard] hil_tx
+RET = SPARES[0]   # the D5(b) loop's return: our RX 61 hears our TX 61
 TRIP = 77   # the self-loop's round trip, samples
 PEAK = 10 ** (-30 / 20)   # -30 dBFS, linear
-BAND_RX = (101, 102, 103, 104)   # band inputs Receiving
+BAND_RX = (1, 2, 3, 4)   # band inputs Receiving
 NOW = 1_900_000_000.0
 DROPIN = gate.DROPIN
 UNIT_LINE = ("/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/iemmixer/site/iemmixer.toml "
@@ -59,8 +59,8 @@ UNIT_LINE = ("/opt/iemmixer/bin/iem-engine run --backend dante --site /var/lib/i
 # FAKE_PANIC plays the injected fault: "" the engine's panic, its line in the
 # journal and systemd's one restart; `stays` no restart and no line; `twice`
 # two restarts; `alarm` the alarm unit started too; `silent` no line.
-# loop.json (written by the FakeDante beside) says whether our RX 94 hears our
-# own TX 94. FAKE_* change one answer each. For `gen3-gate live`
+# loop.json (written by the FakeDante beside) says whether our RX 61 hears our
+# own TX 61. FAKE_* change one answer each. For `gen3-gate live`
 # (test_iempc_gen3_live): the service user's mint folder (root/var/lib/
 # iemmixer/mint: the mint writes a new owner-only file, never over one), the
 # live burst (each one a line of bursts.log), the server's journal
@@ -146,7 +146,7 @@ def engine_status():
         if os.environ.get("FAKE_NEVER_SILENT") and phase == "silent" and st["signals"]:
             phase = "sound"
         peak = float(os.environ.get("FAKE_PEAK", PEAK)) if phase == "sound" else 0.0
-        hil = [{"tx": 94, "peak": peak}, {"tx": 95, "peak": peak}]
+        hil = [{"tx": 61, "peak": peak}, {"tx": 62, "peak": peak}]
         loopback = st["loopback"] if phase != "stale" else st["old_loopback"]
     else:
         loopback = 0
@@ -232,7 +232,7 @@ if words[:4] == SVC:
         cat(SITE)
     if rest == [ENGINE, "check-site", "--site", SITE]:
         if os.environ.get("FAKE_CHECK_SITE_FAILS"):
-            fail("iem-engine: site: [guard] hil_tx 94 is the TX of mix zyxqw", 2)
+            fail("iem-engine: site: [guard] hil_tx 61 is the TX of mix zyxqw", 2)
         print(json.dumps({"topology": "ab12", "inputs": 32, "groups": 2, "mixes": 11}))
         done()
     if rest == [ENGINE, "supervise", "status"]:
@@ -327,11 +327,11 @@ if line == f"{DANTE} ctl status":
     st["since"] += 1
     lag = st["since"] <= int(os.environ.get("FAKE_RX_LAG", "1"))
     channels = [{"rx": n, "status": 8 if lag else 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
-                 "early": 0} for n in (101, 102, 103, 104)]
+                 "early": 0} for n in (1, 2, 3, 4)]
     if os.environ.get("FAKE_RX_OFF"):
         channels[3]["status"] = 1
     if looped():
-        channels.append({"rx": 94, "status": 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
+        channels.append({"rx": 61, "status": 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
                          "early": 0})
     print(json.dumps({"clock": {"ready": 1, "epoch": 0, "polls": 9, "re_anchors": 0}, "tx": [], "rx": [],
                       "channels": channels, "sources": [], "checks": []}))
@@ -394,7 +394,7 @@ CHANGES = (STAGE, INSTALL, RELOAD, RESET, RESTART, RM, SIGNAL, INJECT)
 OLD_PANIC = {"_PID": "999", "MESSAGE": "the RT callback faulted: fault injection: panic on the RT thread"}
 
 
-def device_config(rx: int = 136, tx: int = 96) -> str:
+def device_config(rx: int = 64, tx: int = 64) -> str:
     """A device config of the box's shape (synthetic names)."""
     return ('name = "zyxqw-gen3"\nsample_rate = 96000\nencoding = 24\n'
             f"rx = {json.dumps([f'RX {n}' for n in range(1, rx + 1)])}\n"
@@ -436,8 +436,8 @@ class GateBase(Base):
                                                "FAKE_SHA": SHA})
         patcher.start()
         self.addCleanup(patcher.stop)
-        # Our own device on the Dante network: RX 94 subscribed to nothing.
-        self.device = FakeDante(OURS, 136, {})
+        # Our own device on the Dante network: RX 61 subscribed to nothing.
+        self.device = FakeDante(OURS, 64, {})
         self.device.after = self.write_loop
         self.write_loop()
         net = mock.patch.object(gen3_arc, "send", Network(**{DANTE_IP.replace(".", "_"): self.device}).send)
@@ -520,7 +520,7 @@ class GateBase(Base):
 
     def assert_private(self, text: str) -> None:
         """P6: no host, address, device or channel name, spare output's number or build in what is printed."""
-        for value in (GEN3, DANTE_IP, OURS, self.device.tx_name(RET), "94", "95", SHA):
+        for value in (GEN3, DANTE_IP, OURS, self.device.tx_name(RET), "61", "62", SHA):
             self.assertNotIn(value, text)
 
 
@@ -549,7 +549,7 @@ class GateTests(GateBase):
         st = self.state()
         # Two restarts asked for (the panic's was systemd's own), the engine without its flags again.
         self.assertEqual((st["loaded"], st["hil"], st["fault"], st["starts"]), (None, False, False, 2))
-        # Our RX 94 heard our TX 94 for the run, and is unsubscribed again.
+        # Our RX 61 heard our TX 61 for the run, and is unsubscribed again.
         self.assertEqual(len(self.subscriptions()), 2)
         self.assertEqual(self.device.rows, {})
         # The budget: the job's begin, the panic's restart and the job's end.
@@ -557,7 +557,7 @@ class GateTests(GateBase):
         self.assert_private(err + json.dumps(docs))
 
     def test_a_loop_already_there_is_kept_and_another_subscription_is_put_back(self) -> None:
-        # A subscription may already loop our RX 94 to our own TX 94: kept, nothing sent.
+        # A subscription may already loop our RX 61 to our own TX 61: kept, nothing sent.
         self.device.rows = {RET: (self.device.tx_name(RET), OURS, 9)}
         self.write_loop()
         code, docs, err = self.gate_run()
@@ -916,11 +916,11 @@ class PanicTests(GateBase):
 
 class PreflightTests(GateBase):
     def test_hil_tx_beyond_the_device_s_tx_or_rx_count_is_refused_before_any_restart(self) -> None:
-        self.write_device(device_config(tx=94))
+        self.write_device(device_config(tx=61))
         self.refused("the site's [guard] hil_tx names a spare output the box's device has no TX channel for (an "
                      "engine started with --test-signal would exit 3 and stay down)")
         self.again()
-        self.write_device(device_config(rx=94))
+        self.write_device(device_config(rx=61))
         self.refused("whose D5(b) return the box's device has no RX channel for")
         self.assertEqual(self.state()["starts"], 0)
 
@@ -946,13 +946,13 @@ class PreflightTests(GateBase):
         unit.write_text(text, encoding="utf-8")
         self.again()
         site = self.box / "root/var/lib/iemmixer/site/iemmixer.toml"
-        site.write_text(site.read_text(encoding="utf-8").replace("hil_tx = [94, 95]", "hil_tx = []"),
+        site.write_text(site.read_text(encoding="utf-8").replace("hil_tx = [61, 62]", "hil_tx = []"),
                         encoding="utf-8")
         self.refused("the installed site names no [guard] hil_tx spare outputs")
 
     def test_an_optional_rx_channel_that_does_not_receive_refuses_nothing(self) -> None:
         with open(ip.env_path(), "a", encoding="utf-8") as f:
-            f.write("GEN3_OPTIONAL_RX=104\n")
+            f.write("GEN3_OPTIONAL_RX=4\n")
         code, docs, err = self.gate_run(FAKE_RX_OFF="1")
         self.assertNotIn("not receiving", err)
         self.assertTrue(docs, err)
@@ -1109,25 +1109,25 @@ class PureTests(unittest.TestCase):
                                                                    "in 600 s")
 
     def test_the_counts_cover_the_spare_outputs_and_their_returns(self) -> None:
-        self.assertIsNone(gate.counts_refusal([94, 95], 95, 95))
-        self.assertIn("no TX channel", gate.counts_refusal([94, 95], 136, 94))
-        self.assertIn("no RX channel", gate.counts_refusal([94, 95], 94, 96))
+        self.assertIsNone(gate.counts_refusal([61, 62], 62, 62))
+        self.assertIn("no TX channel", gate.counts_refusal([61, 62], 64, 61))
+        self.assertIn("no RX channel", gate.counts_refusal([61, 62], 61, 64))
         self.assertEqual(gate.device_counts(device_config(3, 2)), (3, 2))
         with self.assertRaises(ValueError):
             gate.device_counts('name = "x"\n')
-        self.assertEqual(gate.site_hil_tx("[guard]\nhil_tx = [94, 95]\n"), [94, 95])
-        for bad in ("", "[guard]\nhil_tx = []\n", "[guard]\nhil_tx = [0]\n", "[guard]\nhil_tx = ['94']\n"):
+        self.assertEqual(gate.site_hil_tx("[guard]\nhil_tx = [61, 62]\n"), [61, 62])
+        for bad in ("", "[guard]\nhil_tx = []\n", "[guard]\nhil_tx = [0]\n", "[guard]\nhil_tx = ['61']\n"):
             with self.assertRaises((ValueError, tomllib.TOMLDecodeError)):
                 gate.site_hil_tx(bad)
 
     def test_the_signal_is_judged_as_hil_v1_judges_it(self) -> None:
-        b = gate.Burst(during=[{94: PEAK, 95: 0.0}, {94: 0.001, 95: PEAK}], after={94: 0.0, 95: 0.0}, loopback=5)
-        got = gate.signal_judged([94, 95], b)
+        b = gate.Burst(during=[{61: PEAK, 62: 0.0}, {61: 0.001, 62: PEAK}], after={61: 0.0, 62: 0.0}, loopback=5)
+        got = gate.signal_judged([61, 62], b)
         self.assertEqual((got["heard"], got["lowest_dbfs"], got["highest_dbfs"], got["level_ok"], got["still"]),
                          (1, -30.0, -30.0, True, 0))
-        low = gate.signal_judged([94, 95], gate.Burst(during=[{94: PEAK, 95: PEAK * 0.94}], after={94: 0.0, 95: 0.1}))
+        low = gate.signal_judged([61, 62], gate.Burst(during=[{61: PEAK, 62: PEAK * 0.94}], after={61: 0.0, 62: 0.1}))
         self.assertEqual((low["level_ok"], low["lowest_dbfs"], low["still"]), (False, -30.54, 1))
-        none = gate.signal_judged([94, 95], gate.Burst(refused=True))
+        none = gate.signal_judged([61, 62], gate.Burst(refused=True))
         self.assertEqual((none["heard"], none["lowest_dbfs"], none["still"]), (0, None, 2))
 
     def test_versions_are_one_build(self) -> None:
@@ -1138,19 +1138,19 @@ class PureTests(unittest.TestCase):
         self.assertEqual(gate.versions_judged("iem-engine 2.0.0-dev.50+local", device, SHA[:12]), (None, False))
 
     def test_the_verdict_names_only_fixed_words(self) -> None:
-        doc = gate.verdict(gate.Checks(), [94, 95], left=True)
+        doc = gate.verdict(gate.Checks(), [61, 62], left=True)
         self.assertEqual(doc["pass"], 0)
         self.assertEqual(doc["failed"], ["health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard",
                                          "no_loopback", "alarm_count", "alarm_not_armed", "panic", "job_end"])
         self.assertEqual((doc["panic"], doc["panic_restarts"]), (0, None))
         self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])   # in FAILURES' order
-        self.assertNotIn("94", json.dumps(doc))
+        self.assertNotIn("61", json.dumps(doc))
 
     def test_every_word_the_verdict_names_is_in_failures(self) -> None:
         c = gate.Checks()
         c.restarts_unread = True
         c.unit_restarts = 1
-        doc = gate.verdict(c, [94, 95], left=True)
+        doc = gate.verdict(c, [61, 62], left=True)
         self.assertIn("restarts_unread", doc["failed"])
         self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])
 

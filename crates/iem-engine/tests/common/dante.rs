@@ -53,7 +53,7 @@ pub struct PumpRig {
 }
 
 /// The test device with exactly the test site's channels and HIL's spare
-/// pair: 132 RX, 95 TX.
+/// pair: 64 RX (the pair's loopback returns are RX 61/62), 64 TX.
 fn device() -> DeviceConfig {
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -61,8 +61,8 @@ fn device() -> DeviceConfig {
     )
     .unwrap();
     let mut cfg = DeviceConfig::from_toml(&text).unwrap();
-    cfg.rx = (1..=132).map(|n| format!("RX {n}")).collect();
-    cfg.tx = (1..=95).map(|n| format!("TX {n}")).collect();
+    cfg.rx = (1..=64).map(|n| format!("RX {n}")).collect();
+    cfg.tx = (1..=64).map(|n| format!("TX {n}")).collect();
     cfg
 }
 

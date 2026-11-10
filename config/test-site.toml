@@ -14,7 +14,7 @@ backup_retention_days = 60
 # channels no mix uses, so the HIL test signal never reaches a band member.
 # The engine opens them after the topology's TX under --test-signal.
 [guard]
-hil_tx = [94, 95]
+hil_tx = [61, 62]
 
 [[members]]
 id = "member1"
@@ -188,109 +188,110 @@ name = "BGVS"
 # (#58, the Mixes tab): each one's own mix, without the mixes that set hears,
 # declared anywhere, so member1 and member3 hear each other. The engineer
 # hears every member's whole mix, each declared before it.
-# Synthetic channels: RX 101-132, TX 71-88 (members), 91/92 (engineer),
-# 93 (translator), in a synthetic 160-channel map; TX 94/95 are HIL's spare
-# outputs (above).
+# Synthetic channels: RX 1-32, TX 1-18 (members), 21/22 (engineer),
+# 23 (translator), in a synthetic 64-channel map; TX 61/62 are HIL's spare
+# outputs (above), their D5(b) loopback returns RX 61/62: a device of 64 RX
+# and 64 TX fits the whole site.
 [engine]
-channels = 160
+channels = 64
 engineer = "engineer"
 
 [[engine.inputs]]
 id = "mic1"
-rx = [101]
+rx = [1]
 
 [[engine.inputs]]
 id = "mic2"
-rx = [102]
+rx = [2]
 
 [[engine.inputs]]
 id = "mic3"
-rx = [103]
+rx = [3]
 
 [[engine.inputs]]
 id = "mic4"
-rx = [104]
+rx = [4]
 
 [[engine.inputs]]
 id = "mic5"
-rx = [105]
+rx = [5]
 
 [[engine.inputs]]
 id = "mic6"
-rx = [106]
+rx = [6]
 
 [[engine.inputs]]
 id = "mic7"
-rx = [107]
+rx = [7]
 
 [[engine.inputs]]
 id = "mic8"
-rx = [108]
+rx = [8]
 
 [[engine.inputs]]
 id = "mic9"
-rx = [109]
+rx = [9]
 
 [[engine.inputs]]
 id = "mic10"
-rx = [110]
+rx = [10]
 
 [[engine.inputs]]
 id = "hand1"
-rx = [111]
+rx = [11]
 
 [[engine.inputs]]
 id = "hand2"
-rx = [112]
+rx = [12]
 
 [[engine.inputs]]
 id = "hand3"
-rx = [113]
+rx = [13]
 
 [[engine.inputs]]
 id = "eng_mic"
-rx = [114]
+rx = [14]
 talkback = true
 
 [[engine.inputs]]
 id = "keys"
-rx = [115, 116]
+rx = [15, 16]
 
 [[engine.inputs]]
 id = "iemonly"
-rx = [117, 118]
+rx = [17, 18]
 
 [[engine.inputs]]
 id = "content"
-rx = [119, 120]
+rx = [19, 20]
 
 [[engine.inputs]]
 id = "click"
-rx = [121]
+rx = [21]
 
 [[engine.inputs]]
 id = "guide"
-rx = [122]
+rx = [22]
 
 [[engine.inputs]]
 id = "drums"
-rx = [123, 124]
+rx = [23, 24]
 
 [[engine.inputs]]
 id = "bass"
-rx = [125, 126]
+rx = [25, 26]
 
 [[engine.inputs]]
 id = "inst"
-rx = [127, 128]
+rx = [27, 28]
 
 [[engine.inputs]]
 id = "other"
-rx = [129, 130]
+rx = [29, 30]
 
 [[engine.inputs]]
 id = "bgvs"
-rx = [131, 132]
+rx = [31, 32]
 
 [[engine.groups]]
 id = "stems"
@@ -298,47 +299,47 @@ inputs = ["click", "guide", "drums", "bass", "inst", "other", "bgvs"]
 
 [[engine.mixes]]
 id = "member2"
-tx = [73, 74]
+tx = [3, 4]
 
 [[engine.mixes]]
 id = "member3"
-tx = [75, 76]
+tx = [5, 6]
 peers = ["member1", "member2", "member4", "member5", "member6", "member7", "member8", "member9"]
 
 [[engine.mixes]]
 id = "member4"
-tx = [77, 78]
+tx = [7, 8]
 
 [[engine.mixes]]
 id = "member5"
-tx = [79, 80]
+tx = [9, 10]
 
 [[engine.mixes]]
 id = "member6"
-tx = [81, 82]
+tx = [11, 12]
 
 [[engine.mixes]]
 id = "member7"
-tx = [83, 84]
+tx = [13, 14]
 
 [[engine.mixes]]
 id = "member8"
-tx = [85, 86]
+tx = [15, 16]
 
 [[engine.mixes]]
 id = "member9"
-tx = [87, 88]
+tx = [17, 18]
 
 [[engine.mixes]]
 id = "member1"
-tx = [71, 72]
+tx = [1, 2]
 peers = ["member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9"]
 
 [[engine.mixes]]
 id = "engineer"
-tx = [91, 92]
+tx = [21, 22]
 mixes = ["member1", "member2", "member3", "member4", "member5", "member6", "member7", "member8", "member9"]
 
 [[engine.mixes]]
 id = "translator"
-tx = [93]
+tx = [23]

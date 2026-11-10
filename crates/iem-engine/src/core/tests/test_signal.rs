@@ -42,10 +42,10 @@ fn test_signal_needs_the_flag_and_is_capped() {
 }
 
 /// A core on the test site whose engine opened HIL's spare outputs: the
-/// test site's `[guard] hil_tx` (TX 94, 95), as `run` does under the
+/// test site's `[guard] hil_tx` (TX 61, 62), as `run` does under the
 /// test-signal flag.
 fn hil_core(flags: Flags) -> Core {
-    core(flags).with_hil(vec![94, 95])
+    core(flags).with_hil(vec![61, 62])
 }
 
 const TEST_FLAG: Flags = Flags {
@@ -64,26 +64,26 @@ fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_spare_output
         listen: false,
     };
     let mut off = hil_core(Flags::default());
-    assert_eq!(code(off.apply(&hil(-30.0, vec![94]))), ErrCode::Forbidden);
+    assert_eq!(code(off.apply(&hil(-30.0, vec![61]))), ErrCode::Forbidden);
     assert_eq!(code(off.apply(&hil(-10.0, vec![]))), ErrCode::Forbidden);
     let mut c = hil_core(TEST_FLAG);
-    assert_eq!(c.hil(), [94, 95]);
+    assert_eq!(c.hil(), [61, 62]);
     assert!(core(TEST_FLAG).hil().is_empty(), "none unless opened");
     // Above the −20 dBFS cap it is refused, never lowered; the cap itself is fine.
-    assert_eq!(code(c.apply(&hil(-19.9, vec![94]))), ErrCode::BadValue);
-    assert_eq!(code(c.apply(&hil(f64::NAN, vec![94]))), ErrCode::BadValue);
+    assert_eq!(code(c.apply(&hil(-19.9, vec![61]))), ErrCode::BadValue);
+    assert_eq!(code(c.apply(&hil(f64::NAN, vec![61]))), ErrCode::BadValue);
     assert_eq!(code(c.apply(&hil(-30.0, vec![]))), ErrCode::BadValue);
     // A card output the engine did not open for HIL is unknown.
-    let unknown = c.apply(&hil(-30.0, vec![94, 96])).unwrap_err();
+    let unknown = c.apply(&hil(-30.0, vec![61, 63])).unwrap_err();
     assert_eq!(
         (unknown.code, unknown.msg.as_str()),
         (
             ErrCode::UnknownId,
-            "card output 96 is not a HIL output of this engine ([guard] hil_tx)"
+            "card output 63 is not a HIL output of this engine ([guard] hil_tx)"
         )
     );
     assert_eq!(
-        code(c.apply(&hil(-30.0, vec![101]))),
+        code(c.apply(&hil(-30.0, vec![32]))),
         ErrCode::UnknownId,
         "an RX"
     );
@@ -92,7 +92,7 @@ fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_spare_output
         "a refusal changes nothing"
     );
     assert_eq!(c.rev(), 0);
-    let out = c.apply(&hil(-20.0, vec![95, 94, 95])).unwrap();
+    let out = c.apply(&hil(-20.0, vec![62, 61, 62])).unwrap();
     assert_eq!(out.rev, 1);
     let RtOp::HilTestSignal {
         i,
@@ -115,7 +115,7 @@ fn the_hil_test_signal_needs_the_flag_stays_under_the_cap_and_names_spare_output
     // It is the test signal: StopTestSignal ends it like any other.
     let stop = c.apply(&Cmd::StopTestSignal).unwrap();
     assert_eq!(stop.rt, vec![RtOp::StopTestSignal]);
-    let out = c.apply(&hil(-30.0, vec![95])).unwrap();
+    let out = c.apply(&hil(-30.0, vec![62])).unwrap();
     let RtOp::HilTestSignal { mask, .. } = out.rt[0] else {
         panic!("{:?}", out.rt)
     };
@@ -143,16 +143,16 @@ fn a_hil_signal_never_names_a_mixs_tx() {
     for mut c in [
         core(TEST_FLAG),
         hil_core(TEST_FLAG),
-        core(TEST_FLAG).with_hil(vec![94, 72]),
+        core(TEST_FLAG).with_hil(vec![61, 2]),
     ] {
         for (tx, mix) in [
-            (72, "member1"),
-            (71, "member1"),
-            (88, "member9"),
-            (91, "engineer"),
-            (93, "translator"),
+            (2, "member1"),
+            (1, "member1"),
+            (18, "member9"),
+            (21, "engineer"),
+            (23, "translator"),
         ] {
-            for card_tx in [vec![tx, 94], vec![94, tx]] {
+            for card_tx in [vec![tx, 61], vec![61, tx]] {
                 let e = c
                     .apply(&Cmd::HilTestSignal {
                         input: input("mic3"),
@@ -163,8 +163,8 @@ fn a_hil_signal_never_names_a_mixs_tx() {
                         listen: false,
                     })
                     .unwrap_err();
-                if card_tx[0] == 94 && c.hil().is_empty() {
-                    // 94 is unknown to an engine without HIL outputs.
+                if card_tx[0] == 61 && c.hil().is_empty() {
+                    // 61 is unknown to an engine without HIL outputs.
                     assert_eq!(e.code, ErrCode::UnknownId, "{card_tx:?}");
                     continue;
                 }
@@ -194,7 +194,7 @@ fn a_plain_test_signal_never_lifts_a_running_hil_mask() {
         hz: 1000.0,
         dbfs: -30.0,
         ttl_s: 0.5,
-        card_tx: vec![94],
+        card_tx: vec![61],
         listen: false,
     };
     let plain = Cmd::StartTestSignal {
@@ -222,7 +222,7 @@ fn a_plain_test_signal_never_lifts_a_running_hil_mask() {
 fn a_hil_output_beyond_the_mask_is_refused() {
     // An engine given more spare outputs than a mask holds (check-site and
     // run refuse such a site): the last slot is taken, one more is refused.
-    let spare: Vec<u16> = (94..=94 + MAX_HIL as u16).collect();
+    let spare: Vec<u16> = (33..=33 + MAX_HIL as u16).collect();
     assert_eq!(spare.len(), MAX_HIL + 1);
     let mut c = core(TEST_FLAG).with_hil(spare.clone());
     let hil = |ch: u16| Cmd::HilTestSignal {
@@ -244,7 +244,7 @@ fn a_hil_output_beyond_the_mask_is_refused() {
         (e.code, e.msg.as_str()),
         (
             ErrCode::BadValue,
-            "card output 102 is beyond the first 8 HIL outputs"
+            "card output 41 is beyond the first 8 HIL outputs"
         )
     );
 }

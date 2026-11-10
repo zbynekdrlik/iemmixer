@@ -169,9 +169,9 @@ if line == f"{DANTE} ctl status":
     tx = [{"flow": 1, "live": 1, "fpp": 8, "channels": 8, "packets": 2000 * so["all"], "send_errors": 0,
            "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes")}]
     off = (os.environ.get("FAKE_RX_OFF") == "1" and late()) or os.environ.get("FAKE_RX_OFF") == "base"
-    channels = [{"rx": n, "status": 1 if off and n == 104 else 0x01010009, "written": 1,
-                 "holes": (2 if n == 101 else 0) + (grown("rx_holes") if n == 102 else 0), "late": 0,
-                 "duplicate": 0, "early": 0} for n in (101, 102, 103, 104)]
+    channels = [{"rx": n, "status": 1 if off and n == 4 else 0x01010009, "written": 1,
+                 "holes": (2 if n == 1 else 0) + (grown("rx_holes") if n == 2 else 0), "late": 0,
+                 "duplicate": 0, "early": 0} for n in (1, 2, 3, 4)]
     doc = {"clock": clock, "requests": [], "sent": [], "uncounted": 0, "tx": tx, "rx": rx, "rx_poll_errors": 0,
            "channels": channels, "sources": [], "checks": []}
     if not os.environ.get("FAKE_NO_ENGINE") and not (os.environ.get("FAKE_NO_ENGINE_AFTER") and late()):
@@ -405,7 +405,7 @@ class CriteriaTests(SoakBase):
 
     def test_an_optional_rx_channel_fails_no_gate(self) -> None:
         with open(ip.env_path(), "a", encoding="utf-8") as f:
-            f.write("GEN3_OPTIONAL_RX=102,104\n")
+            f.write("GEN3_OPTIONAL_RX=2,4\n")
         for env in ({"FAKE_RX_OFF": "1"}, {"FAKE_GROW": "rx_holes"}):
             with self.subTest(env=env):
                 self.again()
@@ -644,14 +644,14 @@ class PureTests(unittest.TestCase):
         status = {"clock": {"ready": 1, "epoch": 0, "polls": 9, "re_anchors": 2, "holdovers": 3, "holdover": 0,
                             "freq_ppb": -5},
                   "rx": [{"flow": 1, "late": 4, "lateness": 15}, {"flow": 3, "late": 0, "lateness": 31}],
-                  "tx": [{"flow": 2, "holes": 6}], "channels": [{"rx": 101, "holes": 2}, {"rx": 102, "holes": 0}],
+                  "tx": [{"flow": 2, "holes": 6}], "channels": [{"rx": 1, "holes": 2}, {"rx": 2, "holes": 0}],
                   "engine": {"media": 1, "blocks": 30, "late": 5, "missed": 7, "overruns": 11, "rebootstraps": 1,
                              "max_process_us": 210, "offset": 176}}
         self.assertEqual(soak.sample(status), {
             "ready": 1, "epoch": 0, "re_anchors": 2, "holdovers": 3, "holdover": 0,
             "engine": {"media": 1, "blocks": 30, "late": 5, "missed": 7, "overruns": 11, "rebootstraps": 1,
                        "max_process_us": 210},
-            "rx_late": {"1": 4, "3": 0}, "tx_holes": {"2": 6}, "rx_holes": {"101": 2, "102": 0}, "rx_off": 0, "lateness": 31})
+            "rx_late": {"1": 4, "3": 0}, "tx_holes": {"2": 6}, "rx_holes": {"1": 2, "2": 0}, "rx_off": 0, "lateness": 31})
         self.assertIsNone(soak.sample({**status, "engine": None})["engine"])
         for bad in ({}, {**status, "clock": {"ready": 1}}, {**status, "rx": "x"},
                     {**status, "rx": [{"flow": 1, "late": -1, "lateness": 0}]}):

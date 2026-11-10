@@ -940,7 +940,7 @@ fn a_listen_probe_keeps_every_mix_tx_zero_and_its_taps_do_not_depend_on_the_bloc
             );
         }
     }
-    // Spare output 95 carries both signals: the probe's own samples.
+    // Spare output 62 carries both signals: the probe's own samples.
     let want: Vec<f32> = spans
         .iter()
         .flat_map(|&(a, b)| reference[tx + 1][a..b].iter().map(|y| *y as f32))
