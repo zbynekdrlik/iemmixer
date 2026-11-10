@@ -2,3 +2,13 @@
 # test fixture and why it is not a secret; a real secret is never allowlisted.
 [extend]
 useDefault = true
+
+# scripts/iem-pc/test_gen3_receivers.py and test_iempc_gen3_soak.py (#72):
+# a receiver's opaque key in the `iem-dante-dev receivers` line is 16 hex
+# digits; the tests' synthetic keys (one in upper case, which the parser
+# refuses) are the ascending and descending hex digit runs, not a secret.
+[[allowlists]]
+description = "synthetic receiver keys of the receivers gate's tests"
+condition = "AND"
+paths = ['''^scripts/iem-pc/test_(gen3_receivers|iempc_gen3_soak)\.py$''']
+regexes = ['''^(0123456789abcdef|0123456789ABCDEF|fedcba9876543210)$''']
