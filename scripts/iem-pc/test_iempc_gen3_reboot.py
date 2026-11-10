@@ -76,8 +76,9 @@ FLOWS = [{"flow": 1, "lateness_min_ns": 400_000}, {"flow": 2, "lateness_min_ns":
 
 
 def behind(us: int) -> list[dict]:
-    """The flows as a box clock `us` behind the band's reads them."""
-    return [{**f, "lateness_min_ns": f["lateness_min_ns"] - us * 1000} for f in FLOWS]
+    """The flows as a box clock `us` behind the band's reads them (a packet
+    from our future is 0, as the judge clamps it)."""
+    return [{**f, "lateness_min_ns": max(0, f["lateness_min_ns"] - us * 1000)} for f in FLOWS]
 
 
 def proved_seen(**over) -> rb.Seen:
@@ -128,14 +129,16 @@ class ProveTests(unittest.TestCase):
         for rx in (behind(100), behind(-400), FLOWS[:1]):
             with self.subTest(rx=rx):
                 self.assertNotIn("tx_late", proved(rx=rx))
-        s = proved_seen(rx=behind(700))
-        self.assertEqual((s.tx_late_us, s.tx_future), (-700.0, 0))
-        self.assertEqual(rb.verdict("reboot", s, 9)["tx_late_us"], -700.0)
+        s = proved_seen(rx=behind(300))
+        self.assertEqual((s.tx_late_us, s.tx_future), (-300.0, 0))
+        doc = rb.verdict("reboot", s, 9)
+        self.assertEqual((doc["tx_late_us"], doc["tx_future"], doc["tx_reads"]), (-300.0, 0, s.tx_reads))
+        self.assertGreaterEqual(s.tx_reads, 3)   # the clock's wait, the RX wait and the watch
 
     def test_a_packet_from_our_future_fails_even_within_the_bound(self):
         # The judge clamps a packet stamped after our now to 0, so a small
         # baseline cannot show the whole shift: any 0 is a clock behind.
-        s = proved_seen(base=100_000, rx=[{"flow": 1, "lateness_min_ns": 0}])
+        s = proved_seen(base=100_000, reads=[FLOWS, [{"flow": 1, "lateness_min_ns": 0}], FLOWS])
         self.assertEqual((s.tx_late_us, s.tx_future), (-100.0, 1))
         self.assertIn("tx_late", rb.failed(s, 9))
 
