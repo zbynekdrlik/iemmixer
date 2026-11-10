@@ -569,7 +569,7 @@ pub fn run(cfg: RunConfig) -> Result<Exit, EngineError> {
             "state rev {} loaded from save.tmp: a crash cut its save off before current.json",
             loaded.persisted.rev
         ),
-        Source::Generation(_) | Source::Baseline => alarms.push(Alarm {
+        Source::Generation(_) => alarms.push(Alarm {
             code: AlarmCode::StateFallback,
             detail: format!(
                 "state rev {} from {:?}",

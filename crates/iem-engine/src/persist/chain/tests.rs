@@ -422,7 +422,7 @@ fn a_newer_save_tmp_beside_current_json_wins() {
 
 #[test]
 fn an_older_or_cut_off_save_tmp_is_skipped_and_named() {
-    // Older by revision (a leftover baseline of an older engine) or cut
+    // Older by revision (a leftover of an earlier save) or cut
     // off while writing: current.json stands, and the skipped save.tmp is
     // reported.
     let (_d, s) = store();

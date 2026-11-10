@@ -18,8 +18,8 @@ archive before anything is written.
   same way, so the box serves the sender's set. The site's own files
   (iemmixer.toml, the roster's status) are never touched. A staging an
   earlier run left is moved aside (`.incoming.before-<stamp>`).
-- engine: the whole state folder is replaced the same way (generations,
-  revision markers and the baseline belong together), the old folder kept
+- engine: the whole state folder is replaced the same way (generations and
+  revision markers belong together), the old folder kept
   as `<engine>.before-<stamp>`.
 
 Nothing is deleted. Files 0600, folders 0700. stdout: one JSON line
@@ -45,7 +45,7 @@ SERVER_FILES = ("secrets/jwt_secret", "secrets/vapid_private", "secrets/pin_hash
 SERVER_FOLDERS = ("lineups", "photos", "presets", "snapshots", "customizations", "backups")
 # The engine folder's state files (persist.rs): no lock, no temporary or damaged file.
 ENGINE_PREFIXES = ("gen-",)
-ENGINE_FILES = ("current.json", "baseline.json")
+ENGINE_FILES = ("current.json",)
 ENGINE_MARKER = "current.json.rev-"
 
 MAX_ARCHIVE = 512 * 1024 * 1024

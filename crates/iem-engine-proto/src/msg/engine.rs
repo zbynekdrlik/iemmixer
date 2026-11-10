@@ -137,7 +137,7 @@ pub enum Change {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlarmCode {
-    /// The state came from a generation or the baseline, not `current.json`.
+    /// The state came from a generation, not `current.json`.
     StateFallback,
     /// No state loaded: defaults with every mix muted.
     StateLost,

@@ -1,5 +1,5 @@
 //! The load chain (#32): which file holds the state (`current.json`, an
-//! interrupted save in `save.tmp`, a generation, the baseline), what the
+//! interrupted save in `save.tmp`, a generation), what the
 //! seed must keep (`Store::live_state`), and the boot's recovery that
 //! normalizes the directory to what was loaded (`Store::recover`).
 //!
@@ -28,13 +28,13 @@
 //! when `current.json` is not Valid (a save.tmp that could not be compared
 //! because the generations cannot be listed loads only with an alarm).
 //! Otherwise a Valid `current.json`, then the newest Valid generation, then
-//! the baseline, then muted defaults. A Valid `save.tmp` passed over for a
+//! muted defaults. A Valid `save.tmp` passed over for a
 //! lower revision is only legitimate as a leftover: it is named in an
 //! alarm (and the next save moves it aside).
 //!
 //! **Past an Unreadable live file** (`current.json`, or a generation newer
-//! than the one loaded) the state loaded (a generation, `save.tmp`, the
-//! baseline or the defaults) continues its revision `REV_JUMP` above the
+//! than the one loaded) the state loaded (a generation, `save.tmp` or the
+//! defaults) continues its revision `REV_JUMP` above the
 //! highest revision it or any name in the directory shows, with an alarm
 //! (#32 MAJOR-3, F3-r4 2): the file may hold any revision the last session
 //! reached, recovery never moves it, and once it can be read again it must
@@ -106,8 +106,8 @@ fn transient(e: &io::Error) -> bool {
 
 impl Store {
     /// The live state the seed must keep, if any: the file the load chain
-    /// would use among `current.json`, `save.tmp` and the generations (a
-    /// seed is not live state, so `baseline.json` never counts). A file that
+    /// would use among `current.json`, `save.tmp` and the generations. A
+    /// file that
     /// exists but does not decode is nothing the engine could load, so it
     /// does not count (the seed's save renames a damaged `current.json`
     /// into a generation, its bytes kept). An I/O error while looking is an
@@ -136,8 +136,8 @@ impl Store {
     }
 
     /// The load chain: the live state (`current.json`, `save.tmp` or the
-    /// newest valid generation, see the module docs), else `baseline.json`,
-    /// else defaults with every mix muted. A file must pass `decode`
+    /// newest valid generation, see the module docs), else defaults with
+    /// every mix muted. A file must pass `decode`
     /// (format, schema, the payload's SHA-256, then the payload's parse) to
     /// be used; one that exists and does not, or cannot be read, is
     /// `rejected` with the reason, as is a `save.tmp` passed over for an
@@ -248,11 +248,6 @@ impl Store {
         let passed_over = std::mem::take(&mut pick.passed_over);
         if let Some((persisted, source, _)) = live {
             return (settle(topo, persisted, source, pick), passed_over);
-        }
-        let baseline = self.dir.join(BASELINE);
-        if let Ok(Read::Valid(persisted)) = self.read_state(&baseline, &mut pick, Reading::Tolerant)
-        {
-            return (settle(topo, persisted, Source::Baseline, pick), passed_over);
         }
         let loaded = Loaded {
             persisted: Persisted {
@@ -633,9 +628,8 @@ struct Pick {
 /// revision `REV_JUMP` above the highest the state loaded or any name
 /// shows (#32 MAJOR-3, F3-r4 2), so the session's saves outrank the file
 /// once it can be read again. A lower revision never wins: an
-/// import's fresh count (0) and an older engine's leftover baseline never
-/// roll the saved state back (such a baseline at the same revision holds
-/// that revision's state); such a `save.tmp` is named in an alarm.
+/// import's fresh count (0) never rolls the saved state back; such a
+/// `save.tmp` is named in an alarm.
 fn supersedes(interrupted: &Persisted, other: &Persisted) -> bool {
     interrupted.rev >= other.rev
 }
