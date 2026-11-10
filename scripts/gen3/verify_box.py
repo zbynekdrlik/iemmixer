@@ -51,10 +51,11 @@ with a fixed reason
   threads SCHED_FIFO 60 on core 0, each of its interrupts on core 0.
 - idle: /etc/tmpfiles.d/iemmixer-idle.conf keeps the CPUs out of C6, C8 and
   C10, and no CPU may enter them (a receiver read 490 us against 240 us, #72).
-- display: /etc/tmpfiles.d/iemmixer-display.conf turns the display output
-  polling off at boot, and on a box with the parameter `sudo -n cat
-  /sys/module/drm_kms_helper/parameters/poll` reads N (the i915 driver's poll
-  held a CPU ~2 ms and made the engine's pump miss blocks, Live 4).
+- display: /etc/udev/rules.d/60-iemmixer-display.rules holds exactly the rule
+  keeping every PCI display device out of runtime suspend, the old
+  /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is gone, and
+  every PCI display device's power/control reads on (the i915 driver's poll
+  wakes a suspended GPU, and the wake held the NIC's core 0.4-2 ms, #72).
 
 `tpm2` is 1 when `systemd-creds has-tpm2` says the box has a usable TPM2: the
 key `--with-key=auto` sealed the pepper with besides the host key.
@@ -108,9 +109,10 @@ PRIORITY = 60
 CORE = "0"
 FIFO = 1
 IFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
-DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
-POLL_PARAM = "/sys/module/drm_kms_helper/parameters/poll"
-POLL_OFF = f"w {POLL_PARAM} - - - - N"
+DISPLAY_RULE = "/etc/udev/rules.d/60-iemmixer-display.rules"
+KEEP_AWAKE = 'ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{class}=="0x03*", ATTR{power/control}="on"'
+OLD_DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
+PCI_DEVICES = "/sys/bus/pci/devices"
 IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
 IDLE_STATES = (2, 3, 4)   # C6, C8, C10 on the N100
 WAKE_DEVICE = "/dev/cpu_dma_latency"
@@ -479,18 +481,28 @@ def check_idle(box: Box) -> None:
 
 def check_display(box: Box) -> None:
     try:
-        lines = {" ".join(line.split()) for line in read(DISPLAY_CONF).splitlines()}
+        lines = [line.strip() for line in read(DISPLAY_RULE).splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
     except FileNotFoundError:
-        lines = set()
-    if POLL_OFF not in lines:
-        raise Failed(f"no {DISPLAY_CONF} turning display output polling off")
-    if not os.path.exists(at(POLL_PARAM)):
-        return
-    r = run("sudo", "-n", "cat", POLL_PARAM)
-    if r.returncode != 0:
-        raise Failed("the display output polling cannot be read (sudo -n cat)")
-    if r.stdout.strip() != "N":
-        raise Failed("display output polling is on")
+        lines = []
+    if lines != [KEEP_AWAKE]:
+        raise Failed(f"no {DISPLAY_RULE} keeping the display devices awake")
+    if os.path.lexists(at(OLD_DISPLAY_CONF)):
+        raise Failed(f"the old {OLD_DISPLAY_CONF} (the output poll off) is still there")
+    for dev in sorted(glob.glob(at(PCI_DEVICES) + "/*")):
+        try:
+            with open(os.path.join(dev, "class"), encoding="utf-8") as f:
+                if not f.read().strip().startswith("0x03"):
+                    continue
+        except FileNotFoundError:
+            continue
+        try:
+            with open(os.path.join(dev, "power/control"), encoding="utf-8") as f:
+                control = f.read().strip()
+        except FileNotFoundError:
+            control = ""
+        if control != "on":
+            raise Failed("a display device may runtime-suspend (power/control is not on)")
 
 
 def tpm2() -> int:

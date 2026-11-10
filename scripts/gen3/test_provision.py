@@ -88,11 +88,18 @@ MENU_ENTRY_REASON = "grub's menu has no entry for the newest realtime kernel: ru
 AFTER_REBOOT = "realtime: the box runs it after its next reboot"
 # A file the root script renders in its temporary folder, installed 0644 root.
 TMP_INSTALL = ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", "<tmp>"]
-# The display drivers' output polling (the kernel's drm_kms_helper.poll, root
-# only), and the tmpfiles.d file that turns it off at every boot.
-POLL = "sys/module/drm_kms_helper/parameters/poll"
-DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
-POLL_OFF = "w /sys/module/drm_kms_helper/parameters/poll - - - - N\n"
+# The display GPU kept out of runtime suspend (#72, 2026-11-10): the udev rule
+# that sets power/control on for every PCI display device when it is added or
+# its driver binds, a display GPU and a device of another class, the trigger
+# that applies the rule now, and the old step's tmpfiles.d file (the output
+# poll off), which goes.
+DISPLAY_RULE = "/etc/udev/rules.d/60-iemmixer-display.rules"
+KEEP_AWAKE = 'ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{class}=="0x03*", ATTR{power/control}="on"\n'
+GPU = "sys/bus/pci/devices/0000:00:02.0"
+BRIDGE = "sys/bus/pci/devices/0000:00:1f.0"
+TRIGGER = ["udevadm", "trigger", "--settle", "--action=bind", "--subsystem-match=pci", "--attr-match=class=0x03*"]
+OLD_DISPLAY_CONF = "/etc/tmpfiles.d/iemmixer-display.conf"
+OLD_POLL_OFF = "w /sys/module/drm_kms_helper/parameters/poll - - - - N\n"
 # No deep CPU idle (#72, 2026-10-31: a package asleep held the NIC's DMA, a
 # receiver read 490 us against 240 us).
 IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
@@ -110,7 +117,7 @@ CHOWN_STATE = ["chown", "-R", "-h", "iemmixer:iemmixer", "--", "/var/lib/iemmixe
 # on its own name. The box's state is FAKE_WORLD/db.json; each call is one
 # JSON line of calls.log, marked a write unless it only reads.
 FAKE = r'''
-import fnmatch, glob, hashlib, json, os, subprocess, sys
+import fnmatch, glob, hashlib, json, os, re, subprocess, sys
 
 WORLD = os.environ["FAKE_WORLD"]
 ROOT = os.environ["FAKE_ROOT"]
@@ -529,16 +536,57 @@ elif name == "chrt":
 elif name == "systemd-tmpfiles":
     # Its `w` lines: the argument written to a file that exists.
     assert args[:1] == ["--create"] and len(args) == 2, args
-    rc = int(os.environ.get("FAKE_TMPFILES_RC", "0"))
+    with open(args[1], encoding="utf-8") as f:
+        for line in f:
+            words = line.split()
+            if len(words) == 7 and words[0] == "w" and os.path.exists(ROOT + words[1]):
+                with open(ROOT + words[1], "w", encoding="utf-8") as out:
+                    out.write(words[6] + "\n")
+elif name == "udevadm":
+    # `control --reload`, and a `trigger` that applies the rules of
+    # FAKE_ROOT/etc/udev/rules.d to every device of the subsystem whose
+    # attribute matches: `KEY=="a|b"` conditions (ACTION, SUBSYSTEM,
+    # ATTR{name}, shell patterns), `ATTR{name}="value"` assignments.
+    if args == ["control", "--reload"]:
+        sys.exit(0)
+    assert args[:1] == ["trigger"], args
+    rc = int(os.environ.get("FAKE_UDEVADM_RC", "0"))
     if rc:
-        fail(f"Failed to write to {args[1]}: Permission denied", rc)
-    if not os.environ.get("FAKE_TMPFILES_IGNORED"):
-        with open(args[1], encoding="utf-8") as f:
-            for line in f:
-                words = line.split()
-                if len(words) == 7 and words[0] == "w" and os.path.exists(ROOT + words[1]):
-                    with open(ROOT + words[1], "w", encoding="utf-8") as out:
-                        out.write(words[6] + "\n")
+        fail("Failed to trigger devices", rc)
+    opts = dict(a[2:].split("=", 1) for a in args[1:] if "=" in a)
+    attr_name, attr_pattern = opts["attr-match"].split("=", 1)
+    if os.environ.get("FAKE_UDEV_IGNORED"):
+        sys.exit(0)
+
+    def attr(dev, key):
+        with open(os.path.join(dev, key), encoding="utf-8") as f:
+            return f.read().strip()
+
+    rules = []
+    for rule_file in sorted(glob.glob(os.path.join(ROOT, "etc/udev/rules.d/*.rules"))):
+        with open(rule_file, encoding="utf-8") as f:
+            rules += [line.strip() for line in f if line.strip() and not line.lstrip().startswith("#")]
+    for dev in sorted(glob.glob(os.path.join(ROOT, "sys/bus", opts["subsystem-match"], "devices/*"))):
+        if not fnmatch.fnmatchcase(attr(dev, attr_name), attr_pattern):
+            continue
+        for rule in rules:
+            ok, assigns = True, []
+            for key in (k.strip() for k in rule.split(",")):
+                m = re.fullmatch(r'([A-Z]+)(?:\{([^}]+)\})?(==|=)"([^"]*)"', key)
+                assert m, key
+                word, name_, op, value = m.groups()
+                if op == "=":
+                    assigns.append((name_, value))
+                    continue
+                actual = {"ACTION": opts["action"], "SUBSYSTEM": opts["subsystem-match"]}.get(word)
+                if word == "ATTR":
+                    actual = attr(dev, name_)
+                if not any(fnmatch.fnmatchcase(actual, alt) for alt in value.split("|")):
+                    ok = False
+            if ok:
+                for name_, value in assigns:
+                    with open(os.path.join(dev, name_), "w", encoding="utf-8") as f:
+                        f.write(value + "\n")
 elif name == "ethtool":
     # EEE only: its state is FAKE_ROOT/fake-eee/<interface> (no such file: the
     # NIC has no EEE, as ethtool says "not supported").
@@ -580,8 +628,6 @@ elif name == "sudo":
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
     if rest[:1] == ["cat"] and len(rest) == 2:
-        if os.environ.get("FAKE_SUDO_CAT_REFUSED"):
-            fail("a password is required")
         path = ROOT + rest[1]
         if not os.path.exists(path):
             fail(f"cat: {rest[1]}: No such file or directory")
@@ -605,7 +651,7 @@ else:
 FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
               "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
               "chrt", "taskset", "sudo", "find", "chown", "systemd-tmpfiles", "nproc", "uname", "update-grub",
-              "grub-editenv", "grub-set-default", "ethtool")
+              "grub-editenv", "grub-set-default", "ethtool", "udevadm")
 
 
 def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
@@ -714,8 +760,14 @@ class World(unittest.TestCase):
         write(r / "proc/meminfo", "MemTotal:       16123456 kB\nMemFree:         9000000 kB\n")
         write(r / "proc/swaps", SWAPS_HEADER)
         kernel_trees(r, applied=False)
-        # The i915 driver polls a box's display outputs every 10 s by default.
-        write(r / POLL, "Y\n", 0o600)
+        # The display GPU as its driver leaves it (allowed to runtime-suspend,
+        # so the output poll wakes it every ~10 s), a device of another class
+        # beside it, and the old display step's file from an earlier provision.
+        write(r / GPU / "class", "0x030000\n")
+        write(r / GPU / "power/control", "auto\n")
+        write(r / BRIDGE / "class", "0x060100\n")
+        write(r / BRIDGE / "power/control", "auto\n")
+        write(r / OLD_DISPLAY_CONF.lstrip("/"), OLD_POLL_OFF, 0o644)
         # Ubuntu's generic kernel and grub's settings as the installer leaves them.
         write(r / "boot/vmlinuz-7.0.0-1-generic", "synthetic generic kernel\n", 0o600)
         write(r / GRUB.lstrip("/"), GRUB_BEFORE, 0o644)
@@ -916,8 +968,9 @@ class ProvisionRootTests(World):
             ["systemctl", "enable", "iem-napi.service"],
             ["systemctl", "restart", "iem-napi.service"],
             *napi_calls,
-            [*tmp_install, DISPLAY_CONF],
-            ["systemd-tmpfiles", "--create", DISPLAY_CONF],
+            [*tmp_install, DISPLAY_RULE],
+            ["udevadm", "control", "--reload"],
+            TRIGGER,
             [*tmp_install, IDLE_CONF],
             ["systemctl", "disable", "iem-dante.service"],
             ["install", "-D", "-m", "0440", "-o", "root", "-g", "root", "--", "<tmp>",
@@ -938,10 +991,12 @@ class ProvisionRootTests(World):
         self.assertEqual((r / "usr/local/lib/iemmixer/napi-priority").read_bytes(), NAPI.read_bytes())
         self.assertEqual((r / "usr/local/lib/iemmixer/napi-priority").stat().st_mode & 0o777, 0o755)
         self.assertEqual((r / "etc/systemd/system/iem-napi.service").read_bytes(), NAPI_UNIT.read_bytes())
-        display = (r / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8")
-        self.assertTrue(display.endswith(POLL_OFF), display)
-        self.assertEqual((r / DISPLAY_CONF.lstrip("/")).stat().st_mode & 0o777, 0o644)
-        self.assertEqual((r / POLL).read_text(encoding="utf-8"), "N\n")
+        display = (r / DISPLAY_RULE.lstrip("/")).read_text(encoding="utf-8")
+        self.assertTrue(display.endswith(KEEP_AWAKE), display)
+        self.assertEqual((r / DISPLAY_RULE.lstrip("/")).stat().st_mode & 0o777, 0o644)
+        self.assertFalse((r / OLD_DISPLAY_CONF.lstrip("/")).exists())
+        self.assertEqual((r / GPU / "power/control").read_text(encoding="utf-8"), "on\n")
+        self.assertEqual((r / BRIDGE / "power/control").read_text(encoding="utf-8"), "auto\n")
         self.assertEqual((r / "etc/sudoers.d/iemmixer-gen3").stat().st_mode & 0o777, 0o440)
         self.assertFalse((r / "etc/sudoers.d/.iemmixer-gen3.new").exists())
         self.assertEqual((r / "etc/credstore.encrypted/iemmixer-pepper").stat().st_mode & 0o777, 0o600)
@@ -1193,45 +1248,62 @@ class ProvisionRootTests(World):
         self.assertIn("iem-napi", r.stderr)
         self.assertEqual(self.steps(r).get("napi"), None)
 
-    def test_display_polling_is_turned_off_kept_off_and_a_box_without_it_has_nothing_to_turn_off(self) -> None:
-        # Live 4 on the box (#72 phase D): with no screen attached, the i915
-        # driver's output poll (every ~10 s, waking the GPU each time) held a
-        # CPU for ~2 ms, and the engine's pump, woken onto that CPU, missed
-        # its blocks: 66 re-bootstraps in 2 h, none in 30 minutes with the
-        # poll off.
+    def test_the_display_gpu_is_kept_awake_kept_so_and_a_box_without_one_gets_the_rule_alone(self) -> None:
+        # #72, 2026-11-10: the i915 driver polls a screenless box's outputs
+        # only while its GPU is runtime-suspended, and each poll wakes it: the
+        # wake reloads the display microcontroller's firmware with preemption
+        # off (430-600 us on the box, ~2 ms on 2026-10-27/28), on core 0, where
+        # the Dante NIC's NAPI thread (SCHED_FIFO 60) then waits. Kept awake,
+        # no poll runs (0 polls, 0 resumes in 60 s); the old step only turned
+        # the poll off.
         self.provisioned()
-        poll = self.root / POLL
-        self.assertEqual(poll.read_text(encoding="utf-8"), "N\n")
-        # Set back on (by hand, or a kernel that ignored the file at boot):
-        # the next run sets it again and changes nothing else.
-        write(poll, "Y\n")
+        gpu = self.root / GPU / "power/control"
+        self.assertEqual(gpu.read_text(encoding="utf-8"), "on\n")
+        self.assertEqual((self.root / BRIDGE / "power/control").read_text(encoding="utf-8"), "auto\n")
+        self.assertFalse((self.root / OLD_DISPLAY_CONF.lstrip("/")).exists())
+        # Allowed to suspend again (by hand, or a driver that bound before
+        # udev ran): the next run triggers the rule again and changes nothing
+        # else; the run after that changes nothing.
+        write(gpu, "auto\n")
         self.clear_calls()
         r = self.provisioned()
         self.assertEqual(self.steps(r)["display"], "changed")
-        self.assertEqual(self.writes(), [["systemd-tmpfiles", "--create", DISPLAY_CONF]])
-        self.assertEqual(poll.read_text(encoding="utf-8"), "N\n")
-        # One that does not take fails the run loudly.
-        write(poll, "Y\n")
-        r = self.provision(FAKE_TMPFILES_IGNORED="1")
+        self.assertEqual(self.writes(), [["udevadm", "control", "--reload"], TRIGGER])
+        self.assertEqual(gpu.read_text(encoding="utf-8"), "on\n")
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["display"], "unchanged")
+        self.assertEqual(self.writes(), [])
+        # The old file put back, as a file or a link (even a dangling one):
+        # removed, nothing triggered.
+        old = self.root / OLD_DISPLAY_CONF.lstrip("/")
+        for put_back in (lambda: write(old, OLD_POLL_OFF, 0o644), lambda: old.symlink_to("/nonexistent")):
+            put_back()
+            self.clear_calls()
+            r = self.provisioned()
+            self.assertEqual(self.steps(r)["display"], "changed")
+            self.assertFalse(old.exists() or old.is_symlink())
+            self.assertEqual(self.writes(), [])
+        # A rule that does not take fails the run loudly.
+        write(gpu, "auto\n")
+        r = self.provision(FAKE_UDEV_IGNORED="1")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("display output polling is still on", r.stderr)
+        self.assertIn("a display device may still runtime-suspend after udevadm trigger", r.stderr)
         self.assertIsNone(self.steps(r).get("display"))
-        # One systemd-tmpfiles refuses (it exits 73 when it cannot write a
-        # value) fails the run the same way, with the step's own words.
-        r = self.provision(FAKE_TMPFILES_RC="73")
+        # A trigger udevadm refuses fails the run with the step's own words.
+        r = self.provision(FAKE_UDEVADM_RC="2")
         self.assertEqual(r.returncode, 1)
-        self.assertIn(f"systemd-tmpfiles --create {DISPLAY_CONF} failed (exit 73)", r.stderr)
+        self.assertIn("udevadm trigger of the display devices failed (exit 2)", r.stderr)
         self.assertIsNone(self.steps(r).get("display"))
-        # A box without the parameter (no display driver): the file is
-        # written, nothing to apply or read back.
-        shutil.rmtree(self.root / "sys/module/drm_kms_helper")
-        (self.root / DISPLAY_CONF.lstrip("/")).unlink()
+        # A box without a display device: the rule is written, nothing to
+        # trigger or read back.
+        shutil.rmtree(self.root / GPU)
+        (self.root / DISPLAY_RULE.lstrip("/")).unlink()
         self.clear_calls()
         r = self.provisioned()
         self.assertEqual(self.steps(r)["display"], "changed")
-        self.assertIn("display: no display output polling on this box", r.stdout)
-        self.assertNotIn("systemd-tmpfiles", [c[0] for c in self.writes()])
-        self.assertTrue((self.root / DISPLAY_CONF.lstrip("/")).read_text(encoding="utf-8").endswith(POLL_OFF))
+        self.assertNotIn("udevadm", [c[0] for c in self.writes()])
+        self.assertTrue((self.root / DISPLAY_RULE.lstrip("/")).read_text(encoding="utf-8").endswith(KEEP_AWAKE))
 
     def test_a_box_serving_the_band_stays_enabled_at_boot(self) -> None:
         # Provisioning the serving box on 2026-11-01 (#72) disabled the engine
@@ -1795,7 +1867,8 @@ class VerifyTests(World):
                 "chrony.service is enabled or running beside dantesync"),
             "napi": (lambda: write(self.root / "proc/irq" / IRQS[0] / "smp_affinity_list", "0-3\n"),
                      "an interrupt of the Dante interface is not on core 0 alone"),
-            "display": (lambda: write(self.root / POLL, "Y\n"), "display output polling is on"),
+            "display": (lambda: write(self.root / GPU / "power/control", "auto\n"),
+                        "a display device may runtime-suspend (power/control is not on)"),
             "idle": (lambda: write(self.root / "sys/devices/system/cpu/cpu0/cpuidle/state2/disable", "0\n"),
                      "a CPU may enter deep idle"),
             "realtime": (lambda: write(self.root / GRUB.lstrip("/"),
@@ -1903,10 +1976,14 @@ class VerifyTests(World):
              "no /etc/tmpfiles.d/iemmixer-idle.conf keeping the CPUs out of deep idle"),
             ("idle", lambda: write(self.root / "dev/cpu_dma_latency", "", 0o600),
              "the service user cannot hold the CPU wake latency"),
-            ("display", lambda: (self.root / DISPLAY_CONF.lstrip("/")).unlink(),
-             "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
-            ("display", lambda: write(self.root / DISPLAY_CONF.lstrip("/"), POLL_OFF.replace(" N", " Y")),
-             "no /etc/tmpfiles.d/iemmixer-display.conf turning display output polling off"),
+            ("display", lambda: (self.root / DISPLAY_RULE.lstrip("/")).unlink(),
+             "no /etc/udev/rules.d/60-iemmixer-display.rules keeping the display devices awake"),
+            ("display", lambda: write(self.root / DISPLAY_RULE.lstrip("/"), KEEP_AWAKE.replace('"on"', '"auto"')),
+             "no /etc/udev/rules.d/60-iemmixer-display.rules keeping the display devices awake"),
+            ("display", lambda: write(self.root / OLD_DISPLAY_CONF.lstrip("/"), OLD_POLL_OFF),
+             "the old /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is still there"),
+            ("display", lambda: (self.root / GPU / "power/control").unlink(),
+             "a display device may runtime-suspend (power/control is not on)"),
         ]
         for check, change, reason in cases:
             with self.subTest(reason=reason):
@@ -1917,21 +1994,13 @@ class VerifyTests(World):
                 self.assertEqual(self.verify_line(r)[check], 0)
                 self.assertIn(f"verify_box: {check}: {reason}", r.stderr)
 
-    def test_display_fails_when_the_polling_cannot_be_read(self) -> None:
-        # A box whose sudoers predates the display step's template line.
+    def test_a_box_without_a_display_device_passes_display_on_the_rule_alone(self) -> None:
+        # The other class's device, allowed to suspend, is not looked at.
         self.good_box()
-        r = self.verify(FAKE_SUDO_CAT_REFUSED="1")
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertEqual(self.verify_line(r)["display"], 0)
-        self.assertIn("verify_box: display: the display output polling cannot be read (sudo -n cat)", r.stderr)
-
-    def test_a_box_without_display_output_polling_passes_display_on_the_file_alone(self) -> None:
-        self.good_box()
-        shutil.rmtree(self.root / "sys/module/drm_kms_helper")
+        shutil.rmtree(self.root / GPU)
         r = self.verify()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.verify_line(r)["display"], 1)
-        self.assertNotIn("sudo -n cat /" + POLL, [" ".join(c["argv"]) for c in self.calls()])
 
     def test_realtime_running_is_1_only_on_a_realtime_kernel_booted_with_the_isolated_cores(self) -> None:
         # Information beside the checks: provision sets the boot state, a
@@ -1983,9 +2052,8 @@ class VerifyTests(World):
         self.good_box()
         self.verify()
         sent = [" ".join(c["argv"]) for c in self.calls() if c["argv"][0] == "sudo"]
-        self.assertEqual(len(sent), 6)
+        self.assertEqual(len(sent), 5)
         self.assertIn(" ".join(["sudo", "-n", *FIND_STATE]), sent)
-        self.assertIn("sudo -n cat /" + POLL, sent)
         self.assertIn("sudo -n cat " + MENU, sent)
         allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
         for runas, command, _listed in sudo_lines(sent):

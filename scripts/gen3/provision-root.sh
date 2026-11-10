@@ -16,8 +16,8 @@ set -euo pipefail
 # configuration changed, runs update-grub when grub's settings changed or its
 # menu does not hold them, starts
 # the box's time owner (dantesync) when it is not running, runs iem-napi (the
-# Dante interface's packet priority) when it does not hold, and turns the
-# display output polling off when it is on.
+# Dante interface's packet priority) when it does not hold, and triggers the
+# display rule when a display device may still runtime-suspend.
 # Refused with nothing changed: not root, dantesync not installed (the box's
 # one time owner comes from install-dantesync.sh, never from here) or its
 # config not the ops follower config --ntp-file's NTP server names, a PTP
@@ -82,12 +82,16 @@ set -euo pipefail
 #             Dante interface (/etc/iemmixer/iem-dante.env).
 #   idle      /etc/tmpfiles.d/iemmixer-idle.conf: no deep CPU idle (C6, C8,
 #             C10) at every boot, and now when a CPU may still enter one
-#   display   /etc/tmpfiles.d/iemmixer-display.conf: the display drivers'
-#             output polling off (drm_kms_helper's poll N) at every boot,
-#             applied with systemd-tmpfiles and read back when the box has
-#             the parameter. The box has no screen; the i915 driver's poll
-#             (every ~10 s, waking the GPU) held a CPU ~2 ms and the engine's
-#             pump, woken onto it, missed its blocks (Live 4).
+#   display   /etc/udev/rules.d/60-iemmixer-display.rules: every PCI
+#             display device kept out of runtime suspend (power/control on)
+#             when it is added or its driver binds; applied now with
+#             `udevadm trigger` and read back when a display device may still
+#             suspend; the old /etc/tmpfiles.d/iemmixer-display.conf (the
+#             output poll off) removed. The i915 driver polls a screenless
+#             box's outputs only while its GPU is runtime-suspended, and each
+#             poll wakes it: the wake reloads the display microcontroller's
+#             firmware with preemption off (0.4-2 ms) on core 0, where the
+#             Dante NIC's NAPI thread then waits (#72, 2026-11-10).
 #   stack     none of the stack's units enabled (nothing of it starts at
 #             boot).
 #   sudoers   /etc/sudoers.d/iemmixer-gen3 (0440): sudo-lines.txt for the
@@ -124,9 +128,10 @@ AUTO_UPGRADES=/etc/apt/apt.conf.d/20auto-upgrades
 SWAPFILE=/swapfile
 NAPI_HELPER=/usr/local/lib/iemmixer/napi-priority
 NAPI_UNIT=/etc/systemd/system/iem-napi.service
-DISPLAY_CONF=/etc/tmpfiles.d/iemmixer-display.conf
+DISPLAY_RULE=/etc/udev/rules.d/60-iemmixer-display.rules
+OLD_DISPLAY_CONF=/etc/tmpfiles.d/iemmixer-display.conf
+PCI_DEVICES=/sys/bus/pci/devices
 IDLE_CONF=/etc/tmpfiles.d/iemmixer-idle.conf
-POLL_PARAM=/sys/module/drm_kms_helper/parameters/poll
 ENVFILE=/etc/iemmixer/iem-dante.env
 SUDOERS=/etc/sudoers.d/iemmixer-gen3
 # sudo's secure_path on Ubuntu, in its order: where sudo finds a program the
@@ -457,13 +462,13 @@ cat > "$work/20auto-upgrades" << 'EOF'
 APT::Periodic::Update-Package-Lists "0";
 APT::Periodic::Unattended-Upgrade "0";
 EOF
-cat > "$work/iemmixer-display.conf" << 'EOF'
-# The Gen 3 box (#72 phase D, Live 4): no display output polling. The box has
-# no screen; the i915 driver's poll (every ~10 s, waking the GPU) held a CPU
-# for ~2 ms, and the engine's pump, woken onto that CPU, missed its blocks.
-# Applied at every boot by systemd-tmpfiles. Written by
-# scripts/gen3/provision-root.sh.
-w /sys/module/drm_kms_helper/parameters/poll - - - - N
+cat > "$work/iemmixer-display.rules" << 'EOF'
+# The Gen 3 box (#72, 2026-11-10): the display GPU never runtime-suspends. The
+# i915 driver polls a screenless box's outputs only while its GPU is
+# suspended, and each poll wakes it: the wake reloads the display
+# microcontroller's firmware with preemption off (0.4-2 ms) on the NIC's core.
+# Kept awake, no poll runs. Written by scripts/gen3/provision-root.sh.
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{class}=="0x03*", ATTR{power/control}="on"
 EOF
 cat > "$work/iemmixer-idle.conf" << 'EOF'
 # The Gen 3 box (#72, 2026-10-31): no deep CPU idle. With the package asleep the
@@ -842,18 +847,32 @@ step_napi() {
   [ "$active_state" = active ] || die "iem-napi is '$active_state' after it ran, not active (journalctl -u iem-napi on the box)"
 }
 
+# 1 when a PCI display device of the box may runtime-suspend (its
+# power/control is not on).
+display_may_suspend() {
+  local dev
+  for dev in "$R$PCI_DEVICES"/*; do
+    [ -f "$dev/class" ] || continue
+    case "$(cat -- "$dev/class")" in 0x03*) ;; *) continue ;; esac
+    [ "$(cat -- "$dev/power/control")" = on ] || return 0
+  done
+  return 1
+}
+
 step_display() {
-  put_file 0644 root root "$DISPLAY_CONF" "$work/iemmixer-display.conf"
-  if [ ! -e "$R$POLL_PARAM" ]; then
-    echo "display: no display output polling on this box (no $POLL_PARAM)"
-    return 0
+  put_file 0644 root root "$DISPLAY_RULE" "$work/iemmixer-display.rules"
+  if [ -e "$R$OLD_DISPLAY_CONF" ] || [ -L "$R$OLD_DISPLAY_CONF" ]; then
+    rm -f -- "$R$OLD_DISPLAY_CONF"
+    changed=1
   fi
-  [ "$(cat -- "$R$POLL_PARAM")" != N ] || return 0
-  systemd-tmpfiles --create "$R$DISPLAY_CONF" ||
-    die "systemd-tmpfiles --create $DISPLAY_CONF failed (exit $?)"
+  display_may_suspend || return 0
+  udevadm control --reload || die "udevadm control --reload failed (exit $?)"
+  udevadm trigger --settle --action=bind --subsystem-match=pci '--attr-match=class=0x03*' ||
+    die "udevadm trigger of the display devices failed (exit $?)"
   changed=1
-  [ "$(cat -- "$R$POLL_PARAM")" = N ] ||
-    die "display output polling is still on after systemd-tmpfiles --create $DISPLAY_CONF ($POLL_PARAM is not N)"
+  if display_may_suspend; then
+    die "a display device may still runtime-suspend after udevadm trigger (power/control is not on)"
+  fi
 }
 
 step_stack() {

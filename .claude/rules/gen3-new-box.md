@@ -27,7 +27,7 @@ Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r
 
 - x86-64 with **at least 4 and at most 32 CPUs** (`nproc --all`): provisioning isolates the last two for the engine and refuses anything else.
 - A wired NIC on the band's Dante network, its link up at 1 Gbit/s. The r8169 holds phase F's timing on the realtime kernel; an Intel i210/i225/i226 is the upgrade path only if a measurement shows the NIC is the limit (owner: buy nothing unless a measurement says so).
-- No screen needed. Display output polling stays off (provision's `display` step): with it on, the i915 poll held the NIC's core for ~2 ms and 245–637 RX packets a flow came late in 30 minutes (2026-10-28).
+- No screen needed. The display GPU stays out of runtime suspend (provision's `display` step): the i915 driver polls a screenless box's outputs while its GPU is suspended, each poll wakes it, and that wake held the NIC's core for 0.4–2 ms (245–637 RX packets a flow late in 30 minutes, 2026-10-28). Kept awake, no poll runs (2026-11-10).
 
 ## 1. The operating system
 
@@ -51,7 +51,7 @@ Everything below was worked out on the first box (Intel N100, 4 cores, Realtek r
 - **`napi`:** the Dante NIC's packet priority at every boot (`iem-napi.service`): threaded NAPI at SCHED_FIFO 60 on core 0, its interrupt on core 0 (it waits up to 20 s for the interface to be opened), **EEE off**;
 - **`napi` also shapes the Dante interface** (`iem-napi.service`): TSO/GSO off, root `prio` with `tbf` 100 Mbit on the non-audio bands, PTP (UDP 319/320) in the unlimited band; audio goes past the qdisc through AF_PACKET (`CAP_NET_RAW` on the engine). Without it 300 kB of TCP from the box read 650 µs at a receiver and no counter of ours saw it. Read a receiver's Latency tab, not the box's counters;
 - **`idle`:** C6, C8 and C10 off at every boot (a receiver read 490 µs against 240 µs with them on, no counter of ours sees it; the state numbers are the N100's);
-- **`display`:** the display poll off at every boot;
+- **`display`:** a udev rule keeping every PCI display device out of runtime suspend (`power/control` on), applied now and at every boot; the old poll-off tmpfiles file removed;
 - `iem-dante.service` disabled at boot (the engine and the server are the deploy's to enable); the sudoers rule.
 
 Then reboot once (`# airuleset:destructive-ok <reason>` on the command) and run verify again: every check 1, `realtime_running` 1 (`uname -r` ends `-realtime`, `/sys/devices/system/cpu/isolated` the last two CPUs).
@@ -117,7 +117,7 @@ Besides the gates, on new hardware or after a timing change:
 - At most two `iem-engine` restarts in ten minutes: a third hits the start limit and runs the alarm unit (which notifies people only while the box serves the band). `reset-failed` before a deliberate start resets that count, as deploy.sh and the gates do; the gates' own budget still waits ten minutes between runs (section 7).
 - Measure with the stage devices on: otherwise those flows come from other devices and P is judged on the wrong sources.
 - Dante receivers play our flows at our advertised latency, never their own lower setting: a 1 ms `latency_ns` used for TX cost 0.75 ms at the rack.
-- The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot.
+- The display poll cannot be tested by setting `drm_kms_helper.poll` back to Y at runtime (it does not re-arm); test it with a boot. With the GPU kept awake it never runs: `power/control` `on` and `runtime_suspended_time` 0 on the GPU's PCI device after a boot show the rule took. `/usr/bin/rtla` is a wrapper that finds no rtla for the realtime kernel: run `/usr/lib/linux-tools-<version>/rtla`.
 - systemd gives `MONITOR_*` only to ExecStartPre=/ExecStart=, never to ExecCondition=.
 - `iem-dante-dev health` stays degraded (`restarted`) after any automatic restart of a unit until its next deliberate start (`reset-failed` and `restart`, or a deploy): a check right after a crash or a panic reads degraded, not failed.
 - A timing key changed on the box by hand is checked against `device.rs`'s bounds first: a device config the engine cannot load keeps it down (exit 2, no restart) and the alarm notifies people (2026-10-28 22:26: `work_margin = 24` with the block at 32, 3 min 41 s down). Keep the previous config and put it back at once when the engine is not healthy within seconds.
