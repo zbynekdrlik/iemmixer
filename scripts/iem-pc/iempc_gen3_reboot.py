@@ -15,8 +15,8 @@ the box for robustness (#72, 2026-11-01).
 
 **Before any change** (Refused): `GEN3_HOST`, for `reset` also `LIVE_MEMBER`
 (the mint's member); no HIL job left; healthy; a CI build its server names;
-every required RX channel Receiving; the least lateness of the RX flows (the
-TX judge's baseline, above 0); the boot id; the engine's rev; the sums of the
+every required RX channel Receiving; the TX judge's baseline (a flow reading
+above 0); the boot id; the engine's rev; the sums of the
 files the band depends on (FILES).
 
 **The verdict**, every check run, words in FAILURES' order:
@@ -33,15 +33,21 @@ files the band depends on (FILES).
 - tx_late: the packets' judge from the clock's ready on, for TX_WATCH_S
   (#72, 6567516059: late from ready for 3 to 5 minutes). Every RX flow row's
   `lateness_min_ns` is our now less the sender's PTP stamp, least of a
-  second; the senders follow the grandmaster, so the least over the flows
-  dropping below the baseline is our clock behind the band's, our TX stamped
-  early: late at every receiver. Fails with no read judged, a drop past
-  PHASE_US, or a read of 0 (a packet from our future: the judge clamps there,
-  so the whole drop no longer shows). A flow not yet back only raises the
+  second, clamped at 0; the senders follow the grandmaster, so the least
+  over the flows dropping below the baseline is our clock behind the band's,
+  our TX stamped early: late at every receiver. A flow at 0 carries no clock
+  information (a low-latency sender's packets arrive within their stamp's
+  sample and read 0 on a healthy box, #72 2.0.0-dev.68), so the judge reads
+  the least over the flows above 0, and counts the flows at 0. The baseline
+  is both, read before any change. Fails with no read judged (no flow above
+  0), a drop of the least past PHASE_US, or a read with more flows at 0 than
+  the baseline (a flow pushed to the clamp: the whole drop no longer shows,
+  and the least of the rest can rise). A flow not yet back only raises the
   least, and flow numbers change across a boot: the least, never per flow.
   An optional RX channel's flow missing before the restart and back after it
-  with a lower lateness of its own lowers the least: a false fail, never a
-  false pass;
+  with a lower lateness of its own, or at 0, makes a false fail, never a
+  false pass; so does a low-latency flow above 0 at the baseline and at 0
+  later;
 - fs_errors: the kernel's log since the boot names a filesystem or disk error;
 - state: current.json unreadable, or a rev below the one before, or below the
   rev the engine says it loaded;
@@ -68,6 +74,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import iempc_gen3 as g3
 import iempc_gen3_gate as gate
@@ -118,40 +125,55 @@ def first_lock(log: str) -> tuple[float | None, int]:
     return error, unlocks
 
 
-def least_lateness(status) -> int | None:
-    """The least `lateness_min_ns` over the RX flows of a status whose clock
-    is ready (pure); None when the clock is not ready or no flow has one."""
+def lateness(status) -> list[int] | None:
+    """Every RX flow's `lateness_min_ns` of a status whose clock is ready
+    (pure); None when the clock is not ready or no flow has one."""
     clock = status.get("clock") if isinstance(status, dict) else None
     rx = status.get("rx") if isinstance(status, dict) else None
     if not isinstance(clock, dict) or clock.get("ready") != 1 or not isinstance(rx, list):
         return None
     values = [f.get("lateness_min_ns") for f in rx if isinstance(f, dict)]
-    values = [v for v in values if type(v) is int and v >= 0]
-    return min(values, default=None)
+    return [v for v in values if type(v) is int and v >= 0] or None
 
 
-def tx_baseline(status) -> int | None:
+def least_lateness(status) -> int | None:
+    """The least `lateness_min_ns` above 0 over the RX flows of a ready
+    clock (pure): a flow at 0 carries no clock information."""
+    return min((v for v in lateness(status) or () if v), default=None)
+
+
+class Baseline(NamedTuple):
+    """The TX judge's baseline, read before any change."""
+    least_ns: int   # the least lateness above 0
+    zeros: int   # the flows at 0
+
+
+def tx_baseline(status) -> Baseline | None:
     """The TX judge's baseline from the status read before any change
-    (pure); None when no flow is judged or one is from our future (0)."""
+    (pure); None when no flow reads above 0 (nothing to judge)."""
     least = least_lateness(status)
-    return least if least else None
+    return None if least is None else Baseline(least, (lateness(status) or []).count(0))
 
 
 @dataclass
 class Judge:
-    """The TX judge: the least lateness of each read against the baseline."""
-    base_ns: int
+    """The TX judge: the least lateness above 0 of each read against the
+    baseline's, and its flows at 0 against the baseline's count."""
+    base: Baseline
     worst_ns: int | None = None   # the most negative shift seen
-    reads: int = 0
-    future: int = 0   # reads of 0: a packet from our future
+    reads: int = 0   # reads with a flow above 0
+    future: int = 0   # reads with more flows at 0 than the baseline: pushed to the clamp
 
     def see(self, status) -> None:
-        least = least_lateness(status)
+        values = lateness(status)
+        if values is None:
+            return
+        self.future += values.count(0) > self.base.zeros
+        least = min((v for v in values if v), default=None)
         if least is None:
             return
         self.reads += 1
-        self.future += least == 0
-        shift = least - self.base_ns
+        shift = least - self.base.least_ns
         self.worst_ns = shift if self.worst_ns is None else min(self.worst_ns, shift)
 
 
@@ -201,7 +223,7 @@ class Seen:
     phase_us: float | None = None
     unlocks: int = 0
     tx_late_us: float | None = None   # the TX judge's worst shift; None: no read judged
-    tx_future: int = 0
+    tx_future: int = 0   # reads with more flows at 0 than the baseline
     tx_reads: int = 0
     fs_errors: int | None = None
     rev: int | None = None
@@ -339,10 +361,10 @@ def read(box: gate.Box, words) -> str | None:
         return None
 
 
-def prove(box: gate.Box, s: Seen, t0: float, sums: str, sha: str, base_ns: int) -> None:
+def prove(box: gate.Box, s: Seen, t0: float, sums: str, sha: str, base: Baseline) -> None:
     """Everything read back once the box answers on its new boot. Every
     status read, the waits' included, feeds the TX judge."""
-    judge = Judge(base_ns)
+    judge = Judge(base)
 
     def look() -> dict | None:
         status = box.device_status()
@@ -413,9 +435,9 @@ def run(ctx, ip, kind: str) -> int:
     status = box.device_status()
     if not receives(status, box.optional):
         raise ip.Refused(f"no {kind} gate: a required RX channel does not receive (nothing was changed)")
-    base_ns = tx_baseline(status)
-    if base_ns is None:
-        raise ip.Refused(f"no {kind} gate: no RX flow's packets are judged, or one is from our future "
+    base = tx_baseline(status)
+    if base is None:
+        raise ip.Refused(f"no {kind} gate: no RX flow reads a lateness above 0, the TX judge has nothing to judge "
                          "(nothing was changed)")
     before, state, sums = boot_id(box), read_state(box), read(box, SUMS)
     if before is None or state is None or sums is None:
@@ -447,7 +469,7 @@ def run(ctx, ip, kind: str) -> int:
             writes.done.set()
         s.back_s = timed(box, t0, lambda: boot_id(box) not in (None, before), BACK_S)
         if s.back_s is not None:
-            prove(box, s, t0, sums, sha, base_ns)
+            prove(box, s, t0, sums, sha, base)
         if kind == "reset" and s.back_s is not None:
             put_back(lan, token, level0)
             box.wait(lambda: abs((read_state(box) or (0, math.inf))[1] - level0) < 0.01, 15.0)
