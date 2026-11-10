@@ -223,6 +223,33 @@ class ProveTests(unittest.TestCase):
         self.assertEqual(rb.failed(s, 1), ["level"])
 
 
+class RunTests(unittest.TestCase):
+    def refusal(self, rx: list[dict]) -> str:
+        """The refusal of `run` on a stand-in box with these RX flows, its
+        boot id unreadable: past the TX judge's baseline it refuses there."""
+        class Ctx:
+            env = {"GEN3_HOST": "box"}
+        box = FakeBox(rx=rx, calls={" ".join(rb.BOOT_ID): ""})
+        saved = (rb.gate.Box, rb.soak.end_left_job, rb.soak.box_build)
+        rb.gate.Box = lambda *_: box
+        rb.soak.end_left_job, rb.soak.box_build = (lambda _box: False), (lambda _box: SHA)
+        try:
+            with self.assertRaises(Ip.Refused) as caught:
+                rb.run(Ctx(), Ip, "reboot")
+        finally:
+            rb.gate.Box, rb.soak.end_left_job, rb.soak.box_build = saved
+        return str(caught.exception)
+
+    def test_a_healthy_box_with_flows_at_0_gets_past_the_baseline(self):
+        # #72, 2.0.0-dev.68: refused here before any change.
+        self.assertIn("boot id", self.refusal(LIVE))
+
+    def test_a_box_with_no_flow_above_0_is_refused_before_any_change(self):
+        message = self.refusal([{"flow": 1, "lateness_min_ns": 0}])
+        self.assertIn("above 0", message)
+        self.assertIn("nothing was changed", message)
+
+
 class PureTests(unittest.TestCase):
     def test_only_the_first_lock_s_error_counts_and_unlocks_after_it(self):
         log = "=== UNLOCKED before\n" + LOCKED + "\n=== UNLOCKED\n" + LOCKED.replace("-9.5", "-300") + "\n=== UNLOCKED\n"
