@@ -23,7 +23,8 @@ SOAK_MEMBER names a member who is not active.
 
 **Before any call** (Refused): `--minutes` one of MINUTES; GEN3_HOST;
 SOAK_MEMBER of the private env an id (the member whose mix the client
-listens to; never printed).
+listens to; never printed); GEN3_DANTE_IP (our device's address on the
+Dante network: the receivers' read runs there).
 
 **Before any change** (Refused, nothing changed): a HIL job a dead run left
 is ended first (iempc_gen3_gate.preflight without its ARC reads, then
@@ -48,7 +49,8 @@ own server on port 80; the band site's lan_url is not the box), `--member`,
 `--expect-build`, and `--jwt-secret-file` the box server's own key (the
 client signs its own engineer token: no PIN, no login). Beside it the dev
 box reads `iem-dante-dev ctl status` every STATUS_EVERY_S, and every
-HEALTH_EVERY_S `iem-dante-dev health`, the stack's units (`systemctl show`
+HEALTH_EVERY_S `iem-dante-dev health`, every RECEIVERS_EVERY_S `iem-dante-dev
+receivers` (the first at the watch's start), the stack's units (`systemctl show`
 of iem-engine's and iem-server's NRestarts and ActiveEnterTimestampMonotonic)
 and the soak unit's state, until the client ended or the dev box's own
 bound passed (the run plus WAIT_MARGIN_S: `not_finished`, the unit
@@ -78,7 +80,16 @@ reset-failed), the env file and the summary removed on the box.
 - tx_holes: a TX flow's holes rose;
 - rx_holes: an RX channel's ring holes rose (owner, 2026-10-31 on #72: zero
   loss, a stage device that stops fails it too);
-- rx_off: a read with a subscribed RX channel that does not receive.
+- rx_off: a read with a subscribed RX channel that does not receive;
+- receiver_late: the receivers of our TX, as Dante Controller's latency
+  monitor shows them (`iem-dante-dev receivers --ip GEN3_DANTE_IP` on the box
+  every RECEIVERS_EVERY_S, from the watch's start: each receiver's own
+  heartbeat), counted a late packet of a flow of ours, or a listen's peak
+  passed the receiver's latency (gen3_receivers, #72);
+- receiver_unread: no receivers read heard a receiver of our TX (a box
+  whose build has no `receivers` read is refused before any change instead), a read did
+  not hear every receiver of our TX it found, or more reads failed than gave
+  a line.
 Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
 Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in
 samples (`lateness_max`). A rise is summed read to read; a count that went
@@ -112,6 +123,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import gen3_receivers
 import iempc_gen3 as g3
 import iempc_gen3_gate as gate
 import soak_verdict
@@ -132,6 +144,8 @@ STOP_S = 10   # the unit's stop bound (SendSIGKILL=no)
 WAIT_MARGIN_S = RUN_MARGIN_S + 60   # the dev box's own bound past the run
 STATUS_EVERY_S = 1.0
 HEALTH_EVERY_S = 10.0
+RECEIVERS_EVERY_S = 60.0   # the receivers' read: discovery, ARC reads and a 5 s listen
+RECEIVERS_CALL_S = 30   # one receivers read's ssh bound, half of POLL_HOLE_S: a read never opens a status hole
 POLL_HOLE_S = 60.0
 RECORDS = "gen3-soak"
 UNIT_PROPS = "LoadState,ActiveState,SubState,Result,ExecMainStatus"
@@ -149,7 +163,7 @@ RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "
 # The failures a verdict names, in its order.
 FAILURES = ("not_finished", "client", "harness", "polls", "health", "restarted", "pump_stalled", "pump_late",
             "pump_missed", "pump_overruns", "pump_rebootstraps", "clock_not_ready", "holdover", "re_anchor",
-            "rx_late", "tx_holes", "rx_holes", "rx_off")
+            "rx_late", "tx_holes", "rx_holes", "rx_off", "receiver_late", "receiver_unread")
 DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min)"
 DESC_FAIL = "the Gen 3 box's soak failed: "
 
@@ -309,6 +323,8 @@ class Watch:
     unit: Unit | None = None   # the soak unit's last state read
     finished: bool = False
     summary: object = None
+    dante_ip: str = ""
+    receivers: gen3_receivers.Tally = field(default_factory=gen3_receivers.Tally)
 
     def record(self, kind: str, doc: dict) -> None:
         t = round(time.monotonic() - self.started, 1) if self.started is not None else 0.0
@@ -396,6 +412,7 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
                             ("rx_holes", j["rx_holes"]), ("rx_off", j["rx_off"])):
             if value:
                 failed.append(word)
+        failed.extend(w.receivers.failures())
     ended = w.finished and w.unit is not None
     return {
         "pass": int(not cut and not failed), "conclusion": conclusion or ("failure" if failed else "success"),
@@ -406,7 +423,7 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
         "reads": len(w.samples), "failed_reads": w.failed_reads, "poll_hole_s": status_hole,
         "health_reads": len(w.health_times), "not_healthy": w.not_healthy, "health_reasons": sorted(w.reasons),
         "health_hole_s": health_hole,
-        **j, "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
+        **j, "receivers": w.receivers.numbers(), "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
         "failed": failed,
     }
 
@@ -440,6 +457,18 @@ def end_left_job(box: gate.Box) -> bool:
                              "was changed)")
     gate.end_left(box, gate.preflight(box, None))
     return True
+
+
+def receivers_ready(box: gate.Box) -> None:
+    """The box's iem-dante-dev has the `receivers` read (2.0.0-dev.70 on):
+    an older build answers it with its usage error, and every read of the
+    run would fail `receiver_unread` for that alone."""
+    try:
+        box.call([*gen3_receivers.words(g3.DANTE_BIN, "0.0.0.0")[:2], "--help"])
+    except box.ip.StepError:
+        raise box.ip.Refused(f"no {NAME} gate: the box's iem-dante-dev has no `receivers` read (a build before "
+                             "2.0.0-dev.70): deploy a newer build first, the receivers of our TX cannot be read "
+                             "with this one (nothing was changed)") from None
 
 
 def box_build(box: gate.Box) -> str:
@@ -592,6 +621,21 @@ def read_health(box: gate.Box, w: Watch) -> None:
     w.record("health", {"state": state, "reasons": known})
 
 
+def read_receivers(box: gate.Box, w: Watch) -> None:
+    """`iem-dante-dev receivers` on the box: what the receivers of our TX
+    say about our packets (gen3_receivers); a read that gives no line is a
+    failed one."""
+    try:
+        doc = box.last_json(box.call(gen3_receivers.words(g3.DANTE_BIN, w.dante_ip),
+                                     timeout=RECEIVERS_CALL_S))
+    except box.ip.StepError:
+        doc = None
+    read = gen3_receivers.parse(doc)
+    w.receivers.see(read)
+    if read is not None:
+        w.record("receivers", {"heard": read.heard, "flows": len(read.flows)})
+
+
 def read_units(box: gate.Box, w: Watch) -> None:
     units = read_stack(box)
     if units is None:
@@ -606,10 +650,13 @@ def watch(job: Job, w: Watch) -> bool:
     box = job.box
     w.started = time.monotonic()
     limit = wait_limit(w.minutes * 60)
-    next_health = w.started
+    next_health = next_receivers = w.started
     while True:
         now = time.monotonic()
         read_sample(box, w)
+        if now >= next_receivers:
+            next_receivers = now + RECEIVERS_EVERY_S
+            read_receivers(box, w)
         if now >= next_health:
             next_health = now + HEALTH_EVERY_S
             read_health(box, w)
@@ -691,15 +738,17 @@ def run(ctx, ip) -> int:
     minutes = minutes_of(ip, ctx.args)
     host = g3.gen3_host(ip, ctx.env, gate.WORDS)
     member = member_of(ip, ctx.env)
+    dante = gate.dante_ip(ip, ctx.env)
     box = gate.Box(ip, ctx, host, NAME)
     left_job = end_left_job(box)
     if not box.healthy():
         raise ip.Refused(f"no {NAME} gate: the box is not healthy (iem-dante-dev health on the box says why) "
                          "(nothing was changed)")
     sha = box_build(box)
+    receivers_ready(box)
     left_soak = clear_unit(box)
     number = g3.job_run()
-    w = Watch(minutes, left_job, left_soak, records_folder(ip, number))
+    w = Watch(minutes, left_job, left_soak, records_folder(ip, number), dante_ip=dante)
     baseline(box, w)
     job = Job(box)
     try:

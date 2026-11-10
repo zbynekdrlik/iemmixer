@@ -94,3 +94,44 @@ fn ctl_without_a_socket_looks_at_the_box_s_socket() {
         "{err}"
     );
 }
+
+#[test]
+fn a_receivers_command_line_error_exits_2_with_the_usage() {
+    let out = run(&["receivers", "--seconds", "5"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with(
+            "iem-dante-dev: receivers: --ip <our Dante IPv4 address> is required\n\n\
+             usage: iem-dante-dev receivers --ip"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn receivers_help_prints_its_usage_and_exits_0() {
+    let out = run(&["receivers", "--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("usage: iem-dante-dev receivers --ip <our Dante IPv4>"),
+        "{text}"
+    );
+}
+
+#[test]
+fn receivers_whose_own_arc_is_silent_exits_1_and_names_no_address() {
+    // Nothing answers ARC on loopback here: the read cannot run, exit 1
+    // within the ARC client's one-second wait, no line, no address said.
+    let out = run(&["receivers", "--ip", "127.0.0.1", "--seconds", "1"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("iem-dante-dev receivers: our own ARC: "),
+        "{err}"
+    );
+    assert!(!err.contains("127.0.0.1"), "{err}");
+}

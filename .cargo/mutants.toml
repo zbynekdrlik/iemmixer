@@ -126,6 +126,15 @@ exclude_re = [
   # against stand-ins on 127.0.0.1), and lib.rs's `parse_args` and
   # `run_health` (tests/cli.rs runs the binary).
   "iem-dante-dev/src/health\\.rs.*\\bglue::(check|systemctl_show)\\b",
+  # `iem-dante-dev receivers`' glue (#72, the receiver side): `read` runs
+  # discovery on the box's Dante network, reads other devices' ARC and
+  # listens to the heartbeat group for its seconds; no build machine holds
+  # Dante receivers. Every decision stays mutated: `parse`,
+  # `parse_command`, `candidates`, `subscribes`, `our_slots`, `key_of`,
+  # `report`, `Report::line`
+  # (receivers/tests.rs, real heartbeat records through dstack's parse),
+  # and lib.rs's `run_receivers` (tests/cli.rs runs the binary).
+  "iem-dante-dev/src/receivers\\.rs.*\\bglue::read\\b",
   # The NullRt pacing thread's end after release; NullRt::stop itself is
   # tested in iem-audio-io (stop_ends_a_running_stream).
   "iem-engine/src/engine\\.rs.*replace <impl Driver for NullRtDriver>::stop with \\(\\)",

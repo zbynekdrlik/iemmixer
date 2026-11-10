@@ -44,6 +44,8 @@ UNIT_SHOW = "systemctl show --property=LoadState,ActiveState,SubState,Result,Exe
 UNITS = ("systemctl show --property=Id,NRestarts,ActiveEnterTimestampMonotonic iem-engine.service "
          "iem-server.service")
 HEALTH_ANY = "/opt/iemmixer/bin/iem-dante-dev health || true"
+RECEIVERS = f"/opt/iemmixer/bin/iem-dante-dev receivers --ip {gt.DANTE_IP} --seconds 5"
+RECEIVERS_HELP = "/opt/iemmixer/bin/iem-dante-dev receivers --help"
 STAGE_ENV = f"mkdir -p .cache/iem-gen3-gate && cat > {STAGED}"
 INSTALL_ENV = f"sudo -n install -D -m 0644 {STAGED} {ENV_FILE}"
 RM_ENV = f"sudo -n rm -f {ENV_FILE}"
@@ -51,8 +53,8 @@ RM_SUMMARY = f"sudo -n -u iemmixer rm -f {SUMMARY}"
 CAT_SUMMARY = f"sudo -n -u iemmixer cat {SUMMARY}"
 STOP_UNIT = "sudo -n systemctl stop iem-soak"
 RESET_UNIT = "sudo -n systemctl reset-failed iem-soak"
-BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, UNIT_SHOW, gt.CTL, UNITS]
-TICK = [gt.CTL, HEALTH_ANY, UNITS, UNIT_SHOW]
+BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, RECEIVERS_HELP, UNIT_SHOW, gt.CTL, UNITS]
+TICK = [gt.CTL, RECEIVERS, HEALTH_ANY, UNITS, UNIT_SHOW]
 AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY]
 
 
@@ -178,6 +180,26 @@ if line == f"{DANTE} ctl status":
         doc["engine"] = engine
     print(json.dumps(doc))
     soak_done()
+if line == f"{DANTE} receivers --help":
+    # A build before 2.0.0-dev.70 (FAKE_OLD_BUILD): the stack's own usage error.
+    if os.environ.get("FAKE_OLD_BUILD"):
+        soak_fail("iem-dante-dev: unknown argument", 2)
+    print("usage: iem-dante-dev receivers --ip <our Dante IPv4> [--seconds <n>]")
+    soak_done()
+if line == f"{DANTE} receivers --ip @DANTE_IP@ --seconds 5":
+    # One receiver of our TX with one flow of ours, as the box command says
+    # it (FAKE_RECEIVERS: late, over, none, silent, fails, from the second read on).
+    so["recv"] = so.get("recv", 0) + 1
+    fault = os.environ.get("FAKE_RECEIVERS", "") if so["recv"] >= 2 else ""
+    if fault == "fails":
+        soak_fail("zyxq receivers: no heartbeat socket: permission denied")
+    flow = {"key": "0123456789abcdef", "slot": 3, "latency_us": 250, "beats": 0 if fault == "silent" else 5,
+            "peak_us": 260 if fault == "over" else 120, "late": 0, "late_total": 9 if fault == "late" else 7}
+    flows = [] if fault == "none" else [flow]
+    heard = 1 if flows and flow["beats"] else 0
+    print(json.dumps({"receivers": {"devices": 4, "unread": 0, "no_id": 0, "receivers": len(flows),
+                                    "heard": heard, "flows": flows, "red": fault in ("late", "over")}}))
+    soak_done()
 if line == f"{DANTE} health || true":
     if os.environ.get("FAKE_SOAK_DEGRADED") and late():
         print(json.dumps({"health": {"state": "degraded", "reasons": ["holdover", "zyxqword"], "units": []}}))
@@ -232,7 +254,7 @@ if line == "sudo -n systemctl reset-failed iem-soak":
 '''
 ANCHOR = 'if line == f"test -e {DROPIN} && echo left || echo none":'
 assert gt.FAKE_SSH.count(ANCHOR) == 1, "the HIL gate's stand-in box changed: put the soak's part in front again"
-SOAK_SSH = gt.FAKE_SSH.replace(ANCHOR, SOAK_PART + ANCHOR)
+SOAK_SSH = gt.FAKE_SSH.replace(ANCHOR, SOAK_PART.replace("@DANTE_IP@", gt.DANTE_IP) + ANCHOR)
 
 # The line of a passing run of 120 minutes (its two holes taken out: they are times).
 PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "client_result": "success",
@@ -241,7 +263,10 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "reads": 3, "failed_reads": 0, "health_reads": 2, "not_healthy": 0, "health_reasons": [],
         "pump_late": 0, "pump_missed": 0, "pump_overruns": 0, "pump_rebootstraps": 0, "pump_stalled": 0,
         "max_process_us": 210, "clock_not_ready": 0, "holdovers": 0, "in_holdover": 0, "re_anchors": 0,
-        "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0, "unit_restarts": 0,
+        "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0,
+        "receivers": {"reads": 2, "failed": 0, "heard_max": 1, "unheard": 0, "unread_max": 0, "no_id_max": 0,
+                      "flows_max": 1, "late": 0, "over": 0, "margin_us": 130},
+        "unit_restarts": 0,
         "left_job": 0, "left_soak": 0, "failed": []}
 
 
@@ -255,6 +280,7 @@ class SoakBase(gt.GateBase):
         (self.box / "root" / MINT.lstrip("/")).mkdir(parents=True)
         (self.tmp / "bin" / "ssh").write_text(f"#!{sys.executable}\n{SOAK_SSH}", encoding="utf-8")
         for target, name, value in ((soak, "STATUS_EVERY_S", 0.0), (soak, "HEALTH_EVERY_S", 0.0),
+                                    (soak, "RECEIVERS_EVERY_S", 0.0),
                                     (g3, "job_run", lambda: RUN)):
             p = mock.patch.object(target, name, value)
             p.start()
@@ -321,7 +347,8 @@ class SoakTests(SoakBase):
         summary = json.loads((records / "soakclient.json").read_text(encoding="utf-8"))
         self.assertEqual((summary["complete"], summary["seconds"]), (True, 7200.5))
         polls = [json.loads(line) for line in (records / "polls.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([p["kind"] for p in polls], ["status", "status", "health", "status", "health"])
+        self.assertEqual([p["kind"] for p in polls],
+                         ["status", "status", "receivers", "health", "status", "receivers", "health"])
         self.assertNotIn(MEMBER, (records / "polls.jsonl").read_text(encoding="utf-8"))
         self.assert_private(err + json.dumps(docs))
 
@@ -392,6 +419,39 @@ class CriteriaTests(SoakBase):
                 self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
                 self.assertEqual(self.soak_state()["unit"], None)   # the unit ended all the same
                 self.assert_private(err + json.dumps(docs))
+
+    def test_the_receivers_of_our_tx_fail_the_soak_when_they_count_us_late_or_read_nothing(self) -> None:
+        cases = (("late", ["receiver_late"], {"late": 2, "over": 0}),
+                 ("over", ["receiver_late"], {"late": 0, "over": 1, "margin_us": -10}),
+                 ("none", [], {"late": 0, "heard_max": 1}),
+                 ("silent", ["receiver_unread"], {"late": 0, "heard_max": 1, "flows_max": 1, "unheard": 1}),
+                 ("fails", [], {"reads": 1, "failed": 1}))
+        for fault, failed, numbers in cases:
+            with self.subTest(fault=fault):
+                self.again()
+                code, docs, err = self.gate_run(FAKE_RECEIVERS=fault)
+                doc = self.line(docs)
+                self.assertEqual((code, doc["failed"]), (1 if failed else 0, failed), err)
+                for key, value in numbers.items():
+                    self.assertEqual(doc["receivers"][key], value, key)
+                if failed:
+                    self.assertEqual(self.posts()[0][-1],
+                                     f"description=the Gen 3 box's soak failed: {failed[0]}")
+                self.assert_private(err + json.dumps(docs))
+
+    def test_a_soak_that_never_hears_a_receiver_of_our_tx_fails_receiver_unread(self) -> None:
+        for fault in ("none", "silent", "fails"):
+            with self.subTest(fault=fault), mock.patch.dict(os.environ, {"FAKE_RECEIVERS": fault}):
+                self.again()
+                # From the first read on: the fake's faults start at its second.
+                (self.box / "soak.json").write_text(json.dumps({
+                    "unit": None, "client": None, "reads": 0, "all": 0, "stops": 0, "runs": [], "recv": 1,
+                    "nr": {"iem-engine.service": 0, "iem-server.service": 0},
+                    "enter": {"iem-engine.service": 1110000, "iem-server.service": 1120000}}), encoding="utf-8")
+                code, docs, err = self.gate_run()
+                doc = self.line(docs)
+                self.assertEqual((code, doc["failed"], doc["receivers"]["heard_max"]), (1, ["receiver_unread"], 0),
+                                 err)
 
     def test_a_degraded_health_names_only_known_reasons(self) -> None:
         code, docs, err = self.gate_run(FAKE_SOAK_DEGRADED="1")
@@ -552,6 +612,7 @@ class RefusalTests(SoakBase):
         for env_text, words in (
                 (text.replace(f"GEN3_HOST={gt.GEN3}\n", ""), "no GEN3_HOST in the private env"),
                 (text.replace(f"SOAK_MEMBER={MEMBER}\n", ""), "SOAK_MEMBER of the private env is not an id"),
+                (text.replace(f"GEN3_DANTE_IP={gt.DANTE_IP}\n", ""), "no GEN3_DANTE_IP in the private env"),
                 (text.replace(f"SOAK_MEMBER={MEMBER}\n", "SOAK_MEMBER=zyx member\n"),
                  "SOAK_MEMBER of the private env is not an id")):
             with self.subTest(words=words):
@@ -571,6 +632,9 @@ class RefusalTests(SoakBase):
                   "no soak gate: the box's server does not name the engine's build in /api/version"),
                  ({"FAKE_SERVER_HASH": ""},
                   "no soak gate: the box's server does not name the engine's build in /api/version"),
+                 ({"FAKE_OLD_BUILD": "1"},
+                  "no soak gate: the box's iem-dante-dev has no `receivers` read (a build before 2.0.0-dev.70): "
+                  "deploy a newer build first"),
                  ({"FAKE_BASELINE_FAILS": "1"}, "no soak gate: the Gen 3 device's status could not be read"),
                  ({"FAKE_NO_ENGINE": "1"}, "no soak gate: the Gen 3 device's status shows no engine"),
                  ({"FAKE_RX_OFF": "base"}, "no soak gate: 1 required RX channels do not receive yet"))

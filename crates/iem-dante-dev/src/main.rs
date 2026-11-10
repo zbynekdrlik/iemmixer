@@ -21,6 +21,9 @@ fn main() -> std::process::ExitCode {
         let socket = std::path::Path::new(iem_dante_dev::SOCKET);
         return iem_dante_dev::run_ctl(build.name, socket, &request);
     }
+    if let Some(command) = iem_dante_dev::receivers::parse_command(&args) {
+        return iem_dante_dev::run_receivers(build.name, command);
+    }
     match iem_dante_dev::parse_args(&args) {
         Some(command) => iem_dante_dev::run_health(build, command),
         None => iem_dante::daemon::cli::main(build),

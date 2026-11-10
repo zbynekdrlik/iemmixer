@@ -3,11 +3,14 @@
 
 //! `iem-dante-dev`'s own part (#72): the box's health ([`health`], the
 //! `health` subcommand), which moved here from dstack at its v0.2.0
-//! (ROZHODNUTÉ on #72, 30.10.2026), and `ctl` at our socket ([`SOCKET`]).
+//! (ROZHODNUTÉ on #72, 30.10.2026), the receivers of our TX as they see
+//! our packets ([`receivers`], the `receivers` subcommand), and `ctl` at
+//! our socket ([`SOCKET`]).
 //! Every other command line is the stack's (`daemon::cli::main`);
 //! [`parse_args`] and [`parse_ctl`] tell them apart.
 
 pub mod health;
+pub mod receivers;
 
 use std::path::PathBuf;
 
@@ -181,6 +184,41 @@ pub fn run_health(
         return ExitCode::from(1);
     }
     ExitCode::from(verdict.state.exit_code())
+}
+
+/// Runs `receivers`' parsed command line for the binary called `name`:
+/// the usage (exit 0), a usage error (exit 2), the read's one line (exit 0)
+/// or why it could not run (exit 1).
+#[cfg(target_os = "linux")]
+pub fn run_receivers(
+    name: &str,
+    command: Result<Option<receivers::Options>, String>,
+) -> std::process::ExitCode {
+    use std::io::Write;
+    use std::process::ExitCode;
+    let opts = match command {
+        Ok(Some(opts)) => opts,
+        Ok(None) => {
+            println!("{}", receivers::usage(name));
+            return ExitCode::SUCCESS;
+        }
+        Err(msg) => {
+            eprintln!("{name}: {msg}\n\n{}", receivers::usage(name));
+            return ExitCode::from(2);
+        }
+    };
+    let report = match receivers::read(&opts) {
+        Ok(report) => report,
+        Err(why) => {
+            eprintln!("{name} receivers: {why}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = writeln!(std::io::stdout(), "{}", report.line()) {
+        eprintln!("{name} receivers: stdout: {e}");
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
