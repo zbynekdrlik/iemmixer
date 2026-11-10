@@ -295,6 +295,32 @@ class RunTests(unittest.TestCase):
                          rb.Baseline((500_000, 360_379, 153_388, 90_000, 0, 0)))
         self.assertGreaterEqual(rb.BASELINE_S, 30.0)
 
+    def test_the_baseline_reads_until_baseline_s(self):
+        # A fake clock: each wait poll is 2 s; the reads go on for BASELINE_S.
+        now, reads = [0.0], []
+
+        class Clocked(FakeBox):
+            def wait(self, test, limit):
+                deadline = now[0] + limit
+                while not test():
+                    if now[0] > deadline:
+                        return False
+                    now[0] += 2.0
+                return True
+
+            def device_status(self):
+                reads.append(now[0])
+                return ready(with_ns(LIVE, f4=600_000) if now[0] == 20.0 else LIVE)
+
+        original = rb.time.monotonic
+        rb.time.monotonic = lambda: now[0]
+        try:
+            base = rb.sample_baseline(Clocked(), ready(LIVE))
+        finally:
+            rb.time.monotonic = original
+        self.assertEqual((reads[0], reads[-1]), (0.0, rb.BASELINE_S))
+        self.assertEqual(base, rb.Baseline((600_000, 360_379, 153_388, 119_238, 0, 0)))
+
     def test_a_box_with_no_flow_above_phase_us_is_refused_before_any_change(self):
         for rx in ([{"flow": 1, "lateness_min_ns": 0}], [{"flow": 1, "lateness_min_ns": 150_000}]):
             with self.subTest(rx=rx):
@@ -337,8 +363,20 @@ class PureTests(unittest.TestCase):
                 self.assertIsNone(base_of(rx))
         self.assertIsNone(rb.tx_baseline([]))
         self.assertIsNone(rb.tx_baseline([None, ready(FLOWS, clock=0)]))
-        # The reads with the most flows count; one with fewer is a flow not back.
-        self.assertEqual(base_of(FLOWS[:1], FLOWS), rb.Baseline((400_000, BASE_NS)))
+        # The reads with the usual count of flows count: one with fewer is a
+        # flow not back, one with more a flow there for a moment (review of
+        # the reworked judge: one read of 7 flows made every later read of 6
+        # unjudged, a healthy box failed). A tie takes the fewer flows.
+        self.assertEqual(base_of(FLOWS[:1], FLOWS, FLOWS), rb.Baseline((400_000, BASE_NS)))
+        self.assertEqual(base_of(FLOWS[:1], FLOWS), rb.Baseline((400_000,)))
+        extra = [*LIVE, {"flow": 7, "lateness_min_ns": 50_000}]
+        self.assertEqual(base_of(LIVE, extra, LIVE), base_of(LIVE))
+
+    def test_a_flow_there_for_a_moment_at_the_baseline_does_not_fail_the_boot(self):
+        base = base_of(LIVE, [*LIVE, {"flow": 7, "lateness_min_ns": 50_000}], LIVE)
+        s = proved_seen(rx=LIVE, base=base)
+        self.assertEqual((s.tx_late_us, s.tx_partial), (0.0, 0))
+        self.assertNotIn("tx_late", rb.failed(s, 9))
 
     def test_a_journal_recovery_is_no_filesystem_error(self):
         self.assertEqual(rb.fs_errors("EXT4-fs (sda2): recovery complete\nEXT4-fs (sda2): orphan cleanup\n"), 0)
