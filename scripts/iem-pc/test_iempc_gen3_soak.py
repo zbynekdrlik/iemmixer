@@ -45,6 +45,7 @@ UNITS = ("systemctl show --property=Id,NRestarts,ActiveEnterTimestampMonotonic i
          "iem-server.service")
 HEALTH_ANY = "/opt/iemmixer/bin/iem-dante-dev health || true"
 RECEIVERS = f"/opt/iemmixer/bin/iem-dante-dev receivers --ip {gt.DANTE_IP} --seconds 5"
+RECEIVERS_HELP = "/opt/iemmixer/bin/iem-dante-dev receivers --help"
 STAGE_ENV = f"mkdir -p .cache/iem-gen3-gate && cat > {STAGED}"
 INSTALL_ENV = f"sudo -n install -D -m 0644 {STAGED} {ENV_FILE}"
 RM_ENV = f"sudo -n rm -f {ENV_FILE}"
@@ -52,7 +53,7 @@ RM_SUMMARY = f"sudo -n -u iemmixer rm -f {SUMMARY}"
 CAT_SUMMARY = f"sudo -n -u iemmixer cat {SUMMARY}"
 STOP_UNIT = "sudo -n systemctl stop iem-soak"
 RESET_UNIT = "sudo -n systemctl reset-failed iem-soak"
-BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, UNIT_SHOW, gt.CTL, UNITS]
+BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, RECEIVERS_HELP, UNIT_SHOW, gt.CTL, UNITS]
 TICK = [gt.CTL, RECEIVERS, HEALTH_ANY, UNITS, UNIT_SHOW]
 AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY]
 
@@ -178,6 +179,12 @@ if line == f"{DANTE} ctl status":
     if not os.environ.get("FAKE_NO_ENGINE") and not (os.environ.get("FAKE_NO_ENGINE_AFTER") and late()):
         doc["engine"] = engine
     print(json.dumps(doc))
+    soak_done()
+if line == f"{DANTE} receivers --help":
+    # A build before 2.0.0-dev.70 (FAKE_OLD_BUILD): the stack's own usage error.
+    if os.environ.get("FAKE_OLD_BUILD"):
+        soak_fail("iem-dante-dev: unknown argument", 2)
+    print("usage: iem-dante-dev receivers --ip <our Dante IPv4> [--seconds <n>]")
     soak_done()
 if line == f"{DANTE} receivers --ip @DANTE_IP@ --seconds 5":
     # One receiver of our TX with one flow of ours, as the box command says
@@ -625,6 +632,9 @@ class RefusalTests(SoakBase):
                   "no soak gate: the box's server does not name the engine's build in /api/version"),
                  ({"FAKE_SERVER_HASH": ""},
                   "no soak gate: the box's server does not name the engine's build in /api/version"),
+                 ({"FAKE_OLD_BUILD": "1"},
+                  "no soak gate: the box's iem-dante-dev has no `receivers` read (a build before 2.0.0-dev.70): "
+                  "deploy a newer build first"),
                  ({"FAKE_BASELINE_FAILS": "1"}, "no soak gate: the Gen 3 device's status could not be read"),
                  ({"FAKE_NO_ENGINE": "1"}, "no soak gate: the Gen 3 device's status shows no engine"),
                  ({"FAKE_RX_OFF": "base"}, "no soak gate: 1 required RX channels do not receive yet"))

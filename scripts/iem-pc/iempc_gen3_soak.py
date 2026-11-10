@@ -86,7 +86,8 @@ reset-failed), the env file and the summary removed on the box.
   every RECEIVERS_EVERY_S, from the watch's start: each receiver's own
   heartbeat), counted a late packet of a flow of ours, or a listen's peak
   passed the receiver's latency (gen3_receivers, #72);
-- receiver_unread: no receivers read heard a receiver of our TX, a read did
+- receiver_unread: no receivers read heard a receiver of our TX (a box
+  whose build has no `receivers` read is refused before any change instead), a read did
   not hear every receiver of our TX it found, or more reads failed than gave
   a line.
 Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
@@ -458,6 +459,18 @@ def end_left_job(box: gate.Box) -> bool:
     return True
 
 
+def receivers_ready(box: gate.Box) -> None:
+    """The box's iem-dante-dev has the `receivers` read (2.0.0-dev.70 on):
+    an older build answers it with its usage error, and every read of the
+    run would fail `receiver_unread` for that alone."""
+    try:
+        box.call([*gen3_receivers.words(g3.DANTE_BIN, "0.0.0.0")[:2], "--help"])
+    except box.ip.StepError:
+        raise box.ip.Refused(f"no {NAME} gate: the box's iem-dante-dev has no `receivers` read (a build before "
+                             "2.0.0-dev.70): deploy a newer build first, the receivers of our TX cannot be read "
+                             "with this one (nothing was changed)") from None
+
+
 def box_build(box: gate.Box) -> str:
     """The box's build: its engine's CI build, named by its own server."""
     ip, no = box.ip, f"no {NAME} gate"
@@ -732,6 +745,7 @@ def run(ctx, ip) -> int:
         raise ip.Refused(f"no {NAME} gate: the box is not healthy (iem-dante-dev health on the box says why) "
                          "(nothing was changed)")
     sha = box_build(box)
+    receivers_ready(box)
     left_soak = clear_unit(box)
     number = g3.job_run()
     w = Watch(minutes, left_job, left_soak, records_folder(ip, number), dante_ip=dante)
