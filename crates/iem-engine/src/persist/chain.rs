@@ -107,8 +107,7 @@ fn transient(e: &io::Error) -> bool {
 impl Store {
     /// The live state the seed must keep, if any: the file the load chain
     /// would use among `current.json`, `save.tmp` and the generations. A
-    /// file that
-    /// exists but does not decode is nothing the engine could load, so it
+    /// file that exists but does not decode is nothing the engine could load, so it
     /// does not count (the seed's save renames a damaged `current.json`
     /// into a generation, its bytes kept). An I/O error while looking is an
     /// error, never "no state" (#32 D5, m3: the seed would write over state

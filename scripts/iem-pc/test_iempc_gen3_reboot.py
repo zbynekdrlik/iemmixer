@@ -142,6 +142,40 @@ class ProveTests(unittest.TestCase):
         self.assertEqual((s.tx_late_us, s.tx_future), (-100.0, 1))
         self.assertIn("tx_late", rb.failed(s, 9))
 
+    def test_the_watch_reads_until_ready_plus_tx_watch_s(self):
+        # A fake clock: each wait poll is 10 s. The clock goes ready at
+        # 100 s, so the watch must read until 400 s; a clock behind the
+        # band's from 380 s on is still inside it (it would not be inside
+        # t0 + TX_WATCH_S).
+        now = [0.0]
+
+        class Clocked(FakeBox):
+            def wait(self, test, limit):
+                deadline = now[0] + limit
+                while True:
+                    if test():
+                        return True
+                    if now[0] > deadline:
+                        return False
+                    now[0] += 10.0
+
+            def device_status(self):
+                rx = behind(200) if 380.0 <= now[0] < 400.0 else FLOWS
+                return {"clock": {"ready": int(now[0] >= 100.0)}, "channels": [{"rx": 1, "status": 0x0101_0009}],
+                        "rx": rx}
+
+        original = (rb.soak.box_build, rb.time.monotonic)
+        rb.soak.box_build, rb.time.monotonic = (lambda _box: SHA), (lambda: now[0])
+        try:
+            s = rb.Seen(back_s=30.0)
+            rb.prove(Clocked(), s, 0.0, "sums", SHA, BASE_NS)
+        finally:
+            rb.soak.box_build, rb.time.monotonic = original
+        self.assertEqual(s.ready_s, 100.0)
+        self.assertGreaterEqual(now[0], 100.0 + rb.TX_WATCH_S)
+        self.assertEqual(s.tx_late_us, -200.0)
+        self.assertIn("tx_late", rb.failed(s, 9))
+
     def test_a_box_that_never_came_back_names_only_that(self):
         self.assertEqual(rb.failed(rb.Seen(), 1), ["not_back"])
 
@@ -165,6 +199,14 @@ class PureTests(unittest.TestCase):
                     {"clock": {"ready": 1}, "rx": "x"}, {}, None):
             with self.subTest(bad=bad):
                 self.assertIsNone(rb.least_lateness(bad))
+
+    def test_the_baseline_is_a_judged_read_never_one_from_our_future(self):
+        ready = {"clock": {"ready": 1}}
+        self.assertEqual(rb.tx_baseline({**ready, "rx": FLOWS}), BASE_NS)
+        for rx in ([], [{"flow": 1, "lateness_min_ns": 0}, *FLOWS]):
+            with self.subTest(rx=rx):
+                self.assertIsNone(rb.tx_baseline({**ready, "rx": rx}))
+        self.assertIsNone(rb.tx_baseline(None))
 
     def test_a_journal_recovery_is_no_filesystem_error(self):
         self.assertEqual(rb.fs_errors("EXT4-fs (sda2): recovery complete\nEXT4-fs (sda2): orphan cleanup\n"), 0)

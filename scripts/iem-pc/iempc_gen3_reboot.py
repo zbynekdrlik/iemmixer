@@ -38,7 +38,10 @@ files the band depends on (FILES).
   early: late at every receiver. Fails with no read judged, a drop past
   PHASE_US, or a read of 0 (a packet from our future: the judge clamps there,
   so the whole drop no longer shows). A flow not yet back only raises the
-  least, and flow numbers change across a boot: the least, never per flow;
+  least, and flow numbers change across a boot: the least, never per flow.
+  An optional RX channel's flow missing before the restart and back after it
+  with a lower lateness of its own lowers the least: a false fail, never a
+  false pass;
 - fs_errors: the kernel's log since the boot names a filesystem or disk error;
 - state: current.json unreadable, or a rev below the one before, or below the
   rev the engine says it loaded;
@@ -125,6 +128,13 @@ def least_lateness(status) -> int | None:
     values = [f.get("lateness_min_ns") for f in rx if isinstance(f, dict)]
     values = [v for v in values if type(v) is int and v >= 0]
     return min(values, default=None)
+
+
+def tx_baseline(status) -> int | None:
+    """The TX judge's baseline from the status read before any change
+    (pure); None when no flow is judged or one is from our future (0)."""
+    least = least_lateness(status)
+    return least if least else None
 
 
 @dataclass
@@ -403,8 +413,8 @@ def run(ctx, ip, kind: str) -> int:
     status = box.device_status()
     if not receives(status, box.optional):
         raise ip.Refused(f"no {kind} gate: a required RX channel does not receive (nothing was changed)")
-    base_ns = least_lateness(status)
-    if not base_ns:
+    base_ns = tx_baseline(status)
+    if base_ns is None:
         raise ip.Refused(f"no {kind} gate: no RX flow's packets are judged, or one is from our future "
                          "(nothing was changed)")
     before, state, sums = boot_id(box), read_state(box), read(box, SUMS)
