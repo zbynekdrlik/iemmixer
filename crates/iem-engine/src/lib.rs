@@ -8,7 +8,7 @@
 //! - [`rt`]: the RT processor, the fixed mix pipeline in one callback (I5, I7);
 //!   [`probe`]: its listen probe;
 //! - [`resample`], [`media`]: 96 ↔ 48 kHz for listen taps and talkback (X3, X4);
-//! - [`persist`]: atomic checksummed saves, generations, baseline, load chain;
+//! - [`persist`]: atomic checksummed saves, generations, load chain;
 //! - [`pipe`], [`control`], [`engine`]: local-socket pipes, the control loop,
 //!   start-up, the crash model without the driver and the offline renderer;
 //!   `dante` hosts our own Dante device and drives the processor on

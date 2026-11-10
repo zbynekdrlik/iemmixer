@@ -422,7 +422,7 @@ fn a_newer_save_tmp_beside_current_json_wins() {
 
 #[test]
 fn an_older_or_cut_off_save_tmp_is_skipped_and_named() {
-    // Older by revision (a leftover baseline of an older engine) or cut
+    // Older by revision (a leftover of an earlier save) or cut
     // off while writing: current.json stands, and the skipped save.tmp is
     // reported.
     let (_d, s) = store();
@@ -494,27 +494,30 @@ fn a_state_dir_that_cannot_be_listed_is_reported() {
 }
 
 #[test]
-fn baseline_is_the_last_resort_before_defaults() {
+fn a_baseline_json_is_never_read() {
+    // #72 (6761755454): no engine writes `baseline.json` and the
+    // generations cover the fallback it gave. A valid one an older engine
+    // left beside a damaged current.json is not a load source: the load
+    // falls to muted defaults and neither reads nor names the file.
     let (_d, s) = store();
     write_baseline(&s, &sample(9));
     fs::write(s.dir().join(CURRENT), b"{}").unwrap();
     let loaded = s.load(&test_site());
-    assert_eq!(loaded.source, Source::Baseline);
-    assert_eq!(loaded.persisted.rev, 9);
+    assert_eq!((loaded.source, loaded.persisted.rev), (Source::Defaults, 0));
     assert_eq!(loaded.rejected.len(), 1);
+    assert!(loaded.rejected[0].0.ends_with(CURRENT));
+    assert!(loaded.alarms.is_empty(), "{:?}", loaded.alarms);
+    // Nor is it the seed's live state.
+    assert_eq!(s.live_state().unwrap(), None);
 }
 
 #[test]
 fn an_unreadable_file_is_rejected_not_skipped_as_missing() {
     let (_d, s) = store();
-    write_baseline(&s, &sample(4));
     // A directory where current.json belongs: reading it fails, not NotFound.
     fs::create_dir(s.dir().join(CURRENT)).unwrap();
     let loaded = s.load(&test_site());
-    // The baseline's state (its revision is the load's to set: #32
-    // MAJOR-3).
-    assert_eq!(loaded.source, Source::Baseline);
-    assert_eq!(loaded.persisted.saved_unix_ms, sample(4).saved_unix_ms);
+    assert_eq!(loaded.source, Source::Defaults);
     assert_eq!(loaded.rejected.len(), 1);
     assert!(loaded.rejected[0].0.ends_with(CURRENT));
 }
@@ -523,7 +526,7 @@ fn an_unreadable_file_is_rejected_not_skipped_as_missing() {
 fn a_boot_past_an_unreadable_current_json_continues_its_revision_above_it() {
     // #32 MAJOR-3: current.json may hold any revision up to where the
     // session left off, and recovery never moves it. So whatever loads
-    // instead (a generation, the baseline, the defaults) continues
+    // instead (a generation, the defaults) continues
     // 1 000 000 above the highest revision the state loaded or any name
     // in the directory shows (F3 round 4, finding 2: the marker names
     // current.json's 8), with an alarm: the session's saves then
@@ -547,13 +550,8 @@ fn a_boot_past_an_unreadable_current_json_continues_its_revision_above_it() {
     );
     let generation = s.generations().unwrap()[0].1.clone();
     fs::remove_file(generation).unwrap();
+    // A baseline.json an older engine left is no step of the chain.
     write_baseline(&s, &sample(4));
-    let loaded = s.load(&g);
-    assert_eq!(
-        (loaded.source, loaded.persisted.rev),
-        (Source::Baseline, 1_000_008)
-    );
-    fs::remove_file(s.dir().join(BASELINE)).unwrap();
     let loaded = s.load(&g);
     assert_eq!(
         (loaded.source, loaded.persisted.rev),

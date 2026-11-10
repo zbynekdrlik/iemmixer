@@ -32,7 +32,6 @@ BAND = {
     "server/photos/member1.jpg": b"\xff\xd8zyxqw",
     "engine/current.json": b'{"rev": 7}',
     "engine/current.json.rev-7": b"",
-    "engine/baseline.json": b'{"rev": 1}',
 }
 
 

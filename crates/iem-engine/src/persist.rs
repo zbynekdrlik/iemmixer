@@ -10,8 +10,6 @@
 //!   revision `current.json` holds, renamed at each commit, so a listing
 //!   shows every committed revision even when contents cannot be read
 //!   (#32 F3-r4 2; `chain`, the revision floor);
-//! - `baseline.json`: the last load source; no engine writes it any more,
-//!   but a state folder may hold one from an older build, so it still loads;
 //! - `save.new`: a save being written (never a load source);
 //! - `save.tmp`: a complete save before its renames, always replaced whole
 //!   (a crash before the second rename leaves the newest state only in it;
@@ -30,9 +28,8 @@
 //! unknown fields and default missing ones (additive schemas). The load chain
 //! (`chain`, which also holds the save protocol, the Missing / Unreadable /
 //! Damaged / Valid states and the boot recovery) is current or `save.tmp`
-//! → generations (newest first) → baseline → defaults with every mix
-//! muted. Files of an older schema (1: the REAPER-shaped graph before #20)
-//! are refused. Every file operation goes through `files::Files`, so tests
+//! → generations (newest first) → defaults with every mix muted. Files of
+//! an older schema (1: the REAPER-shaped graph before #20) are refused. Every file operation goes through `files::Files`, so tests
 //! fail any single step (`fault_tests`).
 
 use std::collections::BTreeMap;
@@ -64,7 +61,6 @@ pub use chain::{FileState, Recovery};
 pub const FORMAT: &str = "iemmixer-state";
 pub const GENERATIONS: usize = 20;
 const CURRENT: &str = "current.json";
-const BASELINE: &str = "baseline.json";
 const TMP: &str = "save.tmp";
 const NEW: &str = "save.new";
 const LOCK: &str = "engine.lock";
@@ -97,7 +93,6 @@ pub enum Source {
     /// The boot's recovery makes it `current.json`.
     Interrupted,
     Generation(u64),
-    Baseline,
     Defaults,
 }
 
@@ -493,9 +488,10 @@ mod tests {
     use crate::test_support::test_site;
     use iem_engine_proto::{InputId, InputState, Level, Mix};
 
-    /// A `baseline.json` as an older engine left it.
+    /// A valid `baseline.json` as an older engine left it: no load reads
+    /// it (#72, 6761755454).
     pub(super) fn write_baseline(s: &Store, p: &Persisted) {
-        fs::write(s.dir().join(BASELINE), encode(p).unwrap()).unwrap();
+        fs::write(s.dir().join("baseline.json"), encode(p).unwrap()).unwrap();
     }
 
     pub(super) fn sample(rev: u64) -> Persisted {

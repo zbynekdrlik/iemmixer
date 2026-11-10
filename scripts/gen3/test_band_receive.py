@@ -43,7 +43,6 @@ BAND = {
     "engine/current.json": b'{"rev": 5}',
     "engine/current.json.rev-5": b"",
     "engine/gen-0000000001-r4.json": b'{"rev": 4}',
-    "engine/baseline.json": b'{"rev": 1}',
 }
 
 
@@ -109,7 +108,8 @@ class ReceiveTests(unittest.TestCase):
                {"server/secrets/pepper.dpapi": b"x"}, {"server/stale-secrets-x/jwt_secret": b"x"},
                {"server/lineups": b"x"}, {"engine/engine.lock": b""}, {"engine/save.tmp": b"x"},
                {"engine/current.json.damaged-1": b"x"}, {"engine/current.json.rev-x": b""},
-               {"engine/sub/gen-1.json": b"x"}, {"other/x": b"x"}, {"roster.toml": b"x"}]
+               {"engine/sub/gen-1.json": b"x"}, {"engine/baseline.json": b"x"}, {"other/x": b"x"},
+               {"roster.toml": b"x"}]
         for extra in bad:
             with self.subTest(extra=list(extra)):
                 code, doc, err = self.run_main(archive({**BAND, **extra}))

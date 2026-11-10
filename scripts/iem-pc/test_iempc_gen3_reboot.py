@@ -61,18 +61,39 @@ class FakeBox:
         return self.over.get("healthy", True)
 
     def device_status(self):
-        return {"clock": {"ready": 1}, "channels": [{"rx": 1, "status": 0x0101_0009}]}
+        """The device's status; `rx` sets the RX flows of every read, `reads`
+        the flows read by read (the last one stays)."""
+        reads = self.over.get("reads")
+        rx = (reads.pop(0) if len(reads) > 1 else reads[0]) if reads else self.over.get("rx", FLOWS)
+        return {"clock": {"ready": self.over.get("ready", 1)}, "channels": [{"rx": 1, "status": 0x0101_0009}],
+                "rx": rx}
 
 
-def proved(**over) -> list[str]:
+# The least lateness of a second of each RX flow before the restart: our now
+# less the sender's stamp (synthetic numbers).
+BASE_NS = 380_000
+FLOWS = [{"flow": 1, "lateness_min_ns": 400_000}, {"flow": 2, "lateness_min_ns": BASE_NS}]
+
+
+def behind(us: int) -> list[dict]:
+    """The flows as a box clock `us` behind the band's reads them (a packet
+    from our future is 0, as the judge clamps it)."""
+    return [{**f, "lateness_min_ns": max(0, f["lateness_min_ns"] - us * 1000)} for f in FLOWS]
+
+
+def proved_seen(**over) -> rb.Seen:
     box, s = FakeBox(**over), rb.Seen(back_s=30.0)
     original = rb.soak.box_build
     rb.soak.box_build = lambda _box: over.get("sha", SHA)
     try:
-        rb.prove(box, s, rb.time.monotonic(), "sums", SHA)
+        rb.prove(box, s, rb.time.monotonic(), "sums", SHA, over.get("base", BASE_NS))
     finally:
         rb.soak.box_build = original
-    return rb.failed(s, over.get("rev_before", 9))
+    return s
+
+
+def proved(**over) -> list[str]:
+    return rb.failed(proved_seen(**over), over.get("rev_before", 9))
 
 
 class ProveTests(unittest.TestCase):
@@ -92,16 +113,75 @@ class ProveTests(unittest.TestCase):
                 ("state", {"calls": {" ".join(rb.READ_STATE): "{"}}),
                 ("state", {"rev_before": 11}),
                 ("files", {"calls": {" ".join(rb.SUMS): "other"}}),
-                ("build", {"sha": "b" * 40})):
+                ("build", {"sha": "b" * 40}),
+                ("tx_late", {"rx": behind(700)}),
+                ("tx_late", {"rx": [{"flow": 1, "lateness_min_ns": 0}, *FLOWS]}),
+                ("tx_late", {"rx": []}),
+                ("tx_late", {"ready": 0}),
+                ("tx_late", {"reads": [FLOWS, FLOWS, behind(200)]})):
             with self.subTest(word=word):
                 self.assertIn(word, proved(**over))
+
+    def test_tx_is_judged_from_ready_by_the_least_lateness_of_every_flow(self):
+        # #72 6567516059: a clock behind the band's after ready is TX late at
+        # every receiver. Within PHASE_US behind, or ahead, passes; a flow
+        # not yet back only raises the least, so it never fails the boot.
+        for rx in (behind(100), behind(-400), FLOWS[:1]):
+            with self.subTest(rx=rx):
+                self.assertNotIn("tx_late", proved(rx=rx))
+        s = proved_seen(rx=behind(300))
+        self.assertEqual((s.tx_late_us, s.tx_future), (-300.0, 0))
+        doc = rb.verdict("reboot", s, 9)
+        self.assertEqual((doc["tx_late_us"], doc["tx_future"], doc["tx_reads"]), (-300.0, 0, s.tx_reads))
+        self.assertGreaterEqual(s.tx_reads, 3)   # the clock's wait, the RX wait and the watch
+
+    def test_a_packet_from_our_future_fails_even_within_the_bound(self):
+        # The judge clamps a packet stamped after our now to 0, so a small
+        # baseline cannot show the whole shift: any 0 is a clock behind.
+        s = proved_seen(base=100_000, reads=[FLOWS, [{"flow": 1, "lateness_min_ns": 0}], FLOWS])
+        self.assertEqual((s.tx_late_us, s.tx_future), (-100.0, 1))
+        self.assertIn("tx_late", rb.failed(s, 9))
+
+    def test_the_watch_reads_until_ready_plus_tx_watch_s(self):
+        # A fake clock: each wait poll is 10 s. The clock goes ready at
+        # 100 s, so the watch must read until 400 s; a clock behind the
+        # band's from 380 s on is still inside it (it would not be inside
+        # t0 + TX_WATCH_S).
+        now = [0.0]
+
+        class Clocked(FakeBox):
+            def wait(self, test, limit):
+                deadline = now[0] + limit
+                while True:
+                    if test():
+                        return True
+                    if now[0] > deadline:
+                        return False
+                    now[0] += 10.0
+
+            def device_status(self):
+                rx = behind(200) if 380.0 <= now[0] < 400.0 else FLOWS
+                return {"clock": {"ready": int(now[0] >= 100.0)}, "channels": [{"rx": 1, "status": 0x0101_0009}],
+                        "rx": rx}
+
+        original = (rb.soak.box_build, rb.time.monotonic)
+        rb.soak.box_build, rb.time.monotonic = (lambda _box: SHA), (lambda: now[0])
+        try:
+            s = rb.Seen(back_s=30.0)
+            rb.prove(Clocked(), s, 0.0, "sums", SHA, BASE_NS)
+        finally:
+            rb.soak.box_build, rb.time.monotonic = original
+        self.assertEqual(s.ready_s, 100.0)
+        self.assertGreaterEqual(now[0], 100.0 + rb.TX_WATCH_S)
+        self.assertEqual(s.tx_late_us, -200.0)
+        self.assertIn("tx_late", rb.failed(s, 9))
 
     def test_a_box_that_never_came_back_names_only_that(self):
         self.assertEqual(rb.failed(rb.Seen(), 1), ["not_back"])
 
     def test_a_level_that_did_not_come_back_fails_a_reset(self):
         s = rb.Seen(back_s=1.0, ready_s=1.0, healthy_s=1.0, rx_s=1.0, units_ok=True, shaped=True, phase_us=1.0,
-                    fs_errors=0, rev=2, sums_same=True, build_same=True, level_ok=False)
+                    fs_errors=0, rev=2, sums_same=True, build_same=True, level_ok=False, tx_late_us=0.0)
         self.assertEqual(rb.failed(s, 1), ["level"])
 
 
@@ -109,6 +189,24 @@ class PureTests(unittest.TestCase):
     def test_only_the_first_lock_s_error_counts_and_unlocks_after_it(self):
         log = "=== UNLOCKED before\n" + LOCKED + "\n=== UNLOCKED\n" + LOCKED.replace("-9.5", "-300") + "\n=== UNLOCKED\n"
         self.assertEqual(rb.first_lock(log), (-9.5, 2))
+
+    def test_the_least_lateness_reads_only_a_ready_clock_s_flows(self):
+        status = {"clock": {"ready": 1}, "rx": [{"flow": 1, "lateness_min_ns": 9}, {"flow": 2, "lateness_min_ns": 7},
+                                                {"flow": 3}, {"flow": 4, "lateness_min_ns": -1},
+                                                {"flow": 5, "lateness_min_ns": True}, "x"]}
+        self.assertEqual(rb.least_lateness(status), 7)
+        for bad in ({**status, "clock": {"ready": 0}}, {"clock": {"ready": 1}, "rx": []}, {"clock": {"ready": 1}},
+                    {"clock": {"ready": 1}, "rx": "x"}, {}, None):
+            with self.subTest(bad=bad):
+                self.assertIsNone(rb.least_lateness(bad))
+
+    def test_the_baseline_is_a_judged_read_never_one_from_our_future(self):
+        ready = {"clock": {"ready": 1}}
+        self.assertEqual(rb.tx_baseline({**ready, "rx": FLOWS}), BASE_NS)
+        for rx in ([], [{"flow": 1, "lateness_min_ns": 0}, *FLOWS]):
+            with self.subTest(rx=rx):
+                self.assertIsNone(rb.tx_baseline({**ready, "rx": rx}))
+        self.assertIsNone(rb.tx_baseline(None))
 
     def test_a_journal_recovery_is_no_filesystem_error(self):
         self.assertEqual(rb.fs_errors("EXT4-fs (sda2): recovery complete\nEXT4-fs (sda2): orphan cleanup\n"), 0)

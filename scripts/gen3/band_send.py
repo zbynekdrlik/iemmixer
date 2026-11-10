@@ -33,7 +33,7 @@ from pathlib import Path
 SERVER_FILES = ("secrets/jwt_secret", "secrets/vapid_private", "secrets/pin_hashes.json", "secrets/token_floor.json",
                 "roster.toml", "push_subscriptions.json", "push_subs_v2_migrated", "alarm_subscriptions.json")
 SERVER_FOLDERS = ("lineups", "photos", "presets", "snapshots", "customizations", "backups")
-ENGINE_NAME = re.compile(r"current\.json|baseline\.json|current\.json\.rev-[0-9]+|gen-.*\.json")
+ENGINE_NAME = re.compile(r"current\.json|current\.json\.rev-[0-9]+|gen-.*\.json")
 
 
 class Refused(Exception):

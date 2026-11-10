@@ -699,7 +699,7 @@ class World(unittest.TestCase):
                           ("site/roster.status.json", 0o644), ("site/push_subscriptions.json", 0o600),
                           ("site/push_subs_v2_migrated", 0o644), ("site/lineups/active.json", 0o644),
                           ("site/lineups/lineup1/customizations/member1.json", 0o644),
-                          ("engine/current.json", 0o644), ("engine/baseline.json", 0o644)):
+                          ("engine/current.json", 0o644), ("engine/gen-1-r1.json", 0o644)):
             write(r / "var/lib/iemmixer" / rel, f"synthetic {rel}\n", mode)
         for leaf in ("state.toml", "state.toml.phase-b-32x16"):
             write(r / "var/lib/iem-dante" / leaf, f"synthetic {leaf}\n", 0o644)
