@@ -43,12 +43,14 @@ engine's rev; the sums of the files the band depends on (FILES).
   at most as far as one flow drops (a low flow reaching 0 drops its own
   lateness; a low-latency sender reads 0 on a healthy box, #72
   2.0.0-dev.68). The baseline is each sorted value's least over BASELINE_S
-  of reads with the most flows, its highest above PHASE_US. A read with
-  fewer flows (a flow not yet back) is not judged. Fails with no read
-  judged, or a sorted value past PHASE_US below the baseline's. A flow
+  of reads with the usual count of flows, its highest above PHASE_US. A
+  read with fewer flows (a flow not yet back) is not judged. Fails with no
+  read judged, or a sorted value past PHASE_US below the baseline's. A flow
   missing before the restart and back after it only raises the sorted
   values (it can hide part of a shift, never a false fail); one flow gone
-  and a new one in the same read can make a false fail;
+  and a new one in the same read can make a false fail, and so can one
+  sender's own jitter dipping in the watch more than PHASE_US below its
+  least over the baseline's BASELINE_S;
 - fs_errors: the kernel's log since the boot names a filesystem or disk error;
 - state: current.json unreadable, or a rev below the one before, or below the
   rev the engine says it loaded;
@@ -148,12 +150,15 @@ class Baseline(NamedTuple):
 
 def tx_baseline(statuses) -> Baseline | None:
     """The TX judge's baseline from the statuses read before any change
-    (pure): of the reads with the most flows, each sorted value's least.
-    None when no read had a ready clock and a flow, or when the highest is
-    not above PHASE_US (a clock PHASE_US behind would not show)."""
+    (pure): of the reads with the usual count of flows (the most common, a
+    tie the fewer: a flow there for a moment must not leave every later
+    read unjudged), each sorted value's least. None when no read had a
+    ready clock and a flow, or when the highest is not above PHASE_US (a
+    clock PHASE_US behind would not show)."""
     reads = [sorted(v, reverse=True) for v in map(lateness, statuses) if v]
-    most = max(map(len, reads), default=0)
-    ns = tuple(map(min, zip(*(r for r in reads if len(r) == most))))
+    counts = [len(r) for r in reads]
+    usual = min(counts, key=lambda n: (-counts.count(n), n), default=0)
+    ns = tuple(map(min, zip(*(r for r in reads if len(r) == usual))))
     return Baseline(ns) if ns and ns[0] > PHASE_US * 1000 else None
 
 
@@ -345,7 +350,8 @@ class ClockNotReady(Exception):
 
 
 def sample_baseline(box: gate.Box, first: dict | None) -> Baseline | None:
-    """The TX judge's baseline from `first` and BASELINE_S of reads after it;
+    """The TX judge's baseline (`tx_baseline`) from `first` and BASELINE_S
+    of reads after it: None when its highest flow is not above PHASE_US;
     ClockNotReady when no read had a ready clock."""
     statuses = [first]
     end = time.monotonic() + BASELINE_S
