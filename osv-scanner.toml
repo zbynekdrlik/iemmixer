@@ -4,10 +4,6 @@
 # entry below names why it cannot affect a shipped binary.
 
 [[IgnoredVulns]]
-id = "GHSA-qwgh-2vcv-g2f7"
-reason = "block-buffer 0.10.4 only under digest 0.10 (sha1, sha2, blake2: axum's WebSocket handshake, argon2, our file hashes); the cursor is corrupted only when the buffer's compress or generator callback panics, the panic is caught and the buffer used again, and digest 0.10's callbacks are the hash compression functions, which do not panic (no ReadBuffer: no XOF is used); the fix, 0.12.1, belongs to digest 0.11, which argon2 0.5 and axum 0.8 do not take"
-
-[[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"
 reason = "paste unmaintained (no vulnerability); a proc-macro used by Leptos and others, it runs only at build time"
 
