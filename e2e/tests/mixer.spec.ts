@@ -667,6 +667,13 @@ test.describe("Menu, hide and solo (F6, F8)", () => {
     await expect(strip(page, "mic2")).toBeVisible();
     await strip(page, "mic2").locator(".mute-btn").click();
     await expect(strip(page, "mic2")).not.toHaveClass(/muted/);
+    // The class above is the page's optimistic state; closing the page right
+    // after it could drop the unmute before the engine has it, and the next
+    // test would start with mic2 muted. The reload shows the engine's state.
+    await page.reload();
+    await tab(page, "Mics");
+    await expect(strip(page, "mic2")).toBeVisible({ timeout: 15_000 });
+    await expect(strip(page, "mic2")).not.toHaveClass(/muted/);
   });
 
   test("solo is exclusive: a new solo replaces the previous one (reaperiem#131)", async ({ page }) => {
