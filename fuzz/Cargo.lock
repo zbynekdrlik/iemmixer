@@ -111,8 +111,8 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "dstack"
-version = "0.6.70"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.70#137aa406e759f605ef54afe0b9b0d9328599be88"
+version = "0.6.78"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -134,13 +134,13 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.70"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.70#137aa406e759f605ef54afe0b9b0d9328599be88"
+version = "0.6.78"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 
 [[package]]
 name = "dsync-ptp"
-version = "1.28.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.28.0#98f8b35d7a14102f5ae3aa4366f0c7320c50d11b"
+version = "1.29.0"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.29.0#f3c34bccfd14c3ce9e5a5ee672763b849893e10c"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -219,18 +219,18 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "iem-audio-io"
-version = "2.0.0-dev.71"
+version = "2.0.0-dev.72"
 dependencies = [
  "dstack-audio-io",
 ]
 
 [[package]]
 name = "iem-dsp"
-version = "2.0.0-dev.71"
+version = "2.0.0-dev.72"
 
 [[package]]
 name = "iem-engine"
-version = "2.0.0-dev.71"
+version = "2.0.0-dev.72"
 dependencies = [
  "dstack",
  "iem-audio-io",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "2.0.0-dev.71"
+version = "2.0.0-dev.72"
 dependencies = [
  "serde",
  "serde_json",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "2.0.0-dev.71"
+version = "2.0.0-dev.72"
 
 [[package]]
 name = "if-addrs"
@@ -378,7 +378,7 @@ dependencies = [
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.70#137aa406e759f605ef54afe0b9b0d9328599be88"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
 dependencies = [
  "fastrand",
  "flume",
