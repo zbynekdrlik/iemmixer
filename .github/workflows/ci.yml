@@ -339,6 +339,36 @@ jobs:
           subject-name: gen3-SHA256SUMS-${{ github.sha }}
           subject-digest: ${{ steps.d.outputs.digest }}
 
+  release:
+    name: release
+    # Every merge to main is a release (#111): once every main job is green,
+    # tag v<workspace version> on this commit and publish the GitHub release.
+    # A version whose tag exists already is left alone.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [integrity, gen3-scripts, lint, test, fuzz, engine, gen3-bin, gen3-attest, wasm, e2e, supply-chain, secrets]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(python3 scripts/check_version.py --release-tag)"
+          [ -n "$tag" ] || { echo "::error::main carries a pre-release version; every merge to main is a release"; exit 1; }
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $tag exists already"
+            exit 0
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$tag" --generate-notes
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish
+
   wasm:
     name: wasm
     runs-on: ubuntu-24.04

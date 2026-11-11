@@ -34,4 +34,4 @@ An in-ear-monitor mixer for a band: a native Rust audio engine with its own Dant
 
 **Dante.** Never change Dante subscriptions or any Dante device other than our own device on the box.
 
-**Versions.** One version for the workspace: `[workspace.package].version` in `Cargo.toml` (`2.0.0-dev.N`). `scripts/check_version.py` enforces consistency, and dev > main on PRs.
+**Versions and releases.** One version for the workspace: `[workspace.package].version` in `Cargo.toml`, a release `X.Y.Z` (3.x is Gen 3; no `-dev` suffix). Every merge to main is a release: each dev→main PR bumps it first (patch for fixes, minor for features), and CI's `release` job tags `v<version>` and publishes the GitHub release once every main job is green (#111). `scripts/check_version.py` enforces consistency, dev > main and no pre-release on PRs to main.
