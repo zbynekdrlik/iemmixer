@@ -82,7 +82,7 @@ class BaseRefTests(unittest.TestCase):
         for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"],
                      ["config", "commit.gpgsign", "false"]):
             subprocess.run(["git", "-C", str(self.root), *args], check=True)
-        write_tree(self.root, "2.0.0-dev.0")
+        write_tree(self.root, "3.0.0")
         subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "base"], check=True)
 
@@ -90,7 +90,7 @@ class BaseRefTests(unittest.TestCase):
         shutil.rmtree(self.root)
 
     def test_bumped_head_passes(self) -> None:
-        write_tree(self.root, "2.0.0-dev.1")
+        write_tree(self.root, "3.0.1")
         self.assertEqual(cv.main(["--root", str(self.root), "--base-ref", "main"]), 0)
 
     def test_unbumped_head_fails(self) -> None:
