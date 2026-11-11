@@ -866,8 +866,8 @@ checksum = "669a445ee724c5c69b1b06fe0b63e70a1c84bc9bb7d9696cd4f4e3ec45050408"
 
 [[package]]
 name = "dstack"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.84"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.84#03f664dd70e546bd71b86f92d69516c365e83238"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -889,13 +889,13 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.78"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+version = "0.6.84"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.84#03f664dd70e546bd71b86f92d69516c365e83238"
 
 [[package]]
 name = "dsync-ptp"
-version = "1.29.0"
-source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.29.0#f3c34bccfd14c3ce9e5a5ee672763b849893e10c"
+version = "1.30.1"
+source = "git+https://github.com/zbynekdrlik/dsync?tag=v1.30.1#0096a0aabb7a45fdc4ee274c61fc67c37372a9aa"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dante-dev"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "dstack",
  "serde",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "assert_no_alloc",
  "iem-golden",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "assert_no_alloc",
  "dstack",
@@ -1783,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "iem-golden"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "assert_no_alloc",
  "iem-golden",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -2335,7 +2335,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.78#40f0ce5e0b140d0636a73fbf03e1ea57b576e088"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.84#03f664dd70e546bd71b86f92d69516c365e83238"
 dependencies = [
  "fastrand",
  "flume",
@@ -3219,9 +3219,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags",
  "errno",

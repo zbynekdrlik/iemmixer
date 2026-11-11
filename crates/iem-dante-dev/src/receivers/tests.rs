@@ -287,6 +287,7 @@ fn device(name: &str, last: u8, id: Option<u8>) -> Device {
         name: name.to_string(),
         arc: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, last), 4440),
         dbc: None,
+        cmc: None,
         device_id: id.map(|i| [i; 8]),
         txt: Default::default(),
     }
