@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Version gate: one version for the whole workspace; on PRs to main the head
-version must be greater than main's (SemVer 2.0 precedence).
+version must be greater than main's (SemVer 2.0 precedence) and a release
+(X.Y.Z, no pre-release): every merge to main is a release, tagged by CI (#111).
 
 Single source: [workspace.package].version in Cargo.toml. Every crate uses
 `version.workspace = true`, and Cargo.lock
@@ -77,17 +78,36 @@ def consistency_errors(root: Path) -> list[str]:
     return errors
 
 
+def release_tag(version: str) -> str | None:
+    """The git tag of a release version ("v3.0.0"); None for a pre-release."""
+    _, pre = parse(version)
+    return None if pre else f"v{version}"
+
+
+def release_errors(head: str) -> list[str]:
+    """Every merge to main is a release (#111): a PR head into main has no pre-release suffix."""
+    if release_tag(head) is None:
+        return [f"version {head} is a pre-release: every merge to main is a release, use X.Y.Z"]
+    return []
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Workspace version gate.")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--base-ref", help="e.g. origin/main: the head version must be greater")
+    parser.add_argument("--release-tag", action="store_true",
+                        help="print the release tag of the workspace version (empty for a pre-release)")
     args = parser.parse_args(argv)
+    if args.release_tag:
+        print(release_tag(workspace_version((args.root / "Cargo.toml").read_text(encoding="utf-8"))) or "")
+        return 0
     errors = consistency_errors(args.root)
     head = workspace_version((args.root / "Cargo.toml").read_text(encoding="utf-8"))
     if args.base_ref:
         base_text = subprocess.run(["git", "-C", str(args.root), "show", f"{args.base_ref}:Cargo.toml"],
                                    check=True, capture_output=True, text=True).stdout
         base = workspace_version(base_text)
+        errors.extend(release_errors(head))
         if compare(head, base) <= 0:
             errors.append(f"version {head} must be greater than {args.base_ref} ({base}): bump [workspace.package].version first")
         else:

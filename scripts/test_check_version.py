@@ -82,7 +82,7 @@ class BaseRefTests(unittest.TestCase):
         for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.org"], ["config", "user.name", "t"],
                      ["config", "commit.gpgsign", "false"]):
             subprocess.run(["git", "-C", str(self.root), *args], check=True)
-        write_tree(self.root, "2.0.0-dev.0")
+        write_tree(self.root, "3.0.0")
         subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(self.root), "commit", "-qm", "base"], check=True)
 
@@ -90,7 +90,7 @@ class BaseRefTests(unittest.TestCase):
         shutil.rmtree(self.root)
 
     def test_bumped_head_passes(self) -> None:
-        write_tree(self.root, "2.0.0-dev.1")
+        write_tree(self.root, "3.0.1")
         self.assertEqual(cv.main(["--root", str(self.root), "--base-ref", "main"]), 0)
 
     def test_unbumped_head_fails(self) -> None:
@@ -103,6 +103,33 @@ class WorkspaceMembersTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         members = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["members"]
         self.assertEqual(sorted(m.split("/")[-1] for m in members), sorted(cv.CRATES))
+
+
+class ReleaseTagTests(unittest.TestCase):
+    def test_release_version_gets_its_tag(self) -> None:
+        self.assertEqual(cv.release_tag("3.0.0"), "v3.0.0")
+        self.assertEqual(cv.release_tag("3.10.2"), "v3.10.2")
+
+    def test_pre_release_gets_no_tag(self) -> None:
+        self.assertIsNone(cv.release_tag("3.0.1-dev.1"))
+
+    def test_cli_prints_the_tag(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        write_tree(tmp, "3.0.0")
+        out = subprocess.run([sys.executable, str(Path(cv.__file__)), "--root", str(tmp), "--release-tag"],
+                             check=True, capture_output=True, text=True).stdout
+        self.assertEqual(out, "v3.0.0\n")
+
+
+class PreReleaseToMainTests(unittest.TestCase):
+    """Every merge to main is a release (#111): a PR to main carries no pre-release suffix."""
+
+    def test_pre_release_head_fails_against_main(self) -> None:
+        self.assertIn("pre-release", " ".join(cv.release_errors("3.0.1-dev.1")))
+
+    def test_release_head_passes(self) -> None:
+        self.assertEqual(cv.release_errors("3.0.1"), [])
 
 
 if __name__ == "__main__":
