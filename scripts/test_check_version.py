@@ -105,5 +105,32 @@ class WorkspaceMembersTests(unittest.TestCase):
         self.assertEqual(sorted(m.split("/")[-1] for m in members), sorted(cv.CRATES))
 
 
+class ReleaseTagTests(unittest.TestCase):
+    def test_release_version_gets_its_tag(self) -> None:
+        self.assertEqual(cv.release_tag("3.0.0"), "v3.0.0")
+        self.assertEqual(cv.release_tag("3.10.2"), "v3.10.2")
+
+    def test_pre_release_gets_no_tag(self) -> None:
+        self.assertIsNone(cv.release_tag("3.0.1-dev.1"))
+
+    def test_cli_prints_the_tag(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        write_tree(tmp, "3.0.0")
+        out = subprocess.run([sys.executable, str(Path(cv.__file__)), "--root", str(tmp), "--release-tag"],
+                             check=True, capture_output=True, text=True).stdout
+        self.assertEqual(out, "v3.0.0\n")
+
+
+class PreReleaseToMainTests(unittest.TestCase):
+    """Every merge to main is a release (#111): a PR to main carries no pre-release suffix."""
+
+    def test_pre_release_head_fails_against_main(self) -> None:
+        self.assertIn("pre-release", " ".join(cv.release_errors("3.0.1-dev.1")))
+
+    def test_release_head_passes(self) -> None:
+        self.assertEqual(cv.release_errors("3.0.1"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
