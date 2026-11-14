@@ -161,6 +161,17 @@ class TxTests(unittest.TestCase):
         # Another value listed classifies nothing.
         self.assertEqual(verdict(rows, non_inear=frozenset({999}))["pass"], 0)
 
+    def test_a_tx_flow_with_channels_and_no_known_latency_fails(self) -> None:
+        rows = paths(inputs=[("mic1", [1])])
+        tx = [{"flow": 1, "channels": 4, "receiver_latency_us": 250},
+              {"flow": 2, "channels": 8, "receiver_latency_us": 0}]
+        self.assertEqual(lat.tx_flows(status(tx=tx)), [{"receiver_latency_us": 250, "state": "in_ear"},
+                                                       {"receiver_latency_us": None, "state": "tx_unread"}])
+        self.assertEqual(lat.verdict(rows, RATE, lat.tx_flows(status(tx=tx)))["pass"], 0)
+        # Without that flow the same rows pass, and an empty flow is never read.
+        tx_ok = [tx[0], {"flow": 3, "channels": 0, "receiver_latency_us": 0}]
+        self.assertEqual(lat.verdict(rows, RATE, lat.tx_flows(status(tx=tx_ok)))["pass"], 1)
+
     def test_the_env_lists_parse_and_refuse(self) -> None:
         self.assertEqual(lat.parse_non_inear(" 1000, 2000 "), frozenset({1000, 2000}))
         self.assertEqual(lat.parse_non_inear(""), frozenset())
@@ -180,7 +191,7 @@ class RateTests(unittest.TestCase):
         self.assertEqual(lat.sample_rate('name = "x"\nsample_rate = 48000\n'), 48_000)
         self.assertEqual(lat.budget_samples(48_000), 48)
         self.assertEqual(lat.budget_samples(96_000), 96)
-        self.assertEqual(lat.budget_samples(44_100), 45)   # rounded up
+        self.assertEqual(lat.budget_samples(44_100), 44)   # rounded down: never above 1 ms
 
     def test_at_48_khz_a_path_of_48_samples_passes_and_49_fails(self) -> None:
         for delay, state in ((8, "ok"), (9, "over")):

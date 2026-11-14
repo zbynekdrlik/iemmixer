@@ -4,7 +4,7 @@ device, against the budget of 1 ms.
 
 path = D + the input's RX flow delay + the in-ear receiver's latency, in
 samples at the device's rate (`sample_rate` of the box's device config; the
-budget is 1 ms at that rate, rounded up: 96 at 96 kHz):
+budget is 1 ms at that rate, rounded down, never above 1 ms: 96 at 96 kHz):
 
 - D is the engine's offset (`ctl status` `engine.offset`: B + P + W);
 - the RX flow delay is the worst `delay` of the status `rx[]` flows whose
@@ -75,8 +75,8 @@ def sample_rate(device_text: str) -> int:
 
 
 def budget_samples(rate: int) -> int:
-    """1 ms at `rate` in whole samples, rounded up."""
-    return math.ceil(rate / 1000)
+    """1 ms at `rate` in whole samples, rounded down (never above 1 ms)."""
+    return rate // 1000
 
 
 def parse_exempt(text: str) -> dict[str, str]:
@@ -111,13 +111,20 @@ def samples_of_us(us: float, rate: int) -> int:
 def tx_flows(status: dict, non_inear: frozenset[int] = frozenset()) -> list[dict]:
     """Each TX flow with channels: {receiver_latency_us, state}, `state`
     in_ear (at IN_EAR_MAX_US or less), non_inear (above it and listed) or
-    tx_unclassified (above it, not listed)."""
+    tx_unclassified (above it, not listed), or tx_unread (no receiver
+    latency known: dstack's 0). dstack states the latency in whole us
+    (truncated from ns), so a path can read at most one sample short."""
     out = []
     for flow in status.get("tx") or []:
         if not isinstance(flow, dict):
             continue
         channels, us = flow.get("channels"), flow.get("receiver_latency_us")
-        if type(channels) is not int or channels <= 0 or type(us) not in (int, float) or us <= 0:
+        if type(channels) is not int or channels <= 0:
+            continue
+        if type(us) not in (int, float) or us <= 0:
+            # dstack's 0 is "not known" (a multicast flow, a receiver not read):
+            # it may feed an in-ear at any latency, so it fails the guard.
+            out.append({"receiver_latency_us": None, "state": "tx_unread"})
             continue
         state = "in_ear" if us <= IN_EAR_MAX_US else "non_inear" if us in non_inear else "tx_unclassified"
         out.append({"receiver_latency_us": us, "state": state})
@@ -189,10 +196,10 @@ def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]]
 def verdict(rows: list[dict], rate: int, tx: list[dict]) -> dict:
     """{pass, budget_samples, rate, paths, tx}: a pass only when at least one
     path is known, no input is over, unknown or unsubscribed, and no TX flow
-    is tx_unclassified."""
+    is tx_unclassified or tx_unread."""
     known = [r for r in rows if r["state"] in ("ok", "over")]
     bad = [r for r in rows if r["state"] in FAILING]
-    unclassified = [f for f in tx if f["state"] == "tx_unclassified"]
+    unclassified = [f for f in tx if f["state"] in ("tx_unclassified", "tx_unread")]
     return {"pass": int(bool(known) and not bad and not unclassified), "budget_samples": budget_samples(rate),
             "rate": rate, "paths": public(rows), "tx": tx}
 
