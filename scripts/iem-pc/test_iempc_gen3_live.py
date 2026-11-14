@@ -51,7 +51,7 @@ BURST = f"{gt.SUPER} test-signal mic1 -20 30 --listen"
 JOURNAL = "sudo -n journalctl -u iem-server.service -o cat -n 20000 --no-pager -q"
 BEFORE = [*gt.PREFLIGHT, VERSION, gt.ALARM, *TOKEN_CALLS]
 # The mic-to-ear guard's reads after the job's end (#122; our RX table over ARC between them).
-LATENCY = [gt.CTL, gt.CAT_SITE]
+LATENCY = [gt.CTL, gt.CAT_DEVICE, gt.CAT_SITE]
 AFTER = [gt.STOP, JOURNAL, gt.ALARM, gt.NRESTARTS, *gt.END, *LATENCY]
 CHANGES = (*gt.CHANGES, BURST)
 

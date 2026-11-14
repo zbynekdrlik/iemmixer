@@ -56,7 +56,7 @@ RESET_UNIT = "sudo -n systemctl reset-failed iem-soak"
 BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, RECEIVERS_HELP, UNIT_SHOW, gt.CTL, UNITS]
 TICK = [gt.CTL, RECEIVERS, HEALTH_ANY, UNITS, UNIT_SHOW]
 # After the run: the mic-to-ear guard's reads (#122; our RX table over ARC between them).
-LATENCY = [gt.CTL, gt.CAT_SITE]
+LATENCY = [gt.CTL, gt.CAT_DEVICE, gt.CAT_SITE]
 AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY, *LATENCY]
 
 
@@ -270,7 +270,7 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0,
         "receivers": {"reads": 2, "failed": 0, "heard_max": 1, "unheard": 0, "unread_max": 0, "no_id_max": 0,
                       "flows_max": 1, "late": 0, "over": 0, "margin_us": 130},
-        "latency": gt.LATENCY_PASS, "unit_restarts": 0,
+        "latency": {**gt.LATENCY_PASS, "tx": gt.LATENCY_PASS["tx"][:1]}, "unit_restarts": 0,   # the soak box: one in-ear TX flow
         "left_job": 0, "left_soak": 0, "failed": []}
 
 
@@ -499,7 +499,7 @@ class CriteriaTests(SoakBase):
         # A failed unit is cleared with reset-failed, not stopped.
         self.again()
         code, docs, err = self.gate_run(FAKE_CLIENT_EXIT="1")
-        self.assertEqual(self.calls()[-6:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
+        self.assertEqual(self.calls()[-7:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
 
     def test_a_listen_gap_fails_the_harness(self) -> None:
         # #88: the listen ran 30 min with no gap at three times the gate's reads (2026-11-08); a gap fails it now.
@@ -544,7 +544,7 @@ class CriteriaTests(SoakBase):
         self.assertEqual((doc["failed"], doc["client_exit"], doc["client_result"]),
                          (["not_finished", "harness"], None, None))
         calls = self.calls()
-        self.assertEqual(calls[-6:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
+        self.assertEqual(calls[-7:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
         self.assertEqual(self.soak_state()["unit"], None)
 
     def test_a_refused_status_post_fails_the_command_after_its_verdict(self) -> None:

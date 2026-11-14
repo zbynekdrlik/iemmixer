@@ -151,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
                            "alarm path's count), posted as hil/gen3 on the box's build; live: the live specs in a "
                            "browser through the band's public URL with a burst every minute, posted as live/gen3; "
                            "soak: iem-soakclient on the box beside reads of its counters, posted as soak/gen3; "
-                           "latency: every mic input's mic-to-ear path against 1 ms, read only, also during an "
+                           "latency: every engine input's mic-to-ear path but the exempt ones against 1 ms, read only, also during an "
                            "event (#122)")
     gate.add_argument("--minutes", type=int,
                       help="soak only: the run's length, 10, 30, 60 or 120 (default 120)")

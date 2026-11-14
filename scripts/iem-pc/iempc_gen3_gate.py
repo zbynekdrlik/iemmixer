@@ -757,38 +757,55 @@ def preflight(box: Box, dante: str | None) -> Facts:
 
 # ---- the mic-to-ear latency (#122) ----
 
-LATENCY_DESC = ("latency: every mic input's path, D + its RX flow's delay + the in-ear receiver's latency, "
-                "against 1 ms (gen3_latency.py)")
+LATENCY_DESC = ("latency: every engine input's path but the exempt ones, D + its RX flow's delay + the in-ear "
+                "receiver's latency, against 1 ms at the device's rate (gen3_latency.py)")
 
 
 def latency(box: Box, dante: str, event: str | None = None) -> dict:
-    """The latency guard's doc (gen3_latency.verdict): one `ctl status`,
-    our RX subscriptions over ARC (`gen3_arc.read_rx`) and the installed
-    site's mic inputs (read as the service user, kept in memory). A read
-    that fails is a failing doc naming which (`unread`), never a pass.
-    `event` "ignore" for the read-only command an event allows."""
+    """The latency guard's doc (gen3_latency.verdict): the private env's
+    exemptions and non-in-ear TX latencies, one `ctl status`, our RX
+    subscriptions over ARC (`gen3_arc.read_rx`), the installed device
+    config's rate and the installed site's inputs (read as the service user,
+    kept in memory). A read that fails is a failing doc naming which
+    (`unread`), never a pass. `event` "ignore" for the read-only command an
+    event allows."""
     ip = box.ip
+
+    def unread(what: str) -> dict:
+        return {"pass": 0, "budget_samples": None, "rate": None, "paths": [], "tx": [], "unread": what}
+
+    try:
+        exempt = gen3_latency.parse_exempt(box.ctx.env.get("GEN3_LATENCY_EXEMPT", ""))
+        non_inear = gen3_latency.parse_non_inear(box.ctx.env.get("GEN3_LATENCY_NON_INEAR_TX_US", ""))
+    except ValueError:
+        return unread("env")
     try:
         status = box.last_json(box.call([g3.DANTE_BIN, "ctl", "status"], event=event))
     except ip.StepError:
-        return {"pass": 0, "budget_samples": gen3_latency.BUDGET_SAMPLES, "paths": [], "unread": "status"}
+        return unread("status")
     try:
         subscriptions = gen3_arc.read_rx(dante)["rx"]
     except (OSError, ValueError, struct.error):
-        return {"pass": 0, "budget_samples": gen3_latency.BUDGET_SAMPLES, "paths": [], "unread": "subscriptions"}
+        return unread("subscriptions")
     try:
-        inputs = gen3_latency.mic_inputs(box.call([*AS_SERVICE, "cat", SITE], event=event))
+        rate = gen3_latency.sample_rate(box.call(["cat", DEVICE_CONFIG], event=event))
     except (ip.StepError, ValueError, tomllib.TOMLDecodeError):
-        return {"pass": 0, "budget_samples": gen3_latency.BUDGET_SAMPLES, "paths": [], "unread": "site"}
-    return gen3_latency.verdict(gen3_latency.paths(status, subscriptions, inputs))
+        return unread("device_config")
+    try:
+        inputs = gen3_latency.engine_inputs(box.call([*AS_SERVICE, "cat", SITE], event=event))
+    except (ip.StepError, ValueError, tomllib.TOMLDecodeError):
+        return unread("site")
+    rows = gen3_latency.paths(status, subscriptions, inputs, rate, exempt)
+    return gen3_latency.verdict(rows, rate, gen3_latency.tx_flows(status, non_inear))
 
 
 def run_latency(ctx, ip) -> int:
     """`iempc gen3-gate latency`: read only, any time (an event too), no
     lock, no status post. One line `{"gen3_gate": {"latency": {pass,
-    budget_samples, paths: [{input, samples, ms, over_budget, state}]}}}`
-    (input ids and numbers only); exit 1 when a mic input is over the budget
-    or unknown, or a read failed."""
+    budget_samples, rate, paths: [{input, samples, ms, over_budget, state}],
+    tx: [{receiver_latency_us, state}]}}}` (input ids and numbers only); exit
+    1 when an input not exempt is over the budget, unknown or unsubscribed, a
+    TX flow is tx_unclassified, or a read failed."""
     host = g3.gen3_host(ip, ctx.env, WORDS)
     dante = dante_ip(ip, ctx.env)
     doc = latency(Box(ip, ctx, host, "latency"), dante, event="ignore")
