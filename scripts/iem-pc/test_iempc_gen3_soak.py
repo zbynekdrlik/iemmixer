@@ -55,7 +55,9 @@ STOP_UNIT = "sudo -n systemctl stop iem-soak"
 RESET_UNIT = "sudo -n systemctl reset-failed iem-soak"
 BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, RECEIVERS_HELP, UNIT_SHOW, gt.CTL, UNITS]
 TICK = [gt.CTL, RECEIVERS, HEALTH_ANY, UNITS, UNIT_SHOW]
-AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY]
+# After the run: the mic-to-ear guard's reads (#122; our RX table over ARC between them).
+LATENCY = [gt.CTL, gt.CAT_SITE]
+AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY, *LATENCY]
 
 
 def client(seconds: int, member: str = MEMBER) -> str:
@@ -161,15 +163,17 @@ if line == f"{DANTE} ctl status":
              "epoch": 1 if clock_fault == "epoch" and late() else 0, "polls": 100 + so["all"],
              "re_anchors": 2 + grown("re_anchors"), "holdovers": 3 + grown("holdovers"),
              "holdover": 1 if clock_fault == "holdover" and late() else 0, "freq_ppb": -1200}
-    engine = {"media": 1, "offset": 176, "playout": 36, "blocks": blocks, "late": 5 + grown("late"),
+    engine = {"media": 1, "offset": 56, "playout": 24, "blocks": blocks, "late": 5 + grown("late"),
               "missed": 7 + grown("missed"), "overruns": 11 + grown("overruns"),
               "rebootstraps": 1 + grown("rebootstraps"), "max_process_us": 210}
-    rx = [{"flow": f, "granted": 1, "fpp": 8, "channels": 4, "latency": 36, "packets": 1000 * so["all"],
+    # The stage device's flows (the mic-to-ear path, #122: D 56 + delay 16 + the in-ear 24 = 96, the budget).
+    rx = [{"flow": f, "device": "zyxqw-stage", "delay": int(os.environ.get("FAKE_RX_DELAY", "16")),
+           "granted": 1, "fpp": 8, "channels": 4, "latency": 36, "packets": 1000 * so["all"],
            "refused": 0, "stray": 0, "out_of_order": 0,
            "late": (4 if f == 1 else 0) + (grown("rx_late") if f == 2 else 0), "unplaced": 0, "lateness": 14 + f, "lateness_min_ns": 375007, "keepalives": 9, "keepalive_errors": 0,
            "recv_errors": 0} for f in (1, 2)]
     tx = [{"flow": 1, "live": 1, "fpp": 8, "channels": 8, "packets": 2000 * so["all"], "send_errors": 0,
-           "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes")}]
+           "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes"), "receiver_latency_us": 250}]
     off = (os.environ.get("FAKE_RX_OFF") == "1" and late()) or os.environ.get("FAKE_RX_OFF") == "base"
     channels = [{"rx": n, "status": 1 if off and n == 4 else 0x01010009, "written": 1,
                  "holes": (2 if n == 1 else 0) + (grown("rx_holes") if n == 2 else 0), "late": 0,
@@ -266,7 +270,7 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0,
         "receivers": {"reads": 2, "failed": 0, "heard_max": 1, "unheard": 0, "unread_max": 0, "no_id_max": 0,
                       "flows_max": 1, "late": 0, "over": 0, "margin_us": 130},
-        "unit_restarts": 0,
+        "latency": gt.LATENCY_PASS, "unit_restarts": 0,
         "left_job": 0, "left_soak": 0, "failed": []}
 
 
@@ -278,6 +282,7 @@ class SoakBase(gt.GateBase):
         text = ip.env_path().read_text(encoding="utf-8")
         ip.env_path().write_text(text + f"SOAK_MEMBER={MEMBER}\n", encoding="utf-8")
         (self.box / "root" / MINT.lstrip("/")).mkdir(parents=True)
+        self.subscribe_mics()
         (self.tmp / "bin" / "ssh").write_text(f"#!{sys.executable}\n{SOAK_SSH}", encoding="utf-8")
         for target, name, value in ((soak, "STATUS_EVERY_S", 0.0), (soak, "HEALTH_EVERY_S", 0.0),
                                     (soak, "RECEIVERS_EVERY_S", 0.0),
@@ -390,7 +395,8 @@ class CriteriaTests(SoakBase):
             ({"FAKE_GROW": "overruns"}, "pump_overruns", "pump_overruns", 1),
             ({"FAKE_GROW": "rebootstraps"}, "pump_rebootstraps", "pump_rebootstraps", 1),
             ({"FAKE_STALL": "1"}, "pump_stalled", "pump_stalled", 2),
-            ({"FAKE_NO_ENGINE_AFTER": "1"}, "pump_stalled", "pump_stalled", 1),
+            # Without the engine's object the mic-to-ear path is unknown too (#122).
+            ({"FAKE_NO_ENGINE_AFTER": "1"}, ("pump_stalled", "latency_over_budget"), "pump_stalled", 1),
             ({"FAKE_CLOCK": "not_ready"}, "clock_not_ready", "clock_not_ready", 1),
             ({"FAKE_CLOCK": "holdover"}, "holdover", "in_holdover", 1),
             ({"FAKE_GROW": "holdovers"}, "holdover", "holdovers", 1),
@@ -412,10 +418,11 @@ class CriteriaTests(SoakBase):
                 code, docs, err = self.gate_run(**env)
                 self.assertEqual(code, 1, err)
                 doc = self.line(docs)
-                self.assertEqual((doc["failed"], doc[key], doc["pass"], doc["conclusion"]), ([word], value, 0,
+                words = list(word) if isinstance(word, tuple) else [word]
+                self.assertEqual((doc["failed"], doc[key], doc["pass"], doc["conclusion"]), (words, value, 0,
                                                                                              "failure"))
                 self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=soak/gen3", "-f",
-                                                       f"description=the Gen 3 box's soak failed: {word}"])
+                                                       f"description=the Gen 3 box's soak failed: {', '.join(words)}"])
                 self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
                 self.assertEqual(self.soak_state()["unit"], None)   # the unit ended all the same
                 self.assert_private(err + json.dumps(docs))
@@ -492,7 +499,7 @@ class CriteriaTests(SoakBase):
         # A failed unit is cleared with reset-failed, not stopped.
         self.again()
         code, docs, err = self.gate_run(FAKE_CLIENT_EXIT="1")
-        self.assertEqual(self.calls()[-4:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY])
+        self.assertEqual(self.calls()[-6:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
 
     def test_a_listen_gap_fails_the_harness(self) -> None:
         # #88: the listen ran 30 min with no gap at three times the gate's reads (2026-11-08); a gap fails it now.
@@ -511,6 +518,24 @@ class CriteriaTests(SoakBase):
             code, docs, err = self.gate_run()
         self.assertEqual((code, self.line(docs)["failed"]), (1, ["polls"]), err)
 
+    def test_a_mic_path_over_the_budget_or_unknown_fails_latency_over_budget(self) -> None:
+        # #122: one sample over 1 ms at the stage device's flow; then a mic whose transmitter has no flow.
+        code, docs, err = self.gate_run(FAKE_RX_DELAY="17")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual((doc["failed"], doc["latency"]["pass"]), (["latency_over_budget"], 0))
+        self.assertEqual(doc["latency"]["paths"][0],
+                         {"input": "mic1", "samples": 97, "ms": 1.01, "over_budget": True, "state": "over"})
+        self.assertEqual(self.posts()[0][-1], "description=the Gen 3 box's soak failed: latency_over_budget")
+        self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
+        self.again()
+        self.device.rows[2] = ("zyxqw 02", "zyxqw-elsewhere", 9)
+        code, docs, err = self.gate_run()
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual((doc["failed"], doc["latency"]["paths"][1]["state"]), (["latency_over_budget"], "unknown"))
+        self.assert_private(err + json.dumps(docs))
+
     def test_a_client_that_never_ends_is_stopped_and_fails_not_finished(self) -> None:
         with mock.patch.object(soak, "wait_limit", lambda seconds: 0.3):
             code, docs, err = self.gate_run(FAKE_NEVER_ENDS="1")
@@ -519,7 +544,7 @@ class CriteriaTests(SoakBase):
         self.assertEqual((doc["failed"], doc["client_exit"], doc["client_result"]),
                          (["not_finished", "harness"], None, None))
         calls = self.calls()
-        self.assertEqual(calls[-4:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY])
+        self.assertEqual(calls[-6:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
         self.assertEqual(self.soak_state()["unit"], None)
 
     def test_a_refused_status_post_fails_the_command_after_its_verdict(self) -> None:

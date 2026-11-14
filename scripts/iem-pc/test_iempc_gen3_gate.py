@@ -35,6 +35,10 @@ REPO = HERE.parent.parent
 GEN3 = "tester@gen3.test"
 DANTE_IP = "192.0.2.20"
 OURS = "zyxqw-gen3"
+STAGE_DEVICE = "zyxqw-stage"   # the stage device the mic inputs come from (the latency guard, #122)
+# The latency guard's doc of the stand-in box (#122): mic1-mic10 at 56 + 16 + 24 = 96 samples, the budget.
+LATENCY_PASS = {"pass": 1, "budget_samples": 96, "paths": [
+    {"input": f"mic{n}", "samples": 96, "ms": 1.0, "over_budget": False, "state": "ok"} for n in range(1, 11)]}
 SPARES = (61, 62)   # the test site's [guard] hil_tx
 RET = SPARES[0]   # the D5(b) loop's return: our RX 61 hears our TX 61
 TRIP = 77   # the self-loop's round trip, samples
@@ -333,8 +337,16 @@ if line == f"{DANTE} ctl status":
     if looped():
         channels.append({"rx": 61, "status": 0x01010009, "written": 1, "holes": 0, "late": 0, "duplicate": 0,
                          "early": 0})
-    print(json.dumps({"clock": {"ready": 1, "epoch": 0, "polls": 9, "re_anchors": 0}, "tx": [], "rx": [],
-                      "channels": channels, "sources": [], "checks": []}))
+    # The mic-to-ear path (#122): D 56, the stage device's flow at delay 16
+    # (FAKE_RX_DELAY), our in-ear TX flow at 250 us (24 samples), one at 1 ms
+    # (not in-ear): 96 samples, the budget.
+    rx = [{"flow": 4, "device": "zyxqw-stage", "granted": 1, "fpp": 4, "channels": 8,
+           "delay": int(os.environ.get("FAKE_RX_DELAY", "16"))}]
+    tx = [{"flow": 1, "live": 1, "fpp": 4, "channels": 4, "receiver_latency_us": 250},
+          {"flow": 5, "live": 1, "fpp": 4, "channels": 8, "receiver_latency_us": 1000}]
+    print(json.dumps({"clock": {"ready": 1, "epoch": 0, "polls": 9, "re_anchors": 0}, "tx": tx, "rx": rx,
+                      "channels": channels, "sources": [], "checks": [],
+                      "engine": {"media": 1, "offset": 56, "playout": 24}}))
     done()
 if line == f"{ENGINE} --version":
     print(os.environ.get("FAKE_ENGINE_VERSION", "iem-engine 2.0.0-dev.50+" + os.environ["FAKE_SHA"]))
@@ -462,6 +474,12 @@ class GateBase(Base):
     def write_device(self, text: str) -> None:
         (self.box / "root/etc/iemmixer/dante-device.toml").write_text(text, encoding="utf-8")
 
+    def subscribe_mics(self) -> None:
+        """Our RX 1-10 (the test site's mic1-mic10) subscribed to the stage
+        device, Receiving: the latency guard's paths (#122)."""
+        for n in range(1, 11):
+            self.device.rows[n] = (f"zyxqw {n:02d}", STAGE_DEVICE, 9)
+
     def write_loop(self) -> None:
         row = self.device.rows.get(RET)
         looped = row is not None and row[:2] == (self.device.tx_name(RET), OURS)
@@ -520,7 +538,7 @@ class GateBase(Base):
 
     def assert_private(self, text: str) -> None:
         """P6: no host, address, device or channel name, spare output's number or build in what is printed."""
-        for value in (GEN3, DANTE_IP, OURS, self.device.tx_name(RET), "61", "62", SHA):
+        for value in (GEN3, DANTE_IP, OURS, STAGE_DEVICE, self.device.tx_name(RET), "61", "62", SHA):
             self.assertNotIn(value, text)
 
 
@@ -998,6 +1016,68 @@ class PreflightTests(GateBase):
         code, docs, err = self.gate_run()
         self.assertEqual((code, docs, self.calls()), (1, [], []), err)
         self.assertIn("'gen3-gate' runs only in dev time", err)
+
+
+class LatencyTests(GateBase):
+    """`iempc gen3-gate latency` (#122): every mic input's mic-to-ear path, read only, also during an event."""
+    ARGS = ("gen3-gate", "latency")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.subscribe_mics()
+
+    def test_it_reads_the_status_our_subscriptions_and_the_site_and_prints_every_path(self) -> None:
+        code, docs, err = self.gate_run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(docs, [{"gen3_gate": {"latency": LATENCY_PASS}}])
+        # One status read and the site, our RX table over ARC; no change, no write, no status post.
+        self.assertEqual(self.calls(), [CTL, CAT_SITE])
+        self.assertEqual((self.subscriptions(), self.posts(), self.ledger()), ([], [], []))
+        self.assert_private(err + json.dumps(docs))
+
+    def test_a_path_over_the_budget_or_unknown_exits_1(self) -> None:
+        code, docs, err = self.gate_run(FAKE_RX_DELAY="48")   # the wireless device's flow today: 128 samples
+        self.assertEqual(code, 1, err)
+        doc = docs[0]["gen3_gate"]["latency"]
+        self.assertEqual((doc["pass"], doc["paths"][0]),
+                         (0, {"input": "mic1", "samples": 128, "ms": 1.33, "over_budget": True, "state": "over"}))
+        self.again()
+        self.device.rows[3] = ("zyxqw 03", "zyxqw-elsewhere", 9)   # a transmitter with no flow in the status
+        code, docs, err = self.gate_run()
+        self.assertEqual(code, 1, err)
+        doc = docs[0]["gen3_gate"]["latency"]
+        self.assertEqual((doc["pass"], doc["paths"][2]["state"]), (0, "unknown"))
+        self.assert_private(err + json.dumps(docs))
+
+    def test_a_read_that_fails_is_a_failure_never_a_pass(self) -> None:
+        with mock.patch.object(gen3_arc, "send", side_effect=OSError("timed out")):
+            code, docs, err = self.gate_run()
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["unread"]), (1, "subscriptions"), err)
+        self.again()
+        code, docs, err = self.gate_run(FAKE_SSH_DOWN=CAT_SITE)
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["unread"]), (1, "site"), err)
+        self.again()
+        code, docs, err = self.gate_run(FAKE_SSH_DOWN=CTL)
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["unread"]), (1, "status"), err)
+        self.assert_private(err + json.dumps(docs))
+
+    def test_it_runs_during_an_event_and_beside_another_command(self) -> None:
+        self.flag()
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs), (0, [{"gen3_gate": {"latency": LATENCY_PASS}}]), err)
+        spec = ip.spec_of(ip.build_parser().parse_args(list(self.ARGS)))
+        self.assertEqual((spec.dev_time, spec.locked), (False, False))
+        # Every other gate stays dev time and locked.
+        for name in ("hil", "live", "soak", "reboot", "reset"):
+            spec = ip.spec_of(ip.build_parser().parse_args(["gen3-gate", name]))
+            self.assertEqual((spec.dev_time, spec.locked), (True, True), name)
+
+    def test_it_refuses_without_gen3_dante_ip_before_any_call(self) -> None:
+        text = ip.env_path().read_text(encoding="utf-8")
+        ip.env_path().write_text(text.replace(f"GEN3_DANTE_IP={DANTE_IP}\n", ""), encoding="utf-8")
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs, self.calls()), (1, [], []), err)
+        self.assertIn("no GEN3_DANTE_IP", err)
 
 
 class SudoTests(GateBase):

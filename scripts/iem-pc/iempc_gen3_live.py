@@ -49,7 +49,9 @@ run's never counts), the push count again, the engine's own restarts
 pc.json, bursts.jsonl, evidence.json and results.json in iempc's state,
 gen3-live/<run>/, kept: no token) with this run's job results; then this
 gate's own words, LIVE_FAILURES (every check that failed, not only the
-first, and `restarted` for an engine that restarted by itself). One line
+first, `restarted` for an engine that restarted by itself, and
+`latency_over_budget` when, after the job's end, a mic input's mic-to-ear
+path is over 1 ms or unknown: `gate.latency`, #122). One line
 `{"gen3_gate": {"live": {...}}}`: numbers, fixed codes, the verdict's first
 failure (its fixed codes and the public spec titles), never a token, URL,
 host, member id or test error text. The status `live/gen3` on the box's
@@ -106,7 +108,8 @@ EXIT = re.compile(r"\(exit (-?[0-9]+)\)")   # iempc_core.guarded's words for a f
 DESC_PASS = "the Gen 3 box's live E2E passed (iempc gen3-gate live)"
 DESC_FAIL = "the Gen 3 box's live E2E failed: "
 # The words a verdict names, in its order (`verdict`: the verdict was red and none of the others says why).
-LIVE_FAILURES = ("begin", "bursts", "browser", "client_log", "push", "job_end", "restarted", "verdict")
+LIVE_FAILURES = ("begin", "bursts", "browser", "client_log", "push", "job_end", "restarted", "latency_over_budget",
+                 "verdict")
 # Playwright runs a flag or the bound left to end by themselves (never force-ended).
 LEFT_RUNNING: list[subprocess.Popen] = []
 
@@ -170,7 +173,7 @@ def failures(c: gate.Checks, run: Run) -> list[str]:
     return failed
 
 
-def line(v: dict, c: gate.Checks, run: Run, left: bool, failed: list[str]) -> dict:
+def line(v: dict, c: gate.Checks, run: Run, left: bool, failed: list[str], latency: dict | None = None) -> dict:
     """The gate's line (pure): numbers, fixed codes, the verdict's first failure."""
     passed = v["conclusion"] == "success" and not failed
     return {
@@ -180,7 +183,8 @@ def line(v: dict, c: gate.Checks, run: Run, left: bool, failed: list[str]) -> di
         "browser_exit": run.browser_exit, "client_log": run.client_log,
         "push_before": run.push_before, "push_after": run.push_after,
         "unit_restarts": c.unit_restarts, "starts": c.starts, "left_job": int(left),
-        "job_end": int(c.end_ok), "hil_off": int(c.hil_off), "numbers": v["numbers"], "failed": failed,
+        "job_end": int(c.end_ok), "hil_off": int(c.hil_off), "numbers": v["numbers"], "latency": latency,
+        "failed": failed,
     }
 
 
@@ -390,6 +394,7 @@ def cancelled(ip, c: gate.Checks, run: Run, left: bool) -> None:
 def run(ctx, ip) -> int:
     """`iempc gen3-gate live` (dev time, locked)."""
     s = settings(ip, ctx.env)
+    dante = gate.dante_ip(ip, ctx.env)
     box = gate.Box(ip, ctx, s.host, NAME)
     facts = gate.preflight(box, None)
     sha = box_build(box)
@@ -433,10 +438,13 @@ def run(ctx, ip) -> int:
     print(f"iempc: gen3-gate: the live run's records are {RECORDS}/{number} in iempc's state", file=sys.stderr,
           flush=True)
     v = verdict_of(r, {"begin": "success", "pc": r.pc, "browser": r.browser, "end": r.end})
+    latency = gate.latency(box, dante)   # the mic-to-ear guard after the job's end (#122)
     failed = failures(c, r)
+    if latency["pass"] != 1:
+        failed.append("latency_over_budget")
     if v["conclusion"] != "success" and not failed:
         failed = ["verdict"]
-    doc = line(v, c, r, facts.left, failed)
+    doc = line(v, c, r, facts.left, failed, latency)
     ip.emit({"gen3_gate": {"live": doc}})
     passed = doc["pass"] == 1
     posted = gate.post(ip, sha, passed, DESC_PASS if passed else DESC_FAIL + ", ".join(failed), CONTEXT)

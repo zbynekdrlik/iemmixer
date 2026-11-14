@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dev-box control of the Gen 3 box (#72, #86).
 
-The box's own gates (`gen3-gate hil|live|soak|reboot|reset`: iempc_gen3_gate.py,
+The box's own gates (`gen3-gate hil|live|soak|reboot|reset|latency`: iempc_gen3_gate.py,
 iempc_gen3_live.py, iempc_gen3_soak.py, iempc_gen3_reboot.py; the verdicts are the
 commit statuses hil/gen3, live/gen3 and soak/gen3), the box deployed in place
 (`gen3-deploy`: iempc_gen3_deploy.py and scripts/gen3/deploy.sh), the box's data
@@ -12,7 +12,7 @@ this checkout (`gen3-backup`, `gen3-new-box`, `gen3-drift`: iempc_gen3_newbox.py
 it when it is missing (a flag it cannot write is a warning, never a stop) and
 does nothing else: the box serves the band at every event (#86).
 
-Every other command waits for dev time: it refuses while the flag exists, and
+Every other command (but the read-only `gen3-gate latency`) waits for dev time: it refuses while the flag exists, and
 every wait sees a new flag within 2 s: a read-only call is abandoned, a change
 the call makes itself completes first; then the command runs the event path
 itself (exit 10).
@@ -117,6 +117,16 @@ COMMANDS: dict[str, Spec] = {
 }
 
 
+# `gen3-gate latency` only reads (#122): any time, an event too, beside any other command.
+READ_ONLY_GATE = Spec(cmd_gen3_gate, dev_time=False, locked=False)
+
+
+def spec_of(args: argparse.Namespace) -> Spec:
+    if args.cmd == "gen3-gate" and args.gate == "latency":
+        return READ_ONLY_GATE
+    return COMMANDS[args.cmd]
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="iempc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -136,11 +146,13 @@ def build_parser() -> argparse.ArgumentParser:
     fresh.add_argument("--iface", help="the Dante interface (default: the box's default route's)")
     fresh.add_argument("--from-backup", help="a gen3-backup stamp, for a box that no longer answers")
     gate = sub.add_parser("gen3-gate")
-    gate.add_argument("gate", choices=("hil", "live", "soak", "reboot", "reset"),
+    gate.add_argument("gate", choices=("hil", "live", "soak", "reboot", "reset", "latency"),
                       help="hil: the box's HIL job and checks (versions, health, the test signal, the D5(b) loop, the "
                            "alarm path's count), posted as hil/gen3 on the box's build; live: the live specs in a "
                            "browser through the band's public URL with a burst every minute, posted as live/gen3; "
-                           "soak: iem-soakclient on the box beside reads of its counters, posted as soak/gen3")
+                           "soak: iem-soakclient on the box beside reads of its counters, posted as soak/gen3; "
+                           "latency: every mic input's mic-to-ear path against 1 ms, read only, also during an "
+                           "event (#122)")
     gate.add_argument("--minutes", type=int,
                       help="soak only: the run's length, 10, 30, 60 or 120 (default 120)")
     return ap
@@ -159,7 +171,7 @@ def main(argv: list[str]) -> int:
     except StepError as e:
         print(f"iempc: {e}", file=sys.stderr)
         return 1
-    spec = COMMANDS[args.cmd]
+    spec = spec_of(args)
     try:
         if spec.dev_time and flag_at_start:
             raise Refused(f"{core.EVENT_NOW} exists: an event is on; '{args.cmd}' runs only in dev time")

@@ -116,6 +116,7 @@ import tomllib
 from dataclasses import dataclass, field
 
 import gen3_arc
+import gen3_latency
 import iempc_gen3 as g3
 
 WORDS = g3.Words("gen3-gate")
@@ -754,6 +755,47 @@ def preflight(box: Box, dante: str | None) -> Facts:
     return facts
 
 
+# ---- the mic-to-ear latency (#122) ----
+
+LATENCY_DESC = ("latency: every mic input's path, D + its RX flow's delay + the in-ear receiver's latency, "
+                "against 1 ms (gen3_latency.py)")
+
+
+def latency(box: Box, dante: str, event: str | None = None) -> dict:
+    """The latency guard's doc (gen3_latency.verdict): one `ctl status`,
+    our RX subscriptions over ARC (`gen3_arc.read_rx`) and the installed
+    site's mic inputs (read as the service user, kept in memory). A read
+    that fails is a failing doc naming which (`unread`), never a pass.
+    `event` "ignore" for the read-only command an event allows."""
+    ip = box.ip
+    try:
+        status = box.last_json(box.call([g3.DANTE_BIN, "ctl", "status"], event=event))
+    except ip.StepError:
+        return {"pass": 0, "budget_samples": gen3_latency.BUDGET_SAMPLES, "paths": [], "unread": "status"}
+    try:
+        subscriptions = gen3_arc.read_rx(dante)["rx"]
+    except (OSError, ValueError, struct.error):
+        return {"pass": 0, "budget_samples": gen3_latency.BUDGET_SAMPLES, "paths": [], "unread": "subscriptions"}
+    try:
+        inputs = gen3_latency.mic_inputs(box.call([*AS_SERVICE, "cat", SITE], event=event))
+    except (ip.StepError, ValueError, tomllib.TOMLDecodeError):
+        return {"pass": 0, "budget_samples": gen3_latency.BUDGET_SAMPLES, "paths": [], "unread": "site"}
+    return gen3_latency.verdict(gen3_latency.paths(status, subscriptions, inputs))
+
+
+def run_latency(ctx, ip) -> int:
+    """`iempc gen3-gate latency`: read only, any time (an event too), no
+    lock, no status post. One line `{"gen3_gate": {"latency": {pass,
+    budget_samples, paths: [{input, samples, ms, over_budget, state}]}}}`
+    (input ids and numbers only); exit 1 when a mic input is over the budget
+    or unknown, or a read failed."""
+    host = g3.gen3_host(ip, ctx.env, WORDS)
+    dante = dante_ip(ip, ctx.env)
+    doc = latency(Box(ip, ctx, host, "latency"), dante, event="ignore")
+    ip.emit({"gen3_gate": {"latency": doc}})
+    return 0 if doc["pass"] == 1 else 1
+
+
 # ---- the job ----
 
 @dataclass
@@ -1147,7 +1189,7 @@ def post_status(ip, sha: str, doc: dict) -> bool:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate hil|live|soak|reboot|reset` (dev time, locked)."""
+    """`iempc gen3-gate hil|live|soak|reboot|reset` (dev time, locked); `latency` (any time, no lock)."""
     if ctx.args.gate != "soak" and getattr(ctx.args, "minutes", None) is not None:
         raise ip.Refused("gen3-gate: --minutes is the soak gate's only (nothing was called)")
     if ctx.args.gate == "live":
@@ -1156,11 +1198,13 @@ def run(ctx, ip) -> int:
     if ctx.args.gate == "soak":
         import iempc_gen3_soak   # it imports this module: imported here, never at the top
         return iempc_gen3_soak.run(ctx, ip)
+    if ctx.args.gate == "latency":
+        return run_latency(ctx, ip)
     if ctx.args.gate in ("reboot", "reset"):
         import iempc_gen3_reboot   # it imports this module: imported here, never at the top
         return iempc_gen3_reboot.run(ctx, ip, ctx.args.gate)
     if ctx.args.gate != "hil":
-        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak, reboot, reset)")
+        raise ip.Refused(f"gen3-gate: {ctx.args.gate!r} is not a gate of this build (hil, live, soak, reboot, reset, latency)")
     host = g3.gen3_host(ip, ctx.env, WORDS)
     dante = dante_ip(ip, ctx.env)
     name = own_name(ip, ctx.env)

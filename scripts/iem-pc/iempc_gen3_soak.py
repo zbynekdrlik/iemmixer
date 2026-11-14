@@ -89,7 +89,10 @@ reset-failed), the env file and the summary removed on the box.
 - receiver_unread: no receivers read heard a receiver of our TX (a box
   whose build has no `receivers` read is refused before any change instead), a read did
   not hear every receiver of our TX it found, or more reads failed than gave
-  a line.
+  a line;
+- latency_over_budget: after the run, a mic input's mic-to-ear path over
+  1 ms or unknown, or its reads failed (`gate.latency`, gen3_latency.py,
+  #122; the line's `latency`).
 Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
 Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in
 samples (`lateness_max`). A rise is summed read to read; a count that went
@@ -163,7 +166,7 @@ RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "
 # The failures a verdict names, in its order.
 FAILURES = ("not_finished", "client", "harness", "polls", "health", "restarted", "pump_stalled", "pump_late",
             "pump_missed", "pump_overruns", "pump_rebootstraps", "clock_not_ready", "holdover", "re_anchor",
-            "rx_late", "tx_holes", "rx_holes", "rx_off", "receiver_late", "receiver_unread")
+            "rx_late", "tx_holes", "rx_holes", "rx_off", "receiver_late", "receiver_unread", "latency_over_budget")
 DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min)"
 DESC_FAIL = "the Gen 3 box's soak failed: "
 
@@ -325,6 +328,7 @@ class Watch:
     summary: object = None
     dante_ip: str = ""
     receivers: gen3_receivers.Tally = field(default_factory=gen3_receivers.Tally)
+    latency: dict | None = None   # the mic-to-ear guard's doc after the run (gate.latency, #122)
 
     def record(self, kind: str, doc: dict) -> None:
         t = round(time.monotonic() - self.started, 1) if self.started is not None else 0.0
@@ -413,6 +417,8 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
             if value:
                 failed.append(word)
         failed.extend(w.receivers.failures())
+        if w.latency is None or w.latency["pass"] != 1:
+            failed.append("latency_over_budget")
     ended = w.finished and w.unit is not None
     return {
         "pass": int(not cut and not failed), "conclusion": conclusion or ("failure" if failed else "success"),
@@ -423,7 +429,7 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
         "reads": len(w.samples), "failed_reads": w.failed_reads, "poll_hole_s": status_hole,
         "health_reads": len(w.health_times), "not_healthy": w.not_healthy, "health_reasons": sorted(w.reasons),
         "health_hole_s": health_hole,
-        **j, "receivers": w.receivers.numbers(), "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
+        **j, "receivers": w.receivers.numbers(), "latency": w.latency, "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
         "failed": failed,
     }
 
@@ -765,6 +771,7 @@ def run(ctx, ip) -> int:
         raise
     print(f"iempc: gen3-gate: the soak's records are {RECORDS}/{number} in iempc's state", file=sys.stderr,
           flush=True)
+    w.latency = gate.latency(box, dante)
     doc = line(w)
     _, engine_restarts = unit_restarts(w.units_base, w.units_last)
     if engine_restarts:

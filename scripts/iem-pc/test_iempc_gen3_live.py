@@ -50,7 +50,9 @@ TOKEN_CALLS = [REMOVE, MINT_ENGINEER, MINT_MEMBER, *COPY, REMOVE]
 BURST = f"{gt.SUPER} test-signal mic1 -20 30 --listen"
 JOURNAL = "sudo -n journalctl -u iem-server.service -o cat -n 20000 --no-pager -q"
 BEFORE = [*gt.PREFLIGHT, VERSION, gt.ALARM, *TOKEN_CALLS]
-AFTER = [gt.STOP, JOURNAL, gt.ALARM, gt.NRESTARTS, *gt.END]
+# The mic-to-ear guard's reads after the job's end (#122; our RX table over ARC between them).
+LATENCY = [gt.CTL, gt.CAT_SITE]
+AFTER = [gt.STOP, JOURNAL, gt.ALARM, gt.NRESTARTS, *gt.END, *LATENCY]
 CHANGES = (*gt.CHANGES, BURST)
 
 # Playwright: records its arguments, folder, LIVE_* values, the client-error
@@ -116,6 +118,7 @@ class LiveBase(gt.GateBase):
         ip.env_path().write_text(text + f"GEN3_PUBLIC_URL={PUBLIC}/\nLIVE_MEMBER={MEMBER}\nLIVE_TEST_INPUT=mic1\n"
                                  f"LIVE_TALKBACK_INPUT={TALK}\n", encoding="utf-8")
         (self.box / "root" / MINT.lstrip("/")).mkdir(parents=True)
+        self.subscribe_mics()
         d = self.tmp / "npxbin"
         d.mkdir()
         p = d / "npx"
@@ -193,11 +196,11 @@ class LiveTests(LiveBase):
             "push_before": 1, "push_after": 1, "unit_restarts": 0, "starts": 2, "left_job": 0, "job_end": 1,
             "hil_off": 1, "numbers": {"live_specs": len(TITLES), "bursts": 2, "push_before": 1, "push_after": 1,
                                       "meter_fps": 31},
-            "failed": []}}}])
+            "latency": gt.LATENCY_PASS, "failed": []}}}])
         # Before any change: the HIL gate's preflight (no ARC read), the box's build, the push count, the
         # tokens; then the job, two bursts while the browser ran, the stop, the evidence, the job's end.
         self.assertEqual(self.calls(), [*BEFORE, *gt.BEGIN, BURST, BURST, *AFTER])
-        self.assertEqual(self.device.packets, [])
+        self.assertEqual(self.subscriptions(), [])   # ARC reads only (the latency guard's), never a write
         self.assertEqual(self.public["asked"], [PUBLIC])
         self.assertEqual(self.posts(), [["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{SHA}", "-f",
                                          "state=success", "-f", "context=live/gen3", "-f",
@@ -228,6 +231,18 @@ class LiveTests(LiveBase):
         self.assertFalse(self.dropin_there())
         self.assertEqual((self.state()["hil"], self.state()["starts"], self.ledger()), (False, 2, [gt.NOW] * 2))
         self.assert_no_token_left()
+        self.assert_private(err + json.dumps(docs))
+
+    def test_a_mic_path_over_the_budget_fails_latency_over_budget(self) -> None:
+        # #122: the stage device's flow one sample later than the budget allows.
+        code, docs, err = self.gate_run(FAKE_RX_DELAY="17")
+        self.assertEqual(code, 1, err)
+        doc = self.doc(docs)
+        self.assertEqual((doc["pass"], doc["conclusion"], doc["failed"]), (0, "success", ["latency_over_budget"]))
+        self.assertEqual(doc["latency"]["paths"][0]["samples"], 97)
+        self.assertEqual(self.posts()[0][4:6], ["-f", "state=failure"])
+        self.assertEqual(self.posts()[0][-1], "description=the Gen 3 box's live E2E failed: latency_over_budget")
+        self.assertTrue(set(doc["failed"]) <= set(live.LIVE_FAILURES))
         self.assert_private(err + json.dumps(docs))
 
     def test_a_burst_goes_out_every_period_while_the_browser_runs(self) -> None:
