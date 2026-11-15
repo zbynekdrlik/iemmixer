@@ -134,6 +134,24 @@ def parse_exempt(text: str) -> dict[str, str]:
     return out
 
 
+def parse_budgets(text: str) -> dict[str, int]:
+    """`id:samples,id:samples` (GEN3_LATENCY_BUDGET): an input's own budget
+    in samples, the owner's call for a device that cannot reach 1 ms (its
+    path pinned at today's value, so growth still fails); empty for none;
+    ValueError for an item without an id, a budget not a whole number above
+    0, or an id twice."""
+    out: dict[str, int] = {}
+    for item in (w.strip() for w in text.split(",")):
+        if not item:
+            continue
+        ident, sep, value = item.partition(":")
+        ident, value = ident.strip(), value.strip()
+        if not sep or not ident or not value.isdecimal() or int(value) <= 0 or ident in out:
+            raise ValueError("GEN3_LATENCY_BUDGET is not a list of id:samples")
+        out[ident] = int(value)
+    return out
+
+
 def samples_of_us(us: float, rate: int) -> int:
     """`us` microseconds in whole samples at `rate`, rounded up."""
     return math.ceil(us * rate / 1_000_000)
@@ -202,11 +220,13 @@ def _channel(status: dict, subscriptions: dict, rx: int, d: int | None, ear: int
 
 
 def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]], rate: int,
-          tx: list[dict], exempt: dict[str, str] | None = None) -> list[dict]:
+          tx: list[dict], exempt: dict[str, str] | None = None,
+          budgets: dict[str, int] | None = None) -> list[dict]:
     """Per input: {input, rx, samples, ms, over_budget, state}; `state` ok,
     over, unknown, unsubscribed or exempt. `tx` is `tx_flows`'s list. An
     input on several channels takes its worst: unknown when any channel is,
-    unsubscribed when any has no subscription, else the longest path."""
+    unsubscribed when any has no subscription, else the longest path. An
+    input in `budgets` is over above its own budget, every other above 1 ms."""
     d, ear, budget = offset(status), in_ear_samples(tx, rate), budget_samples(rate)
     rows = []
     for ident, channels in inputs:
@@ -222,7 +242,7 @@ def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]]
             state, samples = "unsubscribed", None
         else:
             samples = max(c["samples"] for c in states)
-            state = "over" if samples > budget else "ok"
+            state = "over" if samples > (budgets or {}).get(ident, budget) else "ok"
         rows.append({"input": ident, "rx": channels, "samples": samples,
                      "ms": None if samples is None else round(samples * 1000 / rate, 2),
                      "over_budget": state == "over", "state": state})

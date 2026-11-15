@@ -69,9 +69,9 @@ MICS = [("mic1", [1]), ("mic2", [2]), ("mic3", [3])]
 
 
 def paths(doc: dict | None = None, subs: dict = SUBS, inputs=MICS, rate: int = RATE, exempt=None,
-          in_ear=IN_EAR) -> list[dict]:
+          in_ear=IN_EAR, budgets=None) -> list[dict]:
     doc = status() if doc is None else doc
-    return lat.paths(doc, subs, inputs, rate, lat.tx_flows(doc, in_ear), exempt)
+    return lat.paths(doc, subs, inputs, rate, lat.tx_flows(doc, in_ear), exempt, budgets)
 
 
 def verdict(rows: list[dict], doc: dict | None = None, rate: int = RATE, in_ear=IN_EAR) -> dict:
@@ -168,6 +168,27 @@ class PathTests(unittest.TestCase):
         self.assertEqual((rows[0]["samples"], rows[0]["state"]), (128, "over"))
         rows = paths(subs={**SUBS, "4": sub(STAGE)}, inputs=[("mic1", [1, 4])])
         self.assertEqual(rows[0]["state"], "unknown")
+
+
+    def test_an_input_with_its_own_budget_passes_at_it_and_fails_above_it(self) -> None:
+        # The owner's call for a device that cannot reach 1 ms: its path is
+        # pinned at today's value, so any growth still fails.
+        rows = paths(budgets={"mic2": 128})
+        self.assertEqual((row(rows, "mic2")["state"], verdict(rows)["pass"]), ("ok", 1))
+        rows = paths(budgets={"mic2": 127})
+        self.assertEqual((row(rows, "mic2")["state"], verdict(rows)["pass"]), ("over", 0))
+        # Another input keeps the 1 ms budget.
+        doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "rx_channels": [1], "delay": 17}])
+        rows = paths(doc, {"1": sub(STAGE)}, [("mic1", [1])], budgets={"mic2": 128})
+        self.assertEqual((rows[0]["samples"], rows[0]["state"]), (97, "over"))
+
+    def test_the_budget_list_parses_and_refuses(self) -> None:
+        self.assertEqual(lat.parse_budgets(" mic2:128, hand1:128 "), {"mic2": 128, "hand1": 128})
+        self.assertEqual(lat.parse_budgets(""), {})
+        for text in ("mic2", "mic2:", ":128", "mic2:abc", "mic2:0", "mic2:-1", "mic2:1.5", "mic2:128,mic2:96"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    lat.parse_budgets(text)
 
 
 class TxTests(unittest.TestCase):

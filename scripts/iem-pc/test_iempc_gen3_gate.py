@@ -46,7 +46,8 @@ LATENCY_ENV = "GEN3_LATENCY_EXEMPT=" + ",".join(f"{i}:zyxqw playback" for i in P
 LATENCY_PASS = {"pass": 1, "budget_samples": 96, "rate": 96000, "paths": [
     *({"input": i, "samples": 96, "ms": 1.0, "over_budget": False, "state": "ok"} for i in LIVE_INPUTS),
     *({"input": i, "samples": None, "ms": None, "over_budget": False, "state": "exempt"} for i in PLAYBACK)],
-    "tx": [{"receiver_latency_us": 250, "state": "in_ear"}, {"receiver_latency_us": 1000, "state": "non_inear"}]}
+    "tx": [{"receiver_latency_us": 250, "state": "in_ear"}, {"receiver_latency_us": 1000, "state": "non_inear"}],
+    "own_budgets": {}}
 SPARES = (61, 62)   # the test site's [guard] hil_tx
 RET = SPARES[0]   # the D5(b) loop's return: our RX 61 hears our TX 61
 TRIP = 77   # the self-loop's round trip, samples
@@ -1127,6 +1128,25 @@ class LatencyTests(GateBase):
         code, docs, err = self.gate_run()
         self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["unread"], self.calls()), (1, "env", []), err)
         self.assert_private(err + json.dumps(docs))
+
+    def test_an_input_s_own_budget_from_the_env_is_kept_and_printed(self) -> None:
+        # The stand-in's live inputs run at 96 samples: an own budget of 95
+        # for one fails it, 96 passes; the doc names the own budgets; a bad
+        # value is unread before any call.
+        text = ip.env_path().read_text(encoding="utf-8")
+        ip.env_path().write_text(text + "GEN3_LATENCY_BUDGET=hand1:95\n", encoding="utf-8")
+        code, docs, err = self.gate_run()
+        doc = docs[0]["gen3_gate"]["latency"]
+        hand1 = next(p for p in doc["paths"] if p["input"] == "hand1")
+        self.assertEqual((code, doc["pass"], hand1["state"], doc["own_budgets"]), (1, 0, "over", {"hand1": 95}), err)
+        self.again()
+        ip.env_path().write_text(text + "GEN3_LATENCY_BUDGET=hand1:96\n", encoding="utf-8")
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["pass"]), (0, 1), err)
+        self.again()
+        ip.env_path().write_text(text + "GEN3_LATENCY_BUDGET=hand1:lots\n", encoding="utf-8")
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["unread"], self.calls()), (1, "env", []), err)
 
     def test_it_runs_during_an_event_and_beside_another_command(self) -> None:
         self.flag()
