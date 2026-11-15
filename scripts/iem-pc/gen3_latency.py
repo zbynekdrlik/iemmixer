@@ -2,24 +2,31 @@
 source's Dante sample stamp to the in-ear output's playout on the receiving
 device, against the budget of 1 ms.
 
-path = D + the input's RX flow delay + the in-ear receiver's latency, in
+path = D + the input's RX flow delay + the in-ear receivers' latency, in
 samples at the device's rate (`sample_rate` of the box's device config; the
-budget is 1 ms at that rate, rounded down, never above 1 ms: 96 at 96 kHz):
+budget is 1 ms at that rate, rounded down, never above 1 ms: 96 at 96 kHz).
+Every flow is matched by channel numbers, which `ctl status` names (dstack
+v0.6.137):
 
 - D is the engine's offset (`ctl status` `engine.offset`: B + P + W);
 - the RX flow delay is the worst `delay` of the status `rx[]` flows whose
-  `device` is the transmitter the input's RX channel is subscribed to (our
-  subscriptions from ARC, `gen3_arc.read_rx`): several flows from one device
-  take the worst;
-- the in-ear receiver's latency is the worst `receiver_latency_us` of the
-  status `tx[]` flows that carry channels and whose receiver plays them at
-  `IN_EAR_MAX_US` (500 us) or less. That cut is the in-ear receivers' class
-  (the stage rack plays our flows at 250 us): `ctl status` does not yet name
-  the receiver of a TX flow (dstack#298), so the class stands in for it. A
-  TX flow with channels above the cut is a receiver that is not an in-ear one
-  only when its exact latency in us is listed (`GEN3_LATENCY_NON_INEAR_TX_US`
-  in iempc's private env, `parse_non_inear`); any other is
-  `tx_unclassified` and fails the guard: it may be an in-ear played later.
+  `rx_channels` (our RX channels, 1-based) hold the input's RX channel; two
+  flows feeding one channel take the worst;
+- the in-ear receivers' latency is the worst `receiver_latency_us` of the
+  status `tx[]` flows whose `tx_channels` (our TX channels, 1-based, null for
+  an empty slot) carry an in-ear output.
+
+The in-ear outputs are the TX channels of every `[[engine.mixes]]` of the
+site but the engineer's (`[engine] engineer`, the mix with the listen tap:
+the engineer's headphones, not an in-ear): the band members' sets and every
+other mix (the translator's mono mix too, so a mix the site adds is guarded
+unless it is the engineer's). A TX flow is `in_ear` when it carries one of
+them and its receiver latency is known, `tx_unread` when it carries one and
+its `receiver_latency_us` is 0 or missing (dstack's "not known": a multicast
+flow, a receiver not read), `tx_unmapped` when it has channels but no
+readable `tx_channels`, and `non_inear` when it carries only other channels
+(the engineer's mix, a spare output); `tx_unread` and `tx_unmapped` fail the
+guard.
 
 Not in the number: the converters, the wireless mic link and the in-ear
 transmitters (hardware, outside Dante).
@@ -27,30 +34,39 @@ transmitters (hardware, outside Dante).
 Every `[[engine.inputs]]` of the site is guarded but those on the exemption
 list (`GEN3_LATENCY_EXEMPT`, `id:reason,id:reason`, `parse_exempt`):
 playback sources and inputs nobody uses. An exempt input is `exempt` and
-never fails. Every other input fails closed: one whose subscription is not
-receiving, whose transmitter has no flow in the status, or whose path cannot
-be read (no engine object, no in-ear flow) is `unknown`; one with no
-subscription is `unsubscribed`; both fail like `over`.
+never fails. Every other input fails closed: one on a channel without a
+subscription (our subscriptions from ARC, `gen3_arc.read_rx`) is
+`unsubscribed`; one on a subscribed channel no RX flow carries, or whose path
+cannot be read (no engine object, no in-ear flow), is `unknown`; both fail
+like `over`.
 
-Pure functions; `engine_inputs` reads a site's text, `sample_rate` a device
-config's. Rows carry the device's name and the RX channels (site data):
-`public` drops both before anything is printed; an exemption's reason is
-never printed."""
+Pure functions; `engine_inputs` and `in_ear_tx` read a site's text,
+`sample_rate` a device config's. Rows carry the RX channels (site data):
+`public` drops them before anything is printed; no device name is read into
+a row and an exemption's reason is never printed."""
 from __future__ import annotations
 
 import math
 import tomllib
 
-IN_EAR_MAX_US = 500   # the in-ear receivers' class (above)
-RECEIVING = (9, 10)   # ARC 0x3000's Receiving, unicast or multicast (the status word's low 16 bits)
 FAILING = ("over", "unknown", "unsubscribed")
+TX_FAILING = ("tx_unread", "tx_unmapped")
+
+
+def _engine(site_text: str) -> dict:
+    engine = tomllib.loads(site_text).get("engine")
+    return engine if isinstance(engine, dict) else {}
+
+
+def _channels(value) -> bool:
+    """A non-empty list of channel numbers (1-based)."""
+    return isinstance(value, list) and bool(value) and all(type(n) is int and n >= 1 for n in value)
 
 
 def engine_inputs(site_text: str) -> list[tuple[str, list[int]]]:
     """Every `[[engine.inputs]]` of the site: (id, RX channels); ValueError
     when the site has no such list or an entry is not an id with channels."""
-    engine = tomllib.loads(site_text).get("engine")
-    inputs = engine.get("inputs") if isinstance(engine, dict) else None
+    inputs = _engine(site_text).get("inputs")
     if not isinstance(inputs, list) or not inputs:
         raise ValueError("the site has no [[engine.inputs]]")
     out = []
@@ -60,10 +76,34 @@ def engine_inputs(site_text: str) -> list[tuple[str, list[int]]]:
         ident, rx = item.get("id"), item.get("rx")
         if not isinstance(ident, str) or not ident:
             raise ValueError("an [[engine.inputs]] entry has no id")
-        if not isinstance(rx, list) or not rx or not all(type(n) is int and n >= 1 for n in rx):
+        if not _channels(rx):
             raise ValueError("an input's rx is not a list of channel numbers")
         out.append((ident, list(rx)))
     return out
+
+
+def in_ear_tx(site_text: str) -> frozenset[int]:
+    """The in-ear outputs: the TX channels of every `[[engine.mixes]]` but
+    the one `[engine] engineer` names; ValueError when the site names no
+    engineer, has no such mix, or an entry is not an id with channels."""
+    engine = _engine(site_text)
+    engineer, mixes = engine.get("engineer"), engine.get("mixes")
+    if not isinstance(engineer, str) or not engineer:
+        raise ValueError("the site names no engineer")
+    if not isinstance(mixes, list) or not mixes:
+        raise ValueError("the site has no [[engine.mixes]]")
+    out: set[int] = set()
+    seen = False
+    for item in mixes:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not _channels(item.get("tx")):
+            raise ValueError("an [[engine.mixes]] entry is not an id with tx channels")
+        if item["id"] == engineer:
+            seen = True
+        else:
+            out.update(item["tx"])
+    if not seen:
+        raise ValueError("the engineer's mix is not among [[engine.mixes]]")
+    return frozenset(out)
 
 
 def sample_rate(device_text: str) -> int:
@@ -94,13 +134,22 @@ def parse_exempt(text: str) -> dict[str, str]:
     return out
 
 
-def parse_non_inear(text: str) -> frozenset[int]:
-    """GEN3_LATENCY_NON_INEAR_TX_US: receiver latencies in us, commas;
-    ValueError for anything but whole numbers."""
-    words = [w.strip() for w in text.split(",") if w.strip()]
-    if not all(w.isdecimal() for w in words):
-        raise ValueError("GEN3_LATENCY_NON_INEAR_TX_US is not a list of microseconds")
-    return frozenset(int(w) for w in words)
+def parse_budgets(text: str) -> dict[str, int]:
+    """`id:samples,id:samples` (GEN3_LATENCY_BUDGET): an input's own budget
+    in samples, the owner's call for a device that cannot reach 1 ms (its
+    path pinned at today's value, so growth still fails); empty for none;
+    ValueError for an item without an id, a budget not a whole number above
+    0, or an id twice."""
+    out: dict[str, int] = {}
+    for item in (w.strip() for w in text.split(",")):
+        if not item:
+            continue
+        ident, sep, value = item.partition(":")
+        ident, value = ident.strip(), value.strip()
+        if not sep or not ident or not value.isdecimal() or int(value) <= 0 or ident in out:
+            raise ValueError("GEN3_LATENCY_BUDGET is not a list of id:samples")
+        out[ident] = int(value)
+    return out
 
 
 def samples_of_us(us: float, rate: int) -> int:
@@ -108,12 +157,13 @@ def samples_of_us(us: float, rate: int) -> int:
     return math.ceil(us * rate / 1_000_000)
 
 
-def tx_flows(status: dict, non_inear: frozenset[int] = frozenset()) -> list[dict]:
+def tx_flows(status: dict, in_ear: frozenset[int]) -> list[dict]:
     """Each TX flow with channels: {receiver_latency_us, state}, `state`
-    in_ear (at IN_EAR_MAX_US or less), non_inear (above it and listed) or
-    tx_unclassified (above it, not listed), or tx_unread (no receiver
-    latency known: dstack's 0). dstack states the latency in whole us
-    (truncated from ns), so a path can read at most one sample short."""
+    in_ear (carries an in-ear output, latency known), tx_unread (carries one,
+    no latency known: dstack's 0), tx_unmapped (no readable `tx_channels`)
+    or non_inear (carries no in-ear output). dstack states the latency in
+    whole us (truncated from ns), so a path can read at most one sample
+    short."""
     out = []
     for flow in status.get("tx") or []:
         if not isinstance(flow, dict):
@@ -121,27 +171,35 @@ def tx_flows(status: dict, non_inear: frozenset[int] = frozenset()) -> list[dict
         channels, us = flow.get("channels"), flow.get("receiver_latency_us")
         if type(channels) is not int or channels <= 0:
             continue
-        if type(us) not in (int, float) or us <= 0:
+        known = us if type(us) in (int, float) and us > 0 else None
+        carried = flow.get("tx_channels")
+        if not isinstance(carried, list) or not all(n is None or (type(n) is int and n >= 1) for n in carried):
+            out.append({"receiver_latency_us": known, "state": "tx_unmapped"})
+        elif not in_ear.intersection(n for n in carried if n is not None):
+            out.append({"receiver_latency_us": known, "state": "non_inear"})
+        elif known is None:
             # dstack's 0 is "not known" (a multicast flow, a receiver not read):
-            # it may feed an in-ear at any latency, so it fails the guard.
+            # it feeds an in-ear at a latency nobody read, so it fails the guard.
             out.append({"receiver_latency_us": None, "state": "tx_unread"})
-            continue
-        state = "in_ear" if us <= IN_EAR_MAX_US else "non_inear" if us in non_inear else "tx_unclassified"
-        out.append({"receiver_latency_us": us, "state": state})
+        else:
+            out.append({"receiver_latency_us": known, "state": "in_ear"})
     return out
 
 
-def in_ear_samples(status: dict, rate: int) -> int | None:
+def in_ear_samples(tx: list[dict], rate: int) -> int | None:
     """The in-ear receivers' latency in samples: the worst
-    `receiver_latency_us` of the in-ear TX flows; None when no such flow."""
-    worst = max((f["receiver_latency_us"] for f in tx_flows(status) if f["state"] == "in_ear"), default=None)
+    `receiver_latency_us` of the in_ear flows of `tx` (`tx_flows`); None
+    when there is none."""
+    worst = max((f["receiver_latency_us"] for f in tx if f["state"] == "in_ear"), default=None)
     return None if worst is None else samples_of_us(worst, rate)
 
 
-def flow_delay(status: dict, device: str) -> int | None:
-    """The worst `delay` of the RX flows from `device`; None when it has none."""
+def flow_delay(status: dict, rx: int) -> int | None:
+    """The worst `delay` of the RX flows whose `rx_channels` hold our RX
+    channel `rx`; None when no flow carries it."""
     delays = [f["delay"] for f in status.get("rx") or []
-              if isinstance(f, dict) and f.get("device") == device and type(f.get("delay")) is int]
+              if isinstance(f, dict) and isinstance(f.get("rx_channels"), list)
+              and rx in f["rx_channels"] and type(f.get("delay")) is int]
     return max(delays) if delays else None
 
 
@@ -154,40 +212,38 @@ def offset(status: dict) -> int | None:
 def _channel(status: dict, subscriptions: dict, rx: int, d: int | None, ear: int | None) -> dict:
     sub = subscriptions.get(str(rx))
     if not isinstance(sub, dict) or not sub.get("tx_device"):
-        return {"rx": rx, "device": None, "samples": None, "state": "unsubscribed"}
-    device = sub["tx_device"]
-    code = sub.get("status")
-    delay = flow_delay(status, device)
-    if type(code) is not int or code & 0xFFFF not in RECEIVING or delay is None or d is None or ear is None:
-        return {"rx": rx, "device": device, "samples": None, "state": "unknown"}
-    return {"rx": rx, "device": device, "samples": d + delay + ear, "state": "known"}
+        return {"rx": rx, "samples": None, "state": "unsubscribed"}
+    delay = flow_delay(status, rx)
+    if delay is None or d is None or ear is None:
+        return {"rx": rx, "samples": None, "state": "unknown"}
+    return {"rx": rx, "samples": d + delay + ear, "state": "known"}
 
 
 def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]], rate: int,
-          exempt: dict[str, str] | None = None) -> list[dict]:
-    """Per input: {input, rx, device, samples, ms, over_budget, state};
-    `state` ok, over, unknown, unsubscribed or exempt. An input on several
-    channels takes its worst: unknown when any channel is, unsubscribed when
-    any has no subscription, else the longest path."""
-    d, ear, budget = offset(status), in_ear_samples(status, rate), budget_samples(rate)
+          tx: list[dict], exempt: dict[str, str] | None = None,
+          budgets: dict[str, int] | None = None) -> list[dict]:
+    """Per input: {input, rx, samples, ms, over_budget, state}; `state` ok,
+    over, unknown, unsubscribed or exempt. `tx` is `tx_flows`'s list. An
+    input on several channels takes its worst: unknown when any channel is,
+    unsubscribed when any has no subscription, else the longest path. An
+    input in `budgets` is over above its own budget, every other above 1 ms."""
+    d, ear, budget = offset(status), in_ear_samples(tx, rate), budget_samples(rate)
     rows = []
     for ident, channels in inputs:
         if ident in (exempt or {}):
-            rows.append({"input": ident, "rx": channels, "device": None, "samples": None, "ms": None,
+            rows.append({"input": ident, "rx": channels, "samples": None, "ms": None,
                          "over_budget": False, "state": "exempt"})
             continue
-        each = [_channel(status, subscriptions, rx, d, ear) for rx in channels]
-        unknown = [c for c in each if c["state"] == "unknown"]
-        unsubscribed = [c for c in each if c["state"] == "unsubscribed"]
-        if unknown:
-            pick, state = unknown[0], "unknown"
-        elif unsubscribed:
-            pick, state = unsubscribed[0], "unsubscribed"
+        states = [_channel(status, subscriptions, rx, d, ear) for rx in channels]
+        kinds = {c["state"] for c in states}
+        if "unknown" in kinds:
+            state, samples = "unknown", None
+        elif "unsubscribed" in kinds:
+            state, samples = "unsubscribed", None
         else:
-            pick = max(each, key=lambda c: c["samples"])
-            state = "over" if pick["samples"] > budget else "ok"
-        samples = pick["samples"] if state in ("ok", "over") else None
-        rows.append({"input": ident, "rx": channels, "device": pick["device"], "samples": samples,
+            samples = max(c["samples"] for c in states)
+            state = "over" if samples > (budgets or {}).get(ident, budget) else "ok"
+        rows.append({"input": ident, "rx": channels, "samples": samples,
                      "ms": None if samples is None else round(samples * 1000 / rate, 2),
                      "over_budget": state == "over", "state": state})
     return rows
@@ -196,15 +252,15 @@ def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]]
 def verdict(rows: list[dict], rate: int, tx: list[dict]) -> dict:
     """{pass, budget_samples, rate, paths, tx}: a pass only when at least one
     path is known, no input is over, unknown or unsubscribed, and no TX flow
-    is tx_unclassified or tx_unread."""
+    is tx_unread or tx_unmapped."""
     known = [r for r in rows if r["state"] in ("ok", "over")]
     bad = [r for r in rows if r["state"] in FAILING]
-    unclassified = [f for f in tx if f["state"] in ("tx_unclassified", "tx_unread")]
-    return {"pass": int(bool(known) and not bad and not unclassified), "budget_samples": budget_samples(rate),
+    unread = [f for f in tx if f["state"] in TX_FAILING]
+    return {"pass": int(bool(known) and not bad and not unread), "budget_samples": budget_samples(rate),
             "rate": rate, "paths": public(rows), "tx": tx}
 
 
 def public(rows: list[dict]) -> list[dict]:
     """The rows as a gate may print them: the input id and the numbers, never
-    the device's name, the channel numbers (P6) or an exemption's reason."""
+    the channel numbers (P6) or an exemption's reason."""
     return [{k: r[k] for k in ("input", "samples", "ms", "over_budget", "state")} for r in rows]
