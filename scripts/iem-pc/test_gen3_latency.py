@@ -1,8 +1,8 @@
 """Tests for scripts/iem-pc/gen3_latency.py (#122): every engine input's
-mic-to-ear path from a status, our subscriptions and the site's inputs,
-against 1 ms at the device's rate (96 samples at 96 kHz). Every value is
-synthetic (P6): invented device names, channel numbers within the test
-site's."""
+mic-to-ear path from a status, our subscriptions and the site's inputs and
+in-ear outputs, against 1 ms at the device's rate (96 samples at 96 kHz).
+Every value is synthetic (P6): invented device names, channel numbers within
+the test site's."""
 from __future__ import annotations
 
 import sys
@@ -13,26 +13,46 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import gen3_latency as lat  # noqa: E402
 
-STAGE = "zyxqw-stage"     # a stage rack: unicast, fpp 4, delay 16
-WIRELESS = "zyxqw-radio"  # a wireless receiver: its multicast flow, fpp 32, delay 48
+STAGE = "zyxqw-stage"     # a stage rack: unicast, fpp 4, delay 16, feeds our RX 1 and 3
+WIRELESS = "zyxqw-radio"  # a wireless receiver: its multicast flow, fpp 32, delay 48, feeds our RX 2
+IEM = "zyxqw-iemrack"     # the in-ear receivers' device
+FOH = "zyxqw-fohdesk"     # the engineer's headphones' device
 D = 56
 RATE = 96_000
+# The test site's mixes: member1 TX 1/2, member2 TX 3/4, the engineer TX 21/22, the translator TX 23.
+SITE = """
+[engine]
+channels = 64
+engineer = "engineer"
+inputs = [{ id = "mic1", rx = [1] }]
+mixes = [
+  { id = "member1", tx = [1, 2] },
+  { id = "member2", tx = [3, 4] },
+  { id = "engineer", tx = [21, 22] },
+  { id = "translator", tx = [23] },
+]
+"""
+IN_EAR = lat.in_ear_tx(SITE)
 
 
 def status(rx=None, tx=None, d: int | None = D) -> dict:
-    """A `ctl status` of the box's shape today: D 56, the stage rack's flow at
-    delay 16, the wireless device's at 48, in-ear TX flows at 250 us and one
-    TX flow to a receiver at 1 ms."""
+    """A `ctl status` of the box's shape (dstack v0.6.137): D 56, the stage
+    rack's flow at delay 16, the wireless device's at 48, the members' in-ear
+    TX flow at 250 us and the engineer's TX flow at 1 ms."""
     doc = {
         "rx": rx if rx is not None else [
-            {"flow": 1, "granted": 0, "fpp": 0, "channels": 0, "delay": 0},   # an ended flow: no device
-            {"flow": 4, "device": STAGE, "granted": 1, "multicast": 0, "fpp": 4, "channels": 8, "delay": 16},
-            {"flow": 24, "device": WIRELESS, "granted": 0, "multicast": 1, "fpp": 32, "channels": 2, "delay": 48},
+            {"flow": 1, "granted": 0, "fpp": 0, "channels": 0, "rx_channels": [], "delay": 0},   # an ended flow
+            {"flow": 4, "device": STAGE, "granted": 1, "multicast": 0, "fpp": 4, "channels": 8,
+             "rx_channels": [1, 3], "delay": 16},
+            {"flow": 24, "device": WIRELESS, "granted": 0, "multicast": 1, "fpp": 32, "channels": 2,
+             "rx_channels": [2], "delay": 48},
         ],
         "tx": tx if tx is not None else [
-            {"flow": 1, "live": 1, "fpp": 4, "channels": 4, "receiver_latency_us": 250},
-            {"flow": 3, "live": 0, "fpp": 0, "channels": 0, "receiver_latency_us": 0},
-            {"flow": 5, "live": 1, "fpp": 4, "channels": 8, "receiver_latency_us": 1000},
+            {"flow": 1, "receiver": IEM, "live": 1, "fpp": 4, "channels": 4, "tx_channels": [1, 2, 3, None],
+             "receiver_latency_us": 250},
+            {"flow": 3, "live": 0, "fpp": 0, "channels": 0, "tx_channels": None, "receiver_latency_us": 0},
+            {"flow": 5, "receiver": FOH, "live": 1, "fpp": 4, "channels": 8,
+             "tx_channels": [21, 22, None, None, None, None, None, None], "receiver_latency_us": 1000},
         ],
     }
     if d is not None:
@@ -40,41 +60,46 @@ def status(rx=None, tx=None, d: int | None = D) -> dict:
     return doc
 
 
-def sub(device: str, code: int = 9) -> dict:
-    return {"tx_channel": "zyxqw 01", "tx_device": device, "status": code}
+def sub(device: str) -> dict:
+    return {"tx_channel": "zyxqw 01", "tx_device": device, "status": 9}
 
 
-SUBS = {"1": sub(STAGE), "2": sub(WIRELESS, 10), "3": sub(STAGE)}
+SUBS = {"1": sub(STAGE), "2": sub(WIRELESS), "3": sub(STAGE)}
 MICS = [("mic1", [1]), ("mic2", [2]), ("mic3", [3])]
-NON_INEAR = frozenset({1000})
 
 
-def paths(doc: dict | None = None, subs: dict = SUBS, inputs=MICS, rate: int = RATE, exempt=None) -> list[dict]:
-    return lat.paths(status() if doc is None else doc, subs, inputs, rate, exempt)
+def paths(doc: dict | None = None, subs: dict = SUBS, inputs=MICS, rate: int = RATE, exempt=None,
+          in_ear=IN_EAR) -> list[dict]:
+    doc = status() if doc is None else doc
+    return lat.paths(doc, subs, inputs, rate, lat.tx_flows(doc, in_ear), exempt)
 
 
-def verdict(rows: list[dict], doc: dict | None = None, rate: int = RATE, non_inear=NON_INEAR) -> dict:
-    return lat.verdict(rows, rate, lat.tx_flows(status() if doc is None else doc, non_inear))
+def verdict(rows: list[dict], doc: dict | None = None, rate: int = RATE, in_ear=IN_EAR) -> dict:
+    return lat.verdict(rows, rate, lat.tx_flows(status() if doc is None else doc, in_ear))
 
 
 def row(rows: list[dict], ident: str) -> dict:
     return next(r for r in rows if r["input"] == ident)
 
 
+def tx_flow(tx_channels, us, channels: int = 4) -> dict:
+    return {"flow": 1, "receiver": IEM, "channels": channels, "tx_channels": tx_channels, "receiver_latency_us": us}
+
+
 class PathTests(unittest.TestCase):
     def test_the_box_today_the_stage_rack_at_the_budget_passes_the_wireless_path_fails(self) -> None:
         rows = paths()
-        self.assertEqual(row(rows, "mic1"), {"input": "mic1", "rx": [1], "device": STAGE, "samples": 96, "ms": 1.0,
+        self.assertEqual(row(rows, "mic1"), {"input": "mic1", "rx": [1], "samples": 96, "ms": 1.0,
                                              "over_budget": False, "state": "ok"})
-        self.assertEqual(row(rows, "mic2"), {"input": "mic2", "rx": [2], "device": WIRELESS, "samples": 128,
-                                             "ms": 1.33, "over_budget": True, "state": "over"})
+        self.assertEqual(row(rows, "mic2"), {"input": "mic2", "rx": [2], "samples": 128, "ms": 1.33,
+                                             "over_budget": True, "state": "over"})
         self.assertEqual(verdict(rows)["pass"], 0)
         self.assertEqual(verdict(paths(inputs=[("mic1", [1]), ("mic3", [3])]))["pass"], 1)
 
     def test_under_at_and_above_the_budget(self) -> None:
         for delay, samples, state in ((8, 88, "ok"), (16, 96, "ok"), (17, 97, "over")):
             with self.subTest(delay=delay):
-                doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "delay": delay}])
+                doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "rx_channels": [1], "delay": delay}])
                 rows = paths(doc, {"1": sub(STAGE)}, [("mic1", [1])])
                 self.assertEqual((rows[0]["samples"], rows[0]["state"], rows[0]["over_budget"]),
                                  (samples, state, state == "over"))
@@ -89,6 +114,9 @@ class PathTests(unittest.TestCase):
         rows = paths(subs={"1": sub(STAGE)}, inputs=[("mic1", [1]), ("eng_mic", [4])])
         self.assertEqual(row(rows, "eng_mic")["state"], "unsubscribed")
         self.assertEqual(verdict(rows)["pass"], 0)
+        # A channel a flow carries but without a subscription in our table is unsubscribed too (fail closed).
+        rows = paths(subs={"1": sub(STAGE)}, inputs=[("mic3", [3])])
+        self.assertEqual((rows[0]["state"], verdict(rows)["pass"]), ("unsubscribed", 0))
         # One channel of two without a subscription is unsubscribed too.
         rows = paths(subs={"1": sub(STAGE)}, inputs=[("keys", [1, 4])])
         self.assertEqual((rows[0]["state"], verdict(rows)["pass"]), ("unsubscribed", 0))
@@ -98,89 +126,102 @@ class PathTests(unittest.TestCase):
     def test_an_exempt_input_over_the_budget_passes_as_exempt(self) -> None:
         rows = paths(inputs=[("mic1", [1]), ("click", [2]), ("spare", [9])],
                      exempt={"click": "playback", "spare": "unused"})
-        self.assertEqual(row(rows, "click"), {"input": "click", "rx": [2], "device": None, "samples": None,
+        self.assertEqual(row(rows, "click"), {"input": "click", "rx": [2], "samples": None,
                                               "ms": None, "over_budget": False, "state": "exempt"})
         self.assertEqual(row(rows, "spare")["state"], "exempt")
         self.assertEqual(verdict(rows)["pass"], 1)
         # Without the exemption the same input fails.
         self.assertEqual(verdict(paths(inputs=[("mic1", [1]), ("click", [2])]))["pass"], 0)
 
-    def test_an_input_whose_device_has_no_flow_is_unknown_never_a_pass(self) -> None:
-        rows = paths(subs={"1": sub("zyxqw-gone")}, inputs=[("mic1", [1])])
+    def test_a_subscribed_channel_no_flow_carries_is_unknown_never_a_pass(self) -> None:
+        rows = paths(subs={"5": sub(STAGE)}, inputs=[("mic5", [5])])
         self.assertEqual((rows[0]["samples"], rows[0]["ms"], rows[0]["state"]), (None, None, "unknown"))
         self.assertEqual(verdict(rows)["pass"], 0)
+        # A flow from the subscribed device that does not carry the channel counts nothing.
+        doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "rx_channels": [1], "delay": 16}])
+        self.assertEqual(paths(doc, {"5": sub(STAGE)}, [("mic5", [5])])[0]["state"], "unknown")
+        # A flow without rx_channels (an older dstack) maps nothing.
+        doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "delay": 16}])
+        self.assertEqual(paths(doc, {"1": sub(STAGE)}, [("mic1", [1])])[0]["state"], "unknown")
 
-    def test_an_unresolved_subscription_is_unknown(self) -> None:
-        rows = paths(subs={"1": sub(STAGE, 1)}, inputs=[("mic1", [1])])
-        self.assertEqual(rows[0]["state"], "unknown")
-        self.assertEqual(verdict(rows)["pass"], 0)
-        # The low 16 bits are the code: 0x01010009 is Receiving.
-        rows = paths(subs={"1": sub(STAGE, 0x01010009)}, inputs=[("mic1", [1])])
-        self.assertEqual(rows[0]["state"], "ok")
+    def test_the_flow_is_matched_by_channel_never_by_the_device_s_name(self) -> None:
+        # The subscription names another device than the flow's: the channel decides.
+        rows = paths(subs={"1": sub("zyxqw-other")}, inputs=[("mic1", [1])])
+        self.assertEqual((rows[0]["samples"], rows[0]["state"]), (96, "ok"))
 
     def test_without_the_engine_or_an_in_ear_flow_every_path_is_unknown(self) -> None:
-        for doc in (status(d=None), status(tx=[{"flow": 5, "channels": 8, "receiver_latency_us": 1000}])):
+        engineer_only = [tx_flow([21, 22, None, None], 1000)]
+        for doc in (status(d=None), status(tx=engineer_only)):
             rows = paths(doc)
             self.assertEqual({r["state"] for r in rows}, {"unknown"})
             self.assertEqual(verdict(rows, doc)["pass"], 0)
 
-    def test_several_flows_from_one_device_take_the_worst_delay(self) -> None:
-        rx = [{"flow": 4, "device": STAGE, "channels": 4, "delay": 16},
-              {"flow": 7, "device": STAGE, "channels": 4, "delay": 40},
-              {"flow": 8, "device": "zyxqw-other", "channels": 4, "delay": 400}]
-        rows = paths(status(rx=rx), {"1": sub(STAGE)}, [("mic1", [1])])
-        self.assertEqual(rows[0]["samples"], D + 40 + 24)
+    def test_an_input_fed_by_two_flows_takes_the_worst(self) -> None:
+        rx = [{"flow": 4, "device": STAGE, "channels": 4, "rx_channels": [1, 3], "delay": 16},
+              {"flow": 7, "device": WIRELESS, "channels": 4, "rx_channels": [1], "delay": 40},
+              {"flow": 8, "device": "zyxqw-other", "channels": 4, "rx_channels": [9], "delay": 400}]
+        rows = paths(status(rx=rx), {"1": sub(STAGE), "3": sub(STAGE)}, [("mic1", [1]), ("mic3", [3])])
+        self.assertEqual((row(rows, "mic1")["samples"], row(rows, "mic3")["samples"]), (D + 40 + 24, D + 16 + 24))
 
     def test_an_input_on_two_channels_takes_its_worst_and_any_unknown(self) -> None:
         rows = paths(inputs=[("mic1", [1, 2])])
-        self.assertEqual((rows[0]["samples"], rows[0]["device"], rows[0]["state"]), (128, WIRELESS, "over"))
-        rows = paths(subs={**SUBS, "4": sub("zyxqw-gone")}, inputs=[("mic1", [1, 4])])
+        self.assertEqual((rows[0]["samples"], rows[0]["state"]), (128, "over"))
+        rows = paths(subs={**SUBS, "4": sub(STAGE)}, inputs=[("mic1", [1, 4])])
         self.assertEqual(rows[0]["state"], "unknown")
 
 
 class TxTests(unittest.TestCase):
-    def test_the_in_ear_latency_is_the_worst_flow_at_the_cut_or_below(self) -> None:
-        self.assertEqual(lat.in_ear_samples(status(), RATE), 24)
-        tx = [{"flow": 1, "channels": 4, "receiver_latency_us": 250},
-              {"flow": 2, "channels": 4, "receiver_latency_us": 500},
-              {"flow": 3, "channels": 0, "receiver_latency_us": 400},
-              {"flow": 5, "channels": 8, "receiver_latency_us": 1000}]
-        self.assertEqual(lat.in_ear_samples(status(tx=tx), RATE), 48)
-        self.assertEqual(lat.in_ear_samples(status(tx=tx), 48_000), 24)
-        self.assertIsNone(lat.in_ear_samples(status(tx=[{"flow": 5, "channels": 8, "receiver_latency_us": 501}]),
-                                             RATE))
+    def test_the_in_ear_latency_is_the_worst_flow_carrying_an_in_ear_output(self) -> None:
+        self.assertEqual(lat.in_ear_samples(lat.tx_flows(status(), IN_EAR), RATE), 24)
+        tx = [tx_flow([1, 2, None, None], 250), tx_flow([3, 4], 500), tx_flow([5], 400, channels=0),
+              tx_flow([21, 22], 1000)]
+        self.assertEqual(lat.in_ear_samples(lat.tx_flows(status(tx=tx), IN_EAR), RATE), 48)
+        self.assertEqual(lat.in_ear_samples(lat.tx_flows(status(tx=tx), IN_EAR), 48_000), 24)
 
-    def test_a_tx_flow_at_1_ms_not_listed_fails_listed_passes(self) -> None:
+    def test_the_engineer_s_output_at_1000_us_does_not_count_when_non_in_ear(self) -> None:
+        self.assertEqual(lat.tx_flows(status(), IN_EAR), [{"receiver_latency_us": 250, "state": "in_ear"},
+                                                          {"receiver_latency_us": 1000, "state": "non_inear"}])
         rows = paths(inputs=[("mic1", [1])])
-        self.assertEqual(lat.tx_flows(status()), [{"receiver_latency_us": 250, "state": "in_ear"},
-                                                  {"receiver_latency_us": 1000, "state": "tx_unclassified"}])
-        doc = verdict(rows, non_inear=frozenset())
-        self.assertEqual((doc["pass"], doc["tx"][1]["state"]), (0, "tx_unclassified"))
-        doc = verdict(rows, non_inear=frozenset({1000}))
-        self.assertEqual((doc["pass"], doc["tx"][1]["state"]), (1, "non_inear"))
-        # Another value listed classifies nothing.
-        self.assertEqual(verdict(rows, non_inear=frozenset({999}))["pass"], 0)
+        self.assertEqual((rows[0]["samples"], verdict(rows)["pass"]), (96, 1))
+        # The same flow carrying one member's channel too counts: 1 ms against the budget.
+        tx = [tx_flow([1, 2, None, None], 250), tx_flow([21, 22, 3, None], 1000)]
+        doc = status(tx=tx)
+        rows = paths(doc, inputs=[("mic1", [1])])
+        self.assertEqual((rows[0]["samples"], rows[0]["state"], verdict(rows, doc)["pass"]),
+                         (D + 16 + 96, "over", 0))
+        # Were the engineer's output an in-ear one, its 1 ms would count as well.
+        rows = paths(inputs=[("mic1", [1])], in_ear=IN_EAR | {21})
+        self.assertEqual(rows[0]["samples"], D + 16 + 96)
 
-    def test_a_tx_flow_with_channels_and_no_known_latency_fails(self) -> None:
-        rows = paths(inputs=[("mic1", [1])])
-        tx = [{"flow": 1, "channels": 4, "receiver_latency_us": 250},
-              {"flow": 2, "channels": 8, "receiver_latency_us": 0}]
-        self.assertEqual(lat.tx_flows(status(tx=tx)), [{"receiver_latency_us": 250, "state": "in_ear"},
-                                                       {"receiver_latency_us": None, "state": "tx_unread"}])
-        self.assertEqual(lat.verdict(rows, RATE, lat.tx_flows(status(tx=tx)))["pass"], 0)
-        # Without that flow the same rows pass, and an empty flow is never read.
-        tx_ok = [tx[0], {"flow": 3, "channels": 0, "receiver_latency_us": 0}]
-        self.assertEqual(lat.verdict(rows, RATE, lat.tx_flows(status(tx=tx_ok)))["pass"], 1)
+    def test_an_in_ear_tx_channel_on_a_flow_with_receiver_latency_0_fails(self) -> None:
+        for us in (0, None):
+            with self.subTest(us=us):
+                tx = [tx_flow([1, 2, None, None], 250), tx_flow([3, 4], us)]
+                doc = status(tx=tx)
+                self.assertEqual(lat.tx_flows(doc, IN_EAR), [{"receiver_latency_us": 250, "state": "in_ear"},
+                                                             {"receiver_latency_us": None, "state": "tx_unread"}])
+                rows = paths(doc, inputs=[("mic1", [1])])
+                self.assertEqual((rows[0]["state"], verdict(rows, doc)["pass"]), ("ok", 0))
+        # Only the engineer's channels at 0 (a multicast flow nobody reads): no in-ear, no failure.
+        tx = [tx_flow([1, 2, None, None], 250), tx_flow([21, 22], 0)]
+        doc = status(tx=tx)
+        self.assertEqual(lat.tx_flows(doc, IN_EAR)[1], {"receiver_latency_us": None, "state": "non_inear"})
+        self.assertEqual(verdict(paths(doc, inputs=[("mic1", [1])]), doc)["pass"], 1)
+        # A slot with no flow (channels 0) is never read.
+        tx = [tx_flow([1, 2, None, None], 250), tx_flow([3, 4], 0, channels=0)]
+        self.assertEqual(len(lat.tx_flows(status(tx=tx), IN_EAR)), 1)
 
-    def test_the_env_lists_parse_and_refuse(self) -> None:
-        self.assertEqual(lat.parse_non_inear(" 1000, 2000 "), frozenset({1000, 2000}))
-        self.assertEqual(lat.parse_non_inear(""), frozenset())
+    def test_a_tx_flow_whose_channels_cannot_be_read_fails(self) -> None:
+        for carried in (None, "1,2", [0, 1], [1.0]):
+            with self.subTest(carried=carried):
+                doc = status(tx=[tx_flow([1, 2, None, None], 250), tx_flow(carried, 250)])
+                self.assertEqual(lat.tx_flows(doc, IN_EAR)[1]["state"], "tx_unmapped")
+                self.assertEqual(verdict(paths(doc, inputs=[("mic1", [1])]), doc)["pass"], 0)
+
+    def test_the_exemption_list_parses_and_refuses(self) -> None:
         self.assertEqual(lat.parse_exempt("click:band pc playback, spare:no source"),
                          {"click": "band pc playback", "spare": "no source"})
         self.assertEqual(lat.parse_exempt(""), {})
-        for text in ("1000us", "1.5", "-1"):
-            with self.subTest(text=text), self.assertRaises(ValueError):
-                lat.parse_non_inear(text)
         for text in ("click", "click:", ":playback", "click:a,click:b"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 lat.parse_exempt(text)
@@ -196,7 +237,8 @@ class RateTests(unittest.TestCase):
     def test_at_48_khz_a_path_of_48_samples_passes_and_49_fails(self) -> None:
         for delay, state in ((8, "ok"), (9, "over")):
             with self.subTest(delay=delay):
-                doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "delay": delay}], d=28)
+                doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "rx_channels": [1], "delay": delay}],
+                             d=28)
                 rows = paths(doc, {"1": sub(STAGE)}, [("mic1", [1])], rate=48_000)
                 # 28 + delay + 250 us at 48 kHz (12).
                 self.assertEqual((rows[0]["samples"], rows[0]["state"]), (28 + delay + 12, state))
@@ -210,18 +252,35 @@ class RateTests(unittest.TestCase):
 
 
 class SiteTests(unittest.TestCase):
+    TEST_SITE = (HERE.parent.parent / "config" / "test-site.toml").read_text(encoding="utf-8")
+
     def test_every_engine_input_of_the_site_is_read(self) -> None:
-        text = (HERE.parent.parent / "config" / "test-site.toml").read_text(encoding="utf-8")
-        inputs = lat.engine_inputs(text)
+        inputs = lat.engine_inputs(self.TEST_SITE)
         self.assertEqual(inputs[:11], [(f"mic{n}", [n]) for n in range(1, 11)] + [("hand1", [11])])
         self.assertEqual(len(inputs), 24)
         self.assertEqual(inputs[-1], ("bgvs", [31, 32]))
+
+    def test_the_in_ear_outputs_are_every_mix_s_tx_but_the_engineer_s(self) -> None:
+        # The test site: member1-9 on TX 1-18, the engineer on 21/22, the translator on 23.
+        self.assertEqual(lat.in_ear_tx(self.TEST_SITE), frozenset(range(1, 19)) | {23})
+        self.assertEqual(IN_EAR, frozenset({1, 2, 3, 4, 23}))
 
     def test_a_site_without_engine_inputs_or_with_a_bad_entry_is_refused(self) -> None:
         for text in ("", "[engine]\n", '[[engine.inputs]]\nid = "mic1"\nrx = "x"\n',
                      '[[engine.inputs]]\nid = "keys"\nrx = [0]\n', '[[engine.inputs]]\nrx = [1]\n'):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 lat.engine_inputs(text)
+
+    def test_a_site_whose_in_ear_outputs_cannot_be_told_is_refused(self) -> None:
+        mixes = 'mixes = [{ id = "member1", tx = [1, 2] }, { id = "engineer", tx = [21, 22] }]\n'
+        self.assertEqual(lat.in_ear_tx('[engine]\nengineer = "engineer"\n' + mixes), frozenset({1, 2}))
+        for text in ("", "[engine]\n" + mixes,                      # no engineer named
+                     '[engine]\nengineer = "eng"\n' + mixes,         # the engineer's mix is not there
+                     '[engine]\nengineer = "engineer"\nmixes = []\n',
+                     '[engine]\nengineer = "engineer"\nmixes = [{ id = "engineer", tx = [] }]\n',
+                     '[engine]\nengineer = "engineer"\nmixes = [{ tx = [1] }]\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                lat.in_ear_tx(text)
 
 
 class VerdictTests(unittest.TestCase):
@@ -231,7 +290,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(doc["paths"][1], {"input": "mic2", "samples": 128, "ms": 1.33, "over_budget": True,
                                            "state": "over"})
         text = repr(doc)
-        for value in (STAGE, WIRELESS, "'rx'", "device", "zyxqwreason"):
+        for value in (STAGE, WIRELESS, IEM, FOH, "'rx'", "device", "receiver'", "zyxqwreason"):
             self.assertNotIn(value, text)
 
 

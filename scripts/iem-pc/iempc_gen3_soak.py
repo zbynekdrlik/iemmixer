@@ -91,7 +91,7 @@ reset-failed), the env file and the summary removed on the box.
   not hear every receiver of our TX it found, or more reads failed than gave
   a line;
 - latency_over_budget: after the run, an input not exempt over 1 ms,
-  unknown or unsubscribed, a TX flow unclassified, or its reads failed (`gate.latency`, gen3_latency.py,
+  unknown or unsubscribed, a TX flow carrying an in-ear output unread or unmapped, or its reads failed (`gate.latency`, gen3_latency.py,
   #122; the line's `latency`).
 Channels in GEN3_OPTIONAL_RX fail neither (gate.optional_rx).
 Information only: the longest block since the engine started (`max_process_us`), the worst RX flow lateness of a second in

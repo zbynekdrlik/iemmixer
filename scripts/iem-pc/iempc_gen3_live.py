@@ -51,7 +51,8 @@ gen3-live/<run>/, kept: no token) with this run's job results; then this
 gate's own words, LIVE_FAILURES (every check that failed, not only the
 first, `restarted` for an engine that restarted by itself, and
 `latency_over_budget` when, after the job's end, an input not exempt is over
-1 ms, unknown or unsubscribed, or a TX flow is unclassified: `gate.latency`,
+1 ms, unknown or unsubscribed, or a TX flow carrying an in-ear output is
+unread or unmapped: `gate.latency`,
 #122). One line
 `{"gen3_gate": {"live": {...}}}`: numbers, fixed codes, the verdict's first
 failure (its fixed codes and the public spec titles), never a token, URL,

@@ -166,13 +166,18 @@ if line == f"{DANTE} ctl status":
     engine = {"media": 1, "offset": 56, "playout": 24, "blocks": blocks, "late": 5 + grown("late"),
               "missed": 7 + grown("missed"), "overruns": 11 + grown("overruns"),
               "rebootstraps": 1 + grown("rebootstraps"), "max_process_us": 210}
-    # The stage device's flows (the mic-to-ear path, #122: D 56 + delay 16 + the in-ear 24 = 96, the budget).
+    # The stage device's flows (the mic-to-ear path, #122: D 56 + delay 16 + the in-ear 24 = 96, the budget):
+    # flow 1 feeds our RX 1-7, flow 2 RX 8-14 (FAKE_RX_UNMAPPED a channel neither carries); the in-ear
+    # TX flow carries TX 1-8 (members' mixes) at 250 us.
+    unmapped = int(os.environ.get("FAKE_RX_UNMAPPED", "0"))
     rx = [{"flow": f, "device": "zyxqw-stage", "delay": int(os.environ.get("FAKE_RX_DELAY", "16")),
+           "rx_channels": [n for n in range(7 * f - 6, 7 * f + 1) if n != unmapped],
            "granted": 1, "fpp": 8, "channels": 4, "latency": 36, "packets": 1000 * so["all"],
            "refused": 0, "stray": 0, "out_of_order": 0,
            "late": (4 if f == 1 else 0) + (grown("rx_late") if f == 2 else 0), "unplaced": 0, "lateness": 14 + f, "lateness_min_ns": 375007, "keepalives": 9, "keepalive_errors": 0,
            "recv_errors": 0} for f in (1, 2)]
-    tx = [{"flow": 1, "live": 1, "fpp": 8, "channels": 8, "packets": 2000 * so["all"], "send_errors": 0,
+    tx = [{"flow": 1, "receiver": "zyxqw-iemrack", "live": 1, "fpp": 8, "channels": 8,
+           "tx_channels": list(range(1, 9)), "packets": 2000 * so["all"], "send_errors": 0,
            "keepalives": 4, "rebootstraps": 0, "holes": 6 + grown("tx_holes"), "receiver_latency_us": 250}]
     off = (os.environ.get("FAKE_RX_OFF") == "1" and late()) or os.environ.get("FAKE_RX_OFF") == "base"
     channels = [{"rx": n, "status": 1 if off and n == 4 else 0x01010009, "written": 1,
@@ -529,8 +534,7 @@ class CriteriaTests(SoakBase):
         self.assertEqual(self.posts()[0][-1], "description=the Gen 3 box's soak failed: latency_over_budget")
         self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
         self.again()
-        self.device.rows[2] = ("zyxqw 02", "zyxqw-elsewhere", 9)
-        code, docs, err = self.gate_run()
+        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="2")   # a subscribed channel no RX flow carries
         self.assertEqual(code, 1, err)
         doc = self.line(docs)
         self.assertEqual((doc["failed"], doc["latency"]["paths"][1]["state"]), (["latency_over_budget"], "unknown"))
