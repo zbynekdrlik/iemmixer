@@ -42,7 +42,6 @@ use iem_dante::media::source::Source;
 use iem_dante::media::tx::{LaneCounts, TX_MARGIN_NS, Transmitter, ns_of};
 use iem_dante::stream::{BLOCK, Blocks, Map, Pump, PumpStats, PumpView, Timing, WORK_MARGIN};
 use iem_dante::subscribe::Answer;
-use iem_dante::subscribe::directory;
 use iem_dante::subscribe::resolve::{Advertised, Own, Resolver};
 use iem_engine::cmd::push_group;
 use iem_engine::core::{Core, Flags};
@@ -140,7 +139,8 @@ fn device(dir: &Path) -> Device {
         process_id: 0,
         rx_port_base: None,
         tx_port_base: None,
-        arc_rx_fpp: directory::FPP,
+        arc_rx_fpp: None,
+        test_clock_ppm: None,
         pump_cpu: None,
         io_cpu: None,
         rx_cpu: None,
@@ -562,6 +562,20 @@ fn engine_holes(first: u64, engine: u64) -> u64 {
     2 * (engine - first)
 }
 
+/// The TX lane's `holes` before the engine's first output, as dstack counts
+/// them since v0.6.126 (dstack#234): a read before an engine ring's first
+/// write is a start hole, which `LaneCounts::holes` does not carry, so of the
+/// silence sent from the flow's first stamp only W a channel is a hole
+/// (2 x (B + P) of the 2 x D are start holes): 2 channels x `work_margin`.
+fn engine_start_lane_holes(first: u64, engine: u64) -> u64 {
+    assert_eq!(
+        engine_holes(first, engine),
+        2 * (BLOCK + u64::from(RATE) / 1000 + WORK_MARGIN),
+        "{first} {engine}"
+    );
+    2 * WORK_MARGIN
+}
+
 #[tokio::test]
 async fn the_mix_through_our_device_is_the_offline_render_bit_for_bit() {
     // TX 1 the counter, TX 2 a sine: RX 1 and RX 2, the engine's inputs.
@@ -669,7 +683,7 @@ async fn the_mix_through_our_device_is_the_offline_render_bit_for_bit() {
     assert_eq!(first, right.first_written(s0).unwrap());
     assert_eq!(
         (run.tx.send_errors, run.tx.rebootstraps, run.tx.holes),
-        (0, 0, engine_holes(first, s0 + d)),
+        (0, 0, engine_start_lane_holes(first, s0 + d)),
         "{:?}",
         run.tx
     );
@@ -737,7 +751,12 @@ async fn the_test_mix_adds_no_delay() {
     // The echo read every sample it sent (no hole); TX 3 and TX 4 sent
     // holes only before the engine's first output.
     let first = run.outputs[0].first_written(s0).unwrap();
-    assert_eq!(run.tx.holes, engine_holes(first, s0 + d), "{:?}", run.tx);
+    assert_eq!(
+        run.tx.holes,
+        engine_start_lane_holes(first, s0 + d),
+        "{:?}",
+        run.tx
+    );
     assert_eq!(run.rx.packets, run.tx.packets);
     assert_clean_rx(&run.rx);
     assert_eq!((run.pump.late, run.pump.rebootstraps), (0, 0));
@@ -862,7 +881,11 @@ async fn a_re_anchor_rebootstraps_the_pump_and_restarts_the_fade() {
         "{old_pump:?}"
     );
     let first = rx5.first_written(s0).unwrap();
-    assert_eq!(old_tx.holes, engine_holes(first, s0 + d), "{old_tx:?}");
+    assert_eq!(
+        old_tx.holes,
+        engine_start_lane_holes(first, s0 + d),
+        "{old_tx:?}"
+    );
     assert_fading_in(rx1, rx5, d, s0 + d);
     assert_identity(rx1, rx5, d, s0 + d + FADE, old_end);
 
