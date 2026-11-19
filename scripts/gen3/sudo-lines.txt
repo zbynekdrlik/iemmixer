@@ -88,6 +88,7 @@ root | systemctl disable --now ntp
 root | systemctl disable --now time-sync-coordinator
 root | timedatectl set-ntp false
 root | systemctl enable dantesync
+# also iempc gen3-gate soak --restart-clock's one restart (#130)
 root | systemctl restart dantesync
 
 # scripts/gen3/install-cloudflared.sh (phase E): the pinned release's

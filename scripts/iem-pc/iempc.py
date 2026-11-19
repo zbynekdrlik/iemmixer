@@ -155,6 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "event (#122)")
     gate.add_argument("--minutes", type=int,
                       help="soak only: the run's length, 10, 30, 60 or 120 (default 120)")
+    gate.add_argument("--restart-clock", action="store_true",
+                      help="soak only: restart dantesync once at the run's midpoint; the pump must keep running and "
+                           "the clock recover within the gate's window (#130)")
     return ap
 
 

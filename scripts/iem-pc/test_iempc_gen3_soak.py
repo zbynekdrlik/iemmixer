@@ -22,6 +22,7 @@ from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import gen3_soak_judge as judge  # noqa: E402
 import iempc_gen3 as g3  # noqa: E402
 import iempc_gen3_soak as soak  # noqa: E402
 import test_iempc_gen3_gate as gt  # noqa: E402  (the module: its test classes run there, not here)
@@ -73,7 +74,9 @@ def start(seconds: int = 7200) -> list[str]:
     return [STAGE_ENV, INSTALL_ENV, RM_SUMMARY, client(seconds)]
 
 
-CHANGES = (*gt.CHANGES, STAGE_ENV, INSTALL_ENV, RM_ENV, RM_SUMMARY, STOP_UNIT, RESET_UNIT,
+CLOCK_RESTART = "sudo -n systemctl restart dantesync"   # --restart-clock (#130)
+
+CHANGES = (*gt.CHANGES, STAGE_ENV, INSTALL_ENV, RM_ENV, RM_SUMMARY, STOP_UNIT, RESET_UNIT, CLOCK_RESTART,
            *(client(m * 60) for m in (10, 30, 60, 120)))
 
 # The soak's part of the stand-in box, run before the HIL gate's handlers.
@@ -108,6 +111,18 @@ def late():
 
 def grown(key):
     return 1 if want == key and late() else 0
+
+def since_restart():
+    """Status reads since dantesync's restart (1 the first after it), 0 before or without one."""
+    return so["all"] - so["clock_restart"] if so.get("clock_restart") is not None else 0
+
+def restart_disturbs(k):
+    """What a dantesync restart does to the media clock k reads after it: holdover at the first, then a
+    re-anchor with the clock not ready and the pump pacing itself (FAKE_RESTART_FAULT=stuck: from then
+    on), clean from the third (counted in the reads above: a holdover, a re-anchor, a new epoch, one
+    re-bootstrap with 3 missed blocks and a late one)."""
+    stuck = os.environ.get("FAKE_RESTART_FAULT") == "stuck"
+    return {"holdover": k == 1, "not_ready": k == 2 or (stuck and k >= 2)}
 
 def client_ends():
     c = so["client"]
@@ -159,13 +174,19 @@ if line == f"{DANTE} ctl status":
     blocks = 9_000_000 if os.environ.get("FAKE_STALL") else 9_000_000 + 3000 * so["all"]
     if os.environ.get("FAKE_ENGINE_BACK") and late():
         blocks = 3000
-    clock = {"ready": 0 if clock_fault == "not_ready" and late() else 1,
-             "epoch": 1 if clock_fault == "epoch" and late() else 0, "polls": 100 + so["all"],
-             "re_anchors": 2 + grown("re_anchors"), "holdovers": 3 + grown("holdovers"),
-             "holdover": 1 if clock_fault == "holdover" and late() else 0, "freq_ppb": -1200}
-    engine = {"media": 1, "offset": 56, "playout": 24, "blocks": blocks, "late": 5 + grown("late"),
-              "missed": 7 + grown("missed"), "overruns": 11 + grown("overruns"),
-              "rebootstraps": 1 + grown("rebootstraps"), "max_process_us": 210}
+    k = since_restart()
+    if k >= 1 and os.environ.get("FAKE_RESTART_FAULT") == "stall":
+        blocks = 9_000_000 + 3000 * (so["all"] - k)   # frozen from the restart on
+    d = restart_disturbs(k)
+    clock = {"ready": 0 if (clock_fault == "not_ready" and late()) or d["not_ready"] else 1,
+             "epoch": 1 if (clock_fault == "epoch" and late()) or k >= 2 else 0, "polls": 100 + so["all"],
+             "re_anchors": 2 + grown("re_anchors") + (1 if k >= 2 else 0),
+             "holdovers": 3 + grown("holdovers") + (1 if k >= 1 else 0),
+             "holdover": 1 if (clock_fault == "holdover" and late()) or d["holdover"] else 0, "freq_ppb": -1200}
+    engine = {"media": 0 if d["not_ready"] else 1, "offset": 56, "playout": 24, "blocks": blocks,
+              "late": 5 + grown("late") + (1 if k >= 2 else 0), "missed": 7 + grown("missed") + (3 if k >= 2 else 0),
+              "overruns": 11 + grown("overruns"), "rebootstraps": 1 + grown("rebootstraps") + (1 if k >= 2 else 0),
+              "max_process_us": 210}
     # The stage device's flows (the mic-to-ear path, #122: D 56 + delay 16 + the in-ear 24 = 96, the budget):
     # flow 1 feeds our RX 1-7, flow 2 RX 8-14 (FAKE_RX_UNMAPPED a channel neither carries); the in-ear
     # TX flow carries TX 1-8 (members' mixes) at 250 us.
@@ -210,8 +231,12 @@ if line == f"{DANTE} receivers --ip @DANTE_IP@ --seconds 5":
                                     "heard": heard, "flows": flows, "red": fault in ("late", "over")}}))
     soak_done()
 if line == f"{DANTE} health || true":
+    d = restart_disturbs(since_restart())
     if os.environ.get("FAKE_SOAK_DEGRADED") and late():
         print(json.dumps({"health": {"state": "degraded", "reasons": ["holdover", "zyxqword"], "units": []}}))
+    elif d["holdover"] or d["not_ready"]:
+        reasons = ["holdover"] if d["holdover"] else ["clock_not_ready", "pump_free"]
+        print(json.dumps({"health": {"state": "degraded", "reasons": reasons, "units": []}}))
     else:
         print(json.dumps({"health": {"state": "healthy", "reasons": [], "units": []}}))
     soak_done()
@@ -247,6 +272,14 @@ if words[:3] == ["sudo", "-n", "systemd-run"]:
                     "seconds": int(argv[argv.index("--seconds") + 1])}
     so["unit"], so["reads"] = {"active": "active", "sub": "running", "result": "success", "status": 0}, 0
     soak_done()
+if line == "sudo -n systemctl restart dantesync":
+    # dantesync restarted (#130): the clock's disturbance shows from the next status read on.
+    if os.environ.get("FAKE_CLOCK_RESTART_FAILS"):
+        soak_fail("Failed to restart dantesync.service: Access denied")
+    so["clock_restart"] = so["all"]
+    if os.environ.get("FAKE_FLAG_ON") == "clock":
+        flag()
+    soak_done()
 if line == "sudo -n systemctl stop iem-soak":
     so["stops"] += 1
     if so["unit"] is None:
@@ -273,6 +306,7 @@ PASS = {"pass": 1, "conclusion": "success", "minutes": 120, "client_exit": 0, "c
         "pump_late": 0, "pump_missed": 0, "pump_overruns": 0, "pump_rebootstraps": 0, "pump_stalled": 0,
         "max_process_us": 210, "clock_not_ready": 0, "holdovers": 0, "in_holdover": 0, "re_anchors": 0,
         "rx_late": 0, "tx_holes": 0, "rx_holes": 0, "rx_off": 0, "lateness_max": 16, "counts_back": 0,
+        "clock_restart": None,
         "receivers": {"reads": 2, "failed": 0, "heard_max": 1, "unheard": 0, "unread_max": 0, "no_id_max": 0,
                       "flows_max": 1, "late": 0, "over": 0, "margin_us": 130},
         "latency": {**gt.LATENCY_PASS, "tx": gt.LATENCY_PASS["tx"][:1]}, "unit_restarts": 0,   # the soak box: one in-ear TX flow
@@ -428,7 +462,7 @@ class CriteriaTests(SoakBase):
                                                                                              "failure"))
                 self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=soak/gen3", "-f",
                                                        f"description=the Gen 3 box's soak failed: {', '.join(words)}"])
-                self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
+                self.assertTrue(set(doc["failed"]) <= set(judge.FAILURES))
                 self.assertEqual(self.soak_state()["unit"], None)   # the unit ended all the same
                 self.assert_private(err + json.dumps(docs))
 
@@ -532,7 +566,7 @@ class CriteriaTests(SoakBase):
         self.assertEqual(doc["latency"]["paths"][0],
                          {"input": "mic1", "samples": 97, "ms": 1.01, "over_budget": True, "state": "over"})
         self.assertEqual(self.posts()[0][-1], "description=the Gen 3 box's soak failed: latency_over_budget")
-        self.assertTrue(set(doc["failed"]) <= set(soak.FAILURES))
+        self.assertTrue(set(doc["failed"]) <= set(judge.FAILURES))
         self.again()
         code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="2")   # a subscribed channel no RX flow carries
         self.assertEqual(code, 1, err)
@@ -595,6 +629,136 @@ class FlagTests(SoakBase):
         calls = self.calls()
         self.assertEqual(calls[calls.index(client(7200)) + 1:], [UNIT_SHOW, RM_ENV, RM_SUMMARY])
         self.assertEqual((self.env_file_there(), self.posts()), (False, []))
+
+
+class ClockRestartTests(SoakBase):
+    """--restart-clock (#130): dantesync restarted once at the run's midpoint
+    (here at the watch's first pass); the stand-in box plays its holdover, a
+    re-anchor with the clock not ready and the pump pacing itself, then a
+    clean clock, over four reads of the client's run."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        p = mock.patch.object(soak, "restart_at", lambda seconds: 0.0)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def restart_run(self, **env: str) -> tuple[int, list[dict], str]:
+        with mock.patch.dict(os.environ, {"FAKE_SOAK_READS": "4", **env}):
+            return self.run_main(*self.ARGS, "--restart-clock")
+
+    def test_a_dantesync_restart_the_pump_rides_through_passes_with_its_window_as_information(self) -> None:
+        code, docs, err = self.restart_run()
+        self.assertEqual(code, 0, err)
+        doc = self.line(docs)
+        self.assertEqual(doc["failed"], [])
+        clock = dict(doc["clock_restart"])
+        self.assertIsInstance(clock.pop("at_s"), float)
+        self.assertIsInstance(clock.pop("recovered_s"), float)
+        self.assertEqual(clock, {"sent": 1, "window_s": 120.0, "holdovers": 1, "in_holdover": 1, "re_anchors": 2,
+                                 "clock_not_ready": 1, "pump_free": 1, "pump_late": 1, "pump_missed": 3,
+                                 "pump_rebootstraps": 1, "health": 2,
+                                 "health_reasons": ["clock_not_ready", "holdover", "pump_free"]})
+        # Outside the window nothing rose; the pump's blocks rose at every read.
+        for key in ("holdovers", "in_holdover", "re_anchors", "clock_not_ready", "pump_late", "pump_missed",
+                    "pump_rebootstraps", "pump_stalled", "not_healthy", "unit_restarts", "counts_back"):
+            self.assertEqual(doc[key], 0, key)
+        # Sent once, right after the client's start, the flag looked at before it.
+        calls = self.calls()
+        self.assertEqual(calls.count(CLOCK_RESTART), 1)
+        self.assertEqual(calls[calls.index(client(7200)) + 1], CLOCK_RESTART)
+        self.assertEqual(self.posts()[0][-1],
+                         "description=the Gen 3 box's soak passed (iempc gen3-gate soak, 120 min, a dantesync restart)")
+        self.assertEqual((self.state()["starts"], self.ledger()), (0, []))   # dantesync's restart is no engine start
+        self.assert_private(err + json.dumps(docs))
+
+    def test_a_pump_that_stops_after_the_restart_fails_pump_stalled(self) -> None:
+        code, docs, err = self.restart_run(FAKE_RESTART_FAULT="stall")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual(doc["failed"], ["pump_stalled"])
+        self.assertGreater(doc["pump_stalled"], 0)
+
+    def test_an_engine_restart_after_the_restart_fails_restarted(self) -> None:
+        # The stall watch's exit 1 and systemd's restart: never excused by the window.
+        code, docs, err = self.restart_run(FAKE_UNIT_RESTART="iem-engine.service")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual((doc["failed"], doc["unit_restarts"]), (["restarted"], 1))
+        self.assertEqual(self.ledger(), [gt.NOW])
+
+    def test_a_clock_not_back_within_the_window_fails_clock_not_recovered(self) -> None:
+        code, docs, err = self.restart_run(FAKE_RESTART_FAULT="stuck")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual((doc["failed"], doc["clock_restart"]["recovered_s"]), (["clock_not_recovered"], None))
+        self.assertEqual(self.posts()[0][-1], "description=the Gen 3 box's soak failed: clock_not_recovered")
+
+    def test_the_restart_s_disturbance_outside_its_window_fails_as_any_other(self) -> None:
+        with mock.patch.object(soak, "CLOCK_WINDOW_S", 0.0):
+            code, docs, err = self.restart_run()
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual(doc["failed"], ["health", "pump_stalled", "pump_late", "pump_missed", "pump_rebootstraps",
+                                         "clock_not_ready", "holdover", "re_anchor", "clock_not_recovered"])
+        self.assertTrue(set(doc["failed"]) <= set(judge.FAILURES))
+
+    def test_the_flag_right_before_the_restart_sends_none(self) -> None:
+        def flagged(seconds: int) -> float:
+            self.flag()
+            return 0.0
+        with mock.patch.object(soak, "restart_at", flagged):
+            code, docs, err = self.restart_run()
+        self.assertEqual(code, ip.PREEMPTED, err)
+        self.assertNotIn(CLOCK_RESTART, self.calls())
+        doc = self.line(docs)
+        self.assertEqual((doc["conclusion"], doc["failed"], doc["clock_restart"]["sent"]), ("cancelled", [], 0))
+        self.assertEqual((self.soak_state()["unit"], self.env_file_there(), self.posts()), (None, False, []))
+
+    def test_a_flag_during_the_restart_s_call_is_cancelled_with_the_restart_counted_as_sent(self) -> None:
+        code, docs, err = self.restart_run(FAKE_FLAG_ON="clock")
+        self.assertEqual(code, ip.PREEMPTED, err)
+        self.assertEqual(self.calls().count(CLOCK_RESTART), 1)
+        doc = self.line(docs)
+        self.assertEqual((doc["conclusion"], doc["clock_restart"]["sent"]), ("cancelled", 1))
+        self.assertEqual((self.soak_state()["unit"], self.posts()), (None, []))
+
+    def test_a_restart_whose_answer_is_not_seen_is_judged_as_sent(self) -> None:
+        call = soak.gate.Box.call
+
+        def outlived(box, words, **kw):
+            if words == soak.CLOCK_RESTART:
+                call(box, words, **kw)
+                raise ip.StillRunning("ssh outlived its bound")
+            return call(box, words, **kw)
+        with mock.patch.object(soak.gate.Box, "call", outlived):
+            code, docs, err = self.restart_run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.line(docs)["clock_restart"]["sent"], 1)
+        self.assertIn("the dantesync restart was sent but its answer not seen", err)
+
+    def test_a_restart_that_cannot_be_sent_fails_clock_restart_unsent(self) -> None:
+        code, docs, err = self.restart_run(FAKE_CLOCK_RESTART_FAILS="1")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual((doc["failed"], doc["clock_restart"]["sent"]), (["clock_restart_unsent"], 0))
+        self.assertIn("WARNING: gen3-gate: the dantesync restart was not sent", err)
+        self.assertEqual(self.soak_state()["unit"], None)
+
+    def test_a_run_that_ends_before_its_midpoint_fails_clock_restart_unsent(self) -> None:
+        with mock.patch.object(soak, "restart_at", lambda seconds: seconds / 2):
+            code, docs, err = self.restart_run()
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.line(docs)["failed"], ["clock_restart_unsent"])
+        self.assertNotIn(CLOCK_RESTART, self.calls())
+
+    def test_the_other_gates_refuse_the_flag_before_any_call(self) -> None:
+        for gate_name in ("hil", "live", "reboot", "reset", "latency"):
+            with self.subTest(gate=gate_name):
+                self.again()
+                code, docs, err = self.run_main("gen3-gate", gate_name, "--restart-clock")
+                self.assertEqual((code, docs, self.calls()), (1, [], []), err)
+                self.assertIn("--restart-clock is the soak gate's only", err)
 
 
 class LeftTests(SoakBase):
@@ -703,6 +867,11 @@ class SudoTests(SoakBase):
         code, _, err = self.gate_run(FAKE_CLIENT_EXIT="1")
         self.assertEqual(code, 1, err)
         take()
+        with mock.patch.object(soak, "restart_at", lambda seconds: 0.0), \
+                mock.patch.dict(os.environ, {"FAKE_SOAK_READS": "4"}):
+            code, _, err = self.run_main(*self.ARGS, "--minutes", "10", "--restart-clock")
+        self.assertEqual(code, 0, err)
+        take()
         code, _, err = self.gate_run(FAKE_FLAG_ON="soak")
         self.assertEqual(code, ip.PREEMPTED, err)
         take()
@@ -712,7 +881,7 @@ class SudoTests(SoakBase):
             self.assertIn((runas, command), allowed, command)
             self.assertFalse(listed, command)
         seen = {(runas, command) for runas, command, _listed in lines}
-        for want in (INSTALL_ENV, RM_ENV, STOP_UNIT, RESET_UNIT,
+        for want in (INSTALL_ENV, RM_ENV, STOP_UNIT, RESET_UNIT, CLOCK_RESTART,
                      *(" ".join(shlex.split(client(m * 60))) for m in (10, 30, 60, 120))):
             self.assertIn(("root", want[len("sudo -n "):]), seen)
         for want in (RM_SUMMARY, CAT_SUMMARY):
@@ -750,14 +919,18 @@ class PureTests(unittest.TestCase):
                     {**status, "rx": [{"flow": 1, "late": -1, "lateness": 0}]}):
             self.assertIsNone(soak.sample(bad), bad)
 
-    def test_growth_counts_each_rise_and_a_count_that_went_back_from_zero(self) -> None:
-        self.assertEqual(soak.growth([{"a": 1}, {"a": 3}, {"a": 2, "b": 1}, {"a": 2, "b": 1}]), (5, 1))
-        self.assertEqual(soak.growth([{"a": 4}]), (0, 0))
-        self.assertEqual(soak.growth([]), (0, 0))
+    def test_the_restart_is_the_run_s_midpoint_and_its_window_ends_well_before_a_short_run(self) -> None:
+        self.assertEqual(soak.restart_at(600), 300.0)
+        self.assertLessEqual(soak.restart_at(600) + soak.CLOCK_WINDOW_S, 600 - 180)
 
-    def test_a_hole_is_the_longest_wait_between_reads_and_the_run_s_edges(self) -> None:
-        self.assertEqual(soak.hole([1.0, 2.0, 70.0], 0.5, 71.0), 68.0)
-        self.assertEqual(soak.hole([], 3.0, 10.0), 7.0)
+    def test_a_watch_marks_its_reads_in_the_window_by_their_times_the_baseline_never(self) -> None:
+        w = soak.Watch(10, False, False, Path("."))
+        w.samples = [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}]   # the baseline first, then three good reads
+        w.status_times = [99.0, 150.0, 221.0]
+        self.assertEqual(w.inside(), [False, False, False, False])   # no restart sent
+        w.clock_at = 100.0
+        self.assertEqual(w.inside(), [False, False, True, False])
+        self.assertEqual((w.in_window(100.0), w.in_window(220.0), w.in_window(220.1)), (True, True, False))
 
     def test_the_units_are_read_from_systemctl_show(self) -> None:
         u = soak.unit_fields("Result=exit-code\nExecMainStatus=1\nLoadState=loaded\nActiveState=failed\n"

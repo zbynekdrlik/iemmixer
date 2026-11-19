@@ -30,18 +30,32 @@ impl Drop for Server {
     }
 }
 
-/// A local port nobody listens on (the probe listener is closed again) and
-/// that is none of `taken`.
-fn free_port_except(taken: &[u16]) -> u16 {
+/// The port the server's log says it bound for `what` (`HTTP` or `HTTPS`:
+/// its "<what> server listening port=<n>" line), once it is there. The
+/// server binds port 0 and the OS picks: no free port is guessed before the
+/// bind, so a test beside it can never take it first (#130's CI: a guessed
+/// port taken in between, `Address already in use`).
+fn bound_port(server: &mut Server, what: &str) -> u16 {
+    let marker = format!("{what} server listening port=");
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        if !taken.contains(&port) {
+        let log = server.log();
+        if let Some(port) = log
+            .lines()
+            .find_map(|line| line.split_once(&marker))
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+        {
             return port;
         }
+        if let Some(status) = server.child.try_wait().unwrap() {
+            panic!("the server ended at start ({status}): {log}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server never bound {what}: {log}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -59,23 +73,21 @@ fn version_status(port: u16) -> Option<String> {
 /// The server on a free port with an empty site in a temp directory, once
 /// it answers `/api/version`.
 fn start() -> Server {
-    launch(tempfile::tempdir().unwrap(), "", &[], &[])
+    launch(tempfile::tempdir().unwrap(), "", &[])
 }
 
 /// The server in `dir` with the site lines `extra` and the environment
-/// `envs`, on a free HTTP port that is none of `taken`, once it answers
-/// `/api/version`.
-fn launch(dir: tempfile::TempDir, extra: &str, envs: &[(&str, PathBuf)], taken: &[u16]) -> Server {
+/// `envs`, on an HTTP port the OS picks, once it answers `/api/version`.
+fn launch(dir: tempfile::TempDir, extra: &str, envs: &[(&str, PathBuf)]) -> Server {
     let site = dir.path().join("iemmixer.toml");
     // A fixed public IP: no detection over the internet at start.
     std::fs::write(&site, format!("local_public_ip = \"203.0.113.1\"\n{extra}")).unwrap();
     let log = std::fs::File::create(dir.path().join("server.log")).unwrap();
-    let port = free_port_except(taken);
     let mut command = Command::new(env!("CARGO_BIN_EXE_iem-server"));
     command
         .env("IEMMIXER_CONFIG", &site)
         .env("IEMMIXER_ENGINE_PIPE", dir.path().join("no-engine.sock"))
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
         .env("NO_COLOR", "1");
     for (name, value) in envs {
         command.env(name, value);
@@ -86,7 +98,13 @@ fn launch(dir: tempfile::TempDir, extra: &str, envs: &[(&str, PathBuf)], taken: 
         .stderr(Stdio::from(log))
         .spawn()
         .expect("spawn iem-server");
-    let mut server = Server { child, port, dir };
+    let mut server = Server {
+        child,
+        port: 0,
+        dir,
+    };
+    server.port = bound_port(&mut server, "HTTP");
+    let port = server.port;
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if version_status(port).as_deref() == Some("HTTP/1.1 200 OK") {
@@ -229,13 +247,8 @@ fn cert_in(dir: &std::path::Path) {
 fn start_https() -> (Server, u16) {
     let dir = tempfile::tempdir().unwrap();
     cert_in(dir.path());
-    let https_port = free_port_except(&[]);
-    let server = launch(
-        dir,
-        &format!("tls = true\nhttps_port = {https_port}\n"),
-        &[],
-        &[https_port],
-    );
+    let mut server = launch(dir, "tls = true\nhttps_port = 0\n", &[]);
+    let https_port = bound_port(&mut server, "HTTPS");
     let deadline = Instant::now() + Duration::from_secs(20);
     // A probe connection, closed at once (it never starts its handshake).
     while TcpStream::connect(("127.0.0.1", https_port)).is_err() {
@@ -258,13 +271,12 @@ fn the_certificate_next_to_the_site_serves_https() {
     cert_in(dir.path());
     let elsewhere = dir.path().join("platform-config");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    let https_port = free_port_except(&[]);
-    let server = launch(
+    let mut server = launch(
         dir,
-        &format!("tls = true\nhttps_port = {https_port}\n"),
+        "tls = true\nhttps_port = 0\n",
         &[("XDG_CONFIG_HOME", elsewhere)],
-        &[https_port],
     );
+    let https_port = bound_port(&mut server, "HTTPS");
     let deadline = Instant::now() + Duration::from_secs(20);
     while TcpStream::connect(("127.0.0.1", https_port)).is_err() {
         assert!(

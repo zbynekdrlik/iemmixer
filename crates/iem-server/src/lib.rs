@@ -866,11 +866,18 @@ where
             if let Some(rustls_config) = https_config(&files, keeper_name).await {
                 let https_addr = SocketAddr::from(([0, 0, 0, 0], https_port));
                 let https_app = app.clone();
-                let handle = axum_server::Handle::new();
+                let handle = axum_server::Handle::<SocketAddr>::new();
                 let server_handle = handle.clone();
                 let served = rustls_config.clone();
+                // The port it really bound (`https_port = 0`: one the OS
+                // picks; the tests read it from this line).
+                let watch = handle.clone();
+                tokio::spawn(async move {
+                    if let Some(bound) = watch.listening().await {
+                        tracing::info!(port = bound.port(), "HTTPS server listening");
+                    }
+                });
                 let task = tokio::spawn(async move {
-                    tracing::info!(port = https_port, "HTTPS server listening");
                     if let Err(e) = axum_server::bind_rustls(https_addr, served)
                         .handle(server_handle)
                         .serve(https_app.into_make_service_with_connect_info::<SocketAddr>())
@@ -922,13 +929,18 @@ where
 
     // Set TCP_NODELAY on every accepted connection to reduce audio streaming latency.
     use axum::serve::ListenerExt;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await?
-        .tap_io(|tcp_stream| {
-            if let Err(e) = tcp_stream.set_nodelay(true) {
-                tracing::trace!("failed to set TCP_NODELAY: {e:#}");
-            }
-        });
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // The port it really bound (`PORT=0`: one the OS picks; the tests read it
+    // from this line, so no free port is guessed before the bind).
+    tracing::info!(
+        port = listener.local_addr()?.port(),
+        "HTTP server listening"
+    );
+    let listener = listener.tap_io(|tcp_stream| {
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            tracing::trace!("failed to set TCP_NODELAY: {e:#}");
+        }
+    });
 
     // Signal readiness AFTER successful bind
     if let Some(tx) = ready_tx {
