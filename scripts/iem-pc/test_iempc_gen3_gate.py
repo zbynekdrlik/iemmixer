@@ -575,7 +575,8 @@ class GateTests(GateBase):
         self.assertEqual(docs, [{"gen3_gate": {"hil": {
             "pass": 1, "health": 1, "rx_back": 1, "rx_channels": 4, "hil_on": 1, "versions": 1, "outputs": 2,
             "dbfs": -30, "seconds": 10, "lowest_dbfs": -30.0, "highest_dbfs": -30.0, "still": 0, "loop": "set",
-            "loopback_samples": TRIP, "loop_expected_samples": TRIP, "loop_delta_samples": 0, "loop_restored": 1, "alarm_devices": 1, "alarm_armed": 1, "unit_restarts": 0,
+            "loopback_samples": TRIP, "loop_expected_samples": TRIP, "loop_delta_samples": 0, "loop_restored": 1,
+            "alarm_devices": 1, "alarm_armed": 1, "unit_restarts": 0,
             "panic": 1, "panic_restarts": 1, "starts": 3, "left_job": 0, "job_end": 1, "hil_off": 1,
             "failed": []}}}])
         self.assertEqual(self.calls(), [*PREFLIGHT, *BEGIN, *VERSIONS, CTL, SIGNAL, *[STATUS] * 4, CTL, ALARM,
@@ -640,29 +641,24 @@ class GateTests(GateBase):
         self.assertIn(STOP, calls)
         self.assertLess(calls.index(STOP), calls.index(RM))
 
-    def test_a_measured_round_trip_off_the_computed_one_fails_as_a_mismatch(self) -> None:
-        # The loop's flow at delay 24: computed 80, measured 77, three samples short (the tolerance is 2).
-        code, docs, err = self.gate_run(FAKE_LOOP_DELAY="24")
-        self.assertEqual(code, 1, err)
-        doc = docs[0]["gen3_gate"]["hil"]
-        self.assertEqual((doc["failed"], doc["loopback_samples"], doc["loop_expected_samples"],
-                          doc["loop_delta_samples"]), (["loop_latency_mismatch"], TRIP, 80, -3))
-        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
-                                               "description=the Gen 3 box's HIL failed: loop_latency_mismatch"])
-        self.assertFalse(self.dropin_there())   # the job ended all the same
-        self.assert_private(err + json.dumps(docs))
-
-    def test_a_round_trip_above_or_below_the_computed_one_by_more_than_the_tolerance_fails(self) -> None:
-        for delay, delta in (("24", -3), ("18", 3)):
+    def test_a_round_trip_off_the_computed_one_by_more_than_the_tolerance_fails_as_a_mismatch(self) -> None:
+        # The loop's flow at delay 23: computed 79, measured 77, two short; at 19: 75, two over (the tolerance is 1).
+        for delay, expected, delta in (("23", 79, -2), ("19", 75, 2)):
             with self.subTest(delay=delay):
                 self.next_run()
                 code, docs, err = self.gate_run(FAKE_LOOP_DELAY=delay)
+                self.assertEqual(code, 1, err)
                 doc = docs[0]["gen3_gate"]["hil"]
-                self.assertEqual((code, doc["failed"], doc["loop_delta_samples"]),
-                                 (1, ["loop_latency_mismatch"], delta), err)
+                self.assertEqual((doc["failed"], doc["loopback_samples"], doc["loop_expected_samples"],
+                                  doc["loop_delta_samples"]), (["loop_latency_mismatch"], TRIP, expected, delta))
+                self.assertEqual(self.posts()[-1][4:], [
+                    "-f", "state=failure", "-f", "context=hil/gen3", "-f",
+                    "description=the Gen 3 box's HIL failed: loop_latency_mismatch"])
+                self.assertFalse(self.dropin_there())   # the job ended all the same
+                self.assert_private(err + json.dumps(docs))
 
     def test_a_round_trip_within_the_tolerance_of_the_computed_one_passes(self) -> None:
-        for delay, delta in (("23", -2), ("19", 2)):
+        for delay, delta in (("22", -1), ("20", 1)):
             with self.subTest(delay=delay):
                 self.next_run()
                 code, docs, err = self.gate_run(FAKE_LOOP_DELAY=delay)
@@ -1365,10 +1361,26 @@ class PureTests(unittest.TestCase):
         doc = gate.verdict(gate.Checks(), [61, 62], left=True)
         self.assertEqual(doc["pass"], 0)
         self.assertEqual(doc["failed"], ["health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard",
-                                         "no_loopback", "loop_latency_unread", "alarm_count", "alarm_not_armed", "panic", "job_end"])
+                                         "no_loopback", "alarm_count", "alarm_not_armed", "panic", "job_end"])
         self.assertEqual((doc["panic"], doc["panic_restarts"]), (0, None))
         self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])   # in FAILURES' order
         self.assertNotIn("61", json.dumps(doc))
+
+    def test_a_measured_round_trip_is_held_against_the_computed_one(self) -> None:
+        c = gate.Checks(burst=gate.Burst(loopback=56))
+        cases = ((None, ["loop_latency_unread"], None), (57, [], -1), (55, [], 1), (58, ["loop_latency_mismatch"], -2),
+                 (54, ["loop_latency_mismatch"], 2))
+        for expected, words, delta in cases:
+            with self.subTest(expected=expected):
+                c.loop_expected = expected
+                doc = gate.verdict(c, [61, 62], left=False)
+                loop_words = [w for w in doc["failed"] if w.startswith("loop_latency")]
+                self.assertEqual((loop_words, doc["loop_expected_samples"], doc["loop_delta_samples"]),
+                                 (words, expected, delta))
+        # No round trip measured: no_loopback alone, never a latency word on top.
+        doc = gate.verdict(gate.Checks(), [61, 62], left=False)
+        self.assertEqual(([w for w in doc["failed"] if w.startswith("loop_latency")], doc["loop_delta_samples"]),
+                         ([], None))
 
     def test_every_word_the_verdict_names_is_in_failures(self) -> None:
         c = gate.Checks()
