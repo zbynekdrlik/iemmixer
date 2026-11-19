@@ -57,19 +57,18 @@ impl StallWatch {
     }
 
     /// One look at `now`: the pump's `blocks` and whether the clock is
-    /// `ready`. A clock not ready disarms the watch; a ready one arms it
-    /// whatever the count (0 too: a pump that never ran a block); blocks
-    /// that moved are remembered with `now`; blocks unchanged for the bound
-    /// since they were first seen are a [`Stall`] (at every look from then).
+    /// `ready`. Blocks that moved are remembered with `now`, whatever the
+    /// clock (the pump counts its free blocks too, so a running pump's count
+    /// moves while the clock is not ready); blocks unchanged for the bound
+    /// since they were first seen are a [`Stall`] at every look from then
+    /// on with the clock ready, never with it not ready. So a clock that
+    /// flaps ready and not ready never hides a frozen pump, and a pump that
+    /// never ran a block (its count 0) is one too.
     pub fn look(&mut self, now: Instant, blocks: u64, ready: bool) -> Option<Stall> {
-        if !ready {
-            self.seen = None;
-            return None;
-        }
         match self.seen {
             Some((seen, since)) if seen == blocks => {
                 let for_ = now.saturating_duration_since(since);
-                (for_ >= self.within).then_some(Stall { blocks, for_ })
+                (ready && for_ >= self.within).then_some(Stall { blocks, for_ })
             }
             _ => {
                 self.seen = Some((blocks, now));

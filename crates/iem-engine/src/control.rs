@@ -20,7 +20,7 @@ use iem_audio_io::StreamStats;
 use iem_audio_io::hist::HistSnapshot;
 use iem_engine_proto::{Alarm, AlarmCode, EngineMsg, Role};
 use rtrb::Producer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::cmd::{RtCmd, RtOp};
 use crate::core::Core;
@@ -226,8 +226,11 @@ impl Control {
         }
         // A `Shutdown` handled this tick wins over a backend ending seen in
         // the same tick (a stall included): the stop asked for is exit 0,
-        // never a restart.
+        // never a restart; the backend's own end is still said, never dropped.
         if self.shutdown {
+            if let Some(Ending::Backend(why)) = self.driver.as_ref().and_then(|d| d.ending()) {
+                error!("the audio backend ended by itself during the shutdown: {why}");
+            }
             return Some(self.shutdown_now());
         }
         match self.driver.as_ref().and_then(|d| d.ending()) {

@@ -1,0 +1,10 @@
+crates/iem-core/src/lib.rs:101:5: replace build_datetime -> String with String::new()
+crates/iem-core/src/lib.rs:101:5: replace build_datetime -> String with "xyzzy".into()
+crates/iem-core/src/lib.rs:107:5: replace build_datetime_at -> String with String::new()
+crates/iem-core/src/lib.rs:107:5: replace build_datetime_at -> String with "xyzzy".into()
+crates/iem-core/src/lib.rs:108:18: replace == with != in build_datetime_at
+crates/iem-core/src/lib.rs:117:5: replace deployed_at -> String with String::new()
+crates/iem-core/src/lib.rs:117:5: replace deployed_at -> String with "xyzzy".into()
+crates/iem-core/src/lib.rs:123:5: replace deployed_at_at -> String with String::new()
+crates/iem-core/src/lib.rs:123:5: replace deployed_at_at -> String with "xyzzy".into()
+crates/iem-core/src/lib.rs:124:18: replace == with != in deployed_at_at

@@ -32,7 +32,7 @@ fn the_bound_is_500_ms() {
 }
 
 #[test]
-fn dstacks_longest_wait_never_stalls() {
+fn a_43_ms_gap_never_stalls() {
     // Since dstack v0.6.193 the pump waits at most W + B samples (4 128:
     // 43 ms at 96 kHz) with no block, then runs again. The watch stays quiet.
     let t0 = Instant::now();
@@ -88,29 +88,58 @@ fn one_look_short_of_the_bound_is_no_stall() {
 }
 
 #[test]
-fn blocks_frozen_while_the_clock_is_not_ready_never_stall() {
+fn blocks_frozen_while_the_clock_is_not_ready_are_reported_at_its_first_ready_look() {
+    // The pump counts its free blocks too (dstack's PumpStats::record at
+    // every block), so a count frozen through a holdover is a stuck pump.
     let t0 = Instant::now();
     let mut w = StallWatch::new(bound());
-    // 10 s frozen at 42 in a holdover.
+    // 10 s frozen at 42 with the clock not ready: never reported then.
     assert_eq!(first_stall(&mut w, t0, 1000, |_| 42, |_| false), None);
-    // The clock comes back: the bound counts from its first ready look, not
-    // from when the count stopped.
+    // The clock comes back: reported at once, frozen since the first look.
     let back = t0 + Duration::from_secs(10);
-    assert_eq!(w.look(back, 42, true), None);
-    assert_eq!(w.look(back + bound() - MS, 42, true), None);
-    assert!(w.look(back + bound(), 42, true).is_some());
+    assert_eq!(
+        w.look(back, 42, true),
+        Some(Stall {
+            blocks: 42,
+            for_: Duration::from_secs(10)
+        })
+    );
 }
 
 #[test]
-fn a_holdover_in_the_middle_starts_the_bound_again() {
+fn a_clock_not_ready_never_reports_and_never_hides_a_frozen_pump() {
     let t0 = Instant::now();
     let mut w = StallWatch::new(Duration::from_millis(500));
     assert_eq!(w.look(t0, 9, true), None);
     assert_eq!(w.look(t0 + 400 * MS, 9, false), None);
     assert_eq!(w.look(t0 + 450 * MS, 9, true), None);
-    // 600 ms after the first look, but only 150 ms of it ready again.
-    assert_eq!(w.look(t0 + 600 * MS, 9, true), None);
-    assert!(w.look(t0 + 950 * MS, 9, true).is_some());
+    // Frozen since t0: not ready at 600 ms reports nothing, the next ready
+    // look does, the not-ready stretch counted in.
+    assert_eq!(w.look(t0 + 600 * MS, 9, false), None);
+    assert_eq!(
+        w.look(t0 + 610 * MS, 9, true),
+        Some(Stall {
+            blocks: 9,
+            for_: 610 * MS
+        })
+    );
+    // A clock that flaps under the bound never hides it.
+    let mut w = StallWatch::new(Duration::from_millis(500));
+    let ready = |i: u32| i % 20 < 10;
+    assert_eq!(
+        first_stall(&mut w, t0, 100, |_| 4, ready),
+        Some((
+            60,
+            Stall {
+                blocks: 4,
+                for_: 600 * MS
+            }
+        ))
+    );
+    // A pump whose count moves while the clock is not ready (its free
+    // blocks) never stalls.
+    let mut w = StallWatch::new(Duration::from_millis(500));
+    assert_eq!(first_stall(&mut w, t0, 300, u64::from, |_| false), None);
 }
 
 #[test]
@@ -152,15 +181,16 @@ fn a_pump_that_never_runs_its_first_block_while_the_clock_is_ready_stalls_at_the
             for_: bound()
         }
     );
-    // Armed from the first ready look, not from the start.
+    // A clock ready only from look 100: reported at that look, the count
+    // frozen since the first.
     let mut w = StallWatch::new(bound());
     assert_eq!(
         first_stall(&mut w, t0, 600, |_| 0, |i| i >= 100),
         Some((
-            150,
+            100,
             Stall {
                 blocks: 0,
-                for_: bound()
+                for_: Duration::from_secs(1)
             }
         ))
     );

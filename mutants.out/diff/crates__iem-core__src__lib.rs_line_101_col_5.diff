@@ -1,0 +1,21 @@
+--- crates/iem-core/src/lib.rs
++++ replace build_datetime -> String with String::new()
+@@ -93,17 +93,17 @@
+ /// Version label for display: `v` + the Cargo version (pre-releases already
+ /// carry `-dev.N`), e.g. "v2.0.0-dev.3".
+ pub fn version_label() -> String {
+     format!("v{VERSION}")
+ }
+ 
+ /// Build datetime for display in Slovak format (e.g., "28.02.2026 09:47")
+ pub fn build_datetime() -> String {
+-    build_datetime_at(build_time())
++    String::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; "0" or
+ /// unparsable means a local build).
+ fn build_datetime_at(build_time: &str) -> String {
+     let timestamp = build_time.parse::<i64>().unwrap_or(0);
+     if timestamp == 0 {
+         "local build".to_string()

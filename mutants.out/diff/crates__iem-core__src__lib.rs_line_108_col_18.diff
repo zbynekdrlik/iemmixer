@@ -1,0 +1,21 @@
+--- crates/iem-core/src/lib.rs
++++ replace == with != in build_datetime_at
+@@ -100,17 +100,17 @@
+ pub fn build_datetime() -> String {
+     build_datetime_at(build_time())
+ }
+ 
+ /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; "0" or
+ /// unparsable means a local build).
+ fn build_datetime_at(build_time: &str) -> String {
+     let timestamp = build_time.parse::<i64>().unwrap_or(0);
+-    if timestamp == 0 {
++    if timestamp != /* ~ changed by cargo-mutants ~ */ 0 {
+         "local build".to_string()
+     } else {
+         utc_format(timestamp, "%d.%m.%Y %H:%M").unwrap_or_else(|| "unknown".to_string())
+     }
+ }
+ 
+ /// Get formatted deployment timestamp (e.g., "2026-02-26 14:30:00 UTC")
+ pub fn deployed_at() -> String {

@@ -1,0 +1,26 @@
+--- crates/iem-core/src/lib.rs
++++ replace deployed_at_at -> String with String::new()
+@@ -115,22 +115,17 @@
+ /// Get formatted deployment timestamp (e.g., "2026-02-26 14:30:00 UTC")
+ pub fn deployed_at() -> String {
+     deployed_at_at(build_time())
+ }
+ 
+ /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+ /// is unknown).
+ fn deployed_at_at(build_time: &str) -> String {
+-    let timestamp = build_time.parse::<i64>().unwrap_or(0);
+-    if timestamp == 0 {
+-        "unknown".to_string()
+-    } else {
+-        utc_format(timestamp, "%Y-%m-%d %H:%M:%S UTC").unwrap_or_else(|| "unknown".to_string())
+-    }
++    String::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod version_tests {
+     use super::*;
+ 
+     #[test]
+     fn version_label_is_v_plus_the_cargo_version() {

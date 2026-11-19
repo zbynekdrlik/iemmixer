@@ -393,7 +393,7 @@ fn a_shutdown_and_a_stall_in_one_tick_end_with_the_shutdown() {
     let mut r = rig();
     r.status.faded_out.store(true, Ordering::Release);
     let why =
-        "the engine pump stalled: blocks frozen at 3 for 2500 ms while the media clock is ready";
+        "the engine pump stalled: blocks frozen at 3 for 500 ms while the media clock is ready";
     r.c.driver = Some(scripted(Some(Ending::Backend(why.into()))));
     r.c.shutdown = true;
     assert_eq!(

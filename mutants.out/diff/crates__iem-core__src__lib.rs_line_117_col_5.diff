@@ -1,0 +1,21 @@
+--- crates/iem-core/src/lib.rs
++++ replace deployed_at -> String with String::new()
+@@ -109,17 +109,17 @@
+         "local build".to_string()
+     } else {
+         utc_format(timestamp, "%d.%m.%Y %H:%M").unwrap_or_else(|| "unknown".to_string())
+     }
+ }
+ 
+ /// Get formatted deployment timestamp (e.g., "2026-02-26 14:30:00 UTC")
+ pub fn deployed_at() -> String {
+-    deployed_at_at(build_time())
++    String::new() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+ /// is unknown).
+ fn deployed_at_at(build_time: &str) -> String {
+     let timestamp = build_time.parse::<i64>().unwrap_or(0);
+     if timestamp == 0 {
+         "unknown".to_string()

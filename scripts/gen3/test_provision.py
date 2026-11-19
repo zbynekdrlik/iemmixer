@@ -1501,9 +1501,12 @@ class MdnsCapTests(World):
         # After nftables.service: an /etc/nftables.conf that begins with
         # `flush ruleset` would otherwise remove the table once it is loaded.
         self.assertIn("nftables.service", " ".join(unit["Unit"]["After"]).split())
+        # And restarted with it: a `systemctl restart nftables` loads the
+        # table again. PartOf= never starts nftables nor waits for it.
+        self.assertEqual(unit["Unit"]["PartOf"], ["nftables.service"])
         self.assertEqual(unit["Install"]["WantedBy"], ["multi-user.target"])
         # Ordering only: a failure here holds back neither the clock nor the stack.
-        for key in ("Requires", "RequiredBy", "BindsTo", "PartOf", "Requisite"):
+        for key in ("Requires", "RequiredBy", "BindsTo", "Requisite"):
             self.assertNotIn(key, unit["Unit"])
             self.assertNotIn(key, unit["Install"])
 
