@@ -1,0 +1,54 @@
+# The Gen 3 box's restart notice (#130); rules in .claude/rules/gen3.md.
+# iem-alarm@.service covers a unit that stays down; RestartMode=direct keeps
+# an automatic restart out of `failed`, so the engine's restart after exit 1
+# would pass unseen. Exit 1 is the engine's backend ending by itself: its
+# pump stalled (the stall watch, dante/stall.rs), the device stopped serving,
+# an I/O error. The exit status cannot tell them apart, so the notice says
+# exit 1 and the engine's journal says which (`journalctl -u iem-engine`).
+#
+# iem-engine.service's ExecStopPost= starts this at every end of the engine,
+# with the engine's EXIT_CODE-EXIT_STATUS as its instance (exited-1,
+# exited-0, killed-TERM, ...). ExecCondition= skips every end but exited-1
+# (the unit reads inactive, never failed): a stop (exit 0), exit 2 and 3
+# (not restarted: the stays-down alarm), 70 (an RT fault: the HIL gate's
+# panic check injects one at every run) and 75 (the state folder still
+# locked). A crash loop sends at most three (StartLimitBurst=3), then the
+# start limit raises the stays-down alarm.
+#
+# Then, as iem-alarm@.service: one journal line (`journalctl -t
+# iem-restart-alarm`) and, only while the box serves the band (its engine
+# enabled at boot), the notice down the server's own path to the engineer's
+# devices, `iem-server notify --to alarm` on the box's site; a spare's
+# ExecStartPre= fails before the notice, and a notice no device took exits 3;
+# neither raises anything more. The line and the notice name the engine and
+# fixed words only (P6).
+#
+# A notice never raises an alarm (no OnFailure=), never restarts and is never
+# enabled (no [Install]); no shell: each command is a program and its
+# arguments. Its stop is bounded and never a kill (I8).
+
+[Unit]
+Description=iemmixer Gen 3 restart notice: the engine ended (%i)
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+
+[Service]
+Type=oneshot
+User=iemmixer
+Group=iemmixer
+SyslogIdentifier=iem-restart-alarm
+Environment=IEMMIXER_CONFIG=/var/lib/iemmixer/site/iemmixer.toml
+ExecCondition=/usr/bin/test %i = exited-1
+ExecStartPre=/usr/bin/echo "alarm: iem-engine.service ended unexpectedly (exit 1) and is being restarted"
+ExecStartPre=/usr/bin/systemctl is-enabled --quiet iem-engine.service
+ExecStart=/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "iem-engine.service ended unexpectedly (exit 1: a stalled engine pump, the device stopped serving or an I/O error) and is being restarted"
+TimeoutStartSec=30
+TimeoutStopSec=10
+SendSIGKILL=no
+# It reads the site, the engineer's subscriptions and the VAPID key, and
+# sends the pushes: nothing to write, no capability.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

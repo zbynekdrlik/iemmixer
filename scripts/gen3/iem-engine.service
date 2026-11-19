@@ -3,7 +3,8 @@
 # rules in .claude/rules/gen3.md and .claude/rules/engine.md.
 # Phase D: it runs as the service user `iemmixer` (a system
 # user without login or home, not site data), and a unit that stays down
-# raises one alarm (iem-alarm@.service).
+# raises one alarm (iem-alarm@.service); a restart after exit 1 one notice
+# (iem-restart-alarm@.service, #130).
 # Public repository (P6): the box's interface comes from a file deploy.sh
 # writes on the box, never from here: /etc/iemmixer/iem-dante.env
 # (IEM_DANTE_IFACE=, the standalone device's too). The site is the public
@@ -29,7 +30,7 @@ StartLimitIntervalSec=600
 StartLimitBurst=3
 # Down for good (start-limit-hit, exit 2 or 3, a stop past its bound): one
 # alarm. RestartMode=direct keeps a restart out of `failed`, so a restart
-# raises none.
+# raises none; a restart after exit 1 has its own notice (ExecStopPost=).
 OnFailure=iem-alarm@%n.service
 
 [Service]
@@ -49,6 +50,14 @@ RestartSteps=4
 RestartMaxDelaySec=10
 RestartMode=direct
 RestartPreventExitStatus=2 3
+# Every end hands its exit (EXIT_CODE-EXIT_STATUS: exited-1, exited-0,
+# killed-TERM, ...) to iem-restart-alarm@.service, which notifies the owner
+# for exit 1 only (a stalled pump, #130; the device stopped serving, an I/O
+# error) and skips every other end. `+`: the service user cannot start a
+# unit, so this one line runs as root outside the sandbox; --no-block: the
+# restart never waits for the notice; `-`: a refused start (a system
+# shutdown) never changes the engine's result.
+ExecStopPost=-+/usr/bin/systemctl start --no-block iem-restart-alarm@${EXIT_CODE}-${EXIT_STATUS}.service
 # A stop is SIGTERM and a bounded wait (I8): the engine's shutdown saves,
 # fades, stops our RX flows at their transmitters (within 1 s), ends the pump
 # and the media threads, sends the goodbyes and exits 0. One that does not end

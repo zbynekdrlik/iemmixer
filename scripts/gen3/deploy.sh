@@ -64,8 +64,9 @@ set -euo pipefail
 # - The stop: none of the three units may still run after it (`systemctl
 #   is-active`: inactive or failed); a unit no deploy has installed yet is
 #   "not loaded", so the stop's own exit is not the verdict.
-# - The four units beside this script (the engine, the server, the standalone
-#   device and the alarm unit, each under the service user `iemmixer` of its
+# - The five units beside this script (the engine, the server, the standalone
+#   device, the alarm unit and the restart notice, #130, each under the
+#   service user `iemmixer` of its
 #   own), the config, the interface (written as /etc/iemmixer/iem-dante.env)
 #   phase E's receiver of the band's data (band_receive.py, into
 #   /opt/iemmixer/lib, root's, 0755; #72) with its sender (band_send.py, the
@@ -130,7 +131,7 @@ CREDENTIAL=/etc/credstore.encrypted/iemmixer-pepper
 GITHUB_REPO=zbynekdrlik/iemmixer
 SIGNER=$GITHUB_REPO/.github/workflows/ci.yml
 BINARIES=(iem-engine iem-server iem-dante-dev iem-soakclient)
-UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service)
+UNITS=(iem-dante.service iem-engine.service iem-server.service iem-alarm@.service iem-restart-alarm@.service)
 RECEIVER=band_receive.py
 SENDER=band_send.py
 LIBDIR=/opt/iemmixer/lib

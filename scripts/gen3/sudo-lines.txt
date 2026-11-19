@@ -43,6 +43,7 @@ root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.service /etc/systemd/
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-engine.service /etc/systemd/system/iem-engine.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-server.service /etc/systemd/system/iem-server.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd/system/iem-alarm@.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-restart-alarm@.service /etc/systemd/system/iem-restart-alarm@.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
 root | install -D -m 0755 .cache/iem-gen3-deploy/band_receive.py /opt/iemmixer/lib/band_receive.py

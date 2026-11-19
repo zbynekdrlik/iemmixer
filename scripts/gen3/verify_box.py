@@ -14,7 +14,7 @@ with a fixed reason
   the admin (the user running this) in that group.
 - units: iem-engine, iem-server and iem-dante installed (loaded), each running
   as iemmixer, none with phase C's 10-user.conf drop-in; iem-alarm@.service
-  installed as iemmixer. A box no phase D deploy has reached fails here.
+  and iem-restart-alarm@.service (#130) installed as iemmixer. A box no phase D deploy has reached fails here.
 - boot: none of the three enabled.
 - sudoers: `sudo -n visudo -c` passes and /etc/sudoers.d/iemmixer-gen3 is
   there.
@@ -93,6 +93,7 @@ WORKQUEUE_MASK = "/sys/devices/virtual/workqueue/cpumask"
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-pepper"
 SUDOERS = "/etc/sudoers.d/iemmixer-gen3"
 ALARM = "/etc/systemd/system/iem-alarm@.service"
+RESTART_ALARM = "/etc/systemd/system/iem-restart-alarm@.service"
 ENGINE_UNIT = "/etc/systemd/system/iem-engine.service"
 JOURNAL_CONF = "/etc/systemd/journald.conf.d/50-iemmixer.conf"
 JOURNAL = {"Storage": "persistent", "SystemMaxUse": "1G", "MaxRetentionSec": "30day"}
@@ -214,10 +215,12 @@ def check_units(box: Box) -> None:
             raise Failed(f"{name} does not run as iemmixer")
         if "10-user.conf" in unit.get("DropInPaths", ""):
             raise Failed(f"{name} keeps phase C's 10-user.conf")
-    if not os.path.isfile(at(ALARM)):
-        raise Failed("iem-alarm@.service is not installed")
-    if f"User={SERVICE_USER}" not in (line.strip() for line in read(ALARM).splitlines()):
-        raise Failed("iem-alarm@.service does not run as iemmixer")
+    for path in (ALARM, RESTART_ALARM):
+        name = os.path.basename(path)
+        if not os.path.isfile(at(path)):
+            raise Failed(f"{name} is not installed")
+        if f"User={SERVICE_USER}" not in (line.strip() for line in read(path).splitlines()):
+            raise Failed(f"{name} does not run as iemmixer")
     # The media clock's in-process follower binds UDP 319 (dstack v0.6.23);
     # without the capability it stays silently on dantesync's clock.
     ambient = [line.strip() for line in read(ENGINE_UNIT).splitlines()

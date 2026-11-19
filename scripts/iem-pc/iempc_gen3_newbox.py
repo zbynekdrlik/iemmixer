@@ -74,6 +74,7 @@ CHECKOUT_FILES = {
     "/etc/systemd/system/iem-server.service": "iem-server.service",
     "/etc/systemd/system/iem-dante.service": "iem-dante.service",
     "/etc/systemd/system/iem-alarm@.service": "iem-alarm@.service",
+    "/etc/systemd/system/iem-restart-alarm@.service": "iem-restart-alarm@.service",
     "/etc/systemd/system/iem-tunnel.service": "iem-tunnel.service",
     "/etc/systemd/system/iem-napi.service": "iem-napi.service",
     "/usr/local/lib/iemmixer/napi-priority": "napi-priority",

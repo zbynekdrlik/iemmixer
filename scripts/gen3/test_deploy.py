@@ -29,7 +29,9 @@ REPO = HERE.parent.parent
 DEPLOY = HERE / "deploy.sh"
 UNITS = {name: HERE / f"{name}.service" for name in ("iem-dante", "iem-engine", "iem-server")}
 ALARM = HERE / "iem-alarm@.service"
-UNIT_FILES = ("iem-dante.service", "iem-engine.service", "iem-server.service", "iem-alarm@.service")
+RESTART_ALARM = HERE / "iem-restart-alarm@.service"
+UNIT_FILES = ("iem-dante.service", "iem-engine.service", "iem-server.service", "iem-alarm@.service",
+              "iem-restart-alarm@.service")
 TEMPLATE = HERE / "sudo-lines.txt"
 TEST_SITE = REPO / "config" / "test-site.toml"
 TEST_ROSTER = REPO / "config" / "test-roster.toml"
@@ -708,6 +710,7 @@ class DeployTests(unittest.TestCase):
         f"sudo -n install -D -m 0644 {STAGE}/iem-engine.service /etc/systemd/system/iem-engine.service",
         f"sudo -n install -D -m 0644 {STAGE}/iem-server.service /etc/systemd/system/iem-server.service",
         f"sudo -n install -D -m 0644 {STAGE}/iem-alarm@.service /etc/systemd/system/iem-alarm@.service",
+        f"sudo -n install -D -m 0644 {STAGE}/iem-restart-alarm@.service /etc/systemd/system/iem-restart-alarm@.service",
         f"sudo -n install -D -m 0644 {STAGE}/dante-device.toml /etc/iemmixer/dante-device.toml",
         f"sudo -n install -D -m 0644 {STAGE}/iem-dante.env /etc/iemmixer/iem-dante.env",
         f"sudo -n install -D -m 0755 {STAGE}/band_receive.py /opt/iemmixer/lib/band_receive.py",
@@ -1874,8 +1877,11 @@ class UnitTests(unittest.TestCase):
     def alarm(self) -> dict[str, dict[str, list[str]]]:
         return parse_unit(ALARM)
 
+    def restart_alarm(self) -> dict[str, dict[str, list[str]]]:
+        return parse_unit(RESTART_ALARM)
+
     def all_four(self) -> dict[str, dict[str, dict[str, list[str]]]]:
-        return {**self.units, "iem-alarm@": self.alarm()}
+        return {**self.units, "iem-alarm@": self.alarm(), "iem-restart-alarm@": self.restart_alarm()}
 
     def test_the_engine_and_the_standalone_device_conflict_both_ways(self) -> None:
         self.assertEqual(self.units["iem-engine"]["Unit"].get("Conflicts"), ["iem-dante.service"])
@@ -1912,7 +1918,7 @@ class UnitTests(unittest.TestCase):
                 self.assertEqual(one(unit, "Service", "Group"), "iemmixer")
                 for section in unit.values():
                     self.assertNotIn("DynamicUser", section)
-        for path in [*UNITS.values(), ALARM]:
+        for path in [*UNITS.values(), ALARM, RESTART_ALARM]:
             self.assertNotIn("10-user.conf", path.read_text(encoding="utf-8"), path.name)
 
     def test_every_unit_raises_the_alarm_only_when_it_stays_down(self) -> None:
@@ -1979,7 +1985,7 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(one(engine, "Service", "RuntimeDirectoryMode"), "0750")
         self.assertEqual(one(device, "Service", "RuntimeDirectory"), "iem-dante")
         self.assertEqual(one(device, "Service", "RuntimeDirectoryMode"), "0750")
-        for unit in (server, self.alarm()):
+        for unit in (server, self.alarm(), self.restart_alarm()):
             self.assertNotIn("RuntimeDirectory", unit["Service"])
             self.assertNotIn("RuntimeDirectoryMode", unit["Service"])
 
@@ -1991,8 +1997,9 @@ class UnitTests(unittest.TestCase):
         for unit, folders in ((engine, "iemmixer iem-dante"), (device, "iem-dante"), (server, "iemmixer")):
             self.assertEqual(one(unit, "Service", "StateDirectory"), folders)
             self.assertEqual(one(unit, "Service", "StateDirectoryMode"), "0750")
-        self.assertNotIn("StateDirectory", self.alarm()["Service"])
-        self.assertNotIn("StateDirectoryMode", self.alarm()["Service"])
+        for alarm in (self.alarm(), self.restart_alarm()):
+            self.assertNotIn("StateDirectory", alarm["Service"])
+            self.assertNotIn("StateDirectoryMode", alarm["Service"])
 
     def test_the_engine_unit_restarts_except_on_a_usage_or_card_refusal(self) -> None:
         engine = self.units["iem-engine"]
@@ -2098,6 +2105,87 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(one(alarm, "Service", "SendSIGKILL"), "no")
         for key, value in self.HARDENING:
             self.assertEqual(one(alarm, "Service", key), value, key)
+
+    def test_only_the_engine_hands_every_end_to_the_restart_notice(self) -> None:
+        # #130: RestartMode=direct keeps a restart out of `failed`, so the
+        # engine's ExecStopPost= hands each end (EXIT_CODE-EXIT_STATUS) to the
+        # restart notice: `-` a refused start never changes the engine's
+        # result, `+` root (the service user cannot start a unit), --no-block
+        # the restart never waits for the notice.
+        engine = self.units["iem-engine"]["Service"]
+        self.assertEqual(engine.get("ExecStopPost"), [
+            "-+/usr/bin/systemctl start --no-block iem-restart-alarm@${EXIT_CODE}-${EXIT_STATUS}.service",
+        ])
+        argv = shlex.split(engine["ExecStopPost"][0].removeprefix("-+"))
+        self.assertEqual(argv, ["/usr/bin/systemctl", "start", "--no-block",
+                                "iem-restart-alarm@${EXIT_CODE}-${EXIT_STATUS}.service"])
+        for name in ("iem-server", "iem-dante"):
+            self.assertNotIn("ExecStopPost", self.units[name]["Service"], name)
+        # The restart notice raises no alarm of its own and nobody but the
+        # engine starts it.
+        for path in [*UNITS.values(), ALARM]:
+            if path.name != "iem-engine.service":
+                self.assertNotIn("iem-restart-alarm", path.read_text(encoding="utf-8"), path.name)
+
+    def test_the_restart_notice_fires_on_exit_1_only_and_notifies_the_engineer(self) -> None:
+        notice = self.restart_alarm()
+        service = notice["Service"]
+        self.assertEqual(one(notice, "Service", "Type"), "oneshot")
+        self.assertEqual(one(notice, "Service", "SyslogIdentifier"), "iem-restart-alarm")
+        self.assertEqual(one(notice, "Service", "TimeoutStartSec"), "30")
+        server_env = dict(item.split("=", 1)
+                          for item in shlex.split(one(self.units["iem-server"], "Service", "Environment")))
+        self.assertEqual(service.get("Environment"), [f"IEMMIXER_CONFIG={server_env['IEMMIXER_CONFIG']}"])
+        # The instance is the engine's EXIT_CODE-EXIT_STATUS: only exited-1
+        # (a stalled pump, the device stopped serving, an I/O error) runs on;
+        # a stop (exited-0, killed-TERM), 2, 3, 70 (the HIL gate's injected
+        # RT fault) and 75 are skipped, the unit inactive, never failed.
+        self.assertEqual(service.get("ExecCondition"), ["/usr/bin/test %i = exited-1"])
+        condition = shlex.split(service["ExecCondition"][0])
+        for end, runs in (("exited-1", True), ("exited-0", False), ("killed-TERM", False), ("exited-2", False),
+                          ("exited-3", False), ("exited-70", False), ("exited-75", False), ("exited-10", False)):
+            # The condition itself, run as systemd runs it (%i replaced).
+            argv = [word.replace("%i", end) for word in condition]
+            self.assertEqual(subprocess.run(argv, check=False).returncode == 0, runs, end)
+        # The journal line, then the notice only on a box that serves the band
+        # (its engine enabled at boot), as the stays-down alarm.
+        self.assertEqual(service.get("ExecStartPre"), [
+            '/usr/bin/echo "alarm: iem-engine.service ended unexpectedly (exit 1) and is being restarted"',
+            "/usr/bin/systemctl is-enabled --quiet iem-engine.service",
+        ])
+        self.assertEqual(service.get("ExecStart"), [
+            '/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "iem-engine.service ended unexpectedly '
+            '(exit 1: a stalled engine pump, the device stopped serving or an I/O error) and is being restarted"',
+        ])
+        notify = shlex.split(service["ExecStart"][0])
+        self.assertEqual(notify[0], one(self.units["iem-server"], "Service", "ExecStart"))
+        self.assertEqual(notify[1:4], ["notify", "--to", "alarm"])
+        self.assertEqual(notify[4], "Gen 3 box")
+        self.assertIn("stalled engine pump", notify[5])
+        self.assertIn("is being restarted", notify[5])
+        # It reads no MONITOR_* (only OnFailure= units get them).
+        for lines in service.values():
+            self.assertFalse(any("${MONITOR_" in line for line in lines))
+
+    def test_the_restart_notice_never_loops_never_starts_by_itself_and_runs_no_shell(self) -> None:
+        notice = self.restart_alarm()
+        for section in notice.values():
+            for key in ("OnFailure", "OnSuccess", "Restart"):
+                self.assertNotIn(key, section)
+        self.assertNotIn("Install", notice)
+        service = notice["Service"]
+        lines = [line for key in ("ExecStartPre", "ExecStart", "ExecStartPost", "ExecCondition", "ExecReload",
+                                  "ExecStop", "ExecStopPost") for line in service.get(key, [])]
+        self.assertEqual(len(lines), 4)
+        for line in lines:
+            argv = shlex.split(line)
+            self.assertTrue(argv[0].startswith("/"), line)
+            self.assertNotIn(Path(argv[0]).name, self.SHELLS, line)
+            self.assertNotIn("-c", argv[1:], line)
+        self.assertEqual(one(notice, "Service", "TimeoutStopSec"), "10")
+        self.assertEqual(one(notice, "Service", "SendSIGKILL"), "no")
+        for key, value in self.HARDENING:
+            self.assertEqual(one(notice, "Service", key), value, key)
 
 
 if __name__ == "__main__":

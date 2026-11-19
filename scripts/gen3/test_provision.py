@@ -898,7 +898,7 @@ class World(unittest.TestCase):
 
     def deploy_units(self) -> None:
         """What deploy.sh installs: phase D's units, then daemon-reload."""
-        for name in (*STACK, "iem-alarm@.service"):
+        for name in (*STACK, "iem-alarm@.service", "iem-restart-alarm@.service"):
             shutil.copyfile(HERE / name, self.root / "etc/systemd/system" / name)
         self.run_fake("systemctl", "daemon-reload")
 
@@ -1937,6 +1937,11 @@ class VerifyTests(World):
             ("realtime", lambda: write(workqueue, WORKQUEUE_LINE.replace(" 3\n", " f\n")), workqueue_reason),
             ("units", lambda: (self.root / "etc/systemd/system/iem-alarm@.service").unlink(),
              "iem-alarm@.service is not installed"),
+            ("units", lambda: (self.root / "etc/systemd/system/iem-restart-alarm@.service").unlink(),
+             "iem-restart-alarm@.service is not installed"),
+            ("units", lambda: write(self.root / "etc/systemd/system/iem-restart-alarm@.service",
+                                    "[Service]\nUser=root\n"),
+             "iem-restart-alarm@.service does not run as iemmixer"),
             ("units", unit("iem-dante.service", LoadState="not-found"), "iem-dante.service is not installed"),
             ("units", lambda: write(self.root / "etc/systemd/system/iem-engine.service",
                                     "[Service]\nAmbientCapabilities=CAP_NET_RAW\n"),
