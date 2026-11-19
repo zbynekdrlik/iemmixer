@@ -65,8 +65,11 @@ it already is, waited Receiving); one burst (`supervise test-signal mic1 -30
 10`, the flag checked first; `supervise status` polled until the spare
 outputs carried it and a later status shows them silent, within
 BURST_LIMIT_S): every spare output's loudest peak at -30 dBFS within 0.5 dB,
-the last status silent, `loopback_samples` above 0; the return's
-subscription put back as it was (or none) and read back; the alarm path's
+the last status silent, `loopback_samples` above 0; the loop's computed
+round trip (`loop_expected`, one `ctl status` read before the loop is put
+back: D plus the delay of the RX flow carrying the return, gen3_latency's
+helpers) read and the measured one within LOOP_TOLERANCE_SAMPLES of it; the
+return's subscription put back as it was (or none) and read back; the alarm path's
 count (`iem-server notify --count alarm` as the service user, at least one
 device; never a notice) and the engine enabled at boot (the alarm unit's
 gate); no automatic restart so far; then, only while the engine is healthy,
@@ -147,6 +150,15 @@ SUPERVISE = (*AS_SERVICE, ENGINE_BIN, "supervise")
 # The gate's one burst: fixed, as the sudo rule names it.
 BURST_INPUT, BURST_DBFS, BURST_SECONDS = "mic1", -30, 10
 LEVEL_DB = 0.5   # the tolerance for the spare outputs' level
+# The measured self-loop round trip against the computed one (#122), either
+# way: one sample for the probe's onset (the first sample at or above
+# latency.rs's ONSET, about -60 dBFS, on the output and on its return; the
+# return carries the output quantized at the device's encoding, so a sample
+# right at the threshold can fall on its other side, the arrival one sample
+# early or late) and one for dstack's latencies in whole microseconds,
+# truncated from ns (a path from the status can read one sample short). A
+# real change of the path (a block, a playout or work margin step) is larger.
+LOOP_TOLERANCE_SAMPLES = 2
 CALL_S = 30   # one ssh call: the connect, then the box's own bounded command
 RESTART_S = 60   # `systemctl restart`: the engine's bounded stop (10 s), then its start
 HEALTH_WAIT_S = 90.0   # healthy after a restart: the clock's 30 s grace and more
@@ -181,7 +193,7 @@ DESC_PASS = "the Gen 3 box's HIL passed (iempc gen3-gate hil)"
 DESC_FAIL = "the Gen 3 box's HIL failed: "
 # The failures a verdict names, in its order.
 FAILURES = ("health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard", "level", "not_silent",
-            "no_loopback", "loop_not_restored", "alarm_count", "alarm_not_armed", "restarted", "restarts_unread", "panic",
+            "no_loopback", "loop_latency_mismatch", "loop_latency_unread", "loop_not_restored", "alarm_count", "alarm_not_armed", "restarted", "restarts_unread", "panic",
             "job_end")
 # The server's build, read on the box (python3 -I on ssh's stdin, no file left
 # there): its `git_hash` only.
@@ -442,6 +454,8 @@ class Checks:
     sha: str | None = None
     loop: str = "none"   # kept (already our own loop), set, refused, none
     burst: Burst | None = None
+    # The loop's computed round trip (loop_expected); None when not read.
+    loop_expected: int | None = None
     loop_restored: bool = True
     alarm_devices: int | None = None
     alarm_armed: bool = False
@@ -456,6 +470,18 @@ class Checks:
     starts: int = 0
     end_ok: bool = False
     hil_off: bool = False
+
+
+def loop_expected(status: dict | None, ret: int) -> int | None:
+    """The D5(b) self-loop's computed round trip in samples (pure, #122): D
+    (`ctl status` `engine.offset`) plus the worst `delay` of the RX flows
+    whose `rx_channels` hold the return `ret` (gen3_latency's helpers, the
+    latency guard's model); None when either cannot be read (no status, no
+    engine object, no flow carrying the return)."""
+    if not isinstance(status, dict):
+        return None
+    d, delay = gen3_latency.offset(status), gen3_latency.flow_delay(status, ret)
+    return None if d is None or delay is None else d + delay
 
 
 def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
@@ -481,6 +507,11 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
     loopback = c.burst.loopback if c.burst else 0
     if loopback <= 0:
         failed.append("no_loopback")
+    delta = loopback - c.loop_expected if loopback > 0 and c.loop_expected is not None else None
+    if delta is not None and abs(delta) > LOOP_TOLERANCE_SAMPLES:
+        failed.append("loop_latency_mismatch")
+    if c.loop_expected is None:
+        failed.append("loop_latency_unread")
     if not c.loop_restored:
         failed.append("loop_not_restored")
     if c.alarm_devices is None or c.alarm_devices < 1:
@@ -501,7 +532,8 @@ def verdict(c: Checks, outputs: list[int], left: bool) -> dict:
         "versions": int(c.versions),
         "outputs": signal["outputs"], "dbfs": BURST_DBFS, "seconds": BURST_SECONDS,
         "lowest_dbfs": signal["lowest_dbfs"], "highest_dbfs": signal["highest_dbfs"], "still": signal["still"],
-        "loop": c.loop, "loopback_samples": loopback, "loop_restored": int(c.loop_restored),
+        "loop": c.loop, "loopback_samples": loopback, "loop_expected_samples": c.loop_expected,
+        "loop_delta_samples": delta, "loop_restored": int(c.loop_restored),
         "alarm_devices": c.alarm_devices, "alarm_armed": int(c.alarm_armed), "unit_restarts": c.unit_restarts,
         "panic": "skipped" if c.panic_skipped else int(c.panic), "panic_restarts": c.panic_restarts,
         "starts": c.starts, "left_job": int(left),
@@ -1169,6 +1201,8 @@ def in_job(job: Job, c: Checks) -> None:
         set_loop(job, c)
         c.burst = burst(job)
         stop_burst(job)   # one the limit cut short
+        # The computed round trip while the loop's flow is still there.
+        c.loop_expected = loop_expected(job.box.device_status(), job.facts.hil_tx[0])
         restore_loop(job, c)
     read_alarm(job.box, c)
     read_restarts(job.box, c)   # before the panic: its one restart is the panic check's

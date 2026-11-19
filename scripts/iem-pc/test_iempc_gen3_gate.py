@@ -355,14 +355,22 @@ if line == f"{DANTE} ctl status":
     rx = [{"flow": 4, "device": "zyxqw-stage", "granted": 1, "fpp": 4, "channels": 14,
            "rx_channels": [n for n in range(1, 15) if n != unmapped],
            "delay": int(os.environ.get("FAKE_RX_DELAY", "16"))}]
+    # The D5(b) self-loop's flow while our RX 61 hears our TX 61: D 56 + its
+    # delay 21 (FAKE_LOOP_DELAY) = 77, the probe's round trip (TRIP);
+    # FAKE_NO_LOOP_FLOW none carries it, FAKE_NO_ENGINE no engine object.
+    if looped() and not os.environ.get("FAKE_NO_LOOP_FLOW"):
+        rx.append({"flow": 6, "device": "zyxqw-self", "granted": 1, "fpp": 4, "channels": 1, "rx_channels": [61],
+                   "delay": int(os.environ.get("FAKE_LOOP_DELAY", "21"))})
     eng_tx = [int(n) for n in os.environ.get("FAKE_ENG_TX", "21,22").split(",")]
     tx = [{"flow": 1, "receiver": "zyxqw-iemrack", "live": 1, "fpp": 4, "channels": 4, "tx_channels": [1, 2, 3, 4],
            "receiver_latency_us": int(os.environ.get("FAKE_TX_US", "250"))},
           {"flow": 5, "receiver": "zyxqw-fohdesk", "live": 1, "fpp": 4, "channels": 8,
            "tx_channels": eng_tx + [None] * (8 - len(eng_tx)), "receiver_latency_us": 1000}]
-    print(json.dumps({"clock": {"ready": 1, "epoch": 0, "polls": 9, "re_anchors": 0}, "tx": tx, "rx": rx,
-                      "channels": channels, "sources": [], "checks": [],
-                      "engine": {"media": 1, "offset": 56, "playout": 24}}))
+    doc = {"clock": {"ready": 1, "epoch": 0, "polls": 9, "re_anchors": 0}, "tx": tx, "rx": rx,
+           "channels": channels, "sources": [], "checks": [], "engine": {"media": 1, "offset": 56, "playout": 24}}
+    if os.environ.get("FAKE_NO_ENGINE"):
+        del doc["engine"]
+    print(json.dumps(doc))
     done()
 if line == f"{ENGINE} --version":
     print(os.environ.get("FAKE_ENGINE_VERSION", "iem-engine 2.0.0-dev.50+" + os.environ["FAKE_SHA"]))
@@ -567,11 +575,11 @@ class GateTests(GateBase):
         self.assertEqual(docs, [{"gen3_gate": {"hil": {
             "pass": 1, "health": 1, "rx_back": 1, "rx_channels": 4, "hil_on": 1, "versions": 1, "outputs": 2,
             "dbfs": -30, "seconds": 10, "lowest_dbfs": -30.0, "highest_dbfs": -30.0, "still": 0, "loop": "set",
-            "loopback_samples": TRIP, "loop_restored": 1, "alarm_devices": 1, "alarm_armed": 1, "unit_restarts": 0,
+            "loopback_samples": TRIP, "loop_expected_samples": TRIP, "loop_delta_samples": 0, "loop_restored": 1, "alarm_devices": 1, "alarm_armed": 1, "unit_restarts": 0,
             "panic": 1, "panic_restarts": 1, "starts": 3, "left_job": 0, "job_end": 1, "hil_off": 1,
             "failed": []}}}])
-        self.assertEqual(self.calls(), [*PREFLIGHT, *BEGIN, *VERSIONS, CTL, SIGNAL, *[STATUS] * 4, ALARM, ENABLED,
-                                        NRESTARTS, *PANIC, *END])
+        self.assertEqual(self.calls(), [*PREFLIGHT, *BEGIN, *VERSIONS, CTL, SIGNAL, *[STATUS] * 4, CTL, ALARM,
+                                        ENABLED, NRESTARTS, *PANIC, *END])
         # The status on the box's build: success, a fixed description.
         self.assertEqual(self.posts(), [["api", "-X", "POST", f"repos/{ip.REPO}/statuses/{SHA}", "-f",
                                          "state=success", "-f", "context=hil/gen3", "-f",
@@ -631,6 +639,55 @@ class GateTests(GateBase):
         calls = self.calls()
         self.assertIn(STOP, calls)
         self.assertLess(calls.index(STOP), calls.index(RM))
+
+    def test_a_measured_round_trip_off_the_computed_one_fails_as_a_mismatch(self) -> None:
+        # The loop's flow at delay 24: computed 80, measured 77, three samples short (the tolerance is 2).
+        code, docs, err = self.gate_run(FAKE_LOOP_DELAY="24")
+        self.assertEqual(code, 1, err)
+        doc = docs[0]["gen3_gate"]["hil"]
+        self.assertEqual((doc["failed"], doc["loopback_samples"], doc["loop_expected_samples"],
+                          doc["loop_delta_samples"]), (["loop_latency_mismatch"], TRIP, 80, -3))
+        self.assertEqual(self.posts()[0][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+                                               "description=the Gen 3 box's HIL failed: loop_latency_mismatch"])
+        self.assertFalse(self.dropin_there())   # the job ended all the same
+        self.assert_private(err + json.dumps(docs))
+
+    def test_a_round_trip_above_or_below_the_computed_one_by_more_than_the_tolerance_fails(self) -> None:
+        for delay, delta in (("24", -3), ("18", 3)):
+            with self.subTest(delay=delay):
+                self.next_run()
+                code, docs, err = self.gate_run(FAKE_LOOP_DELAY=delay)
+                doc = docs[0]["gen3_gate"]["hil"]
+                self.assertEqual((code, doc["failed"], doc["loop_delta_samples"]),
+                                 (1, ["loop_latency_mismatch"], delta), err)
+
+    def test_a_round_trip_within_the_tolerance_of_the_computed_one_passes(self) -> None:
+        for delay, delta in (("23", -2), ("19", 2)):
+            with self.subTest(delay=delay):
+                self.next_run()
+                code, docs, err = self.gate_run(FAKE_LOOP_DELAY=delay)
+                doc = docs[0]["gen3_gate"]["hil"]
+                self.assertEqual((code, doc["pass"], doc["failed"], doc["loop_delta_samples"]),
+                                 (0, 1, [], delta), err)
+
+    def test_a_computed_round_trip_that_cannot_be_read_fails_as_unread(self) -> None:
+        # No RX flow carrying the return, or no engine object in the device's status: fail closed.
+        for env in ({"FAKE_NO_LOOP_FLOW": "1"}, {"FAKE_NO_ENGINE": "1"}):
+            with self.subTest(env=env):
+                self.next_run()
+                code, docs, err = self.gate_run(**env)
+                self.assertEqual(code, 1, err)
+                doc = docs[0]["gen3_gate"]["hil"]
+                self.assertEqual((doc["failed"], doc["loopback_samples"], doc["loop_expected_samples"],
+                                  doc["loop_delta_samples"]), (["loop_latency_unread"], TRIP, None, None))
+                self.assertEqual(self.posts()[-1][4:], ["-f", "state=failure", "-f", "context=hil/gen3", "-f",
+                                                        "description=the Gen 3 box's HIL failed: loop_latency_unread"])
+                self.assert_private(err + json.dumps(docs))
+
+    def next_run(self) -> None:
+        """The box as after a run, the budget's window passed."""
+        self.again()
+        self.now += 601
 
     def test_an_engine_that_restarts_by_itself_in_the_job_fails_injects_no_fault_and_counts_in_the_budget(
             self) -> None:
@@ -1308,7 +1365,7 @@ class PureTests(unittest.TestCase):
         doc = gate.verdict(gate.Checks(), [61, 62], left=True)
         self.assertEqual(doc["pass"], 0)
         self.assertEqual(doc["failed"], ["health", "rx_not_back", "hil_not_on", "versions", "loop", "not_heard",
-                                         "no_loopback", "alarm_count", "alarm_not_armed", "panic", "job_end"])
+                                         "no_loopback", "loop_latency_unread", "alarm_count", "alarm_not_armed", "panic", "job_end"])
         self.assertEqual((doc["panic"], doc["panic_restarts"]), (0, None))
         self.assertEqual(doc["failed"], [w for w in gate.FAILURES if w in doc["failed"]])   # in FAILURES' order
         self.assertNotIn("61", json.dumps(doc))
