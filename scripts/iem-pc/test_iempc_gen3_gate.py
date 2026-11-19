@@ -1123,16 +1123,21 @@ class LatencyTests(GateBase):
         # GEN3_OPTIONAL_RX: a source a musician carries away fails no gate
         # off (the soak of 2026-11-19 failed on such an input as unknown).
         with open(ip.env_path(), "a", encoding="utf-8") as f:
-            f.write("GEN3_OPTIONAL_RX=3\n")
-        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="3")
+            f.write("GEN3_OPTIONAL_RX=4\n")
+        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="4", FAKE_RX_OFF="1")
         doc = docs[0]["gen3_gate"]["latency"]
-        self.assertEqual((code, doc["pass"], doc["paths"][2]["state"]), (0, 1, "off"), err)
+        self.assertEqual((code, doc["pass"], doc["paths"][3]["state"]), (0, 1, "off"), err)
         self.assert_private(err + json.dumps(docs))
+        # Receiving yet no flow maps it: unknown, a fail, never off.
+        self.again()
+        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="4")
+        doc = docs[0]["gen3_gate"]["latency"]
+        self.assertEqual((code, doc["pass"], doc["paths"][3]["state"]), (1, 0, "unknown"), err)
         # A malformed list is never a pass.
         with open(ip.env_path(), "a", encoding="utf-8") as f:
             f.write("GEN3_OPTIONAL_RX=three\n")
         self.again()
-        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="3")
+        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="4", FAKE_RX_OFF="1")
         self.assertNotEqual(code, 0, err)
         self.assertFalse(any(d["gen3_gate"]["latency"]["pass"] for d in docs), docs)
 

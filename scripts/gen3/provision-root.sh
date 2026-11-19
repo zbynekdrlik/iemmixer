@@ -663,13 +663,24 @@ grub_menu_holds() {
     grep -q -F -e "menuentry 'Ubuntu, with Linux $1'" -- "$R$GRUB_MENU"
 }
 
+# Installs the package $1, the package lists brought up to date first (once a
+# run): a box whose lists are stale or empty would not find it.
+apt_updated=0
+apt_install() {
+  if [ "$apt_updated" = 0 ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get update || die "apt-get update failed (exit $?)"
+    apt_updated=1
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$1" ||
+    die "apt-get install of $1 failed (exit $?)"
+}
+
 step_realtime() {
   local state kernel version entry saved running
   local -a versions=()
   state="$(package_status "$REALTIME_PACKAGE")"
   if [ "$state" != installed ]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$REALTIME_PACKAGE" ||
-      die "apt-get install of $REALTIME_PACKAGE failed (exit $?)"
+    apt_install "$REALTIME_PACKAGE"
     changed=1
     state="$(package_status "$REALTIME_PACKAGE")"
     [ "$state" = installed ] || die "$REALTIME_PACKAGE is '$state' after its install"
@@ -878,8 +889,7 @@ step_mdns_cap() {
   # The cap's loader, where its unit's ExecStart names it (a box from zero
   # has none: the live box of 2026-11-19 refused here).
   if ! { [ -f "$R$NFT" ] && [ -x "$R$NFT" ]; }; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables ||
-      die "apt-get install of nftables failed (exit $?)"
+    apt_install nftables
     changed=1
     [ -f "$R$NFT" ] && [ -x "$R$NFT" ] || die "nft is not at $NFT after the install of nftables"
   fi

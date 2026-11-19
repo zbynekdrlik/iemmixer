@@ -39,7 +39,8 @@ subscription (our subscriptions from ARC, `gen3_arc.read_rx`) is
 `unsubscribed`; one on a subscribed channel no RX flow carries, or whose path
 cannot be read (no engine object, no in-ear flow), is `unknown`; both fail
 like `over`. A channel in `GEN3_OPTIONAL_RX` (a source a musician carries
-away, which fails no gate off) that no RX flow carries is `off`: it adds
+away, which fails no gate off) that no RX flow carries and that does not
+show Receiving is `off`: it adds
 nothing to its input's path, and an input whose every channel is `off` reads
 `off` and never fails (the soak of 2026-11-19 failed on the keys input, its
 source switched off).
@@ -207,6 +208,14 @@ def flow_delay(status: dict, rx: int) -> int | None:
     return max(delays) if delays else None
 
 
+def receiving(status: dict, rx: int) -> bool:
+    """Whether the status's `channels` row of our RX channel `rx` shows a
+    subscription that receives (the status word's low 16 bits 9 unicast or 10
+    multicast, as `iempc_gen3.is_receiving`)."""
+    return any(isinstance(c, dict) and c.get("rx") == rx and type(c.get("status")) is int
+               and (c["status"] & 0xFFFF) in (9, 10) for c in status.get("channels") or [])
+
+
 def offset(status: dict) -> int | None:
     engine = status.get("engine")
     d = engine.get("offset") if isinstance(engine, dict) else None
@@ -219,7 +228,9 @@ def _channel(status: dict, subscriptions: dict, rx: int, d: int | None, ear: int
     if not isinstance(sub, dict) or not sub.get("tx_device"):
         return {"rx": rx, "samples": None, "state": "unsubscribed"}
     delay = flow_delay(status, rx)
-    if delay is None and rx in optional:
+    # Off only when it receives nothing: a receiving channel no flow maps
+    # (an unreadable mapping) stays unknown, as a required one.
+    if delay is None and rx in optional and not receiving(status, rx):
         return {"rx": rx, "samples": None, "state": "off"}
     if delay is None or d is None or ear is None:
         return {"rx": rx, "samples": None, "state": "unknown"}

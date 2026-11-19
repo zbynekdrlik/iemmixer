@@ -495,7 +495,9 @@ elif name == "apt-get":
     db = load()
     if os.environ.get("DEBIAN_FRONTEND") != "noninteractive":
         fail("unexpected apt-get", 97)
-    if args[:2] == ["purge", "-y"]:
+    if args == ["update"]:
+        db["apt_updates"] = db.get("apt_updates", 0) + 1
+    elif args[:2] == ["purge", "-y"]:
         for package in args[2:]:
             db["packages"].pop(package, None)
     elif args == ["install", "-y", "--no-install-recommends", "nftables"]:
@@ -721,6 +723,8 @@ elif name == "sudo":
         sys.exit(0)
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
+    if rest[:1] == ["/usr/sbin/nft"] and not os.access(ROOT + rest[0], os.X_OK):
+        fail(f"sudo: {rest[0]}: command not found")
     if rest[:1] in (["nft"], ["/usr/sbin/nft"]):
         sys.exit(subprocess.run([os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "nft"),
                                  *rest[1:]]).returncode)
@@ -1044,6 +1048,7 @@ class ProvisionRootTests(World):
             ["install", "-d", "-m", "2755", "-o", "root", "-g", "systemd-journal", "--", "/var/log/journal"],
             ["systemctl", "restart", "systemd-journald.service"],
             ["apt-get", "purge", "-y", "rsyslog"],
+            ["apt-get", "update"],
             ["apt-get", "install", "-y", "--no-install-recommends", "linux-image-realtime"],
             [*tmp_install, GRUB],
             ["update-grub"],
@@ -1542,7 +1547,13 @@ class MdnsCapTests(World):
         (self.root / "usr/sbin/nft").unlink()
         r = self.provisioned()
         self.assertEqual(self.steps(r)["mdns_cap"], "changed")
-        self.assertIn(["apt-get", "install", "-y", "--no-install-recommends", "nftables"], self.writes())
+        writes = self.writes()
+        self.assertIn(["apt-get", "install", "-y", "--no-install-recommends", "nftables"], writes)
+        # The lists brought up to date first, once a run (the realtime step's
+        # install, before it in this world, shares it).
+        self.assertEqual(writes.count(["apt-get", "update"]), 1)
+        self.assertLess(writes.index(["apt-get", "update"]),
+                        writes.index(["apt-get", "install", "-y", "--no-install-recommends", "nftables"]))
         self.assertEqual(self.db()["packages"]["nftables"], "install ok installed")
         self.assertEqual(self.loads(), [MDNS_LOAD])
         self.assert_capped()

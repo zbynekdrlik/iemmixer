@@ -162,6 +162,18 @@ class PathTests(unittest.TestCase):
         # required channel's path alone.
         rows = paths(subs={**SUBS, "5": sub(STAGE)}, inputs=[("mic1", [1, 5])], optional=frozenset({5}))
         self.assertEqual((rows[0]["samples"], rows[0]["state"]), (96, "ok"))
+        # Receiving but no flow maps it (an unreadable mapping): unknown, a
+        # fail, never off.
+        doc = status()
+        doc["channels"] = [{"rx": 5, "status": 0x01010009}]
+        rows = paths(doc, {**SUBS, "5": sub(STAGE)}, stage, optional=frozenset({5}))
+        self.assertEqual((row(rows, "keys")["state"], verdict(rows, doc)["pass"]), ("unknown", 0))
+        doc["channels"] = [{"rx": 5, "status": 0x0001000A}]   # multicast receiving
+        rows = paths(doc, {**SUBS, "5": sub(STAGE)}, stage, optional=frozenset({5}))
+        self.assertEqual(row(rows, "keys")["state"], "unknown")
+        doc["channels"] = [{"rx": 5, "status": 1}]   # Unresolved: off
+        rows = paths(doc, {**SUBS, "5": sub(STAGE)}, stage, optional=frozenset({5}))
+        self.assertEqual(row(rows, "keys")["state"], "off")
         # Off without a subscription is still unsubscribed (the table is ours).
         rows = paths(inputs=[("keys", [5])], optional=frozenset({5}))
         self.assertEqual(rows[0]["state"], "unsubscribed")
