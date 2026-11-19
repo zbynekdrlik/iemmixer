@@ -1119,6 +1119,23 @@ class LatencyTests(GateBase):
         self.assertEqual((doc["pass"], doc["paths"][2]["state"]), (0, "unknown"))
         self.assert_private(err + json.dumps(docs))
 
+    def test_an_optional_source_switched_off_reads_off_and_passes(self) -> None:
+        # GEN3_OPTIONAL_RX: a source a musician carries away fails no gate
+        # off (the soak of 2026-11-19 failed on such an input as unknown).
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=3\n")
+        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="3")
+        doc = docs[0]["gen3_gate"]["latency"]
+        self.assertEqual((code, doc["pass"], doc["paths"][2]["state"]), (0, 1, "off"), err)
+        self.assert_private(err + json.dumps(docs))
+        # A malformed list is never a pass.
+        with open(ip.env_path(), "a", encoding="utf-8") as f:
+            f.write("GEN3_OPTIONAL_RX=three\n")
+        self.again()
+        code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="3")
+        self.assertNotEqual(code, 0, err)
+        self.assertFalse(any(d["gen3_gate"]["latency"]["pass"] for d in docs), docs)
+
     def test_a_read_that_fails_is_a_failure_never_a_pass(self) -> None:
         with mock.patch.object(gen3_arc, "send", side_effect=OSError("timed out")):
             code, docs, err = self.gate_run()

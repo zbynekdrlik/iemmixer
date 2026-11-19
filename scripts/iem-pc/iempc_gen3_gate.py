@@ -811,7 +811,8 @@ def latency(box: Box, dante: str, event: str | None = None) -> dict:
     try:
         exempt = gen3_latency.parse_exempt(box.ctx.env.get("GEN3_LATENCY_EXEMPT", ""))
         budgets = gen3_latency.parse_budgets(box.ctx.env.get("GEN3_LATENCY_BUDGET", ""))
-    except ValueError:
+        optional = optional_rx(ip, box.ctx.env)
+    except (ValueError, ip.Refused):
         return unread("env")
     try:
         status = box.last_json(box.call([g3.DANTE_BIN, "ctl", "status"], event=event))
@@ -831,7 +832,7 @@ def latency(box: Box, dante: str, event: str | None = None) -> dict:
     except (ip.StepError, ValueError, tomllib.TOMLDecodeError):
         return unread("site")
     tx = gen3_latency.tx_flows(status, in_ear)
-    rows = gen3_latency.paths(status, subscriptions, inputs, rate, tx, exempt, budgets)
+    rows = gen3_latency.paths(status, subscriptions, inputs, rate, tx, exempt, budgets, optional)
     return {**gen3_latency.verdict(rows, rate, tx), "own_budgets": dict(sorted(budgets.items()))}
 
 

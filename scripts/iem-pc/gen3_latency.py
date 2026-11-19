@@ -38,7 +38,11 @@ never fails. Every other input fails closed: one on a channel without a
 subscription (our subscriptions from ARC, `gen3_arc.read_rx`) is
 `unsubscribed`; one on a subscribed channel no RX flow carries, or whose path
 cannot be read (no engine object, no in-ear flow), is `unknown`; both fail
-like `over`.
+like `over`. A channel in `GEN3_OPTIONAL_RX` (a source a musician carries
+away, which fails no gate off) that no RX flow carries is `off`: it adds
+nothing to its input's path, and an input whose every channel is `off` reads
+`off` and never fails (the soak of 2026-11-19 failed on the keys input, its
+source switched off).
 
 Pure functions; `engine_inputs` and `in_ear_tx` read a site's text,
 `sample_rate` a device config's. Rows carry the RX channels (site data):
@@ -209,11 +213,14 @@ def offset(status: dict) -> int | None:
     return d if type(d) is int else None
 
 
-def _channel(status: dict, subscriptions: dict, rx: int, d: int | None, ear: int | None) -> dict:
+def _channel(status: dict, subscriptions: dict, rx: int, d: int | None, ear: int | None,
+             optional: frozenset[int]) -> dict:
     sub = subscriptions.get(str(rx))
     if not isinstance(sub, dict) or not sub.get("tx_device"):
         return {"rx": rx, "samples": None, "state": "unsubscribed"}
     delay = flow_delay(status, rx)
+    if delay is None and rx in optional:
+        return {"rx": rx, "samples": None, "state": "off"}
     if delay is None or d is None or ear is None:
         return {"rx": rx, "samples": None, "state": "unknown"}
     return {"rx": rx, "samples": d + delay + ear, "state": "known"}
@@ -221,12 +228,15 @@ def _channel(status: dict, subscriptions: dict, rx: int, d: int | None, ear: int
 
 def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]], rate: int,
           tx: list[dict], exempt: dict[str, str] | None = None,
-          budgets: dict[str, int] | None = None) -> list[dict]:
+          budgets: dict[str, int] | None = None,
+          optional: frozenset[int] = frozenset()) -> list[dict]:
     """Per input: {input, rx, samples, ms, over_budget, state}; `state` ok,
-    over, unknown, unsubscribed or exempt. `tx` is `tx_flows`'s list. An
-    input on several channels takes its worst: unknown when any channel is,
-    unsubscribed when any has no subscription, else the longest path. An
-    input in `budgets` is over above its own budget, every other above 1 ms."""
+    over, unknown, unsubscribed, off or exempt. `tx` is `tx_flows`'s list. An
+    input on several channels takes its worst over the channels that are not
+    `off` (an `optional` channel no flow carries): unknown when any is,
+    unsubscribed when any has no subscription, else the longest path; `off`
+    when every channel is. An input in `budgets` is over above its own
+    budget, every other above 1 ms."""
     d, ear, budget = offset(status), in_ear_samples(tx, rate), budget_samples(rate)
     rows = []
     for ident, channels in inputs:
@@ -234,9 +244,12 @@ def paths(status: dict, subscriptions: dict, inputs: list[tuple[str, list[int]]]
             rows.append({"input": ident, "rx": channels, "samples": None, "ms": None,
                          "over_budget": False, "state": "exempt"})
             continue
-        states = [_channel(status, subscriptions, rx, d, ear) for rx in channels]
+        states = [c for c in (_channel(status, subscriptions, rx, d, ear, optional) for rx in channels)
+                  if c["state"] != "off"]
         kinds = {c["state"] for c in states}
-        if "unknown" in kinds:
+        if not states:
+            state, samples = "off", None
+        elif "unknown" in kinds:
             state, samples = "unknown", None
         elif "unsubscribed" in kinds:
             state, samples = "unsubscribed", None
