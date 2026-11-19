@@ -98,7 +98,13 @@ pub fn version_label() -> String {
 
 /// Build datetime for display in Slovak format (e.g., "28.02.2026 09:47")
 pub fn build_datetime() -> String {
-    let timestamp = build_time().parse::<i64>().unwrap_or(0);
+    build_datetime_at(build_time())
+}
+
+/// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; "0" or
+/// unparsable means a local build).
+fn build_datetime_at(build_time: &str) -> String {
+    let timestamp = build_time.parse::<i64>().unwrap_or(0);
     if timestamp == 0 {
         "local build".to_string()
     } else {
@@ -108,7 +114,13 @@ pub fn build_datetime() -> String {
 
 /// Get formatted deployment timestamp (e.g., "2026-02-26 14:30:00 UTC")
 pub fn deployed_at() -> String {
-    let timestamp = build_time().parse::<i64>().unwrap_or(0);
+    deployed_at_at(build_time())
+}
+
+/// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+/// is unknown).
+fn deployed_at_at(build_time: &str) -> String {
+    let timestamp = build_time.parse::<i64>().unwrap_or(0);
     if timestamp == 0 {
         "unknown".to_string()
     } else {
@@ -145,6 +157,25 @@ mod version_tests {
             full_version_at("1758707100"),
             format!("{VERSION} (24.09.2025 09:45)")
         );
+    }
+
+    #[test]
+    fn build_datetime_shows_the_utc_build_time_or_a_local_build() {
+        assert_eq!(build_datetime_at("1758707100"), "24.09.2025 09:45");
+        assert_eq!(build_datetime_at("0"), "local build");
+        assert_eq!(build_datetime_at("not a number"), "local build");
+        // Past the years jiff formats.
+        assert_eq!(build_datetime_at("999999999999"), "unknown");
+        assert_eq!(build_datetime(), build_datetime_at(build_time()));
+    }
+
+    #[test]
+    fn deployed_at_shows_the_utc_build_time_or_unknown() {
+        assert_eq!(deployed_at_at("1758707100"), "2025-09-24 09:45:00 UTC");
+        assert_eq!(deployed_at_at("0"), "unknown");
+        assert_eq!(deployed_at_at("not a number"), "unknown");
+        assert_eq!(deployed_at_at("999999999999"), "unknown");
+        assert_eq!(deployed_at(), deployed_at_at(build_time()));
     }
 
     #[test]
