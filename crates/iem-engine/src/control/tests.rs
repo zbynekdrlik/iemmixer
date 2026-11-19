@@ -386,6 +386,25 @@ fn a_backend_ending_saves_and_exits_backend() {
     assert_eq!(fades_asked(&mut r), 0, "no fade");
 }
 
+/// #130: a `Shutdown` control message and a backend ending (the pump's
+/// stall) in the same tick: the shutdown wins, exit 0 (never a restart).
+#[test]
+fn a_shutdown_and_a_stall_in_one_tick_end_with_the_shutdown() {
+    let mut r = rig();
+    r.status.faded_out.store(true, Ordering::Release);
+    let why =
+        "the engine pump stalled: blocks frozen at 3 for 2500 ms while the media clock is ready";
+    r.c.driver = Some(scripted(Some(Ending::Backend(why.into()))));
+    r.c.shutdown = true;
+    assert_eq!(
+        r.c.tick(Instant::now()),
+        Some(Exit::Shutdown { faded: true })
+    );
+    assert!(r.dir.path().join("state/current.json").exists(), "saved");
+    assert!(r.c.driver.is_none(), "released");
+    assert_eq!(fades_asked(&mut r), 1, "the shutdown's fade");
+}
+
 #[test]
 fn only_new_sanitiser_trips_raise_an_alarm() {
     let mut r = rig();

@@ -224,6 +224,12 @@ impl Control {
             self.broadcast(&EngineMsg::Status(last));
             return Some(self.fault(stats.fault.unwrap_or_else(|| "unknown".into())));
         }
+        // A `Shutdown` handled this tick wins over a backend ending seen in
+        // the same tick (a stall included): the stop asked for is exit 0,
+        // never a restart.
+        if self.shutdown {
+            return Some(self.shutdown_now());
+        }
         match self.driver.as_ref().and_then(|d| d.ending()) {
             Some(Ending::Backend(why)) => return Some(self.backend_ended(why)),
             Some(Ending::Stop) => {

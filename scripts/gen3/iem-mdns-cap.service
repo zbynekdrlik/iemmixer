@@ -10,15 +10,17 @@
 #
 # Loading replaces the table in one transaction and touches no other table.
 # A stop leaves the table as it is (no ExecStop): the cap holds until the next
-# boot or load. Never part of the stack: "ide event" stops nothing here, and a
-# failure here holds back neither dantesync nor the stack (ordering only, no
-# Requires=).
+# boot or load. It loads after nftables.service, whose /etc/nftables.conf
+# may begin with `flush ruleset` and would otherwise remove the table. Never
+# part of the stack: "ide event" stops nothing here, and a failure here holds
+# back neither dantesync nor the stack (ordering only, no Requires=).
 
 [Unit]
 Description=iemmixer Gen 3: the box's own mDNS cap (dstack dante-mdns-cap.nft)
 Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
 DefaultDependencies=no
 Wants=network-pre.target
+After=nftables.service
 Before=network-pre.target iem-engine.service iem-dante.service
 Conflicts=shutdown.target
 Before=shutdown.target

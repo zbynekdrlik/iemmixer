@@ -1498,6 +1498,9 @@ class MdnsCapTests(World):
         before = " ".join(unit["Unit"]["Before"]).split()
         for name in ("network-pre.target", "iem-engine.service", "iem-dante.service"):
             self.assertIn(name, before)
+        # After nftables.service: an /etc/nftables.conf that begins with
+        # `flush ruleset` would otherwise remove the table once it is loaded.
+        self.assertIn("nftables.service", " ".join(unit["Unit"]["After"]).split())
         self.assertEqual(unit["Install"]["WantedBy"], ["multi-user.target"])
         # Ordering only: a failure here holds back neither the clock nor the stack.
         for key in ("Requires", "RequiredBy", "BindsTo", "PartOf", "Requisite"):

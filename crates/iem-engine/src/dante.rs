@@ -22,9 +22,11 @@
 //!   flow stopped at its transmitter, the goodbyes; within
 //!   [`STOP_WITHIN`]), each left to end with a warning when late, never
 //!   killed (I8).
-//! - [`stall`]: the pump's stall watch (#130): blocks frozen for
-//!   [`stall::STALL_WITHIN`] while the media clock is ready end the run as
-//!   [`Ending::Backend`] (exit 1, which the unit restarts).
+//! - [`stall`]: the pump's stall watch (#130): blocks frozen (or none run
+//!   at all) for [`stall::within`] the device's rate (dstack's longest wait,
+//!   `DISCONTINUITY` samples, plus 500 ms: 2.5 s at 96 kHz) while the media
+//!   clock is ready end the run as [`Ending::Backend`] (exit 1, which the
+//!   unit restarts).
 //!
 //! Logs name counts, channel numbers and the topology hash, never a name or
 //! an address. Every decision here is pure and tested (`dante/tests.rs`);
@@ -58,7 +60,7 @@ use crate::topology::{Topology, hil_return_refusal};
 
 pub mod stall;
 
-use self::stall::{STALL_WITHIN, StallWatch};
+use self::stall::StallWatch;
 
 /// How long the stop waits for the pump's thread: it ends within one block
 /// (or one free period) of its stop flag.
@@ -197,7 +199,7 @@ impl DanteDriver {
     /// The driver of a pump counting into `stats` on its thread `pump`
     /// (ended by `pump_stop`) on `clock`, and of the `device` serving beside
     /// it, which sets `reported` at a signal; the pump's blocks frozen for
-    /// `stall_within` while `clock` is ready end the run ([`STALL_WITHIN`]
+    /// `stall_within` while `clock` is ready end the run ([`stall::within`]
     /// in [`start`]).
     pub fn new(
         stats: Arc<PumpStats>,
@@ -364,7 +366,7 @@ pub fn start(
         reported,
         Box::new(device),
         Arc::clone(&media.clock),
-        STALL_WITHIN,
+        stall::within(cfg.sample_rate),
     );
     Ok((Box::new(driver), timing.block as usize))
 }
