@@ -57,6 +57,25 @@ bound passed (the run plus WAIT_MARGIN_S: `not_finished`, the unit
 stopped). Then the summary (as the service user), the unit stopped (or
 reset-failed), the env file and the summary removed on the box.
 
+**`--restart-clock`** (#130; the soak gate's only): once, at the run's
+midpoint (`restart_at`, the first watch pass past it), the flag looked at
+right before it, `sudo -n systemctl restart dantesync` (install-dantesync.sh's
+sudo line). For CLOCK_WINDOW_S (120 s) from its send, a read's clock words
+(holdover, re-anchor, epoch, not ready), the pump's late, missed and
+re-bootstrapped blocks and its free pacing (`media` 0), and a health read
+whose only reasons are CLOCK_HEALTH, are information in the line's
+`clock_restart`; a rise belongs to the window when the step's later read lies
+in it. Why 120 s: on 2026-11-19 a dantesync restart held the media clock in
+holdover 18 s and dantesync locked 19 s after it; the in-process follower
+takes over about 35 s after a start; twice the two together, and a 10-minute
+run still judges 180 s after the window. Blocks not rising, a read without
+the pump, overruns, an engine restart (the stall watch's exit 1) and every
+loss word judge as anywhere: a loss the restart causes is a finding.
+`clock_restart_unsent`: the restart's call failed, or the run ended before
+its midpoint; `clock_not_recovered`: no read with the clock ready, out of
+holdover and the pump on the media clock after the window's last read that
+was not, within the window (`recovered`).
+
 **The verdict**, every check run, its words in FAILURES' order:
 - not_finished: the client still ran at the bound; client: its unit's
   result not `success` or its exit not 0;
@@ -76,6 +95,7 @@ reset-failed), the env file and the summary removed on the box.
 - clock_not_ready: a read whose clock was not ready;
 - holdover: a read in holdover, or the clock's holdovers rose;
 - re_anchor: the clock's re_anchors rose or its epoch changed;
+- clock_restart_unsent, clock_not_recovered: `--restart-clock`'s (above);
 - rx_late: an RX flow's late packets rose (judged per flow by the stack);
 - tx_holes: a TX flow's holes rose;
 - rx_holes: an RX channel's ring holes rose (owner, 2026-10-31 on #72: zero
@@ -166,8 +186,21 @@ RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "
 # The failures a verdict names, in its order.
 FAILURES = ("not_finished", "client", "harness", "polls", "health", "restarted", "pump_stalled", "pump_late",
             "pump_missed", "pump_overruns", "pump_rebootstraps", "clock_not_ready", "holdover", "re_anchor",
-            "rx_late", "tx_holes", "rx_holes", "rx_off", "receiver_late", "receiver_unread", "latency_over_budget")
-DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min)"
+            "clock_restart_unsent", "clock_not_recovered", "rx_late", "tx_holes", "rx_holes", "rx_off",
+            "receiver_late", "receiver_unread", "latency_over_budget")
+DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min{restart})"
+DESC_RESTART = ", a dantesync restart"
+# --restart-clock (#130): install-dantesync.sh's own sudo line.
+CLOCK_RESTART = [*gate.SUDO, "systemctl", "restart", "dantesync"]
+# The restart's recovery window: on 2026-11-19 a dantesync restart held the
+# media clock in holdover 18 s and dantesync locked 19 s after it; the
+# in-process follower takes over about 35 s after a start. Twice the two
+# together, and a 10-minute run keeps 180 s of judged reads after it.
+CLOCK_WINDOW_S = 120.0
+# The health reasons a dantesync restart causes: information inside the window.
+CLOCK_HEALTH = frozenset({"holdover", "clock_not_ready", "pump_free", "pump_rebootstrap"})
+WINDOW_KEYS = ("holdovers", "in_holdover", "re_anchors", "clock_not_ready", "pump_free", "pump_late", "pump_missed",
+               "pump_rebootstraps")
 DESC_FAIL = "the Gen 3 box's soak failed: "
 
 
@@ -234,22 +267,43 @@ def sample(status, optional: frozenset[int] = frozenset()) -> dict | None:
     return {k: s[k] for k in (*CLOCK_KEYS, "engine", "rx_late", "tx_holes", "rx_holes", "rx_off", "lateness")}
 
 
-def growth(values: list[dict]) -> tuple[int, int]:
-    """(the rise of cumulative counters read to read, summed over their keys;
-    how many went back). A key first read later counts from 0; one that went
-    back counts its new value from 0."""
-    total = back = 0
+def steps(values: list[dict]) -> list[tuple[int, int]]:
+    """Each step's (rise of cumulative counters, summed over their keys; how
+    many went back), one per read after the first. A key first read later
+    counts from 0; one that went back counts its new value from 0."""
+    out = []
     prev = values[0] if values else {}
     for cur in values[1:]:
+        rise = back = 0
         for key, value in cur.items():
             before = prev.get(key, 0)
             if value >= before:
-                total += value - before
+                rise += value - before
             else:
-                total += value
+                rise += value
                 back += 1
+        out.append((rise, back))
         prev = {**prev, **cur}
-    return total, back
+    return out
+
+
+def growth(values: list[dict]) -> tuple[int, int]:
+    """(the rise read to read, summed; how many went back): `steps` summed."""
+    s = steps(values)
+    return sum(r for r, _ in s), sum(b for _, b in s)
+
+
+def split(values: list[dict], inside: list[bool]) -> tuple[int, int, int]:
+    """(the rise outside the window, the rise inside it, how many went back):
+    a step belongs to the window when its later read lies in it."""
+    out = into = back = 0
+    for (rise, b), cur in zip(steps(values), inside[1:]):
+        if cur:
+            into += rise
+        else:
+            out += rise
+        back += b
+    return out, into, back
 
 
 def hole(times: list[float], start: float, end: float) -> float:
@@ -329,6 +383,17 @@ class Watch:
     dante_ip: str = ""
     receivers: gen3_receivers.Tally = field(default_factory=gen3_receivers.Tally)
     latency: dict | None = None   # the mic-to-ear guard's doc after the run (gate.latency, #122)
+    restart_clock: bool = False   # --restart-clock (#130)
+    clock_tried: bool = False   # the restart's moment came (sent or refused)
+    clock_at: float | None = None   # monotonic: right before the restart was sent; None when it was not
+    clock_health: int = 0   # health reads inside the window with only the restart's reasons
+
+    def in_window(self, t: float) -> bool:
+        return self.clock_at is not None and self.clock_at <= t <= self.clock_at + CLOCK_WINDOW_S
+
+    def inside(self) -> list[bool]:
+        """Each sample inside the restart's window (the baseline never)."""
+        return [False, *(self.in_window(t) for t in self.status_times)][:len(self.samples)]
 
     def record(self, kind: str, doc: dict) -> None:
         t = round(time.monotonic() - self.started, 1) if self.started is not None else 0.0
@@ -336,31 +401,78 @@ class Watch:
             f.write(json.dumps({"t": t, "kind": kind, **doc}) + "\n")
 
 
-def judged(samples: list[dict]) -> dict:
-    """The pump's, the clock's and the flows' numbers over the reads (pure)."""
-    engines = [s["engine"] for s in samples if s["engine"] is not None]
+def judged(samples: list[dict], inside: list[bool] | None = None) -> dict:
+    """The pump's, the clock's and the flows' numbers over the reads (pure).
+    `inside` marks the reads in a dantesync restart's window (#130): there
+    the clock's words and the pump's re-bootstraps, missed and late blocks
+    and free pacing go into `window`, information; blocks that do not rise,
+    a read without the pump, overruns and every flow's count judge as
+    anywhere."""
+    inside = [*(inside or []), *[False] * (len(samples) - len(inside or []))]
+    engines = [(s["engine"], i) for s, i in zip(samples, inside) if s["engine"] is not None]
+    e_inside = [i for _, i in engines]
     out: dict = {}
+    window = dict.fromkeys(WINDOW_KEYS, 0)
     for key in PUMP_COUNTS:
-        out[f"pump_{key}"], _ = growth([{key: e[key]} for e in engines])
-    blocks = [e["blocks"] for e in engines]
-    steps = list(zip(blocks, blocks[1:]))
-    out["pump_stalled"] = (sum(1 for s in samples if s["engine"] is None or s["engine"]["media"] != 1)
-                           + sum(1 for a, b in steps if b == a))
-    out["max_process_us"] = engines[-1]["max_process_us"] if engines else None
-    out["clock_not_ready"] = sum(1 for s in samples if s["ready"] != 1)
-    out["holdovers"], h_back = growth([{"n": s["holdovers"]} for s in samples])
-    out["in_holdover"] = sum(1 for s in samples if s["holdover"])
-    anchors, a_back = growth([{"n": s["re_anchors"]} for s in samples])
+        rise, into, _ = split([{key: e[key]} for e, _ in engines], e_inside)
+        if key == "overruns":   # a block's own time: no clock causes it
+            out[f"pump_{key}"] = rise + into
+        else:
+            out[f"pump_{key}"], window[f"pump_{key}"] = rise, into
+    blocks = [e["blocks"] for e, _ in engines]
+    pairs = list(zip(blocks, blocks[1:]))
+    free = [s["engine"] is not None and s["engine"]["media"] != 1 for s in samples]
+    window["pump_free"] = sum(1 for f, i in zip(free, inside) if f and i)
+    out["pump_stalled"] = (sum(1 for s in samples if s["engine"] is None)
+                           + sum(1 for f, i in zip(free, inside) if f and not i)
+                           + sum(1 for a, b in pairs if b == a))
+    out["max_process_us"] = engines[-1][0]["max_process_us"] if engines else None
+    not_ready = [s["ready"] != 1 for s in samples]
+    out["clock_not_ready"] = sum(1 for n, i in zip(not_ready, inside) if n and not i)
+    window["clock_not_ready"] = sum(1 for n, i in zip(not_ready, inside) if n and i)
+    out["holdovers"], window["holdovers"], h_back = split([{"n": s["holdovers"]} for s in samples], inside)
+    out["in_holdover"] = sum(1 for s, i in zip(samples, inside) if s["holdover"] and not i)
+    window["in_holdover"] = sum(1 for s, i in zip(samples, inside) if s["holdover"] and i)
+    anchors, window["re_anchors"], a_back = split([{"n": s["re_anchors"]} for s in samples], inside)
     epochs = [s["epoch"] for s in samples]
-    out["re_anchors"] = anchors + sum(1 for a, b in zip(epochs, epochs[1:]) if a != b)
-    back = sum(1 for a, b in steps if b < a) + h_back + a_back
+    moved = [a != b for a, b in zip(epochs, epochs[1:])]
+    out["re_anchors"] = anchors + sum(1 for m, i in zip(moved, inside[1:]) if m and not i)
+    window["re_anchors"] += sum(1 for m, i in zip(moved, inside[1:]) if m and i)
+    back = sum(1 for a, b in pairs if b < a) + h_back + a_back
     for key in ("rx_late", "tx_holes", "rx_holes"):
         out[key], b = growth([s[key] for s in samples])
         back += b
     out["rx_off"] = sum(1 for s in samples if s["rx_off"])
     out["lateness_max"] = max((s["lateness"] for s in samples), default=None)
     out["counts_back"] = back
+    out["window"] = window
     return out
+
+
+def clean(s: dict) -> bool:
+    """The clock ready, out of holdover, the pump on the media clock."""
+    return s["ready"] == 1 and not s["holdover"] and s["engine"] is not None and s["engine"]["media"] == 1
+
+
+def recovered(samples: list[dict], times: list[float], at: float, window: float) -> float | None:
+    """Seconds from the restart to the first clean read after the window's
+    last read that is not clean (after the restart when every read in it
+    is); None without one (pure; `times` the reads' after the baseline,
+    `samples` with it)."""
+    reads = [(t - at, s) for t, s in zip(times, samples[1:]) if t >= at]
+    last_bad = max((k for k, (t, s) in enumerate(reads) if t <= window and not clean(s)), default=-1)
+    return next((round(t, 1) for t, s in reads[last_bad + 1:] if clean(s)), None)
+
+
+def clock_line(w: Watch, window: dict) -> dict | None:
+    """The line's `clock_restart` (numbers only), None without the flag."""
+    if not w.restart_clock:
+        return None
+    sent = w.clock_at is not None
+    back = recovered(w.samples, w.status_times, w.clock_at, CLOCK_WINDOW_S) if sent else None
+    return {"sent": int(sent),
+            "at_s": round(w.clock_at - w.started, 1) if sent and w.started is not None else None,
+            "window_s": CLOCK_WINDOW_S, "recovered_s": back, **window, "health": w.clock_health}
 
 
 def unit_restarts(base: dict, last: dict) -> tuple[int, int]:
@@ -391,7 +503,8 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
         problems, numbers = [], {}
     else:
         problems, numbers = soak_verdict.box_check(w.summary, w.minutes * 60)
-    j = judged(w.samples)
+    j = judged(w.samples, w.inside())
+    clock = clock_line(w, j.pop("window"))
     restarts, _ = unit_restarts(w.units_base, w.units_last)
     status_hole, health_hole = holes(w)
     failed: list[str] = []
@@ -412,6 +525,9 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
                             ("pump_missed", j["pump_missed"]), ("pump_overruns", j["pump_overruns"]),
                             ("pump_rebootstraps", j["pump_rebootstraps"]), ("clock_not_ready", j["clock_not_ready"]),
                             ("holdover", j["holdovers"] + j["in_holdover"]), ("re_anchor", j["re_anchors"]),
+                            ("clock_restart_unsent", clock is not None and not clock["sent"]),
+                            ("clock_not_recovered", clock is not None and clock["sent"]
+                             and (clock["recovered_s"] is None or clock["recovered_s"] > CLOCK_WINDOW_S)),
                             ("rx_late", j["rx_late"]), ("tx_holes", j["tx_holes"]),
                             ("rx_holes", j["rx_holes"]), ("rx_off", j["rx_off"])):
             if value:
@@ -429,7 +545,7 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
         "reads": len(w.samples), "failed_reads": w.failed_reads, "poll_hole_s": status_hole,
         "health_reads": len(w.health_times), "not_healthy": w.not_healthy, "health_reasons": sorted(w.reasons),
         "health_hole_s": health_hole,
-        **j, "receivers": w.receivers.numbers(), "latency": w.latency, "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
+        **j, "clock_restart": clock, "receivers": w.receivers.numbers(), "latency": w.latency, "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
         "failed": failed,
     }
 
@@ -619,11 +735,15 @@ def read_health(box: gate.Box, w: Watch) -> None:
     if state not in HEALTH_STATES:
         w.failed_reads += 1
         return
-    w.health_times.append(time.monotonic())
+    t = time.monotonic()
+    w.health_times.append(t)
     known = sorted(r for r in reasons if r in HEALTH_REASONS) if isinstance(reasons, list) else []
     if state != "healthy":
-        w.not_healthy += 1
-        w.reasons.update(known)
+        if w.in_window(t) and isinstance(reasons, list) and reasons and all(r in CLOCK_HEALTH for r in reasons):
+            w.clock_health += 1   # only the restart's own reasons, inside its window (#130)
+        else:
+            w.not_healthy += 1
+            w.reasons.update(known)
     w.record("health", {"state": state, "reasons": known})
 
 
@@ -650,6 +770,28 @@ def read_units(box: gate.Box, w: Watch) -> None:
     w.units_last = units
 
 
+def restart_at(seconds: int) -> float:
+    """The dantesync restart's moment after the watch's start: the run's
+    midpoint (tests replace it)."""
+    return seconds / 2
+
+
+def restart_clock(box: gate.Box, w: Watch) -> None:
+    """--restart-clock (#130): the flag checked right before it, then
+    dantesync restarted once; a refused call is a warning and
+    `clock_restart_unsent`, and the run goes on."""
+    w.clock_tried = True
+    box.ip.pause(box.ctx, 0)
+    at = time.monotonic()
+    try:
+        box.call(CLOCK_RESTART, change=True)
+    except box.ip.StepError as e:
+        gate.warn(f"the dantesync restart was not sent ({e}): the run goes on without it")
+        return
+    w.clock_at = at
+    w.record("clock_restart", {"sent": 1})
+
+
 def watch(job: Job, w: Watch) -> bool:
     """The reads beside the client until it ended (True) or the dev box's
     bound passed (False). A flag in a read or a pause raises EventNow."""
@@ -659,6 +801,8 @@ def watch(job: Job, w: Watch) -> bool:
     next_health = next_receivers = w.started
     while True:
         now = time.monotonic()
+        if w.restart_clock and not w.clock_tried and now - w.started >= restart_at(w.minutes * 60):
+            restart_clock(box, w)
         read_sample(box, w)
         if now >= next_receivers:
             next_receivers = now + RECEIVERS_EVERY_S
@@ -742,6 +886,7 @@ def soak_run(job: Job, w: Watch, sha: str, member: str) -> None:
 def run(ctx, ip) -> int:
     """`iempc gen3-gate soak [--minutes N]` (dev time, locked)."""
     minutes = minutes_of(ip, ctx.args)
+    restart = bool(getattr(ctx.args, "restart_clock", False))
     host = g3.gen3_host(ip, ctx.env, gate.WORDS)
     member = member_of(ip, ctx.env)
     dante = gate.dante_ip(ip, ctx.env)
@@ -754,7 +899,7 @@ def run(ctx, ip) -> int:
     receivers_ready(box)
     left_soak = clear_unit(box)
     number = g3.job_run()
-    w = Watch(minutes, left_job, left_soak, records_folder(ip, number), dante_ip=dante)
+    w = Watch(minutes, left_job, left_soak, records_folder(ip, number), dante_ip=dante, restart_clock=restart)
     baseline(box, w)
     job = Job(box)
     try:
@@ -778,6 +923,7 @@ def run(ctx, ip) -> int:
         gate.note_starts(ip, engine_restarts)   # the unit's start limit counts them: the HIL gate's budget too
     ip.emit({"gen3_gate": {"soak": doc}})
     passed = doc["pass"] == 1
-    description = DESC_PASS.format(minutes=minutes) if passed else DESC_FAIL + ", ".join(doc["failed"])
+    description = (DESC_PASS.format(minutes=minutes, restart=DESC_RESTART if restart else "") if passed
+                   else DESC_FAIL + ", ".join(doc["failed"]))
     posted = gate.post(ip, sha, passed, description, CONTEXT)
     return 0 if passed and posted else 1
