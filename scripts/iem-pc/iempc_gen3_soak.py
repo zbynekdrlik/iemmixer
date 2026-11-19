@@ -76,7 +76,7 @@ its midpoint; `clock_not_recovered`: no read with the clock ready, out of
 holdover and the pump on the media clock after the window's last read that
 was not, within the window (`recovered`).
 
-**The verdict**, every check run, its words in FAILURES' order:
+**The verdict**, every check run, its words in gen3_soak_judge.FAILURES' order:
 - not_finished: the client still ran at the bound; client: its unit's
   result not `success` or its exit not 0;
 - harness: soak_verdict.box_check over the client's summary (complete, the run's seconds,
@@ -147,6 +147,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import gen3_receivers
+import gen3_soak_judge as judge
 import iempc_gen3 as g3
 import iempc_gen3_gate as gate
 import soak_verdict
@@ -177,17 +178,11 @@ STACK_PROPS = "Id,NRestarts,ActiveEnterTimestampMonotonic"
 RUNNING = ("active", "activating", "deactivating", "reloading")
 CLOCK_KEYS = ("ready", "epoch", "re_anchors", "holdovers", "holdover")
 ENGINE_KEYS = ("media", "blocks", "late", "missed", "overruns", "rebootstraps", "max_process_us")
-PUMP_COUNTS = ("late", "missed", "overruns", "rebootstraps")
 HEALTH_STATES = ("healthy", "degraded", "failed", "stopped")
 HEALTH_REASONS = frozenset({"unit_failed", "unit_down", "restarted", "no_status", "clock_not_ready", "holdover",
                             "pump_free", "pump_stalled", "pump_rebootstrap", "server_down", "build_mismatch"})
 RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "watchdog", "start-limit-hit",
                      "resources", "protocol"})   # systemd's Result words; another reads `other`
-# The failures a verdict names, in its order.
-FAILURES = ("not_finished", "client", "harness", "polls", "health", "restarted", "pump_stalled", "pump_late",
-            "pump_missed", "pump_overruns", "pump_rebootstraps", "clock_not_ready", "holdover", "re_anchor",
-            "clock_restart_unsent", "clock_not_recovered", "rx_late", "tx_holes", "rx_holes", "rx_off",
-            "receiver_late", "receiver_unread", "latency_over_budget")
 DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min{restart})"
 DESC_RESTART = ", a dantesync restart"
 # --restart-clock (#130): install-dantesync.sh's own sudo line.
@@ -199,8 +194,6 @@ CLOCK_RESTART = [*gate.SUDO, "systemctl", "restart", "dantesync"]
 CLOCK_WINDOW_S = 120.0
 # The health reasons a dantesync restart causes: information inside the window.
 CLOCK_HEALTH = frozenset({"holdover", "clock_not_ready", "pump_free", "pump_rebootstrap"})
-WINDOW_KEYS = ("holdovers", "in_holdover", "re_anchors", "clock_not_ready", "pump_free", "pump_late", "pump_missed",
-               "pump_rebootstraps")
 DESC_FAIL = "the Gen 3 box's soak failed: "
 
 
@@ -265,51 +258,6 @@ def sample(status, optional: frozenset[int] = frozenset()) -> dict | None:
     engine = {k: _count(status.get("engine"), k) for k in ENGINE_KEYS}
     s["engine"] = None if any(v is None for v in engine.values()) else engine
     return {k: s[k] for k in (*CLOCK_KEYS, "engine", "rx_late", "tx_holes", "rx_holes", "rx_off", "lateness")}
-
-
-def steps(values: list[dict]) -> list[tuple[int, int]]:
-    """Each step's (rise of cumulative counters, summed over their keys; how
-    many went back), one per read after the first. A key first read later
-    counts from 0; one that went back counts its new value from 0."""
-    out = []
-    prev = values[0] if values else {}
-    for cur in values[1:]:
-        rise = back = 0
-        for key, value in cur.items():
-            before = prev.get(key, 0)
-            if value >= before:
-                rise += value - before
-            else:
-                rise += value
-                back += 1
-        out.append((rise, back))
-        prev = {**prev, **cur}
-    return out
-
-
-def growth(values: list[dict]) -> tuple[int, int]:
-    """(the rise read to read, summed; how many went back): `steps` summed."""
-    s = steps(values)
-    return sum(r for r, _ in s), sum(b for _, b in s)
-
-
-def split(values: list[dict], inside: list[bool]) -> tuple[int, int, int]:
-    """(the rise outside the window, the rise inside it, how many went back):
-    a step belongs to the window when its later read lies in it."""
-    out = into = back = 0
-    for (rise, b), cur in zip(steps(values), inside[1:]):
-        if cur:
-            into += rise
-        else:
-            out += rise
-        back += b
-    return out, into, back
-
-
-def hole(times: list[float], start: float, end: float) -> float:
-    """The longest wait between the run's start, its good reads and its end."""
-    edges = [start, *times, end]
-    return max(b - a for a, b in zip(edges, edges[1:]))
 
 
 @dataclass(frozen=True)
@@ -402,75 +350,12 @@ class Watch:
             f.write(json.dumps({"t": t, "kind": kind, **doc}) + "\n")
 
 
-def judged(samples: list[dict], inside: list[bool] | None = None) -> dict:
-    """The pump's, the clock's and the flows' numbers over the reads (pure).
-    `inside` marks the reads in a dantesync restart's window (#130): there
-    the clock's words and the pump's re-bootstraps, missed and late blocks
-    and free pacing go into `window`, information; blocks that do not rise,
-    a read without the pump, overruns and every flow's count judge as
-    anywhere."""
-    inside = [*(inside or []), *[False] * (len(samples) - len(inside or []))]
-    engines = [(s["engine"], i) for s, i in zip(samples, inside) if s["engine"] is not None]
-    e_inside = [i for _, i in engines]
-    out: dict = {}
-    window = dict.fromkeys(WINDOW_KEYS, 0)
-    for key in PUMP_COUNTS:
-        rise, into, _ = split([{key: e[key]} for e, _ in engines], e_inside)
-        if key == "overruns":   # a block's own time: no clock causes it
-            out[f"pump_{key}"] = rise + into
-        else:
-            out[f"pump_{key}"], window[f"pump_{key}"] = rise, into
-    blocks = [e["blocks"] for e, _ in engines]
-    pairs = list(zip(blocks, blocks[1:]))
-    free = [s["engine"] is not None and s["engine"]["media"] != 1 for s in samples]
-    window["pump_free"] = sum(1 for f, i in zip(free, inside) if f and i)
-    out["pump_stalled"] = (sum(1 for s in samples if s["engine"] is None)
-                           + sum(1 for f, i in zip(free, inside) if f and not i)
-                           + sum(1 for a, b in pairs if b == a))
-    out["max_process_us"] = engines[-1][0]["max_process_us"] if engines else None
-    not_ready = [s["ready"] != 1 for s in samples]
-    out["clock_not_ready"] = sum(1 for n, i in zip(not_ready, inside) if n and not i)
-    window["clock_not_ready"] = sum(1 for n, i in zip(not_ready, inside) if n and i)
-    out["holdovers"], window["holdovers"], h_back = split([{"n": s["holdovers"]} for s in samples], inside)
-    out["in_holdover"] = sum(1 for s, i in zip(samples, inside) if s["holdover"] and not i)
-    window["in_holdover"] = sum(1 for s, i in zip(samples, inside) if s["holdover"] and i)
-    anchors, window["re_anchors"], a_back = split([{"n": s["re_anchors"]} for s in samples], inside)
-    epochs = [s["epoch"] for s in samples]
-    moved = [a != b for a, b in zip(epochs, epochs[1:])]
-    out["re_anchors"] = anchors + sum(1 for m, i in zip(moved, inside[1:]) if m and not i)
-    window["re_anchors"] += sum(1 for m, i in zip(moved, inside[1:]) if m and i)
-    back = sum(1 for a, b in pairs if b < a) + h_back + a_back
-    for key in ("rx_late", "tx_holes", "rx_holes"):
-        out[key], b = growth([s[key] for s in samples])
-        back += b
-    out["rx_off"] = sum(1 for s in samples if s["rx_off"])
-    out["lateness_max"] = max((s["lateness"] for s in samples), default=None)
-    out["counts_back"] = back
-    out["window"] = window
-    return out
-
-
-def clean(s: dict) -> bool:
-    """The clock ready, out of holdover, the pump on the media clock."""
-    return s["ready"] == 1 and not s["holdover"] and s["engine"] is not None and s["engine"]["media"] == 1
-
-
-def recovered(samples: list[dict], times: list[float], at: float, window: float) -> float | None:
-    """Seconds from the restart to the first clean read after the window's
-    last read that is not clean (after the restart when every read in it
-    is); None without one (pure; `times` the reads' after the baseline,
-    `samples` with it)."""
-    reads = [(t - at, s) for t, s in zip(times, samples[1:]) if t >= at]
-    last_bad = max((k for k, (t, s) in enumerate(reads) if t <= window and not clean(s)), default=-1)
-    return next((round(t, 1) for t, s in reads[last_bad + 1:] if clean(s)), None)
-
-
 def clock_line(w: Watch, window: dict) -> dict | None:
     """The line's `clock_restart` (numbers only), None without the flag."""
     if not w.restart_clock:
         return None
     sent = w.clock_at is not None
-    back = recovered(w.samples, w.status_times, w.clock_at, CLOCK_WINDOW_S) if sent else None
+    back = judge.recovered(w.samples, w.status_times, w.clock_at, CLOCK_WINDOW_S) if sent else None
     return {"sent": int(sent),
             "at_s": round(w.clock_at - w.started, 1) if sent and w.started is not None else None,
             "window_s": CLOCK_WINDOW_S, "recovered_s": back, **window, "health": w.clock_health,
@@ -494,7 +379,8 @@ def holes(w: Watch) -> tuple[int, int]:
     if w.started is None:
         return 0, 0
     end = w.ended if w.ended is not None else time.monotonic()
-    return (math.ceil(hole(w.status_times, w.started, end)), math.ceil(hole(w.health_times, w.started, end)))
+    return (math.ceil(judge.hole(w.status_times, w.started, end)),
+            math.ceil(judge.hole(w.health_times, w.started, end)))
 
 
 def line(w: Watch, conclusion: str | None = None) -> dict:
@@ -505,7 +391,7 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
         problems, numbers = [], {}
     else:
         problems, numbers = soak_verdict.box_check(w.summary, w.minutes * 60)
-    j = judged(w.samples, w.inside())
+    j = judge.judged(w.samples, w.inside())
     clock = clock_line(w, j.pop("window"))
     restarts, _ = unit_restarts(w.units_base, w.units_last)
     status_hole, health_hole = holes(w)

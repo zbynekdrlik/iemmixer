@@ -5,6 +5,8 @@ paths:
   - "scripts/iem-pc/test_soak_verdict.py"
   - "scripts/iem-pc/iempc_gen3_soak.py"
   - "scripts/iem-pc/test_iempc_gen3_soak.py"
+  - "scripts/iem-pc/gen3_soak_judge.py"
+  - "scripts/iem-pc/test_gen3_soak_judge.py"
 ---
 
 # Soak on the Gen 3 box: harness and verdict, `iempc gen3-gate soak` (#10; #72 phase H)
