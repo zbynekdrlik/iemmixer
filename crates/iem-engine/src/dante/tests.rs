@@ -273,10 +273,28 @@ fn pump_thread(stop: &Arc<AtomicBool>, ended: &Arc<AtomicBool>, log: &Log) -> Jo
     })
 }
 
+/// A media clock whose readiness the test sets; its time never matters to
+/// the driver.
+#[derive(Default)]
+struct TestClock {
+    ready: AtomicBool,
+}
+
+impl PtpClock for TestClock {
+    fn now_ns(&self) -> Option<u64> {
+        self.ready.load(Ordering::Acquire).then_some(1)
+    }
+    fn sleep_until(&self, _: u64) {}
+    fn epoch(&self) -> u32 {
+        0
+    }
+}
+
 struct Rig {
     driver: DanteDriver,
     stats: Arc<PumpStats>,
     reported: Arc<AtomicBool>,
+    clock: Arc<TestClock>,
     log: Log,
 }
 
@@ -286,6 +304,12 @@ fn rig(ended: Option<&str>) -> Rig {
 
 /// A driver whose device answers its stop with `answer`.
 fn rig_with(ended: Option<&str>, answer: Stopped) -> Rig {
+    rig_full(ended, answer, STALL_WITHIN)
+}
+
+/// A driver whose device answers its stop with `answer` and whose stall
+/// watch reports blocks frozen for `stall_within`.
+fn rig_full(ended: Option<&str>, answer: Stopped, stall_within: Duration) -> Rig {
     let stats = Arc::new(PumpStats::new(timing(&device(2, 2)), 96_000));
     let (pump_stop, pump_ended) = (
         Arc::new(AtomicBool::new(false)),
@@ -300,17 +324,21 @@ fn rig_with(ended: Option<&str>, answer: Stopped) -> Rig {
         pump_ended,
         answer,
     };
+    let clock = Arc::new(TestClock::default());
     let driver = DanteDriver::new(
         Arc::clone(&stats),
         thread,
         pump_stop,
         Arc::clone(&reported),
         Box::new(fake),
+        Arc::clone(&clock) as Arc<dyn PtpClock>,
+        stall_within,
     );
     Rig {
         driver,
         stats,
         reported,
+        clock,
         log,
     }
 }
@@ -386,10 +414,8 @@ impl Process for Quiet {
     fn process(&mut self, _block: &mut Block<'_>) {}
 }
 
-#[test]
-fn stats_are_the_pumps() {
-    let r = rig(None);
-    // A pump counting into the driver's stats: three free blocks.
+/// A pump counting into `stats` (free blocks only need a processor).
+fn stepped_pump(stats: &Arc<PumpStats>) -> Pump<Quiet> {
     let cfg = device(2, 2);
     let rings: Arc<[Ring]> = (0..2).map(|_| Ring::new()).collect::<Vec<_>>().into();
     let rx = Arc::new(RxShared::new(96_000, Ipv4Addr::LOCALHOST, Arc::clone(&rings)).unwrap());
@@ -398,7 +424,14 @@ fn stats_are_the_pumps() {
         rx: vec![0, 1],
         tx: vec![0, 1],
     };
-    let mut pump = Pump::new(Quiet, map, timing(&cfg), 24, rx, tx, Arc::clone(&r.stats));
+    Pump::new(Quiet, map, timing(&cfg), 24, rx, tx, Arc::clone(stats))
+}
+
+#[test]
+fn stats_are_the_pumps() {
+    let r = rig(None);
+    // A pump counting into the driver's stats: three free blocks.
+    let mut pump = stepped_pump(&r.stats);
     for _ in 0..3 {
         pump.free();
     }
@@ -442,4 +475,86 @@ fn join_within_waits_for_a_thread_and_leaves_one_still_running() {
     // A panicked thread ended: joined, its panic logged.
     let panicked = std::thread::spawn(|| panic!("a test panic in a stand-in pump"));
     assert!(bounded(move || join_within(panicked, BOUND)));
+}
+
+// ---- the stall watch (#130) ----
+
+/// Calls `ending` every 10 ms (the control tick) for up to `within`: the
+/// first ending and when it came, from the first call.
+fn ending_within(driver: &DanteDriver, within: Duration) -> Option<(Ending, Duration)> {
+    let t0 = Instant::now();
+    while t0.elapsed() < within {
+        if let Some(e) = driver.ending() {
+            return Some((e, t0.elapsed()));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+#[test]
+fn a_pump_frozen_while_the_clock_is_ready_is_a_backend_ending_after_the_bound() {
+    let stall = Duration::from_millis(200);
+    let r = rig_full(None, Stopped::Done, stall);
+    let mut pump = stepped_pump(&r.stats);
+    for _ in 0..3 {
+        pump.free();
+    }
+    r.clock.ready.store(true, Ordering::Release);
+    let (ending, after) = ending_within(&r.driver, BOUND).expect("a stall ends the run");
+    let Ending::Backend(why) = ending else {
+        panic!("a stall is a backend ending: {ending:?}");
+    };
+    assert!(
+        why.starts_with("the engine pump stalled: blocks frozen at 3 for "),
+        "{why}"
+    );
+    assert!(after >= stall, "not before the bound: {after:?}");
+    Box::new(r.driver).stop();
+}
+
+#[test]
+fn a_frozen_pump_while_the_clock_is_not_ready_or_before_its_first_block_runs_on() {
+    let stall = Duration::from_millis(100);
+    // The clock not ready (a holdover), the pump frozen at 3 blocks.
+    let r = rig_full(None, Stopped::Done, stall);
+    let mut pump = stepped_pump(&r.stats);
+    for _ in 0..3 {
+        pump.free();
+    }
+    assert_eq!(ending_within(&r.driver, 4 * stall), None);
+    Box::new(r.driver).stop();
+    // The clock ready, no block yet (the start).
+    let r = rig_full(None, Stopped::Done, stall);
+    r.clock.ready.store(true, Ordering::Release);
+    assert_eq!(ending_within(&r.driver, 4 * stall), None);
+    Box::new(r.driver).stop();
+}
+
+#[test]
+fn an_advancing_pump_runs_on() {
+    let stall = Duration::from_millis(100);
+    let r = rig_full(None, Stopped::Done, stall);
+    let mut pump = stepped_pump(&r.stats);
+    r.clock.ready.store(true, Ordering::Release);
+    let t0 = Instant::now();
+    while t0.elapsed() < 4 * stall {
+        pump.free();
+        assert_eq!(r.driver.ending(), None);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Box::new(r.driver).stop();
+}
+
+#[test]
+fn a_reported_signal_wins_over_a_stall() {
+    let stall = Duration::from_millis(50);
+    let r = rig_full(None, Stopped::Done, stall);
+    let mut pump = stepped_pump(&r.stats);
+    pump.free();
+    r.clock.ready.store(true, Ordering::Release);
+    assert!(ending_within(&r.driver, BOUND).is_some(), "stalled");
+    r.reported.store(true, Ordering::Release);
+    assert_eq!(r.driver.ending(), Some(Ending::Stop), "the shutdown path");
+    Box::new(r.driver).stop();
 }
