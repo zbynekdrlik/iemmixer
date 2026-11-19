@@ -304,7 +304,7 @@ fn rig(ended: Option<&str>) -> Rig {
 
 /// A driver whose device answers its stop with `answer`.
 fn rig_with(ended: Option<&str>, answer: Stopped) -> Rig {
-    rig_full(ended, answer, stall::within(96_000))
+    rig_full(ended, answer, stall::STALL_WITHIN)
 }
 
 /// A driver whose device answers its stop with `answer` and whose stall

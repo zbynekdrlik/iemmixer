@@ -21,38 +21,25 @@ fn first_stall(
     })
 }
 
-/// The device's rate on the box: the bound the engine runs with.
+/// The bound the engine runs with.
 fn bound() -> Duration {
-    within(96_000)
+    STALL_WITHIN
 }
 
 #[test]
-fn the_bound_is_dstacks_longest_wait_plus_500_ms() {
-    // dstack's Blocks::next waits through a clock step back of up to
-    // DISCONTINUITY samples (2 s at 96 kHz) before it re-bootstraps.
-    assert_eq!(DISCONTINUITY, 192_000);
-    assert_eq!(SLACK, Duration::from_millis(500));
-    assert_eq!(within(96_000), Duration::from_millis(2500));
-    assert_eq!(within(48_000), Duration::from_millis(4500));
-    assert_eq!(within(192_000), Duration::from_millis(1500));
-    // 192 000 / 44 100 s = 4.353741496 s (truncated to the ns).
-    assert_eq!(within(44_100), Duration::from_nanos(4_353_741_496) + SLACK);
-    // A rate of 0 never divides by zero.
-    assert_eq!(within(0), Duration::from_secs(192_000) + SLACK);
+fn the_bound_is_500_ms() {
+    assert_eq!(STALL_WITHIN, Duration::from_millis(500));
 }
 
 #[test]
-fn a_clock_step_back_dstack_still_waits_through_never_stalls() {
-    // The pump waits out a step back of DISCONTINUITY samples with no
-    // block: 2 s at 96 kHz, then runs again. The watch stays quiet.
+fn dstacks_longest_wait_never_stalls() {
+    // Since dstack v0.6.193 the pump waits at most W + B samples (4 128:
+    // 43 ms at 96 kHz) with no block, then runs again. The watch stays quiet.
     let t0 = Instant::now();
     let mut w = StallWatch::new(bound());
     assert_eq!(w.look(t0, 77, true), None);
-    assert_eq!(w.look(t0 + Duration::from_secs(2), 77, true), None);
-    assert_eq!(
-        w.look(t0 + Duration::from_secs(2) + 10 * MS, 78, true),
-        None
-    );
+    assert_eq!(w.look(t0 + 43 * MS, 77, true), None);
+    assert_eq!(w.look(t0 + 53 * MS, 78, true), None);
 }
 
 #[test]
@@ -65,8 +52,8 @@ fn blocks_frozen_while_the_clock_is_ready_stall_at_the_bound_and_not_before() {
     let (at, stall) =
         first_stall(&mut w, t0, 600, blocks, |_| true).expect("a frozen pump is a stall");
     // The count stopped moving at look 100 (t0 + 1 s): the stall is seen at
-    // the first look 2.5 s later, look 350, never earlier.
-    assert_eq!(at, 350);
+    // the first look 500 ms later, look 150, never earlier.
+    assert_eq!(at, 150);
     assert_eq!(
         stall,
         Stall {
@@ -76,7 +63,7 @@ fn blocks_frozen_while_the_clock_is_ready_stall_at_the_bound_and_not_before() {
     );
     // Seen again at every later look while it stays frozen.
     assert_eq!(
-        w.look(t0 + 10 * MS * 351, 3007, true),
+        w.look(t0 + 10 * MS * 151, 3007, true),
         Some(Stall {
             blocks: 3007,
             for_: bound() + 10 * MS
@@ -89,13 +76,13 @@ fn one_look_short_of_the_bound_is_no_stall() {
     let t0 = Instant::now();
     let mut w = StallWatch::new(bound());
     assert_eq!(w.look(t0, 5, true), None);
-    // 1 ms short of 2.5 s: none; at it: a stall.
-    assert_eq!(w.look(t0 + Duration::from_millis(2499), 5, true), None);
+    // 1 ms short of 500 ms: none; at it: a stall.
+    assert_eq!(w.look(t0 + Duration::from_millis(499), 5, true), None);
     assert_eq!(
-        w.look(t0 + Duration::from_millis(2500), 5, true),
+        w.look(t0 + Duration::from_millis(500), 5, true),
         Some(Stall {
             blocks: 5,
-            for_: Duration::from_millis(2500)
+            for_: Duration::from_millis(500)
         })
     );
 }
@@ -135,14 +122,14 @@ fn advancing_blocks_never_stall() {
         first_stall(&mut w, t0, 1000, |i| u64::from(i) + 1, |_| true),
         None
     );
-    // One block every 2.4 s is still moving.
+    // One block every 490 ms is still moving.
     let mut w = StallWatch::new(bound());
     assert_eq!(
-        first_stall(&mut w, t0, 2000, |i| u64::from(i / 240) + 1, |_| true),
+        first_stall(&mut w, t0, 1000, |i| u64::from(i / 49) + 1, |_| true),
         None
     );
-    // One block every 400 ms against a 500 ms bound too.
-    let mut w = StallWatch::new(Duration::from_millis(500));
+    // One block every 400 ms too.
+    let mut w = StallWatch::new(bound());
     assert_eq!(
         first_stall(&mut w, t0, 1000, |i| u64::from(i / 40) + 1, |_| true),
         None
@@ -157,7 +144,7 @@ fn a_pump_that_never_runs_its_first_block_while_the_clock_is_ready_stalls_at_the
     let mut w = StallWatch::new(bound());
     let (at, stall) =
         first_stall(&mut w, t0, 600, |_| 0, |_| true).expect("no block at all is a stall");
-    assert_eq!(at, 250, "2.5 s after the first ready look, never earlier");
+    assert_eq!(at, 50, "500 ms after the first ready look, never earlier");
     assert_eq!(
         stall,
         Stall {
@@ -170,7 +157,7 @@ fn a_pump_that_never_runs_its_first_block_while_the_clock_is_ready_stalls_at_the
     assert_eq!(
         first_stall(&mut w, t0, 600, |_| 0, |i| i >= 100),
         Some((
-            350,
+            150,
             Stall {
                 blocks: 0,
                 for_: bound()

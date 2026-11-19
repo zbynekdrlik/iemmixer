@@ -8,31 +8,19 @@
 //! look the clock is ready, whatever the count, so a pump that never runs
 //! its first block (right after a restart, the clock still in the state
 //! that stalled it) is caught as one that froze later; a block count
-//! unchanged for the bound ([`within`]) while armed is a [`Stall`]. The
+//! unchanged for [`STALL_WITHIN`] while armed is a [`Stall`]. The
 //! driver turns it into `Ending::Backend`: one error line, save, release,
 //! exit 1, which the unit restarts.
 
 use std::time::{Duration, Instant};
 
-use iem_dante::media::tx::DISCONTINUITY;
-
-/// The slack on top of dstack's longest legitimate wait ([`within`]): a
-/// block is 333 µs at B = 32 (167 µs at 16), a re-bootstrap or a new
-/// latency runs the next block at once and the clock's not-ready nap is 10
-/// ms, so 500 ms past that wait is no legitimate gap.
-pub const SLACK: Duration = Duration::from_millis(500);
-
-/// How long the pump's blocks may stand still while the clock is ready, at
-/// the device's `rate`: dstack's `Blocks::next` (stream.rs) answers
-/// `Due::Wait` while the media clock stepped back by up to
-/// [`DISCONTINUITY`] samples (192 000: 2 s at 96 kHz) and only re-bootstraps
-/// past it, so a pump may legitimately run no block for that long; the
-/// bound is that wait plus [`SLACK`] (2.5 s at 96 kHz). A rate of 0 (never
-/// a running device) reads as 1 Hz.
-pub fn within(rate: u32) -> Duration {
-    let wait_ns = u128::from(DISCONTINUITY) * 1_000_000_000 / u128::from(rate.max(1));
-    Duration::from_nanos(u64::try_from(wait_ns).unwrap_or(u64::MAX)) + SLACK
-}
+/// How long the pump's blocks may stand still while the clock is ready. A
+/// block is 333 µs at B = 32 (167 µs at 16); since dstack v0.6.193
+/// (dstack#440) `Blocks::next` never waits longer than the margin and a
+/// block (W + B samples: at most 4 128, 43 ms at 96 kHz) and re-bootstraps a
+/// clock gone back at once; the clock's not-ready nap is 10 ms. So 500 ms
+/// (1500 blocks at B = 32) is no legitimate gap.
+pub const STALL_WITHIN: Duration = Duration::from_millis(500);
 
 /// A pump whose blocks stood still while the clock was ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
