@@ -387,6 +387,7 @@ class Watch:
     clock_tried: bool = False   # the restart's moment came (sent or refused)
     clock_at: float | None = None   # monotonic: right before the restart was sent; None when it was not
     clock_health: int = 0   # health reads inside the window with only the restart's reasons
+    clock_reasons: set[str] = field(default_factory=set)   # their reasons (CLOCK_HEALTH words)
 
     def in_window(self, t: float) -> bool:
         return self.clock_at is not None and self.clock_at <= t <= self.clock_at + CLOCK_WINDOW_S
@@ -472,7 +473,8 @@ def clock_line(w: Watch, window: dict) -> dict | None:
     back = recovered(w.samples, w.status_times, w.clock_at, CLOCK_WINDOW_S) if sent else None
     return {"sent": int(sent),
             "at_s": round(w.clock_at - w.started, 1) if sent and w.started is not None else None,
-            "window_s": CLOCK_WINDOW_S, "recovered_s": back, **window, "health": w.clock_health}
+            "window_s": CLOCK_WINDOW_S, "recovered_s": back, **window, "health": w.clock_health,
+            "health_reasons": sorted(w.clock_reasons)}
 
 
 def unit_restarts(base: dict, last: dict) -> tuple[int, int]:
@@ -545,7 +547,8 @@ def line(w: Watch, conclusion: str | None = None) -> dict:
         "reads": len(w.samples), "failed_reads": w.failed_reads, "poll_hole_s": status_hole,
         "health_reads": len(w.health_times), "not_healthy": w.not_healthy, "health_reasons": sorted(w.reasons),
         "health_hole_s": health_hole,
-        **j, "clock_restart": clock, "receivers": w.receivers.numbers(), "latency": w.latency, "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
+        **j, "clock_restart": clock, "receivers": w.receivers.numbers(), "latency": w.latency,
+        "unit_restarts": restarts, "left_job": int(w.left_job), "left_soak": int(w.left_soak),
         "failed": failed,
     }
 
@@ -741,6 +744,7 @@ def read_health(box: gate.Box, w: Watch) -> None:
     if state != "healthy":
         if w.in_window(t) and isinstance(reasons, list) and reasons and all(r in CLOCK_HEALTH for r in reasons):
             w.clock_health += 1   # only the restart's own reasons, inside its window (#130)
+            w.clock_reasons.update(reasons)
         else:
             w.not_healthy += 1
             w.reasons.update(known)
@@ -783,13 +787,23 @@ def restart_clock(box: gate.Box, w: Watch) -> None:
     w.clock_tried = True
     box.ip.pause(box.ctx, 0)
     at = time.monotonic()
+
+    def sent() -> None:
+        w.clock_at = at
+        w.record("clock_restart", {"sent": 1})
     try:
         box.call(CLOCK_RESTART, change=True)
+    except box.ip.EventNow:
+        sent()   # a flag during the call: the restart went, the cancelled line says so
+        raise
+    except box.ip.StillRunning as e:
+        sent()   # handed to the box, its answer not seen: judged as sent
+        gate.warn(f"the dantesync restart was sent but its answer not seen ({e}): judged as sent")
+        return
     except box.ip.StepError as e:
         gate.warn(f"the dantesync restart was not sent ({e}): the run goes on without it")
         return
-    w.clock_at = at
-    w.record("clock_restart", {"sent": 1})
+    sent()
 
 
 def watch(job: Job, w: Watch) -> bool:
@@ -884,7 +898,7 @@ def soak_run(job: Job, w: Watch, sha: str, member: str) -> None:
 # ---- the command ----
 
 def run(ctx, ip) -> int:
-    """`iempc gen3-gate soak [--minutes N]` (dev time, locked)."""
+    """`iempc gen3-gate soak [--minutes N] [--restart-clock]` (dev time, locked)."""
     minutes = minutes_of(ip, ctx.args)
     restart = bool(getattr(ctx.args, "restart_clock", False))
     host = g3.gen3_host(ip, ctx.env, gate.WORDS)

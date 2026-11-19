@@ -276,6 +276,8 @@ if line == "sudo -n systemctl restart dantesync":
     if os.environ.get("FAKE_CLOCK_RESTART_FAILS"):
         soak_fail("Failed to restart dantesync.service: Access denied")
     so["clock_restart"] = so["all"]
+    if os.environ.get("FAKE_FLAG_ON") == "clock":
+        flag()
     soak_done()
 if line == "sudo -n systemctl stop iem-soak":
     so["stops"] += 1
@@ -654,7 +656,8 @@ class ClockRestartTests(SoakBase):
         self.assertIsInstance(clock.pop("recovered_s"), float)
         self.assertEqual(clock, {"sent": 1, "window_s": 120.0, "holdovers": 1, "in_holdover": 1, "re_anchors": 2,
                                  "clock_not_ready": 1, "pump_free": 1, "pump_late": 1, "pump_missed": 3,
-                                 "pump_rebootstraps": 1, "health": 2})
+                                 "pump_rebootstraps": 1, "health": 2,
+                                 "health_reasons": ["clock_not_ready", "holdover", "pump_free"]})
         # Outside the window nothing rose; the pump's blocks rose at every read.
         for key in ("holdovers", "in_holdover", "re_anchors", "clock_not_ready", "pump_late", "pump_missed",
                     "pump_rebootstraps", "pump_stalled", "not_healthy", "unit_restarts", "counts_back"):
@@ -710,6 +713,28 @@ class ClockRestartTests(SoakBase):
         doc = self.line(docs)
         self.assertEqual((doc["conclusion"], doc["failed"], doc["clock_restart"]["sent"]), ("cancelled", [], 0))
         self.assertEqual((self.soak_state()["unit"], self.env_file_there(), self.posts()), (None, False, []))
+
+    def test_a_flag_during_the_restart_s_call_is_cancelled_with_the_restart_counted_as_sent(self) -> None:
+        code, docs, err = self.restart_run(FAKE_FLAG_ON="clock")
+        self.assertEqual(code, ip.PREEMPTED, err)
+        self.assertEqual(self.calls().count(CLOCK_RESTART), 1)
+        doc = self.line(docs)
+        self.assertEqual((doc["conclusion"], doc["clock_restart"]["sent"]), ("cancelled", 1))
+        self.assertEqual((self.soak_state()["unit"], self.posts()), (None, []))
+
+    def test_a_restart_whose_answer_is_not_seen_is_judged_as_sent(self) -> None:
+        call = soak.gate.Box.call
+
+        def outlived(box, words, **kw):
+            if words == soak.CLOCK_RESTART:
+                call(box, words, **kw)
+                raise ip.StillRunning("ssh outlived its bound")
+            return call(box, words, **kw)
+        with mock.patch.object(soak.gate.Box, "call", outlived):
+            code, docs, err = self.restart_run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.line(docs)["clock_restart"]["sent"], 1)
+        self.assertIn("the dantesync restart was sent but its answer not seen", err)
 
     def test_a_restart_that_cannot_be_sent_fails_clock_restart_unsent(self) -> None:
         code, docs, err = self.restart_run(FAKE_CLOCK_RESTART_FAILS="1")
@@ -915,7 +940,7 @@ class PureTests(unittest.TestCase):
         j = soak.judged(samples, [False, True, True, True, False])
         self.assertEqual(j["window"], {"holdovers": 1, "in_holdover": 1, "re_anchors": 2, "clock_not_ready": 1,
                                        "pump_free": 1, "pump_late": 0, "pump_missed": 3, "pump_rebootstraps": 1})
-        # After the window: the holdover counts; inside it the overrun and the frozen blocks counted all the same.
+        # After the window the holdover and the frozen blocks count; the overrun inside it counts all the same.
         self.assertEqual((j["holdovers"], j["in_holdover"], j["re_anchors"], j["clock_not_ready"], j["pump_missed"],
                           j["pump_overruns"], j["pump_stalled"]), (1, 1, 0, 0, 0, 1, 1))
         # Without a window every read judges as before.
@@ -923,6 +948,15 @@ class PureTests(unittest.TestCase):
         self.assertEqual((plain["holdovers"], plain["re_anchors"], plain["pump_missed"], plain["pump_stalled"]),
                          (2, 2, 3, 2))
         self.assertEqual(plain["window"], dict.fromkeys(soak.WINDOW_KEYS, 0))
+
+    def test_a_watch_marks_its_reads_in_the_window_by_their_times_the_baseline_never(self) -> None:
+        w = soak.Watch(10, False, False, Path("."))
+        w.samples = [{"n": 0}, {"n": 1}, {"n": 2}, {"n": 3}]   # the baseline first, then three good reads
+        w.status_times = [99.0, 150.0, 221.0]
+        self.assertEqual(w.inside(), [False, False, False, False])   # no restart sent
+        w.clock_at = 100.0
+        self.assertEqual(w.inside(), [False, False, True, False])
+        self.assertEqual((w.in_window(100.0), w.in_window(220.0), w.in_window(220.1)), (True, True, False))
 
     def test_the_clock_recovers_at_the_first_clean_read_after_the_window_s_last_disturbed_one(self) -> None:
         def s(ready=1, holdover=0, media=1):
