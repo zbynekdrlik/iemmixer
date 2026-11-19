@@ -2127,7 +2127,7 @@ class UnitTests(unittest.TestCase):
             if path.name != "iem-engine.service":
                 self.assertNotIn("iem-restart-alarm", path.read_text(encoding="utf-8"), path.name)
 
-    def test_the_restart_notice_fires_on_exit_1_only_and_notifies_the_engineer(self) -> None:
+    def test_the_restart_notice_fires_on_every_unexpected_end_and_notifies_the_engineer(self) -> None:
         notice = self.restart_alarm()
         service = notice["Service"]
         self.assertEqual(one(notice, "Service", "Type"), "oneshot")
@@ -2136,32 +2136,40 @@ class UnitTests(unittest.TestCase):
         server_env = dict(item.split("=", 1)
                           for item in shlex.split(one(self.units["iem-server"], "Service", "Environment")))
         self.assertEqual(service.get("Environment"), [f"IEMMIXER_CONFIG={server_env['IEMMIXER_CONFIG']}"])
-        # The instance is the engine's EXIT_CODE-EXIT_STATUS: only exited-1
-        # (a stalled pump, the device stopped serving, an I/O error) runs on;
-        # a stop (exited-0, killed-TERM), 2, 3, 70 (the HIL gate's injected
-        # RT fault) and 75 are skipped, the unit inactive, never failed.
-        self.assertEqual(service.get("ExecCondition"), ["/usr/bin/test %i = exited-1"])
+        # The instance is the engine's EXIT_CODE-EXIT_STATUS: every end systemd
+        # restarts runs on (1: a stalled pump, the device stopped serving, an
+        # I/O error; a signal: a crash, an abort, the OOM kill; 75; any other
+        # code); a stop (exited-0, killed-TERM, killed-INT), 2 and 3 (the
+        # stays-down alarm's) and 70 (the HIL gate's injected RT fault) are
+        # skipped, the unit inactive, never failed.
+        self.assertEqual(service.get("ExecCondition"), [
+            "/usr/bin/test %i != exited-0 -a %i != killed-TERM -a %i != killed-INT -a %i != exited-2 "
+            "-a %i != exited-3 -a %i != exited-70",
+        ])
         condition = shlex.split(service["ExecCondition"][0])
-        for end, runs in (("exited-1", True), ("exited-0", False), ("killed-TERM", False), ("exited-2", False),
-                          ("exited-3", False), ("exited-70", False), ("exited-75", False), ("exited-10", False)):
+        for end, runs in (("exited-1", True), ("killed-SEGV", True), ("killed-ABRT", True), ("killed-KILL", True),
+                          ("exited-75", True), ("exited-10", True), ("exited-203", True),
+                          ("exited-0", False), ("killed-TERM", False), ("killed-INT", False), ("exited-2", False),
+                          ("exited-3", False), ("exited-70", False)):
             # The condition itself, run as systemd runs it (%i replaced).
             argv = [word.replace("%i", end) for word in condition]
             self.assertEqual(subprocess.run(argv, check=False).returncode == 0, runs, end)
         # The journal line, then the notice only on a box that serves the band
-        # (its engine enabled at boot), as the stays-down alarm.
+        # (its engine enabled at boot), as the stays-down alarm; both name the
+        # end (the instance) and fixed words only.
         self.assertEqual(service.get("ExecStartPre"), [
-            '/usr/bin/echo "alarm: iem-engine.service ended unexpectedly (exit 1) and is being restarted"',
+            '/usr/bin/echo "alarm: iem-engine.service ended unexpectedly (%i) and is being restarted"',
             "/usr/bin/systemctl is-enabled --quiet iem-engine.service",
         ])
         self.assertEqual(service.get("ExecStart"), [
             '/opt/iemmixer/bin/iem-server notify --to alarm "Gen 3 box" "iem-engine.service ended unexpectedly '
-            '(exit 1: a stalled engine pump, the device stopped serving or an I/O error) and is being restarted"',
+            '(%i) and is being restarted; its journal says why"',
         ])
         notify = shlex.split(service["ExecStart"][0])
         self.assertEqual(notify[0], one(self.units["iem-server"], "Service", "ExecStart"))
         self.assertEqual(notify[1:4], ["notify", "--to", "alarm"])
         self.assertEqual(notify[4], "Gen 3 box")
-        self.assertIn("stalled engine pump", notify[5])
+        self.assertIn("(%i)", notify[5])
         self.assertIn("is being restarted", notify[5])
         # It reads no MONITOR_* (only OnFailure= units get them).
         for lines in service.values():

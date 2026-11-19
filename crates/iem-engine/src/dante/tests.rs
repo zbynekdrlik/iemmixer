@@ -304,7 +304,7 @@ fn rig(ended: Option<&str>) -> Rig {
 
 /// A driver whose device answers its stop with `answer`.
 fn rig_with(ended: Option<&str>, answer: Stopped) -> Rig {
-    rig_full(ended, answer, STALL_WITHIN)
+    rig_full(ended, answer, stall::within(96_000))
 }
 
 /// A driver whose device answers its stop with `answer` and whose stall
@@ -514,7 +514,7 @@ fn a_pump_frozen_while_the_clock_is_ready_is_a_backend_ending_after_the_bound() 
 }
 
 #[test]
-fn a_frozen_pump_while_the_clock_is_not_ready_or_before_its_first_block_runs_on() {
+fn a_frozen_pump_while_the_clock_is_not_ready_runs_on() {
     let stall = Duration::from_millis(100);
     // The clock not ready (a holdover), the pump frozen at 3 blocks.
     let r = rig_full(None, Stopped::Done, stall);
@@ -524,10 +524,24 @@ fn a_frozen_pump_while_the_clock_is_not_ready_or_before_its_first_block_runs_on(
     }
     assert_eq!(ending_within(&r.driver, 4 * stall), None);
     Box::new(r.driver).stop();
-    // The clock ready, no block yet (the start).
+}
+
+#[test]
+fn a_pump_that_runs_no_first_block_while_the_clock_is_ready_is_a_backend_ending() {
+    // The clock ready, no block ever run (a restart into the clock's bad
+    // state): the watch is armed at once and fires after the bound.
+    let stall = Duration::from_millis(100);
     let r = rig_full(None, Stopped::Done, stall);
     r.clock.ready.store(true, Ordering::Release);
-    assert_eq!(ending_within(&r.driver, 4 * stall), None);
+    let (ending, after) = ending_within(&r.driver, BOUND).expect("no block at all ends the run");
+    let Ending::Backend(why) = ending else {
+        panic!("a stall is a backend ending: {ending:?}");
+    };
+    assert!(
+        why.starts_with("the engine pump stalled: blocks frozen at 0 for "),
+        "{why}"
+    );
+    assert!(after >= stall, "not before the bound: {after:?}");
     Box::new(r.driver).stop();
 }
 
