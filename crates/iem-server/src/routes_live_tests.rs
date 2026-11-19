@@ -116,11 +116,7 @@ async fn a_capture_answers_with_its_backup_and_never_overwrites_one() {
     let h = EngineHarness::start();
     let (_dir, s, app) = live(&h).await;
     let eng = token("engineer", true);
-    let now = || {
-        chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string()
-    };
+    let now = || crate::backup_store::utc_now_ms();
     let t0 = now();
     let capture = "/api/backups/capture";
     // Two captures in a row (a double click, the daemon's slot) are two

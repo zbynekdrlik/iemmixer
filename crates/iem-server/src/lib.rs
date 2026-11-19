@@ -527,7 +527,7 @@ impl AppState {
         let lineup = self.roster().map(|r| r.lineup().id.clone());
         let band = self.band_of(lineup.as_deref());
         let key = snapshot_key(lineup.as_deref(), member);
-        let now = chrono::Utc::now().timestamp();
+        let now = iem_core::unix_now();
         let today = band_store::utc_day(now);
         if lock(&self.auto_snapshots).get(&key) == Some(&today) {
             return;
@@ -1262,7 +1262,7 @@ mod tests {
         assert!(refused.is_err(), "self-signed: no CA trusts it");
         // Stored files are served, with or without a keeper.
         let ca = tls_cert::test_certs::TestCa::new();
-        let now = chrono::Utc::now().timestamp();
+        let now = iem_core::unix_now();
         let (chain, key) = ca.leaf(&["mixer.example.org"], now - 86_400, now + 90 * 86_400);
         files
             .save(&tls_cert::checked(chain, key, "mixer.example.org").unwrap())

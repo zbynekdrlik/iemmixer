@@ -42,8 +42,9 @@ thiserror = "2.0"
 # Logging
 tracing = "0.1"
 
-# Date/time for daily snapshots
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# Date/time: UTC stamps, and the backup schedule in the box's local zone
+# (TZ, else /etc/localtime; zones from /usr/share/zoneinfo)
+jiff = { version = "0.2.39", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 
 # System info
 local-ip-address = "0.6"

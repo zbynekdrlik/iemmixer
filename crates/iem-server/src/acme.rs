@@ -467,7 +467,7 @@ impl Acme {
 /// Keeps the name's certificate for the server's life (see the module doc).
 pub async fn keep(acme: Acme, rustls: RustlsConfig, status: StatusCell) {
     loop {
-        let now = chrono::Utc::now().timestamp();
+        let now = iem_core::unix_now();
         let wait = acme.check(&rustls, &status, now).await;
         tokio::time::sleep(wait).await;
     }
