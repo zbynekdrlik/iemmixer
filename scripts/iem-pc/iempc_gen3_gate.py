@@ -100,8 +100,9 @@ words (`box_error`).
 `iempc gen3-gate live` is iempc_gen3_live.py: it builds on this
 module (the preflight without the ARC reads, the job, the budget, the status
 post) and `run` passes the call on to it. `iempc gen3-gate soak [--minutes
-N]` is iempc_gen3_soak.py: no HIL job (a left one is ended first),
-the Box, the status post; `--minutes` is the soak's only.
+N] [--restart-clock]` is iempc_gen3_soak.py: no HIL job (a left one is
+ended first), the Box, the status post; `--minutes` and `--restart-clock`
+are the soak's only.
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
@@ -1212,6 +1213,8 @@ def run(ctx, ip) -> int:
     """`iempc gen3-gate hil|live|soak|reboot|reset` (dev time, locked); `latency` (any time, no lock)."""
     if ctx.args.gate != "soak" and getattr(ctx.args, "minutes", None) is not None:
         raise ip.Refused("gen3-gate: --minutes is the soak gate's only (nothing was called)")
+    if ctx.args.gate != "soak" and getattr(ctx.args, "restart_clock", False):
+        raise ip.Refused("gen3-gate: --restart-clock is the soak gate's only (nothing was called)")
     if ctx.args.gate == "live":
         import iempc_gen3_live   # it imports this module: imported here, never at the top
         return iempc_gen3_live.run(ctx, ip)
