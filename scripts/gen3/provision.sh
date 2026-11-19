@@ -22,8 +22,8 @@ set -euo pipefail
 #   that is not inactive or failed refuses the run before anything is copied
 #   (provision never touches a running stack).
 # - One scp into ~/.cache/iem-gen3-provision (overwritten, never deleted):
-#   provision-root.sh, sudo-lines.txt, iem-napi.service, napi-priority and the
-#   two values as files (ntp-server, roster-ids); then
+#   provision-root.sh, sudo-lines.txt, iem-napi.service, napi-priority,
+#   iem-mdns-cap.service, dante-mdns-cap.nft and the two values as files (ntp-server, roster-ids); then
 #   `sudo -n bash .cache/iem-gen3-provision/provision-root.sh --admin <user>
 #   --ntp-file ... --roster-file ...`, the steps' lines on stdout. That call
 #   runs on the admin's own passwordless rule (phase D's test box; the rule
@@ -42,7 +42,7 @@ set -euo pipefail
 
 STAGE=.cache/iem-gen3-provision
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
-FILES=(provision-root.sh sudo-lines.txt iem-napi.service napi-priority)
+FILES=(provision-root.sh sudo-lines.txt iem-napi.service napi-priority iem-mdns-cap.service dante-mdns-cap.nft)
 
 die() {
   echo "provision.sh: $*" >&2

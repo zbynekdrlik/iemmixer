@@ -77,6 +77,8 @@ CHECKOUT_FILES = {
     "/etc/systemd/system/iem-restart-alarm@.service": "iem-restart-alarm@.service",
     "/etc/systemd/system/iem-tunnel.service": "iem-tunnel.service",
     "/etc/systemd/system/iem-napi.service": "iem-napi.service",
+    "/etc/systemd/system/iem-mdns-cap.service": "iem-mdns-cap.service",
+    "/etc/iemmixer/dante-mdns-cap.nft": "dante-mdns-cap.nft",
     "/usr/local/lib/iemmixer/napi-priority": "napi-priority",
     "/opt/iemmixer/lib/band_receive.py": "band_receive.py",
     "/opt/iemmixer/lib/band_send.py": "band_send.py",

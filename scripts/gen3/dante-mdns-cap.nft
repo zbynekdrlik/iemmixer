@@ -1,0 +1,35 @@
+#!/usr/sbin/nft -f
+# Vendored from dstack v0.6.191 tools/linux/dante-mdns-cap.nft (MIT OR Apache-2.0), byte for byte but this line (#127).
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# The mDNS cap alone, for a one-leg Linux PC (dstack #288,
+# docs/two-networks.md): a PC whose only NIC is both its Dante leg and its
+# LAN cannot take dante-leg.nft, whose drop rules (TCP, IPv6, non-Dante UDP)
+# would cut its LAN, tunnels and updates. It still caps its OWN mDNS out to
+# the group, so no program on it floods the Dante VLAN, even with no switch
+# cap. Nothing else is filtered: policy accept, no input chain, no drop
+# besides the two caps.
+#
+# The two rules are dante-leg.nft's chain `out` caps, byte for byte
+# (crates/dstack/tests/dante_leg.rs checks it): change both together.
+# Queries (DNS QR bit 0, @th,80,1) 10/s past a burst of 50, then all mDNS
+# 50/s past a burst of 200. With no leg condition they hold on every
+# interface; a one-leg PC has only the one.
+#
+# Load (as root), no interface to name:
+#   nft -f /etc/dstack/dante-mdns-cap.nft
+# What the caps dropped:
+#   nft list chain inet dstack_mdns_cap out | grep 'limit rate over'
+# Loading again replaces the table in one transaction (idempotent). The
+# table is its own, so it can sit beside dante-leg.nft's on a two-leg PC.
+
+table inet dstack_mdns_cap
+delete table inet dstack_mdns_cap
+
+table inet dstack_mdns_cap {
+	chain out {
+		type filter hook output priority filter; policy accept;
+		udp dport 5353 ip daddr 224.0.0.251 @th,80,1 0 limit rate over 10/second burst 50 packets counter drop
+		udp dport 5353 ip daddr 224.0.0.251 limit rate over 50/second burst 200 packets counter drop
+	}
+}

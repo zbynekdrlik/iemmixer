@@ -1,0 +1,35 @@
+# The Gen 3 box's own mDNS cap (#127, dstack#288); rules in .claude/rules/gen3.md. Installed and enabled by
+# scripts/gen3/provision-root.sh (its mdns_cap step) with dstack's
+# /etc/iemmixer/dante-mdns-cap.nft (scripts/gen3/dante-mdns-cap.nft, vendored
+# from dstack v0.6.191): one table of its own, inet dstack_mdns_cap, whose
+# output chain drops only our own mDNS to 224.0.0.251:5353 past its two rates
+# (queries 10/s past a burst of 50, all mDNS 50/s past a burst of 200). The
+# owner's rule: no host floods the Dante network, ours included. Nothing in
+# input, nothing else dropped; dstack's full dante-leg.nft is not for this
+# one-NIC box (its TCP drops would cut the tunnel, ACME and the web UI).
+#
+# Loading replaces the table in one transaction and touches no other table.
+# A stop leaves the table as it is (no ExecStop): the cap holds until the next
+# boot or load. Never part of the stack: "ide event" stops nothing here, and a
+# failure here holds back neither dantesync nor the stack (ordering only, no
+# Requires=).
+
+[Unit]
+Description=iemmixer Gen 3: the box's own mDNS cap (dstack dante-mdns-cap.nft)
+Documentation=https://github.com/zbynekdrlik/iemmixer/blob/main/.claude/rules/gen3.md
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target iem-engine.service iem-dante.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/iemmixer/dante-mdns-cap.nft
+TimeoutStartSec=30
+TimeoutStopSec=10
+SendSIGKILL=no
+
+[Install]
+WantedBy=multi-user.target
