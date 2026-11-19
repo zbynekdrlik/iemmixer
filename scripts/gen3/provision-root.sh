@@ -3,8 +3,8 @@
 # shellcheck disable=SC2016
 set -euo pipefail
 # The Gen 3 box's provisioning, run as root on the box (#72 phase D; rules in .claude/rules/gen3.md). provision.sh copies it with
-# sudo-lines.txt, iem-napi.service, napi-priority and the two values into the
-# admin's ~/.cache/iem-gen3-provision and runs it there:
+# sudo-lines.txt, iem-napi.service, napi-priority, iem-mdns-cap.service,
+# dante-mdns-cap.nft and the two values into the admin's ~/.cache/iem-gen3-provision and runs it there:
 #
 #   sudo -n bash .cache/iem-gen3-provision/provision-root.sh --admin <user>
 #        --ntp-file <file: the ops dantesync config's ntp_server>
@@ -16,13 +16,16 @@ set -euo pipefail
 # configuration changed, runs update-grub when grub's settings changed or its
 # menu does not hold them, starts
 # the box's time owner (dantesync) when it is not running, runs iem-napi (the
-# Dante interface's packet priority) when it does not hold, and triggers the
-# display rule when a display device may still runtime-suspend.
+# Dante interface's packet priority) when it does not hold, loads the mDNS
+# cap (iem-mdns-cap) when its file or unit changed or its table is not
+# loaded, and triggers the display rule when a display device may still
+# runtime-suspend.
 # Refused with nothing changed: not root, dantesync not installed (the box's
 # one time owner comes from install-dantesync.sh, never from here) or its
 # config not the ops follower config --ntp-file's NTP server names, a PTP
-# daemon besides it, a unit of the stack running, fewer than 4 or more than
-# 32 CPUs (nproc --all), a sudoers rule sudo-lines.txt renders that visudo
+# daemon besides it, a unit of the stack running, no nft (/usr/sbin/nft, the
+# mDNS cap's loader), fewer than 4 or more than 32 CPUs (nproc --all), a
+# sudoers rule sudo-lines.txt renders that visudo
 # refuses.
 #
 # Steps, in order:
@@ -92,6 +95,18 @@ set -euo pipefail
 #             poll wakes it: the wake reloads the display microcontroller's
 #             firmware with preemption off (0.4-2 ms) on core 0, where the
 #             Dante NIC's NAPI thread then waits (#72, 2026-11-10).
+#   mdns_cap  dstack's mDNS cap (#127, dstack#288; vendored from dstack
+#             v0.6.191 as dante-mdns-cap.nft) at
+#             /etc/iemmixer/dante-mdns-cap.nft and iem-mdns-cap.service,
+#             enabled (at every boot before the network and the stack);
+#             loaded now (`systemctl restart iem-mdns-cap.service`, one nft
+#             transaction replacing its own table inet dstack_mdns_cap and no
+#             other) when the file or the unit changed, the unit is not
+#             active, or `nft list table inet dstack_mdns_cap` fails; read
+#             back with that list. The owner's rule: no host floods the Dante
+#             network, ours included; only our own mDNS out to 224.0.0.251 is
+#             capped, nothing else is filtered (dante-leg.nft's TCP drops
+#             would cut this one-NIC box's tunnel and web UI).
 #   stack     none of the stack's units enabled (nothing of it starts at
 #             boot).
 #   sudoers   /etc/sudoers.d/iemmixer-gen3 (0440): sudo-lines.txt for the
@@ -128,6 +143,10 @@ AUTO_UPGRADES=/etc/apt/apt.conf.d/20auto-upgrades
 SWAPFILE=/swapfile
 NAPI_HELPER=/usr/local/lib/iemmixer/napi-priority
 NAPI_UNIT=/etc/systemd/system/iem-napi.service
+MDNS_CAP=/etc/iemmixer/dante-mdns-cap.nft
+MDNS_UNIT=/etc/systemd/system/iem-mdns-cap.service
+MDNS_TABLE=(inet dstack_mdns_cap)
+NFT=/usr/sbin/nft
 DISPLAY_RULE=/etc/udev/rules.d/60-iemmixer-display.rules
 OLD_DISPLAY_CONF=/etc/tmpfiles.d/iemmixer-display.conf
 PCI_DEVICES=/sys/bus/pci/devices
@@ -192,7 +211,7 @@ done < "$roster_file"
 [ "${#members[@]}" -gt 0 ] || usage "--roster-file holds no member id"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for name in sudo-lines.txt iem-napi.service napi-priority; do
+for name in sudo-lines.txt iem-napi.service napi-priority iem-mdns-cap.service dante-mdns-cap.nft; do
   [ -f "$here/$name" ] || die "$here/$name is missing: provision.sh copies it beside this script"
 done
 
@@ -428,6 +447,9 @@ for unit in "${STACK_UNITS[@]}"; do
     die "$unit is $active_state: provision never touches a running stack; stop it first (sudo systemctl stop iem-server iem-engine iem-dante): nothing changed"
   fi
 done
+# The mDNS cap's loader, where its unit's ExecStart names it.
+[ -f "$R$NFT" ] && [ -x "$R$NFT" ] ||
+  die "nft is not installed ($NFT, iem-mdns-cap.service's ExecStart; apt install nftables): nothing changed"
 # The realtime step's CPUs: the last two isolated for the engine (its pump and
 # the Dante threads), the others (at least two) the kernel's; the workqueue
 # mask below is one hex word, so at most 32.
@@ -847,6 +869,41 @@ step_napi() {
   [ "$active_state" = active ] || die "iem-napi is '$active_state' after it ran, not active (journalctl -u iem-napi on the box)"
 }
 
+# Whether the mDNS cap's own table is loaded (nft lists it).
+mdns_cap_loaded() {
+  nft list table "${MDNS_TABLE[@]}" > /dev/null 2>&1
+}
+
+step_mdns_cap() {
+  local fresh
+  put_file 0644 root root "$MDNS_CAP" "$here/dante-mdns-cap.nft"
+  fresh=$wrote
+  put_file 0644 root root "$MDNS_UNIT" "$here/iem-mdns-cap.service"
+  if [ "$wrote" = 1 ]; then
+    fresh=1
+    systemctl daemon-reload
+  fi
+  unit_states iem-mdns-cap.service
+  if [ "$file_state" != enabled ]; then
+    systemctl enable iem-mdns-cap.service
+    changed=1
+    unit_states iem-mdns-cap.service
+    [ "$file_state" = enabled ] || die "iem-mdns-cap is '$file_state' after its enable"
+  fi
+  # Loading replaces only its own table, in one transaction: never another
+  # table, never the stack.
+  if [ "$fresh" = 1 ] || [ "$active_state" != active ] || ! mdns_cap_loaded; then
+    systemctl restart iem-mdns-cap.service ||
+      die "iem-mdns-cap did not load the mDNS cap (journalctl -u iem-mdns-cap on the box)"
+    changed=1
+  fi
+  mdns_cap_loaded ||
+    die "the mDNS cap's table (nft list table ${MDNS_TABLE[*]}) is not loaded after iem-mdns-cap ran"
+  unit_states iem-mdns-cap.service
+  [ "$active_state" = active ] ||
+    die "iem-mdns-cap is '$active_state' after it ran, not active (journalctl -u iem-mdns-cap on the box)"
+}
+
 # 1 when a PCI display device of the box may runtime-suspend (its
 # power/control is not on).
 display_may_suspend() {
@@ -928,7 +985,7 @@ step_idle() {
   done
 }
 
-for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display idle stack sudoers; do
+for step in user folders state pepper phase-c journal realtime apt sleep swap clock napi display idle mdns_cap stack sudoers; do
   changed=0
   "step_${step//-/_}"
   if [ "$changed" = 1 ]; then

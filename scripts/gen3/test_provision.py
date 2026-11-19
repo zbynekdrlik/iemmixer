@@ -1,7 +1,8 @@
 """Tests for the Gen 3 box's provisioning (#72 phase D):
 provision-root.sh on a temporary root (IEM_PROVISION_ROOT) with stand-in
 commands first on PATH that play the box's users, units, packages, owners and
-the TPM (`systemd-creds`), every call logged; napi-priority on stand-in /sys
+the TPM (`systemd-creds`) and nftables (`nft`), every call logged;
+napi-priority on stand-in /sys
 and /proc trees with stand-in `chrt` and `taskset`; verify_box.py on what the
 root script made (IEM_VERIFY_ROOT, the same stand-ins and a stand-in `sudo`);
 provision.sh against a stand-in `ssh` and `scp`. The rendered sudoers rule
@@ -32,7 +33,21 @@ VERIFY = HERE / "verify_box.py"
 NAPI = HERE / "napi-priority"
 NAPI_UNIT = HERE / "iem-napi.service"
 TEMPLATE = HERE / "sudo-lines.txt"
-STAGE_FILES = ("provision-root.sh", "sudo-lines.txt", "iem-napi.service", "napi-priority")
+MDNS_NFT = HERE / "dante-mdns-cap.nft"
+MDNS_UNIT = HERE / "iem-mdns-cap.service"
+STAGE_FILES = ("provision-root.sh", "sudo-lines.txt", "iem-napi.service", "napi-priority", "iem-mdns-cap.service",
+               "dante-mdns-cap.nft")
+# dstack's mDNS cap (#127, dstack#288): v0.6.191's tools/linux/dante-mdns-cap.nft
+# by its sha256, vendored with one header line (its second) naming its origin.
+MDNS_UPSTREAM_SHA256 = "d3ad269f6f626c18032e4d13b5faed301196859e06f8fac94d6f1a803fbc751b"
+MDNS_TABLE = "inet dstack_mdns_cap"
+MDNS_RATES = ("limit rate over 10/second", "limit rate over 50/second")
+MDNS_BOX = "/etc/iemmixer/dante-mdns-cap.nft"
+MDNS_BOX_UNIT = "/etc/systemd/system/iem-mdns-cap.service"
+MDNS_LOAD = ["nft", "-f", MDNS_BOX]
+# Another table on the box (a firewall of the OS's): never touched.
+OTHER_TABLE = "inet filter"
+OTHER_TABLE_TEXT = "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t}\n}"
 ADMIN = "tester"
 NTP = "ntp-master.test"
 IFACE = "ethz9"
@@ -51,9 +66,9 @@ INTERRUPTS = f"""            CPU0       CPU1       CPU2       CPU3
 """
 SWAPS_HEADER = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
 STEPS = ("user", "folders", "state", "pepper", "phase-c", "journal", "realtime", "apt", "sleep", "swap", "clock",
-         "napi", "display", "idle", "stack", "sudoers")
+         "napi", "display", "idle", "mdns_cap", "stack", "sudoers")
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
-          "sleep", "swap", "clock", "napi", "display", "idle")
+          "sleep", "swap", "clock", "napi", "display", "idle", "mdns_cap")
 # verify's information beside the checks, never part of pass.
 INFO = ("tpm2", "realtime_running")
 # The realtime step on a 4-CPU box (#72 phase F): the kernel the stand-in
@@ -152,6 +167,8 @@ def is_write():
         return args != ["list"]
     if name in READ_ARGS:
         return args[:1] != [READ_ARGS[name]]
+    if name == "nft":
+        return args[:1] != ["list"]
     return True
 
 
@@ -207,6 +224,56 @@ def run_napi():
     with open(os.path.join(WORLD, "journal.log"), "a", encoding="utf-8") as journal:
         return subprocess.run([os.path.join(ROOT, "usr/local/lib/iemmixer/napi-priority"), iface], env=env,
                               stdout=journal, stderr=journal).returncode
+
+
+def run_mdns_cap():
+    """systemd running iem-mdns-cap.service's ExecStart as the installed unit
+    names it: the program by its name (the stand-in), each path on the root."""
+    with open(os.path.join(ROOT, "etc/systemd/system/iem-mdns-cap.service"), encoding="utf-8") as f:
+        line = [line.split("=", 1)[1].split() for line in f if line.startswith("ExecStart=")][-1]
+    argv = [os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), os.path.basename(line[0]))]
+    argv += [ROOT + a if a.startswith("/") else a for a in line[1:]]
+    with open(os.path.join(WORLD, "journal.log"), "a", encoding="utf-8") as journal:
+        return subprocess.run(argv, stdout=journal, stderr=journal).returncode
+
+
+def nft_load(path, tables):
+    """`nft -f`: the file's table lines in order, all or nothing (one
+    transaction): `table F N` makes it when absent, `delete table F N` drops
+    it (an error when absent), `table F N { ... }` adds its body. A table is
+    kept as `nft list table` prints it (counters with their numbers)."""
+    lines = open(path, encoding="utf-8").read().split("\n")
+    new, i = dict(tables), 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line or line.startswith("#"):
+            continue
+        m = re.fullmatch(r"(delete )?table (\w+) (\w+)( \{)?", line)
+        if not m:
+            fail(f"Error: syntax error: {line}")
+        key = f"{m.group(2)} {m.group(3)}"
+        if m.group(1):
+            if key not in new:
+                fail(f"Error: Could not process rule: No such file or directory\ndelete table {key}")
+            del new[key]
+        elif m.group(4):
+            body, depth = [], 1
+            while depth:
+                if i >= len(lines):
+                    fail("Error: syntax error, unexpected end of file")
+                inner = lines[i].strip()
+                i += 1
+                if not inner or inner.startswith("#"):
+                    continue
+                depth += inner.count("{") - inner.count("}")
+                if depth:
+                    body.append(inner.replace(" counter ", " counter packets 0 bytes 0 "))
+            old = new.get(key, f"table {key} {{\n}}").split("\n")[1:-1]
+            new[key] = "\n".join([f"table {key} {{", *old, *("\t" + b for b in body), "}"])
+        else:
+            new.setdefault(key, f"table {key} {{\n}}")
+    return new
 
 
 def proc_file(pid, leaf):
@@ -372,8 +439,11 @@ elif name == "systemctl":
         elif verb in ("start", "restart"):
             if p["LoadState"] != "loaded":
                 fail(f"Unit {unit} not found.", 5)
-            if unit == "iem-napi.service":
-                rc = run_napi()
+            if unit in ("iem-napi.service", "iem-mdns-cap.service"):
+                save(db)
+                rc = run_napi() if unit == "iem-napi.service" else run_mdns_cap()
+                db = load()
+                p = db["units"][unit]
                 p["ActiveState"] = "active" if rc == 0 else "failed"
                 if rc:
                     save(db)
@@ -605,6 +675,21 @@ elif name == "ethtool":
         print(f"\tEEE status: {state}")
         if state != "not supported":
             print("\tTx LPI: disabled")
+elif name == "nft":
+    db = load()
+    tables = db.setdefault("nft", {})
+    if args[:2] == ["list", "table"] and len(args) == 4:
+        key = f"{args[2]} {args[3]}"
+        if key not in tables:
+            fail(f"Error: No such file or directory\nlist table {key}")
+        print(tables[key])
+    elif args[:1] == ["-f"] and len(args) == 2:
+        if os.environ.get("FAKE_NFT_RC"):
+            fail("Error: Could not process rule: Operation not supported", int(os.environ["FAKE_NFT_RC"]))
+        db["nft"] = nft_load(args[1], tables)
+        save(db)
+    else:
+        fail("unexpected nft", 97)
 elif name == "taskset":
     assert args[:2] == ["-p", "-c"], args
     cores, pid = args[2], args[3]
@@ -627,6 +712,9 @@ elif name == "sudo":
         sys.exit(0)
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
+    if rest[:1] == ["nft"]:
+        sys.exit(subprocess.run([os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "nft"),
+                                 *rest[1:]]).returncode)
     if rest[:1] == ["cat"] and len(rest) == 2:
         path = ROOT + rest[1]
         if not os.path.exists(path):
@@ -651,7 +739,7 @@ else:
 FAKE_NAMES = ("id", "getent", "groupadd", "useradd", "usermod", "install", "stat", "systemctl", "timedatectl",
               "dpkg-query", "apt-mark", "apt-get", "systemd-creds", "visudo", "fallocate", "mkswap", "swapon",
               "chrt", "taskset", "sudo", "find", "chown", "systemd-tmpfiles", "nproc", "uname", "update-grub",
-              "grub-editenv", "grub-set-default", "ethtool", "udevadm")
+              "grub-editenv", "grub-set-default", "ethtool", "udevadm", "nft")
 
 
 def stat_line(pid: str, comm: str, policy: int, priority: int) -> str:
@@ -725,7 +813,7 @@ class World(unittest.TestCase):
         r = self.root
         # The programs sudo-lines.txt names, where sudo's secure_path finds them.
         for program in self.template_programs():
-            write(r / ("usr/sbin" if program == "visudo" else "usr/bin") / program, "#!/bin/sh\n", 0o755)
+            write(r / ("usr/sbin" if program in ("visudo", "nft") else "usr/bin") / program, "#!/bin/sh\n", 0o755)
         write(r / "usr/local/bin/dantesync", "#!/bin/sh\n", 0o755)
         write(r / "etc/systemd/system/dantesync.service", "[Service]\nUser=root\nExecStart=/usr/local/bin/dantesync\n")
         write(r / "etc/dantesync/config.json", json.dumps({"ntp_server": NTP, "ntp_server_mode": {"enabled": False}}))
@@ -790,6 +878,7 @@ class World(unittest.TestCase):
         units["iem-dante.service"]["UnitFileState"] = "enabled"
         self.save_db({
             "uid": "0", "user": ADMIN, "next_id": 990, "ntp": "yes", "owners": owners,
+            "nft": {OTHER_TABLE: OTHER_TABLE_TEXT},
             "nproc": 4, "uname": "7.0.0-1-generic", "grubenv": {}, "realtime_kernel": REALTIME,
             "passwd": {ADMIN: f"{ADMIN}:x:1000:1000::/home/{ADMIN}:/bin/bash", "root": "root:x:0:0::/root:/bin/bash"},
             "group": {ADMIN: f"{ADMIN}:x:1000:", "systemd-journal": "systemd-journal:x:999:"},
@@ -891,7 +980,7 @@ class World(unittest.TestCase):
     def steps(r: subprocess.CompletedProcess) -> dict[str, str]:
         out = {}
         for line in r.stdout.splitlines():
-            m = re.fullmatch(r"([a-z-]+) (changed|unchanged)", line)
+            m = re.fullmatch(r"([a-z_-]+) (changed|unchanged)", line)
             if m:
                 out[m.group(1)] = m.group(2)
         return out
@@ -972,6 +1061,13 @@ class ProvisionRootTests(World):
             ["udevadm", "control", "--reload"],
             TRIGGER,
             [*tmp_install, IDLE_CONF],
+            ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", "<stage>/dante-mdns-cap.nft", MDNS_BOX],
+            ["install", "-D", "-m", "0644", "-o", "root", "-g", "root", "--", "<stage>/iem-mdns-cap.service",
+             MDNS_BOX_UNIT],
+            ["systemctl", "daemon-reload"],
+            ["systemctl", "enable", "iem-mdns-cap.service"],
+            ["systemctl", "restart", "iem-mdns-cap.service"],
+            MDNS_LOAD,
             ["systemctl", "disable", "iem-dante.service"],
             ["install", "-D", "-m", "0440", "-o", "root", "-g", "root", "--", "<tmp>",
              "/etc/sudoers.d/.iemmixer-gen3.new"],
@@ -1175,6 +1271,7 @@ class ProvisionRootTests(World):
             (lambda: self.set_unit("phc2sys.service", ActiveState="active"), "phc2sys.service is enabled or running"),
             (lambda: self.set_unit("iem-engine.service", ActiveState="active"), "iem-engine.service is active"),
             (lambda: self.set_unit("iem-dante.service", ActiveState="activating"), "iem-dante.service is activating"),
+            (lambda: (self.root / "usr/sbin/nft").unlink(), "nft is not installed"),
             (cpus(2), "the box has fewer than 4 CPUs"),
             (cpus(33), "the box has more than 32 CPUs"),
         ]
@@ -1357,6 +1454,126 @@ class ProvisionRootTests(World):
         for out in (r.stdout + r.stderr, r2.stdout + r2.stderr):
             for value in (NTP, ADMIN, IFACE):
                 self.assertNotIn(value, out)
+
+
+class MdnsCapTests(World):
+    """dstack's mDNS cap on the box (#127, dstack#288): its file and unit,
+    loaded once, again only when needed, its own table alone."""
+
+    def tables(self) -> dict[str, str]:
+        return self.db()["nft"]
+
+    def loads(self) -> list[list[str]]:
+        return [c for c in self.writes() if c[0] == "nft"]
+
+    def assert_capped(self) -> None:
+        table = self.tables()[MDNS_TABLE]
+        for rate in MDNS_RATES:
+            self.assertEqual(table.count(rate), 1, table)
+        self.assertEqual(table.count("drop"), 2, table)
+        self.assertEqual(table.count("udp dport 5353 ip daddr 224.0.0.251"), 2, table)
+        self.assertIn("type filter hook output priority filter; policy accept;", table)
+
+    def test_the_vendored_file_is_dstack_s_byte_for_byte_with_one_line_naming_its_origin(self) -> None:
+        lines = MDNS_NFT.read_bytes().split(b"\n")
+        self.assertEqual(lines[0], b"#!/usr/sbin/nft -f")
+        self.assertTrue(lines[1].startswith(b"# Vendored from dstack v0.6.191 tools/linux/dante-mdns-cap.nft "
+                                            b"(MIT OR Apache-2.0)"), lines[1])
+        upstream = b"\n".join(lines[:1] + lines[2:])
+        self.assertEqual(hashlib.sha256(upstream).hexdigest(), MDNS_UPSTREAM_SHA256)
+        # Its own table alone: no other table is named, flushed or deleted.
+        named = [re.match(r"\s*(?:delete |flush )?table (\S+) (\S+)", line)
+                 for line in MDNS_NFT.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual({f"{m.group(1)} {m.group(2)}" for m in named if m}, {MDNS_TABLE})
+        self.assertEqual(sum(1 for m in named if m), 3)
+        self.assertNotIn("flush ruleset", MDNS_NFT.read_text(encoding="utf-8"))
+        self.assertNotIn("hook input", MDNS_NFT.read_text(encoding="utf-8"))
+
+    def test_the_unit_loads_the_installed_file_once_at_boot_before_the_network_and_the_engine(self) -> None:
+        unit = parse_unit(MDNS_UNIT)
+        self.assertEqual(unit["Service"]["Type"], ["oneshot"])
+        self.assertEqual(unit["Service"]["RemainAfterExit"], ["yes"])
+        self.assertEqual(unit["Service"]["ExecStart"], [f"/usr/sbin/nft -f {MDNS_BOX}"])
+        self.assertNotIn("ExecStop", unit["Service"])
+        before = " ".join(unit["Unit"]["Before"]).split()
+        for name in ("network-pre.target", "iem-engine.service", "iem-dante.service"):
+            self.assertIn(name, before)
+        self.assertEqual(unit["Install"]["WantedBy"], ["multi-user.target"])
+        # Ordering only: a failure here holds back neither the clock nor the stack.
+        for key in ("Requires", "RequiredBy", "BindsTo", "PartOf", "Requisite"):
+            self.assertNotIn(key, unit["Unit"])
+            self.assertNotIn(key, unit["Install"])
+
+    def test_the_first_run_installs_enables_and_loads_it_and_leaves_every_other_table(self) -> None:
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["mdns_cap"], "changed")
+        root = self.root
+        self.assertEqual((root / MDNS_BOX.lstrip("/")).read_bytes(), MDNS_NFT.read_bytes())
+        self.assertEqual((root / MDNS_BOX.lstrip("/")).stat().st_mode & 0o777, 0o644)
+        self.assertEqual((root / MDNS_BOX_UNIT.lstrip("/")).read_bytes(), MDNS_UNIT.read_bytes())
+        self.assertEqual((root / MDNS_BOX_UNIT.lstrip("/")).stat().st_mode & 0o777, 0o644)
+        unit = self.db()["units"]["iem-mdns-cap.service"]
+        self.assertEqual((unit["UnitFileState"], unit["ActiveState"]), ("enabled", "active"))
+        self.assertEqual(self.loads(), [MDNS_LOAD])
+        self.assert_capped()
+        self.assertEqual(self.tables()[OTHER_TABLE], OTHER_TABLE_TEXT)
+        self.assertEqual(sorted(self.tables()), sorted([OTHER_TABLE, MDNS_TABLE]))
+
+    def test_the_second_run_loads_nothing(self) -> None:
+        self.provisioned()
+        tables = self.tables()
+        self.clear_calls()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["mdns_cap"], "unchanged")
+        self.assertEqual(self.loads(), [])
+        self.assertNotIn(["systemctl", "restart", "iem-mdns-cap.service"], self.writes())
+        self.assertIn(["nft", "list", "table", *MDNS_TABLE.split()], [c["argv"] for c in self.calls()])
+        self.assertEqual(self.tables(), tables)
+
+    def test_a_changed_file_a_changed_unit_a_table_gone_or_a_unit_not_active_loads_it_again(self) -> None:
+        self.provisioned()
+        saved = self.snapshot()
+        old = MDNS_NFT.read_text(encoding="utf-8").replace("10/second burst 50", "20/second burst 50")
+
+        def table_gone() -> None:
+            db = self.db()
+            del db["nft"][MDNS_TABLE]
+            self.save_db(db)
+
+        cases = {
+            "file": (lambda: write(self.root / MDNS_BOX.lstrip("/"), old, 0o644), True),
+            "unit": (lambda: write(self.root / MDNS_BOX_UNIT.lstrip("/"), "[Unit]\n", 0o644), True),
+            "table": (table_gone, False),
+            "inactive": (lambda: self.set_unit("iem-mdns-cap.service", ActiveState="inactive"), False),
+        }
+        for what, (change, installs) in cases.items():
+            with self.subTest(what=what):
+                self.restore(saved)
+                change()
+                r = self.provisioned()
+                self.assertEqual(self.steps(r)["mdns_cap"], "changed")
+                self.assertEqual(self.loads(), [MDNS_LOAD])
+                self.assertIn(["systemctl", "restart", "iem-mdns-cap.service"], self.writes())
+                self.assertEqual(any(c[0] == "install" and c[-1] in (MDNS_BOX, MDNS_BOX_UNIT) for c in self.writes()),
+                                 installs)
+                self.assertEqual((self.root / MDNS_BOX.lstrip("/")).read_bytes(), MDNS_NFT.read_bytes())
+                self.assert_capped()
+                self.assertNotIn("20/second", self.tables()[MDNS_TABLE])
+                self.assertEqual(self.tables()[OTHER_TABLE], OTHER_TABLE_TEXT)
+                # Never the stack.
+                for call in self.writes():
+                    if call[0] == "systemctl":
+                        self.assertFalse(set(call) & set(STACK), call)
+                self.clear_calls()
+                self.assertEqual(self.steps(self.provisioned())["mdns_cap"], "unchanged")
+
+    def test_a_load_that_fails_fails_the_run(self) -> None:
+        r = self.provision(FAKE_NFT_RC="1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("iem-mdns-cap did not load the mDNS cap", r.stderr)
+        self.assertNotIn("mdns_cap", self.steps(r))
+        self.assertNotIn(MDNS_TABLE, self.tables())
+        self.assertEqual(self.tables()[OTHER_TABLE], OTHER_TABLE_TEXT)
 
 
 class RealtimeTests(World):
@@ -1566,7 +1783,7 @@ class SudoersTests(World):
             for text in sorted(expand(command)):
                 program, _, args = text.partition(" ")
                 if not program.startswith("/"):
-                    program = ("/usr/sbin/" if program == "visudo" else "/usr/bin/") + program
+                    program = ("/usr/sbin/" if program in ("visudo", "nft") else "/usr/bin/") + program
                 want.append((ADMIN, runas, f"{program} {args}"))
         rules = self.sudoers_rules(sudoers)
         self.assertEqual(sorted(rules), sorted(set(want)))
@@ -1871,6 +2088,8 @@ class VerifyTests(World):
                         "a display device may runtime-suspend (power/control is not on)"),
             "idle": (lambda: write(self.root / "sys/devices/system/cpu/cpu0/cpuidle/state2/disable", "0\n"),
                      "a CPU may enter deep idle"),
+            "mdns_cap": (db_change(lambda db: db["nft"].pop(MDNS_TABLE)),
+                         "the mDNS cap's table is not loaded (sudo -n nft list table)"),
             "realtime": (lambda: write(self.root / GRUB.lstrip("/"),
                                        GRUB_AFTER.replace(RT_CMDLINE, RT_CMDLINE + " quiet"), 0o644),
                          "/etc/default/grub does not boot the saved entry with the engine's CPUs isolated"),
@@ -1908,6 +2127,14 @@ class VerifyTests(World):
 
         def cpus(n: int):
             return lambda: self.save_db({**self.db(), "nproc": n})
+
+        def drop_rule(rate: str):
+            def apply() -> None:
+                db = self.db()
+                db["nft"][MDNS_TABLE] = "\n".join(line for line in db["nft"][MDNS_TABLE].split("\n")
+                                                  if rate not in line)
+                self.save_db(db)
+            return apply
 
         grub, workqueue = self.root / GRUB.lstrip("/"), self.root / WORKQUEUE_CONF.lstrip("/")
         menu = self.root / MENU.lstrip("/")
@@ -1984,6 +2211,14 @@ class VerifyTests(World):
              "the old /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is still there"),
             ("display", lambda: (self.root / GPU / "power/control").unlink(),
              "a display device may runtime-suspend (power/control is not on)"),
+            ("mdns_cap", unit("iem-mdns-cap.service", UnitFileState="disabled"),
+             "iem-mdns-cap is not enabled and active"),
+            ("mdns_cap", unit("iem-mdns-cap.service", ActiveState="failed"),
+             "iem-mdns-cap is not enabled and active"),
+            ("mdns_cap", drop_rule("10/second"),
+             "the mDNS cap's table has no 'limit rate over 10/second' rule"),
+            ("mdns_cap", drop_rule("50/second"),
+             "the mDNS cap's table has no 'limit rate over 50/second' rule"),
         ]
         for check, change, reason in cases:
             with self.subTest(reason=reason):
@@ -2052,7 +2287,8 @@ class VerifyTests(World):
         self.good_box()
         self.verify()
         sent = [" ".join(c["argv"]) for c in self.calls() if c["argv"][0] == "sudo"]
-        self.assertEqual(len(sent), 5)
+        self.assertEqual(len(sent), 6)
+        self.assertIn("sudo -n nft list table " + MDNS_TABLE, sent)
         self.assertIn(" ".join(["sudo", "-n", *FIND_STATE]), sent)
         self.assertIn("sudo -n cat " + MENU, sent)
         allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}

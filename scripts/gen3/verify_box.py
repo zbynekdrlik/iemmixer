@@ -56,6 +56,11 @@ with a fixed reason
   /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is gone, and
   every PCI display device's power/control reads on (the i915 driver's poll
   wakes a suspended GPU, and the wake held the NIC's core 0.4-2 ms, #72).
+- mdns_cap: iem-mdns-cap enabled and active, and `sudo -n nft list table inet
+  dstack_mdns_cap` (dstack's mDNS cap, #127, dstack#288) succeeds and holds
+  both its rules, `limit rate over 10/second` and `limit rate over 50/second`:
+  the box's own mDNS to the group is capped, so it never floods the Dante
+  network.
 
 `tpm2` is 1 when `systemd-creds has-tpm2` says the box has a usable TPM2: the
 key `--with-key=auto` sealed the pepper with besides the host key.
@@ -82,7 +87,7 @@ TIME_UNITS = ("systemd-timesyncd.service", "chrony.service", "ntp.service", "tim
               "ptp4l.service", "phc2sys.service", "statime.service")
 APT_UNITS = ("unattended-upgrades.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 SLEEP_UNITS = ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")
-OTHER_UNITS = ("dantesync.service", "iem-napi.service", "irqbalance.service")
+OTHER_UNITS = ("dantesync.service", "iem-napi.service", "irqbalance.service", "iem-mdns-cap.service")
 UNITS = (*STACK, *TIME_UNITS, *APT_UNITS, *SLEEP_UNITS, *OTHER_UNITS)
 KERNEL_PACKAGES = ("linux-generic*", "linux-image-generic*", "linux-headers-generic*", "linux-image-realtime*")
 REALTIME_PACKAGE = "linux-image-realtime"
@@ -117,9 +122,11 @@ IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
 IDLE_STATES = (2, 3, 4)   # C6, C8, C10 on the N100
 WAKE_DEVICE = "/dev/cpu_dma_latency"
 WAKE_GRANT = f"z {WAKE_DEVICE} 0660 root iemmixer - -"
+MDNS_TABLE = ("inet", "dstack_mdns_cap")
+MDNS_RATES = ("limit rate over 10/second", "limit rate over 50/second")
 IDLE_OFF = (*(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1" for n in IDLE_STATES), WAKE_GRANT)
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
-          "sleep", "swap", "clock", "napi", "display", "idle")
+          "sleep", "swap", "clock", "napi", "display", "idle", "mdns_cap")
 
 
 class Failed(Exception):
@@ -503,6 +510,18 @@ def check_display(box: Box) -> None:
             control = ""
         if control != "on":
             raise Failed("a display device may runtime-suspend (power/control is not on)")
+
+
+def check_mdns_cap(box: Box) -> None:
+    unit = box.unit("iem-mdns-cap.service")
+    if unit.get("UnitFileState") != "enabled" or unit.get("ActiveState") != "active":
+        raise Failed("iem-mdns-cap is not enabled and active")
+    r = run("sudo", "-n", "nft", "list", "table", *MDNS_TABLE)
+    if r.returncode != 0:
+        raise Failed("the mDNS cap's table is not loaded (sudo -n nft list table)")
+    for rate in MDNS_RATES:
+        if rate not in r.stdout:
+            raise Failed(f"the mDNS cap's table has no '{rate}' rule")
 
 
 def tpm2() -> int:
