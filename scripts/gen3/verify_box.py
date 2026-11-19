@@ -56,7 +56,7 @@ with a fixed reason
   /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is gone, and
   every PCI display device's power/control reads on (the i915 driver's poll
   wakes a suspended GPU, and the wake held the NIC's core 0.4-2 ms, #72).
-- mdns_cap: iem-mdns-cap enabled and active, and `sudo -n nft list table inet
+- mdns_cap: iem-mdns-cap enabled and active, and `sudo -n /usr/sbin/nft list table inet
   dstack_mdns_cap` (dstack's mDNS cap, #127, dstack#288) succeeds and holds
   both its rules, `limit rate over 10/second` and `limit rate over 50/second`:
   the box's own mDNS to the group is capped, so it never floods the Dante
@@ -519,9 +519,9 @@ def check_mdns_cap(box: Box) -> None:
     unit = box.unit("iem-mdns-cap.service")
     if unit.get("UnitFileState") != "enabled" or unit.get("ActiveState") != "active":
         raise Failed("iem-mdns-cap is not enabled and active")
-    r = run("sudo", "-n", "nft", "list", "table", *MDNS_TABLE)
+    r = run("sudo", "-n", "/usr/sbin/nft", "list", "table", *MDNS_TABLE)
     if r.returncode != 0:
-        raise Failed("the mDNS cap's table is not loaded (sudo -n nft list table)")
+        raise Failed("the mDNS cap's table is not loaded (sudo -n /usr/sbin/nft list table)")
     for rate in MDNS_RATES:
         if rate not in r.stdout:
             raise Failed(f"the mDNS cap's table has no '{rate}' rule")

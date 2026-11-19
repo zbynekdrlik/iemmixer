@@ -23,8 +23,8 @@ set -euo pipefail
 # Refused with nothing changed: not root, dantesync not installed (the box's
 # one time owner comes from install-dantesync.sh, never from here) or its
 # config not the ops follower config --ntp-file's NTP server names, a PTP
-# daemon besides it, a unit of the stack running, no nft (/usr/sbin/nft, the
-# mDNS cap's loader), fewer than 4 or more than 32 CPUs (nproc --all), a
+# daemon besides it, a unit of the stack running, fewer than 4 or more than
+# 32 CPUs (nproc --all), a
 # sudoers rule sudo-lines.txt renders that visudo
 # refuses.
 #
@@ -95,7 +95,9 @@ set -euo pipefail
 #             poll wakes it: the wake reloads the display microcontroller's
 #             firmware with preemption off (0.4-2 ms) on core 0, where the
 #             Dante NIC's NAPI thread then waits (#72, 2026-11-10).
-#   mdns_cap  dstack's mDNS cap (#127, dstack#288; vendored from dstack
+#   mdns_cap  nftables installed when /usr/sbin/nft is missing (the cap's
+#             loader; Ubuntu leaves its nftables.service disabled), then
+#             dstack's mDNS cap (#127, dstack#288; vendored from dstack
 #             v0.6.191 as dante-mdns-cap.nft) at
 #             /etc/iemmixer/dante-mdns-cap.nft and iem-mdns-cap.service,
 #             enabled (at every boot before the network and the stack);
@@ -447,9 +449,6 @@ for unit in "${STACK_UNITS[@]}"; do
     die "$unit is $active_state: provision never touches a running stack; stop it first (sudo systemctl stop iem-server iem-engine iem-dante): nothing changed"
   fi
 done
-# The mDNS cap's loader, where its unit's ExecStart names it.
-[ -f "$R$NFT" ] && [ -x "$R$NFT" ] ||
-  die "nft is not installed ($NFT, iem-mdns-cap.service's ExecStart; apt install nftables): nothing changed"
 # The realtime step's CPUs: the last two isolated for the engine (its pump and
 # the Dante threads), the others (at least two) the kernel's; the workqueue
 # mask below is one hex word, so at most 32.
@@ -876,6 +875,14 @@ mdns_cap_loaded() {
 
 step_mdns_cap() {
   local fresh
+  # The cap's loader, where its unit's ExecStart names it (a box from zero
+  # has none: the live box of 2026-11-19 refused here).
+  if ! { [ -f "$R$NFT" ] && [ -x "$R$NFT" ]; }; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nftables ||
+      die "apt-get install of nftables failed (exit $?)"
+    changed=1
+    [ -f "$R$NFT" ] && [ -x "$R$NFT" ] || die "nft is not at $NFT after the install of nftables"
+  fi
   put_file 0644 root root "$MDNS_CAP" "$here/dante-mdns-cap.nft"
   fresh=$wrote
   put_file 0644 root root "$MDNS_UNIT" "$here/iem-mdns-cap.service"

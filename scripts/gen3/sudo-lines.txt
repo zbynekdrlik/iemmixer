@@ -108,7 +108,7 @@ root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-pepper
 root | find /var/lib/iemmixer -name pepper.test
 root | find -P /var/lib/iemmixer /var/lib/iem-dante -not -user iemmixer -print -quit -o -not -group iemmixer -print -quit
 root | cat /boot/grub/grub.cfg
-root | nft list table inet dstack_mdns_cap
+root | /usr/sbin/nft list table inet dstack_mdns_cap
 
 # Dev time by hand: the engine's restart, the box's graceful
 # reboot.
