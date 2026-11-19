@@ -22,6 +22,9 @@
 //!   flow stopped at its transmitter, the goodbyes; within
 //!   [`STOP_WITHIN`]), each left to end with a warning when late, never
 //!   killed (I8).
+//! - [`stall`]: the pump's stall watch (#130): blocks frozen (or none run
+//!   at all) for [`stall::STALL_WITHIN`] while the media clock is ready end
+//!   the run as [`Ending::Backend`] (exit 1, which the unit restarts).
 //!
 //! Logs name counts, channel numbers and the topology hash, never a name or
 //! an address. Every decision here is pure and tested (`dante/tests.rs`);
@@ -29,6 +32,7 @@
 //! (`.cargo/mutants.toml`): the real device needs an interface with a MAC
 //! (the box), which the unit tests never have.
 
+use std::cell::Cell;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +42,7 @@ use std::time::{Duration, Instant};
 use iem_audio_io::StreamStats;
 use iem_audio_io::channels::{ChannelMap, MapError};
 use iem_audio_io::hist::HistSnapshot;
+use iem_dante::clock::PtpClock;
 use iem_dante::daemon::{Options, Place};
 use iem_dante::device::DeviceConfig;
 use iem_dante::host::{self, Host, HostError, Signals, Stopped};
@@ -50,6 +55,10 @@ use crate::control::{Driver, Ending};
 use crate::engine::{DanteArgs, DantePlace, EngineError};
 use crate::rt::Processor;
 use crate::topology::{Topology, hil_return_refusal};
+
+pub mod stall;
+
+use self::stall::{STALL_WITHIN, StallWatch};
 
 /// How long the stop waits for the pump's thread: it ends within one block
 /// (or one free period) of its stop flag.
@@ -176,18 +185,28 @@ pub struct DanteDriver {
     /// Set by the device's runtime at SIGTERM or SIGINT.
     reported: Arc<AtomicBool>,
     device: Box<dyn Device>,
+    /// The pump's media clock: the stall watch is armed only while it is
+    /// ready.
+    clock: Arc<dyn PtpClock>,
+    /// The stall watch, looked at by [`Driver::ending`] on the control
+    /// thread (never the pump's).
+    watch: Cell<StallWatch>,
 }
 
 impl DanteDriver {
     /// The driver of a pump counting into `stats` on its thread `pump`
-    /// (ended by `pump_stop`) and of the `device` serving beside it, which
-    /// sets `reported` at a signal.
+    /// (ended by `pump_stop`) on `clock`, and of the `device` serving beside
+    /// it, which sets `reported` at a signal; the pump's blocks frozen for
+    /// `stall_within` while `clock` is ready end the run ([`STALL_WITHIN`]
+    /// in [`start`]).
     pub fn new(
         stats: Arc<PumpStats>,
         pump: JoinHandle<()>,
         pump_stop: Arc<AtomicBool>,
         reported: Arc<AtomicBool>,
         device: Box<dyn Device>,
+        clock: Arc<dyn PtpClock>,
+        stall_within: Duration,
     ) -> Self {
         DanteDriver {
             stats,
@@ -195,6 +214,8 @@ impl DanteDriver {
             pump_stop,
             reported,
             device,
+            clock,
+            watch: Cell::new(StallWatch::new(stall_within)),
         }
     }
 }
@@ -237,14 +258,24 @@ impl Driver for DanteDriver {
     }
 
     /// The device that ended by itself first (the run ends with exit 1),
-    /// then a reported SIGTERM or SIGINT (the shutdown path).
+    /// then a reported SIGTERM or SIGINT (the shutdown path), then a pump
+    /// whose blocks stood still for the watch's bound while the media
+    /// clock is ready (#130: exit 1, which the unit restarts).
     fn ending(&self) -> Option<Ending> {
         if let Some(why) = self.device.ended() {
             return Some(Ending::Backend(why));
         }
-        self.reported
-            .load(Ordering::Acquire)
-            .then_some(Ending::Stop)
+        if self.reported.load(Ordering::Acquire) {
+            return Some(Ending::Stop);
+        }
+        let mut watch = self.watch.get();
+        let stall = watch.look(
+            Instant::now(),
+            self.stats.view().blocks,
+            self.clock.now_ns().is_some(),
+        );
+        self.watch.set(watch);
+        stall.map(|s| Ending::Backend(s.reason()))
     }
 
     /// The pump's block intervals and block times since it started.
@@ -326,7 +357,15 @@ pub fn start(
         "Dante backend running: the engine on the device's media clock, block samples a block, \
          outputs at RX time + offset"
     );
-    let driver = DanteDriver::new(stats, thread, pump_stop, reported, Box::new(device));
+    let driver = DanteDriver::new(
+        stats,
+        thread,
+        pump_stop,
+        reported,
+        Box::new(device),
+        Arc::clone(&media.clock),
+        STALL_WITHIN,
+    );
     Ok((Box::new(driver), timing.block as usize))
 }
 

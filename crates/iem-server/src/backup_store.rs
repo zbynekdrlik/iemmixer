@@ -88,9 +88,8 @@ impl BackupStore {
 
     /// Deletes backups older than `retention_days`; returns how many.
     pub fn prune(&self, retention_days: u32) -> usize {
-        let cutoff = chrono::Utc::now()
-            - chrono::TimeDelta::try_days(i64::from(retention_days)).unwrap_or_default();
-        self.prune_before(&cutoff.format("%Y%m%d_%H%M%S").to_string())
+        let cutoff = iem_core::unix_now() - i64::from(retention_days) * DAY;
+        self.prune_before(&iem_core::utc_format(cutoff, "%Y%m%d_%H%M%S").unwrap_or_default())
     }
 
     fn prune_before(&self, cutoff: &str) -> usize {
@@ -118,6 +117,19 @@ impl BackupStore {
 
 /// Names one timestamp may take (`…json`, `…_2.json`, …).
 const MAX_SAME_NAME: u32 = 1000;
+
+/// One day in seconds (retention counts whole days of 24 h).
+const DAY: i64 = 24 * 60 * 60;
+
+/// The current UTC time as a backup's timestamp, with milliseconds
+/// ("2026-09-27T13:00:00.123Z").
+pub fn utc_now_ms() -> String {
+    utc_ms(jiff::Timestamp::now())
+}
+
+fn utc_ms(t: jiff::Timestamp) -> String {
+    t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
 
 /// "2026-09-27T13:00:00.123Z" → "20260927_130000_123.json"; the milliseconds
 /// only when the timestamp has them ("…T13:00:00Z" → "20260927_130000.json").
@@ -345,9 +357,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = BackupStore::new(dir.path());
         let days_ago = |days: i64| {
-            (chrono::Utc::now() - chrono::TimeDelta::try_days(days).unwrap())
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
+            iem_core::utc_format(iem_core::unix_now() - days * DAY, "%Y-%m-%dT%H:%M:%SZ").unwrap()
         };
         let recent = days_ago(1);
         store.save(&backup(&recent)).unwrap();
@@ -355,5 +365,20 @@ mod tests {
         assert_eq!(store.prune(60), 1, "only the one older than 60 days");
         let left: Vec<String> = store.list().into_iter().map(|i| i.timestamp).collect();
         assert_eq!(left, [recent]);
+    }
+
+    #[test]
+    fn a_backup_timestamp_is_utc_with_milliseconds_cut_not_rounded() {
+        let at = |s, ns| utc_ms(jiff::Timestamp::new(s, ns).unwrap());
+        assert_eq!(at(1_758_707_100, 0), "2025-09-24T09:45:00.000Z");
+        assert_eq!(at(1_758_707_100, 123_456_789), "2025-09-24T09:45:00.123Z");
+        assert_eq!(at(1_758_707_100, 999_999_999), "2025-09-24T09:45:00.999Z");
+        assert_eq!(
+            timestamp_to_filename(&at(1_758_707_100, 7_000_000)),
+            "20250924_094500_007.json"
+        );
+        let now = utc_now_ms();
+        assert_eq!(now.len(), 24, "{now}");
+        assert!(now.ends_with('Z') && now.as_bytes()[19] == b'.', "{now}");
     }
 }

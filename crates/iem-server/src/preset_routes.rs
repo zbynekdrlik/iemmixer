@@ -143,7 +143,7 @@ async fn save(state: &AppState, page: &Page, member: &str, name: &str) -> Result
     let content = capture(&site, &state.engine.mirror(), page);
     state
         .band()
-        .save_preset(member, name, content, chrono::Utc::now().timestamp())
+        .save_preset(member, name, content, iem_core::unix_now())
         .map_err(|e| store_error(e, "saving the preset"))
 }
 

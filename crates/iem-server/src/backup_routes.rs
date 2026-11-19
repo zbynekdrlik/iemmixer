@@ -87,9 +87,7 @@ pub async fn capture_now(state: &AppState) -> Result<(String, MixerBackup), Stri
         &site,
         &state.engine.mirror(),
         &state.band(),
-        chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string(),
+        crate::backup_store::utc_now_ms(),
     )?;
     // Roster mode (#58 design §6): whose live state it is, and every other
     // lineup's stored state.

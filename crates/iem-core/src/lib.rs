@@ -69,11 +69,25 @@ fn full_version_at(build_time: &str) -> String {
     if timestamp == 0 {
         format!("{VERSION} (local)")
     } else {
-        let datetime = chrono::DateTime::from_timestamp(timestamp, 0)
-            .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let datetime =
+            utc_format(timestamp, "%d.%m.%Y %H:%M").unwrap_or_else(|| "unknown".to_string());
         format!("{VERSION} ({datetime})")
     }
+}
+
+/// The current Unix time in seconds (0 for a clock before 1970).
+pub fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// `ts` (Unix seconds) in UTC, formatted with the strftime `format`; `None`
+/// for a time outside the years -9999…9999.
+pub fn utc_format(ts: i64, format: &str) -> Option<String> {
+    jiff::Timestamp::from_second(ts)
+        .ok()
+        .map(|t| t.strftime(format).to_string())
 }
 
 /// Version label for display: `v` + the Cargo version (pre-releases already
@@ -84,25 +98,33 @@ pub fn version_label() -> String {
 
 /// Build datetime for display in Slovak format (e.g., "28.02.2026 09:47")
 pub fn build_datetime() -> String {
-    let timestamp = build_time().parse::<i64>().unwrap_or(0);
+    build_datetime_at(build_time())
+}
+
+/// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; "0" or
+/// unparsable means a local build).
+fn build_datetime_at(build_time: &str) -> String {
+    let timestamp = build_time.parse::<i64>().unwrap_or(0);
     if timestamp == 0 {
         "local build".to_string()
     } else {
-        chrono::DateTime::from_timestamp(timestamp, 0)
-            .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
-            .unwrap_or_else(|| "unknown".to_string())
+        utc_format(timestamp, "%d.%m.%Y %H:%M").unwrap_or_else(|| "unknown".to_string())
     }
 }
 
 /// Get formatted deployment timestamp (e.g., "2026-02-26 14:30:00 UTC")
 pub fn deployed_at() -> String {
-    let timestamp = build_time().parse::<i64>().unwrap_or(0);
+    deployed_at_at(build_time())
+}
+
+/// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+/// is unknown).
+fn deployed_at_at(build_time: &str) -> String {
+    let timestamp = build_time.parse::<i64>().unwrap_or(0);
     if timestamp == 0 {
         "unknown".to_string()
     } else {
-        chrono::DateTime::from_timestamp(timestamp, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "unknown".to_string())
+        utc_format(timestamp, "%Y-%m-%d %H:%M:%S UTC").unwrap_or_else(|| "unknown".to_string())
     }
 }
 
@@ -135,5 +157,51 @@ mod version_tests {
             full_version_at("1758707100"),
             format!("{VERSION} (24.09.2025 09:45)")
         );
+    }
+
+    #[test]
+    fn build_datetime_shows_the_utc_build_time_or_a_local_build() {
+        assert_eq!(build_datetime_at("1758707100"), "24.09.2025 09:45");
+        assert_eq!(build_datetime_at("0"), "local build");
+        assert_eq!(build_datetime_at("not a number"), "local build");
+        // Past the years jiff formats.
+        assert_eq!(build_datetime_at("999999999999"), "unknown");
+        assert_eq!(build_datetime(), build_datetime_at(build_time()));
+    }
+
+    #[test]
+    fn deployed_at_shows_the_utc_build_time_or_unknown() {
+        assert_eq!(deployed_at_at("1758707100"), "2025-09-24 09:45:00 UTC");
+        assert_eq!(deployed_at_at("0"), "unknown");
+        assert_eq!(deployed_at_at("not a number"), "unknown");
+        assert_eq!(deployed_at_at("999999999999"), "unknown");
+        assert_eq!(deployed_at(), deployed_at_at(build_time()));
+    }
+
+    #[test]
+    fn utc_format_writes_every_format_the_server_uses() {
+        let ts = 1_758_707_100; // 2025-09-24 09:45:00 UTC
+        let f = |format| utc_format(ts, format).unwrap();
+        assert_eq!(f("%d.%m.%Y %H:%M"), "24.09.2025 09:45");
+        assert_eq!(f("%Y-%m-%d %H:%M:%S UTC"), "2025-09-24 09:45:00 UTC");
+        assert_eq!(f("%Y-%m-%d"), "2025-09-24");
+        assert_eq!(f("%Y%m%d_%H%M%S"), "20250924_094500");
+        assert_eq!(f("%Y-%m-%dT%H:%M:%SZ"), "2025-09-24T09:45:00Z");
+        assert_eq!(f("%Y-%m-%dT%H:%M:%S%.3fZ"), "2025-09-24T09:45:00.000Z");
+        // Before the epoch and at the edge of the range.
+        assert_eq!(
+            utc_format(-1, "%Y-%m-%d %H:%M:%S").unwrap(),
+            "1969-12-31 23:59:59"
+        );
+        assert_eq!(utc_format(0, "%Y-%m-%d").unwrap(), "1970-01-01");
+        assert_eq!(utc_format(i64::MAX, "%Y"), None);
+    }
+
+    #[test]
+    fn unix_now_is_the_clock_in_seconds() {
+        let reference = jiff::Timestamp::now().as_second();
+        let now = unix_now();
+        assert!(now > 1_758_707_100, "{now}");
+        assert!((now - reference).abs() <= 2, "{now} vs {reference}");
     }
 }

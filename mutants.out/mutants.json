@@ -1,0 +1,322 @@
+[
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace build_datetime -> String with String::new()\n@@ -93,17 +93,17 @@\n /// Version label for display: `v` + the Cargo version (pre-releases already\n /// carry `-dev.N`), e.g. \"v2.0.0-dev.3\".\n pub fn version_label() -> String {\n     format!(\"v{VERSION}\")\n }\n \n /// Build datetime for display in Slovak format (e.g., \"28.02.2026 09:47\")\n pub fn build_datetime() -> String {\n-    build_datetime_at(build_time())\n+    String::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; \"0\" or\n /// unparsable means a local build).\n fn build_datetime_at(build_time: &str) -> String {\n     let timestamp = build_time.parse::<i64>().unwrap_or(0);\n     if timestamp == 0 {\n         \"local build\".to_string()\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "build_datetime",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 102
+        },
+        "start": {
+          "column": 1,
+          "line": 99
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:101:5: replace build_datetime -> String with String::new()",
+    "package": "iem-core",
+    "replacement": "String::new()",
+    "span": {
+      "end": {
+        "column": 36,
+        "line": 101
+      },
+      "start": {
+        "column": 5,
+        "line": 101
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace build_datetime -> String with \"xyzzy\".into()\n@@ -93,17 +93,17 @@\n /// Version label for display: `v` + the Cargo version (pre-releases already\n /// carry `-dev.N`), e.g. \"v2.0.0-dev.3\".\n pub fn version_label() -> String {\n     format!(\"v{VERSION}\")\n }\n \n /// Build datetime for display in Slovak format (e.g., \"28.02.2026 09:47\")\n pub fn build_datetime() -> String {\n-    build_datetime_at(build_time())\n+    \"xyzzy\".into() /* ~ changed by cargo-mutants ~ */\n }\n \n /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; \"0\" or\n /// unparsable means a local build).\n fn build_datetime_at(build_time: &str) -> String {\n     let timestamp = build_time.parse::<i64>().unwrap_or(0);\n     if timestamp == 0 {\n         \"local build\".to_string()\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "build_datetime",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 102
+        },
+        "start": {
+          "column": 1,
+          "line": 99
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:101:5: replace build_datetime -> String with \"xyzzy\".into()",
+    "package": "iem-core",
+    "replacement": "\"xyzzy\".into()",
+    "span": {
+      "end": {
+        "column": 36,
+        "line": 101
+      },
+      "start": {
+        "column": 5,
+        "line": 101
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace build_datetime_at -> String with String::new()\n@@ -99,22 +99,17 @@\n /// Build datetime for display in Slovak format (e.g., \"28.02.2026 09:47\")\n pub fn build_datetime() -> String {\n     build_datetime_at(build_time())\n }\n \n /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; \"0\" or\n /// unparsable means a local build).\n fn build_datetime_at(build_time: &str) -> String {\n-    let timestamp = build_time.parse::<i64>().unwrap_or(0);\n-    if timestamp == 0 {\n-        \"local build\".to_string()\n-    } else {\n-        utc_format(timestamp, \"%d.%m.%Y %H:%M\").unwrap_or_else(|| \"unknown\".to_string())\n-    }\n+    String::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n     deployed_at_at(build_time())\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "build_datetime_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 104
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:107:5: replace build_datetime_at -> String with String::new()",
+    "package": "iem-core",
+    "replacement": "String::new()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 107
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace build_datetime_at -> String with \"xyzzy\".into()\n@@ -99,22 +99,17 @@\n /// Build datetime for display in Slovak format (e.g., \"28.02.2026 09:47\")\n pub fn build_datetime() -> String {\n     build_datetime_at(build_time())\n }\n \n /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; \"0\" or\n /// unparsable means a local build).\n fn build_datetime_at(build_time: &str) -> String {\n-    let timestamp = build_time.parse::<i64>().unwrap_or(0);\n-    if timestamp == 0 {\n-        \"local build\".to_string()\n-    } else {\n-        utc_format(timestamp, \"%d.%m.%Y %H:%M\").unwrap_or_else(|| \"unknown\".to_string())\n-    }\n+    \"xyzzy\".into() /* ~ changed by cargo-mutants ~ */\n }\n \n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n     deployed_at_at(build_time())\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "build_datetime_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 104
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:107:5: replace build_datetime_at -> String with \"xyzzy\".into()",
+    "package": "iem-core",
+    "replacement": "\"xyzzy\".into()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 112
+      },
+      "start": {
+        "column": 5,
+        "line": 107
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace == with != in build_datetime_at\n@@ -100,17 +100,17 @@\n pub fn build_datetime() -> String {\n     build_datetime_at(build_time())\n }\n \n /// [`build_datetime`] for a `BUILD_TIME` value (unix seconds; \"0\" or\n /// unparsable means a local build).\n fn build_datetime_at(build_time: &str) -> String {\n     let timestamp = build_time.parse::<i64>().unwrap_or(0);\n-    if timestamp == 0 {\n+    if timestamp != /* ~ changed by cargo-mutants ~ */ 0 {\n         \"local build\".to_string()\n     } else {\n         utc_format(timestamp, \"%d.%m.%Y %H:%M\").unwrap_or_else(|| \"unknown\".to_string())\n     }\n }\n \n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "build_datetime_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 113
+        },
+        "start": {
+          "column": 1,
+          "line": 104
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/iem-core/src/lib.rs:108:18: replace == with != in build_datetime_at",
+    "package": "iem-core",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 108
+      },
+      "start": {
+        "column": 18,
+        "line": 108
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace deployed_at -> String with String::new()\n@@ -109,17 +109,17 @@\n         \"local build\".to_string()\n     } else {\n         utc_format(timestamp, \"%d.%m.%Y %H:%M\").unwrap_or_else(|| \"unknown\".to_string())\n     }\n }\n \n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n-    deployed_at_at(build_time())\n+    String::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n /// is unknown).\n fn deployed_at_at(build_time: &str) -> String {\n     let timestamp = build_time.parse::<i64>().unwrap_or(0);\n     if timestamp == 0 {\n         \"unknown\".to_string()\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "deployed_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 118
+        },
+        "start": {
+          "column": 1,
+          "line": 115
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:117:5: replace deployed_at -> String with String::new()",
+    "package": "iem-core",
+    "replacement": "String::new()",
+    "span": {
+      "end": {
+        "column": 33,
+        "line": 117
+      },
+      "start": {
+        "column": 5,
+        "line": 117
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace deployed_at -> String with \"xyzzy\".into()\n@@ -109,17 +109,17 @@\n         \"local build\".to_string()\n     } else {\n         utc_format(timestamp, \"%d.%m.%Y %H:%M\").unwrap_or_else(|| \"unknown\".to_string())\n     }\n }\n \n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n-    deployed_at_at(build_time())\n+    \"xyzzy\".into() /* ~ changed by cargo-mutants ~ */\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n /// is unknown).\n fn deployed_at_at(build_time: &str) -> String {\n     let timestamp = build_time.parse::<i64>().unwrap_or(0);\n     if timestamp == 0 {\n         \"unknown\".to_string()\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "deployed_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 118
+        },
+        "start": {
+          "column": 1,
+          "line": 115
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:117:5: replace deployed_at -> String with \"xyzzy\".into()",
+    "package": "iem-core",
+    "replacement": "\"xyzzy\".into()",
+    "span": {
+      "end": {
+        "column": 33,
+        "line": 117
+      },
+      "start": {
+        "column": 5,
+        "line": 117
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace deployed_at_at -> String with String::new()\n@@ -115,22 +115,17 @@\n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n     deployed_at_at(build_time())\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n /// is unknown).\n fn deployed_at_at(build_time: &str) -> String {\n-    let timestamp = build_time.parse::<i64>().unwrap_or(0);\n-    if timestamp == 0 {\n-        \"unknown\".to_string()\n-    } else {\n-        utc_format(timestamp, \"%Y-%m-%d %H:%M:%S UTC\").unwrap_or_else(|| \"unknown\".to_string())\n-    }\n+    String::new() /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod version_tests {\n     use super::*;\n \n     #[test]\n     fn version_label_is_v_plus_the_cargo_version() {\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "deployed_at_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 129
+        },
+        "start": {
+          "column": 1,
+          "line": 120
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:123:5: replace deployed_at_at -> String with String::new()",
+    "package": "iem-core",
+    "replacement": "String::new()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 128
+      },
+      "start": {
+        "column": 5,
+        "line": 123
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace deployed_at_at -> String with \"xyzzy\".into()\n@@ -115,22 +115,17 @@\n /// Get formatted deployment timestamp (e.g., \"2026-02-26 14:30:00 UTC\")\n pub fn deployed_at() -> String {\n     deployed_at_at(build_time())\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n /// is unknown).\n fn deployed_at_at(build_time: &str) -> String {\n-    let timestamp = build_time.parse::<i64>().unwrap_or(0);\n-    if timestamp == 0 {\n-        \"unknown\".to_string()\n-    } else {\n-        utc_format(timestamp, \"%Y-%m-%d %H:%M:%S UTC\").unwrap_or_else(|| \"unknown\".to_string())\n-    }\n+    \"xyzzy\".into() /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod version_tests {\n     use super::*;\n \n     #[test]\n     fn version_label_is_v_plus_the_cargo_version() {\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "deployed_at_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 129
+        },
+        "start": {
+          "column": 1,
+          "line": 120
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/iem-core/src/lib.rs:123:5: replace deployed_at_at -> String with \"xyzzy\".into()",
+    "package": "iem-core",
+    "replacement": "\"xyzzy\".into()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 128
+      },
+      "start": {
+        "column": 5,
+        "line": 123
+      }
+    }
+  },
+  {
+    "diff": "--- crates/iem-core/src/lib.rs\n+++ replace == with != in deployed_at_at\n@@ -116,17 +116,17 @@\n pub fn deployed_at() -> String {\n     deployed_at_at(build_time())\n }\n \n /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; \"0\" or unparsable\n /// is unknown).\n fn deployed_at_at(build_time: &str) -> String {\n     let timestamp = build_time.parse::<i64>().unwrap_or(0);\n-    if timestamp == 0 {\n+    if timestamp != /* ~ changed by cargo-mutants ~ */ 0 {\n         \"unknown\".to_string()\n     } else {\n         utc_format(timestamp, \"%Y-%m-%d %H:%M:%S UTC\").unwrap_or_else(|| \"unknown\".to_string())\n     }\n }\n \n #[cfg(test)]\n mod version_tests {\n",
+    "file": "crates/iem-core/src/lib.rs",
+    "function": {
+      "function_name": "deployed_at_at",
+      "return_type": "-> String",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 129
+        },
+        "start": {
+          "column": 1,
+          "line": 120
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/iem-core/src/lib.rs:124:18: replace == with != in deployed_at_at",
+    "package": "iem-core",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 124
+      },
+      "start": {
+        "column": 18,
+        "line": 124
+      }
+    }
+  }
+]

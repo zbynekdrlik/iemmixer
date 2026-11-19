@@ -43,6 +43,7 @@ root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.service /etc/systemd/
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-engine.service /etc/systemd/system/iem-engine.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-server.service /etc/systemd/system/iem-server.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd/system/iem-alarm@.service
+root | install -D -m 0644 .cache/iem-gen3-deploy/iem-restart-alarm@.service /etc/systemd/system/iem-restart-alarm@.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
 root | install -D -m 0755 .cache/iem-gen3-deploy/band_receive.py /opt/iemmixer/lib/band_receive.py
@@ -99,12 +100,14 @@ root | install -D -m 0644 .cache/cloudflared-install/iem-tunnel.service /etc/sys
 # scripts/gen3/verify_box.py (read only): the rule itself, the pepper's
 # credential (mode, owner, size; never its bytes), no plain test pepper, the
 # stack's state all the service user's (the first path that is not), grub's
-# menu booting the realtime kernel with the isolated cores (root only).
+# menu booting the realtime kernel with the isolated cores (root only), the
+# mDNS cap's table loaded (#127; nft lists rules as root only).
 root | visudo -c
 root | stat -c %a.%U.%s /etc/credstore.encrypted/iemmixer-pepper
 root | find /var/lib/iemmixer -name pepper.test
 root | find -P /var/lib/iemmixer /var/lib/iem-dante -not -user iemmixer -print -quit -o -not -group iemmixer -print -quit
 root | cat /boot/grub/grub.cfg
+root | nft list table inet dstack_mdns_cap
 
 # Dev time by hand: the engine's restart, the box's graceful
 # reboot.

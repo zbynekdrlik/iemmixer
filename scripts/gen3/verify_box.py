@@ -14,7 +14,7 @@ with a fixed reason
   the admin (the user running this) in that group.
 - units: iem-engine, iem-server and iem-dante installed (loaded), each running
   as iemmixer, none with phase C's 10-user.conf drop-in; iem-alarm@.service
-  installed as iemmixer. A box no phase D deploy has reached fails here.
+  and iem-restart-alarm@.service (#130) installed as iemmixer. A box no phase D deploy has reached fails here.
 - boot: none of the three enabled.
 - sudoers: `sudo -n visudo -c` passes and /etc/sudoers.d/iemmixer-gen3 is
   there.
@@ -56,6 +56,11 @@ with a fixed reason
   /etc/tmpfiles.d/iemmixer-display.conf (the output poll off) is gone, and
   every PCI display device's power/control reads on (the i915 driver's poll
   wakes a suspended GPU, and the wake held the NIC's core 0.4-2 ms, #72).
+- mdns_cap: iem-mdns-cap enabled and active, and `sudo -n nft list table inet
+  dstack_mdns_cap` (dstack's mDNS cap, #127, dstack#288) succeeds and holds
+  both its rules, `limit rate over 10/second` and `limit rate over 50/second`:
+  the box's own mDNS to the group is capped, so it never floods the Dante
+  network.
 
 `tpm2` is 1 when `systemd-creds has-tpm2` says the box has a usable TPM2: the
 key `--with-key=auto` sealed the pepper with besides the host key.
@@ -82,7 +87,7 @@ TIME_UNITS = ("systemd-timesyncd.service", "chrony.service", "ntp.service", "tim
               "ptp4l.service", "phc2sys.service", "statime.service")
 APT_UNITS = ("unattended-upgrades.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 SLEEP_UNITS = ("sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target")
-OTHER_UNITS = ("dantesync.service", "iem-napi.service", "irqbalance.service")
+OTHER_UNITS = ("dantesync.service", "iem-napi.service", "irqbalance.service", "iem-mdns-cap.service")
 UNITS = (*STACK, *TIME_UNITS, *APT_UNITS, *SLEEP_UNITS, *OTHER_UNITS)
 KERNEL_PACKAGES = ("linux-generic*", "linux-image-generic*", "linux-headers-generic*", "linux-image-realtime*")
 REALTIME_PACKAGE = "linux-image-realtime"
@@ -93,6 +98,7 @@ WORKQUEUE_MASK = "/sys/devices/virtual/workqueue/cpumask"
 CREDENTIAL = "/etc/credstore.encrypted/iemmixer-pepper"
 SUDOERS = "/etc/sudoers.d/iemmixer-gen3"
 ALARM = "/etc/systemd/system/iem-alarm@.service"
+RESTART_ALARM = "/etc/systemd/system/iem-restart-alarm@.service"
 ENGINE_UNIT = "/etc/systemd/system/iem-engine.service"
 JOURNAL_CONF = "/etc/systemd/journald.conf.d/50-iemmixer.conf"
 JOURNAL = {"Storage": "persistent", "SystemMaxUse": "1G", "MaxRetentionSec": "30day"}
@@ -117,9 +123,11 @@ IDLE_CONF = "/etc/tmpfiles.d/iemmixer-idle.conf"
 IDLE_STATES = (2, 3, 4)   # C6, C8, C10 on the N100
 WAKE_DEVICE = "/dev/cpu_dma_latency"
 WAKE_GRANT = f"z {WAKE_DEVICE} 0660 root iemmixer - -"
+MDNS_TABLE = ("inet", "dstack_mdns_cap")
+MDNS_RATES = ("limit rate over 10/second", "limit rate over 50/second")
 IDLE_OFF = (*(f"w /sys/devices/system/cpu/cpu*/cpuidle/state{n}/disable - - - - 1" for n in IDLE_STATES), WAKE_GRANT)
 CHECKS = ("user", "units", "boot", "sudoers", "pepper", "no_test_pepper", "state", "journal", "realtime", "apt",
-          "sleep", "swap", "clock", "napi", "display", "idle")
+          "sleep", "swap", "clock", "napi", "display", "idle", "mdns_cap")
 
 
 class Failed(Exception):
@@ -214,10 +222,12 @@ def check_units(box: Box) -> None:
             raise Failed(f"{name} does not run as iemmixer")
         if "10-user.conf" in unit.get("DropInPaths", ""):
             raise Failed(f"{name} keeps phase C's 10-user.conf")
-    if not os.path.isfile(at(ALARM)):
-        raise Failed("iem-alarm@.service is not installed")
-    if f"User={SERVICE_USER}" not in (line.strip() for line in read(ALARM).splitlines()):
-        raise Failed("iem-alarm@.service does not run as iemmixer")
+    for path in (ALARM, RESTART_ALARM):
+        name = os.path.basename(path)
+        if not os.path.isfile(at(path)):
+            raise Failed(f"{name} is not installed")
+        if f"User={SERVICE_USER}" not in (line.strip() for line in read(path).splitlines()):
+            raise Failed(f"{name} does not run as iemmixer")
     # The media clock's in-process follower binds UDP 319 (dstack v0.6.23);
     # without the capability it stays silently on dantesync's clock.
     ambient = [line.strip() for line in read(ENGINE_UNIT).splitlines()
@@ -503,6 +513,18 @@ def check_display(box: Box) -> None:
             control = ""
         if control != "on":
             raise Failed("a display device may runtime-suspend (power/control is not on)")
+
+
+def check_mdns_cap(box: Box) -> None:
+    unit = box.unit("iem-mdns-cap.service")
+    if unit.get("UnitFileState") != "enabled" or unit.get("ActiveState") != "active":
+        raise Failed("iem-mdns-cap is not enabled and active")
+    r = run("sudo", "-n", "nft", "list", "table", *MDNS_TABLE)
+    if r.returncode != 0:
+        raise Failed("the mDNS cap's table is not loaded (sudo -n nft list table)")
+    for rate in MDNS_RATES:
+        if rate not in r.stdout:
+            raise Failed(f"the mDNS cap's table has no '{rate}' rule")
 
 
 def tpm2() -> int:

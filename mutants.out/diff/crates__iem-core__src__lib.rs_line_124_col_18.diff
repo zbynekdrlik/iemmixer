@@ -1,0 +1,21 @@
+--- crates/iem-core/src/lib.rs
++++ replace == with != in deployed_at_at
+@@ -116,17 +116,17 @@
+ pub fn deployed_at() -> String {
+     deployed_at_at(build_time())
+ }
+ 
+ /// [`deployed_at`] for a `BUILD_TIME` value (unix seconds; "0" or unparsable
+ /// is unknown).
+ fn deployed_at_at(build_time: &str) -> String {
+     let timestamp = build_time.parse::<i64>().unwrap_or(0);
+-    if timestamp == 0 {
++    if timestamp != /* ~ changed by cargo-mutants ~ */ 0 {
+         "unknown".to_string()
+     } else {
+         utc_format(timestamp, "%Y-%m-%d %H:%M:%S UTC").unwrap_or_else(|| "unknown".to_string())
+     }
+ }
+ 
+ #[cfg(test)]
+ mod version_tests {

@@ -1,0 +1,738 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 13.333867788,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.553743983,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:101:5: replace build_datetime -> String with String::new()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "build_datetime",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 99,
+                "column": 1
+              },
+              "end": {
+                "line": 102,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 101,
+              "column": 5
+            },
+            "end": {
+              "line": 101,
+              "column": 36
+            }
+          },
+          "replacement": "String::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_101_col_5.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_101_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.102287205,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.453521253,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:101:5: replace build_datetime -> String with \"xyzzy\".into()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "build_datetime",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 99,
+                "column": 1
+              },
+              "end": {
+                "line": 102,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 101,
+              "column": 5
+            },
+            "end": {
+              "line": 101,
+              "column": 36
+            }
+          },
+          "replacement": "\"xyzzy\".into()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_101_col_5_001.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_101_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.152444235,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.502384412,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:107:5: replace build_datetime_at -> String with String::new()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "build_datetime_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 104,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 107,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 6
+            }
+          },
+          "replacement": "String::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_107_col_5.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_107_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.202502954,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.502185135,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:107:5: replace build_datetime_at -> String with \"xyzzy\".into()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "build_datetime_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 104,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 107,
+              "column": 5
+            },
+            "end": {
+              "line": 112,
+              "column": 6
+            }
+          },
+          "replacement": "\"xyzzy\".into()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_107_col_5_001.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_107_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.152432592,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.454315818,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:108:18: replace == with != in build_datetime_at",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "build_datetime_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 104,
+                "column": 1
+              },
+              "end": {
+                "line": 113,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 108,
+              "column": 18
+            },
+            "end": {
+              "line": 108,
+              "column": 20
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_108_col_18.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_108_col_18.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.052321154,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.451421012,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:117:5: replace deployed_at -> String with String::new()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "deployed_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 115,
+                "column": 1
+              },
+              "end": {
+                "line": 118,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 117,
+              "column": 5
+            },
+            "end": {
+              "line": 117,
+              "column": 33
+            }
+          },
+          "replacement": "String::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_117_col_5.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_117_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.0020654,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.451469781,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:117:5: replace deployed_at -> String with \"xyzzy\".into()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "deployed_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 115,
+                "column": 1
+              },
+              "end": {
+                "line": 118,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 117,
+              "column": 5
+            },
+            "end": {
+              "line": 117,
+              "column": 33
+            }
+          },
+          "replacement": "\"xyzzy\".into()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_117_col_5_001.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_117_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.152726592,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.452905554,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:123:5: replace deployed_at_at -> String with String::new()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "deployed_at_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 120,
+                "column": 1
+              },
+              "end": {
+                "line": 129,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 123,
+              "column": 5
+            },
+            "end": {
+              "line": 128,
+              "column": 6
+            }
+          },
+          "replacement": "String::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_123_col_5.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_123_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.052110415,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.451481162,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:123:5: replace deployed_at_at -> String with \"xyzzy\".into()",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "deployed_at_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 120,
+                "column": 1
+              },
+              "end": {
+                "line": 129,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 123,
+              "column": 5
+            },
+            "end": {
+              "line": 128,
+              "column": 6
+            }
+          },
+          "replacement": "\"xyzzy\".into()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_123_col_5_001.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_123_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.102434257,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.451549216,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/iem-core/src/lib.rs:124:18: replace == with != in deployed_at_at",
+          "package": "iem-core",
+          "file": "crates/iem-core/src/lib.rs",
+          "function": {
+            "function_name": "deployed_at_at",
+            "return_type": "-> String",
+            "span": {
+              "start": {
+                "line": 120,
+                "column": 1
+              },
+              "end": {
+                "line": 129,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 124,
+              "column": 18
+            },
+            "end": {
+              "line": 124,
+              "column": 20
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__iem-core__src__lib.rs_line_124_col_18.log",
+      "diff_path": "diff/crates__iem-core__src__lib.rs_line_124_col_18.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.102317343,
+          "process_status": "Success",
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.503308684,
+          "process_status": {
+            "Failure": 100
+          },
+          "argv": [
+            "/opt/rust/rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--cargo-profile=mutants",
+            "--verbose",
+            "--package=iem-core@3.0.9"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 10,
+  "missed": 0,
+  "caught": 10,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-11-19T16:30:33.211225971Z",
+  "end_time": "2026-11-19T16:31:30.017735408Z",
+  "cargo_mutants_version": "27.1.0"
+}

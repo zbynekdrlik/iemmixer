@@ -93,15 +93,23 @@ pub async fn settle(
     }
 }
 
+/// The schedule's day ("YYYY-MM-DD") and minute ("HH:MM") of `now` in its
+/// zone. The daemon passes the box's local time (`Zoned::now`: TZ, else
+/// /etc/localtime): the schedule's slots are the venue's clock.
+fn local_slot(now: &jiff::Zoned) -> (String, String) {
+    (
+        now.strftime("%Y-%m-%d").to_string(),
+        now.strftime("%H:%M").to_string(),
+    )
+}
+
 async fn run(state: AppState) {
     tracing::info!("Backup daemon started");
     let mut done: HashSet<String> = HashSet::new();
     let mut alarms = RefusalAlarms::default();
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-        let now = chrono::Local::now();
-        let today = now.format("%Y-%m-%d").to_string();
-        let hhmm = now.format("%H:%M").to_string();
+        let (today, hhmm) = local_slot(&jiff::Zoned::now());
         done.retain(|key| key.starts_with(&today));
         let (schedule, retention_days) = {
             let config = state.config.read().await;
@@ -163,6 +171,42 @@ mod tests {
     }
 
     const UNREADABLE: &str = "the pins and hides of member3 are unreadable: Is a directory";
+
+    #[test]
+    fn the_slot_is_the_local_day_and_minute() {
+        use jiff::tz::{Offset, TimeZone};
+        // 2025-09-24 23:30:59 UTC.
+        let t = jiff::Timestamp::from_second(1_758_756_659).unwrap();
+        let at = |hours| local_slot(&t.to_zoned(TimeZone::fixed(Offset::constant(hours))));
+        assert_eq!(at(0), ("2025-09-24".into(), "23:30".into()));
+        // Two hours east it is already the next day.
+        assert_eq!(at(2), ("2025-09-25".into(), "01:30".into()));
+        assert_eq!(at(-5), ("2025-09-24".into(), "18:30".into()));
+        // The daemon's own clock is the system zone's.
+        let now = jiff::Zoned::now();
+        assert_eq!(now.time_zone(), &TimeZone::system());
+        let (day, hhmm) = local_slot(&now);
+        assert_eq!((day.len(), hhmm.len()), (10, 5), "{day} {hhmm}");
+    }
+
+    #[test]
+    fn a_slot_is_due_once_a_day_at_its_minute() {
+        let schedule = ["13:00".to_string(), "21:00".to_string()];
+        let mut done = HashSet::new();
+        assert_eq!(due(&schedule, "2025-09-24", "12:59", &done), None);
+        let key = due(&schedule, "2025-09-24", "13:00", &done);
+        assert_eq!(key.as_deref(), Some("2025-09-24 13:00"));
+        done.insert(key.unwrap());
+        assert_eq!(due(&schedule, "2025-09-24", "13:00", &done), None);
+        assert_eq!(
+            due(&schedule, "2025-09-25", "13:00", &done).as_deref(),
+            Some("2025-09-25 13:00")
+        );
+        assert_eq!(
+            due(&schedule, "2025-09-24", "21:00", &done).as_deref(),
+            Some("2025-09-24 21:00")
+        );
+    }
 
     #[test]
     fn the_refusal_alarm_names_the_slot_and_the_reason() {

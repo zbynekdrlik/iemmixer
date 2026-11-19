@@ -294,7 +294,7 @@ mod tests {
     const NAME: &str = "mixer.example.org";
 
     fn now() -> i64 {
-        chrono::Utc::now().timestamp()
+        iem_core::unix_now()
     }
 
     #[test]
