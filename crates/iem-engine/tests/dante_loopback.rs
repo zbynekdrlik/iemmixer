@@ -141,6 +141,7 @@ fn device(dir: &Path) -> Device {
         tx_port_base: None,
         arc_rx_fpp: None,
         test_clock_ppm: None,
+        spin_no_yield_tail: false,
         pump_cpu: None,
         io_cpu: None,
         rx_cpu: None,
