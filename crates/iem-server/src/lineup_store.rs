@@ -515,7 +515,7 @@ pub(crate) fn migrate_with(
     };
     let json = serde_json::to_string_pretty(&pending).map_err(io::Error::other)?;
     write_durable(&staging.join(PENDING_NAME), &json)?;
-    store.set_active(&roster.main().id, chrono::Utc::now().timestamp())?;
+    store.set_active(&roster.main().id, iem_core::unix_now())?;
     fault(Step::Commit)?;
     fs::rename(&staging, &live)?;
     tracing::info!(

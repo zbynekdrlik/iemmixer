@@ -82,9 +82,7 @@ impl BandFile for CustomizationFile {
 
 /// The UTC day ("YYYY-MM-DD") of a Unix time.
 pub fn utc_day(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
+    iem_core::utc_format(ts, "%Y-%m-%d").unwrap_or_default()
 }
 
 impl BandStore {

@@ -82,7 +82,7 @@ async fn create_snapshot(
     ))?;
     let c = capture(&site, &state.engine.mirror(), &page);
     let snapshot = Snapshot {
-        timestamp: chrono::Utc::now().timestamp(),
+        timestamp: iem_core::unix_now(),
         label: req.label.unwrap_or_else(|| "manual".to_string()),
         pinned: false,
         sends: c.sends,

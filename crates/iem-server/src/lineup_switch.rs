@@ -233,9 +233,7 @@ async fn steps(
         if !mirror.synced {
             return Err(Failed::Back(SwitchError::NotSynced));
         }
-        let at = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string();
+        let at = crate::backup_store::utc_now_ms();
         let live = capture(view, &mirror, &state.band_of(Some(from)), at)
             .map_err(|e| Failed::Back(SwitchError::Io(e)))?;
         (live, state_digest(&mirror.state))
@@ -329,7 +327,7 @@ async fn forward(
         .await
         .map_err(SwitchError::Engine)?;
     store
-        .set_active(&to.id, chrono::Utc::now().timestamp())
+        .set_active(&to.id, iem_core::unix_now())
         .map_err(|e| io("the band that plays was not recorded", e))?;
     note_running(store, &running);
     end_solos(state, &soloed).await;
@@ -367,7 +365,7 @@ async fn play(
         .await
         .map_err(|e| e.to_string())?;
     store
-        .set_active(&lineup.id, chrono::Utc::now().timestamp())
+        .set_active(&lineup.id, iem_core::unix_now())
         .map_err(|e| e.to_string())?;
     note_running(store, &running);
     end_solos(state, &soloed).await;

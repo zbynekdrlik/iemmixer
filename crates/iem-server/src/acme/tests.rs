@@ -25,7 +25,7 @@ fn cf_secret() -> String {
 }
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    iem_core::unix_now()
 }
 
 /// Stores the doubles' Cloudflare token in `dir`, as the keeper finds it.
