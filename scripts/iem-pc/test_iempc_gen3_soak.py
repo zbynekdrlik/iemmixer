@@ -57,7 +57,7 @@ RESET_UNIT = "sudo -n systemctl reset-failed iem-soak"
 BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, RECEIVERS_HELP, UNIT_SHOW, gt.CTL, UNITS]
 TICK = [gt.CTL, RECEIVERS, HEALTH_ANY, UNITS, UNIT_SHOW]
 # After the run: the mic-to-ear guard's reads (#122; our RX table over ARC between them).
-LATENCY = [gt.CTL, gt.CAT_DEVICE, gt.CAT_SITE]
+LATENCY = [gt.CTL, gt.CAT_DEVICE, gt.CAT_SITE, gt.CAT_GUARD]
 AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY, *LATENCY]
 
 
@@ -549,7 +549,7 @@ class CriteriaTests(SoakBase):
         # A failed unit is cleared with reset-failed, not stopped.
         self.again()
         code, docs, err = self.gate_run(FAKE_CLIENT_EXIT="1")
-        self.assertEqual(self.calls()[-7:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
+        self.assertEqual(self.calls()[-8:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
 
     def test_a_listen_gap_fails_the_harness(self) -> None:
         # #88: the listen ran 30 min with no gap at three times the gate's reads (2026-11-08); a gap fails it now.
@@ -593,7 +593,7 @@ class CriteriaTests(SoakBase):
         self.assertEqual((doc["failed"], doc["client_exit"], doc["client_result"]),
                          (["not_finished", "harness"], None, None))
         calls = self.calls()
-        self.assertEqual(calls[-7:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
+        self.assertEqual(calls[-8:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
         self.assertEqual(self.soak_state()["unit"], None)
 
     def test_a_refused_status_post_fails_the_command_after_its_verdict(self) -> None:

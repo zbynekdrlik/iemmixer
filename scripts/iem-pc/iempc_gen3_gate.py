@@ -132,6 +132,7 @@ STAGED = f"{STAGE}/iem-hil.conf"
 UNIT = "iem-engine.service"
 UNIT_FILE = f"/etc/systemd/system/{UNIT}"
 DEVICE_CONFIG = "/etc/iemmixer/dante-device.toml"
+GUARD_FILE = "/etc/iemmixer/latency-guard.json"   # deploy.sh's, read by iem-dante-dev health (#122)
 SITE = "/var/lib/iemmixer/site/iemmixer.toml"
 ENGINE_BIN = g3.ENGINE_BIN
 SERVER_BIN = "/opt/iemmixer/bin/iem-server"
@@ -823,7 +824,8 @@ def latency(box: Box, dante: str, event: str | None = None) -> dict:
     except (OSError, ValueError, struct.error):
         return unread("subscriptions")
     try:
-        rate = gen3_latency.sample_rate(box.call(["cat", DEVICE_CONFIG], event=event))
+        device_text = box.call(["cat", DEVICE_CONFIG], event=event)
+        rate = gen3_latency.sample_rate(device_text)
     except (ip.StepError, ValueError, tomllib.TOMLDecodeError):
         return unread("device_config")
     try:
@@ -833,7 +835,19 @@ def latency(box: Box, dante: str, event: str | None = None) -> dict:
         return unread("site")
     tx = gen3_latency.tx_flows(status, in_ear)
     rows = gen3_latency.paths(status, subscriptions, inputs, rate, tx, exempt, budgets, optional)
-    return {**gen3_latency.verdict(rows, rate, tx), "own_budgets": dict(sorted(budgets.items()))}
+    verdict = gen3_latency.verdict(rows, rate, tx)
+    # The guard file health judges with (installed by deploy.sh): the same as
+    # one built from the live site and env, else health checks other budgets
+    # than this gate (an exemption or budget changed since the last deploy).
+    try:
+        installed = json.loads(box.call(["cat", GUARD_FILE], event=event))
+        guard = "same" if installed == gen3_latency.guard(site, device_text, exempt, budgets) else "stale"
+    except ip.StepError:
+        guard = "absent"
+    except ValueError:
+        guard = "stale"
+    return {**verdict, "pass": int(verdict["pass"] and guard == "same"), "guard": guard,
+            "own_budgets": dict(sorted(budgets.items()))}
 
 
 def run_latency(ctx, ip) -> int:
