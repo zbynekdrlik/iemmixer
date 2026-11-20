@@ -21,13 +21,17 @@
 //! The line: `{"health": {state, reasons, units: [{unit, active, result,
 //! restarts}], clock: {ready, holdover, holdovers, re_anchors, freq_ppb},
 //! pump: {media, blocks, late, missed, rebootstraps, max_process_us},
-//! server: {answers, build}}}`. `unit` is `engine`, `server` or `device`;
+//! server: {answers, build}, latency: {inputs, known, over, unread_tx,
+//! worst_samples, budget_samples}}}`. `unit` is `engine`, `server` or `device`;
 //! `active` and `result` are systemd's own words, an unknown one `other`;
 //! `clock` and `pump` are the second read's (the first's when only it
 //! came; `null` without one, `pump` also without an engine); `build` is
 //! `same`, `other` or `null` without an answer. dantesync is the box's
 //! clock (owner, 2026-10-26): `clock` carries what the status has of it.
-//! No name, address or build hash is ever printed.
+//! `latency` is the mic-to-ear guard's ([`latency`], #122; `null` without
+//! its file). No name, address, channel or build hash is ever printed.
+
+pub mod latency;
 
 use iem_dante::health::{Clock, DeviceReason, Pump, Status, device_reasons};
 use serde::{Deserialize, Serialize};
@@ -58,6 +62,9 @@ pub struct Options {
     /// The server's port on 127.0.0.1 ([`SERVER_PORT`] unless
     /// `--server-port`).
     pub server_port: u16,
+    /// The latency guard's numbers ([`latency::GUARD`] unless
+    /// `--latency-guard`).
+    pub latency_guard: std::path::PathBuf,
 }
 
 /// A unit's `ActiveState`: systemd's words, an unknown one [`Active::Other`].
@@ -284,6 +291,13 @@ pub enum Reason {
     ServerDown,
     /// The server's build is not this binary's.
     BuildMismatch,
+    /// With the engine active, a known mic-to-ear path is above its budget
+    /// (#122, [`latency`]).
+    LatencyOverBudget,
+    /// With the engine active, an in-ear TX flow's receiver latency is not
+    /// known, the guard's file does not read, or the status line does not
+    /// read as flows (#122).
+    LatencyUnread,
 }
 
 impl From<DeviceReason> for Reason {
@@ -319,6 +333,9 @@ pub struct Verdict {
     pub answers: bool,
     /// `None` without an answer.
     pub build: Option<Build>,
+    /// The latency guard's numbers ([`Verdict::with_latency`]); `None`
+    /// without its file.
+    pub latency: Option<latency::Line>,
 }
 
 /// What runs: the engine (it hosts the device) with the server, or the
@@ -360,7 +377,9 @@ fn fails(reason: Reason, clock_grace: bool) -> bool {
         | Reason::Holdover
         | Reason::PumpFree
         | Reason::PumpRebootstrap
-        | Reason::BuildMismatch => false,
+        | Reason::BuildMismatch
+        | Reason::LatencyOverBudget
+        | Reason::LatencyUnread => false,
     }
 }
 
@@ -407,6 +426,7 @@ pub fn verdict(
         pump: shown.and_then(|s| s.engine),
         answers: build.is_some(),
         build,
+        latency: None,
     };
     let Some(shape) = shape(units) else {
         return v;
@@ -456,6 +476,31 @@ pub fn verdict(
     v
 }
 
+impl Verdict {
+    /// The verdict with the latency guard's judgment (#122) of the shown
+    /// read's status line (`None` without one): its numbers on the line
+    /// whatever the state; its reasons only while the engine is active and
+    /// the box not stopped, each once, and they degrade a healthy box
+    /// (never fail it).
+    pub fn with_latency(
+        mut self,
+        guard: &latency::GuardRead,
+        status_line: Option<&str>,
+    ) -> Verdict {
+        let (line, reasons) = latency::assess(guard, status_line);
+        self.latency = line;
+        if self.state == State::Stopped || self.units.engine.active != Active::Active {
+            return self;
+        }
+        // Each at most once already, and none of the verdict's own.
+        self.reasons.extend(reasons);
+        if self.state == State::Healthy && !self.reasons.is_empty() {
+            self.state = State::Degraded;
+        }
+        self
+    }
+}
+
 #[derive(Serialize)]
 struct UnitLine {
     unit: &'static str,
@@ -478,6 +523,7 @@ struct Body<'a> {
     clock: Option<Clock>,
     pump: Option<Pump>,
     server: ServerLine,
+    latency: Option<latency::Line>,
 }
 
 #[derive(Serialize)]
@@ -509,6 +555,7 @@ impl Verdict {
                     answers: u8::from(self.answers),
                     build: self.build,
                 },
+                latency: self.latency,
             },
         };
         // Numbers, fixed words and nulls only: nothing here can fail to
@@ -518,21 +565,33 @@ impl Verdict {
 }
 
 #[cfg(target_os = "linux")]
-pub use glue::{ask_server, check};
+pub use glue::{ask_server, check, status_line};
+
+/// The status line the latency guard judges: the read the line shows, the
+/// second's when it reads as a status, else the first's when it does
+/// (`None` when neither does).
+pub fn shown_line<'a>(first: Option<&'a str>, second: Option<&'a str>) -> Option<&'a str> {
+    let reads = |line: &&str| iem_dante::health::parse_status(line).is_some();
+    second.filter(reads).or(first.filter(reads))
+}
 
 /// The Linux glue: the `systemctl` call, the control socket's reads
 /// (dstack's `read_status`) and the server's version over loopback.
 #[cfg(target_os = "linux")]
 mod glue {
-    use std::io::{self, ErrorKind, Read, Write};
+    use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use iem_dante::health::read_status;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+
+    use iem_dante::health::parse_status;
 
     use super::{
-        Options, PROPERTIES, ServerAnswer, UNITS, Verdict, parse_units, server_answer, verdict,
+        Options, PROPERTIES, ServerAnswer, UNITS, Verdict, latency, parse_units, server_answer,
+        verdict,
     };
 
     /// The control socket's reads, a second apart.
@@ -541,8 +600,8 @@ mod glue {
     pub const STATUS_WAIT: Duration = Duration::from_secs(2);
     /// How long the server's version may take, connect to last byte.
     pub const SERVER_WAIT: Duration = Duration::from_secs(2);
-    /// The longest HTTP reply read, bytes (dstack keeps its own for
-    /// the status line).
+    /// The longest HTTP reply or status line read, bytes (dstack's own
+    /// bound for the status line).
     pub const MAX_READ: u64 = 1 << 20;
     /// The request (HTTP/1.0: the server answers with a length or closes).
     pub const VERSION_REQUEST: &[u8] =
@@ -554,13 +613,15 @@ mod glue {
     pub fn check(opts: &Options, name: &str, own_build: &str) -> Verdict {
         let units = parse_units(&systemctl_show(name));
         let now_us = u64::try_from(iem_dante::clock::monotonic_ns() / 1_000).unwrap_or(0);
-        let first = read_status(&opts.socket, STATUS_WAIT);
+        let first_line = status_line(&opts.socket, STATUS_WAIT);
         std::thread::sleep(READ_APART);
-        let second = read_status(&opts.socket, STATUS_WAIT);
+        let second_line = status_line(&opts.socket, STATUS_WAIT);
         let server = ask_server(
             SocketAddr::from((Ipv4Addr::LOCALHOST, opts.server_port)),
             SERVER_WAIT,
         );
+        let first = first_line.as_deref().and_then(parse_status);
+        let second = second_line.as_deref().and_then(parse_status);
         verdict(
             &units,
             first.as_ref(),
@@ -569,6 +630,27 @@ mod glue {
             own_build,
             now_us,
         )
+        .with_latency(
+            &latency::read_guard(&opts.latency_guard),
+            super::shown_line(first_line.as_deref(), second_line.as_deref()),
+        )
+    }
+
+    /// One `status` request to the control socket at `path`, its answer
+    /// line read within `wait` a read, at most [`MAX_READ`] bytes (dstack's
+    /// `read_status`, which keeps only the clock and the engine); `None`
+    /// without a socket or an answer.
+    pub fn status_line(path: &Path, wait: Duration) -> Option<String> {
+        let exchange = || -> io::Result<String> {
+            let mut stream = UnixStream::connect(path)?;
+            stream.set_read_timeout(Some(wait))?;
+            stream.set_write_timeout(Some(wait))?;
+            stream.write_all(b"status\n")?;
+            let mut line = String::new();
+            BufReader::new(stream.take(MAX_READ)).read_line(&mut line)?;
+            Ok(line)
+        };
+        exchange().ok()
     }
 
     /// `systemctl show` of the three units' [`PROPERTIES`]; empty when

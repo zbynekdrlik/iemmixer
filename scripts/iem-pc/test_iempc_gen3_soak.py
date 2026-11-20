@@ -233,7 +233,10 @@ if line == f"{DANTE} receivers --ip @DANTE_IP@ --seconds 5":
 if line == f"{DANTE} health || true":
     d = restart_disturbs(since_restart())
     if os.environ.get("FAKE_SOAK_DEGRADED") and late():
-        print(json.dumps({"health": {"state": "degraded", "reasons": ["holdover", "zyxqword"], "units": []}}))
+        # "1": a holdover; else the reasons it names, comma-separated; an unknown word beside them.
+        named = os.environ["FAKE_SOAK_DEGRADED"]
+        reasons = ["holdover"] if named == "1" else named.split(",")
+        print(json.dumps({"health": {"state": "degraded", "reasons": [*reasons, "zyxqword"], "units": []}}))
     elif d["holdover"] or d["not_ready"]:
         reasons = ["holdover"] if d["holdover"] else ["clock_not_ready", "pump_free"]
         print(json.dumps({"health": {"state": "degraded", "reasons": reasons, "units": []}}))
@@ -503,6 +506,14 @@ class CriteriaTests(SoakBase):
         code, docs, err = self.gate_run(FAKE_SOAK_DEGRADED="1")
         self.assertEqual(code, 1, err)
         self.assertEqual(self.line(docs)["health_reasons"], ["holdover"])
+
+    def test_a_health_degraded_by_the_latency_guard_names_its_reasons(self) -> None:
+        # iem-dante-dev health's own latency guard (#122): its two words are known reasons.
+        code, docs, err = self.gate_run(FAKE_SOAK_DEGRADED="latency_unread,latency_over_budget")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual(doc["health_reasons"], ["latency_over_budget", "latency_unread"])
+        self.assertIn("health", doc["failed"])
 
     def test_an_engine_restart_by_itself_counts_in_the_hil_gate_s_budget(self) -> None:
         code, docs, err = self.gate_run(FAKE_UNIT_RESTART="iem-engine.service")

@@ -14,6 +14,14 @@ fn health_takes_a_socket_and_a_server_port() {
         Command::Health(health::Options {
             socket: PathBuf::from(socket),
             server_port,
+            latency_guard: PathBuf::from("/etc/iemmixer/latency-guard.json"),
+        })
+    };
+    let guarded = |guard: &str| {
+        Command::Health(health::Options {
+            socket: PathBuf::from("/run/iem-dante/control.sock"),
+            server_port: 80,
+            latency_guard: PathBuf::from(guard),
         })
     };
     let default = "/run/iem-dante/control.sock";
@@ -38,6 +46,10 @@ fn health_takes_a_socket_and_a_server_port() {
             &["health", "--server-port", "65535"],
             health(default, 65_535),
         ),
+        (
+            &["health", "--latency-guard", "/tmp/g.json"],
+            guarded("/tmp/g.json"),
+        ),
         (&["health", "--help", "--bogus"], Command::Help),
         (&["health", "--socket", "/tmp/c.sock", "-h"], Command::Help),
     ] {
@@ -47,6 +59,18 @@ fn health_takes_a_socket_and_a_server_port() {
         (&["health", "--socket"], "--socket needs a value"),
         (&["health", "--socket", ""], "--socket needs a path"),
         (&["health", "--server-port"], "--server-port needs a value"),
+        (
+            &["health", "--latency-guard"],
+            "--latency-guard needs a value",
+        ),
+        (
+            &["health", "--latency-guard", ""],
+            "--latency-guard needs a path",
+        ),
+        (
+            &["health", "--latency-guard", "a", "--latency-guard", "b"],
+            "--latency-guard given twice",
+        ),
         (
             &["health", "--server-port", "0"],
             "--server-port \"0\" is not a port from 1 to 65535",
@@ -95,12 +119,16 @@ fn only_a_first_word_health_is_ours_the_rest_is_the_stack_s() {
 fn the_health_usage_names_the_binary_its_options_and_exit_codes() {
     let usage = health_usage("iem-dante-dev");
     assert!(
-        usage.starts_with("usage: iem-dante-dev health [--socket <path>] [--server-port <n>]\n"),
+        usage.starts_with(
+            "usage: iem-dante-dev health [--socket <path>] [--server-port <n>] \
+             [--latency-guard <path>]\n"
+        ),
         "{usage}"
     );
     for part in [
         "(default\n/run/iem-dante/control.sock)",
         "(default port 80)",
+        "(default\n/etc/iemmixer/latency-guard.json; none there, none judged)",
         "Exit 0 healthy, 1 degraded or failed, 3 stopped",
         "2 for\nthe command line",
     ] {
