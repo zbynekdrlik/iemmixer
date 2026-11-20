@@ -589,12 +589,11 @@ pub fn reads<'a>(first: Option<&'a str>, second: Option<&'a str>) -> latency::Re
 /// (dstack's `read_status`) and the server's version over loopback.
 #[cfg(target_os = "linux")]
 mod glue {
-    use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+    use std::io::{self, ErrorKind, Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use std::os::unix::net::UnixStream;
     use std::path::Path;
 
     use iem_dante::health::parse_status;
@@ -623,9 +622,9 @@ mod glue {
     pub fn check(opts: &Options, name: &str, own_build: &str) -> Verdict {
         let units = parse_units(&systemctl_show(name));
         let now_us = u64::try_from(iem_dante::clock::monotonic_ns() / 1_000).unwrap_or(0);
-        let first_line = status_line(&opts.socket, STATUS_WAIT);
+        let first_line = status_line(&opts.socket);
         std::thread::sleep(READ_APART);
-        let second_line = status_line(&opts.socket, STATUS_WAIT);
+        let second_line = status_line(&opts.socket);
         let server = ask_server(
             SocketAddr::from((Ipv4Addr::LOCALHOST, opts.server_port)),
             SERVER_WAIT,
@@ -646,21 +645,12 @@ mod glue {
         )
     }
 
-    /// One `status` request to the control socket at `path`, its answer
-    /// line read within `wait` a read, at most [`MAX_READ`] bytes (dstack's
-    /// `read_status`, which keeps only the clock and the engine); `None`
-    /// without a socket or an answer.
-    pub fn status_line(path: &Path, wait: Duration) -> Option<String> {
-        let exchange = || -> io::Result<String> {
-            let mut stream = UnixStream::connect(path)?;
-            stream.set_read_timeout(Some(wait))?;
-            stream.set_write_timeout(Some(wait))?;
-            stream.write_all(b"status\n")?;
-            let mut line = String::new();
-            BufReader::new(stream.take(MAX_READ)).read_line(&mut line)?;
-            Ok(line)
-        };
-        exchange().ok()
+    /// One `status` answer line from the control socket at `path`, through
+    /// dstack's `health::read_status_line` (v0.6.200, dstack #457: within
+    /// [`STATUS_WAIT`] a read, at most 1 MiB, an `error: ...` answer as its
+    /// text); `None` without a socket or an answer.
+    pub fn status_line(path: &Path) -> Option<String> {
+        iem_dante::health::read_status_line(path, STATUS_WAIT).ok()
     }
 
     /// `systemctl show` of the three units' [`PROPERTIES`]; empty when

@@ -252,7 +252,7 @@ fn the_status_line_is_read_whole_from_the_control_socket() {
     let path = dir.join("control.sock");
     let _ = std::fs::remove_file(&path);
     // No socket: no line.
-    assert_eq!(status_line(&path, BOUND), None);
+    assert_eq!(status_line(&path), None);
     let listener = UnixListener::bind(&path).unwrap();
     let served = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
@@ -262,7 +262,8 @@ fn the_status_line_is_read_whole_from_the_control_socket() {
         (&stream).write_all(b"{\"rx\":[]}\nmore\n").unwrap();
         request
     });
-    assert_eq!(status_line(&path, BOUND).as_deref(), Some("{\"rx\":[]}\n"));
+    // dstack's read_status_line (v0.6.200): the first line, without its end.
+    assert_eq!(status_line(&path).as_deref(), Some("{\"rx\":[]}"));
     assert_eq!(served.join().unwrap(), "status\n");
     std::fs::remove_dir_all(&dir).unwrap();
 }
