@@ -17,8 +17,10 @@
 //! healthy); the gates fail closed on it. [`Judgment::reasons`]:
 //! [`Reason::LatencyOverBudget`] for a known path above its budget,
 //! [`Reason::LatencyUnread`] for an in-ear TX flow whose receiver latency
-//! is unknown (dstack's 0), a guard file that does not read, or a status
-//! line that does not read as flows. Pure; [`read_guard`] reads the file.
+//! is unknown (dstack's 0) in both reads a second apart (dstack reads a new
+//! flow's receiver within about a second, so one read alone is a flow just
+//! started), a guard file that does not read, or a status line that does
+//! not read as flows. Pure; [`read_guard`] reads the file.
 
 use std::path::Path;
 
@@ -142,7 +144,9 @@ pub struct Line {
     pub unread_tx: u64,
     /// The longest known path, samples.
     pub worst_samples: Option<u64>,
-    /// 1 ms at the device's rate, samples (rounded down).
+    /// 1 ms at the device's rate, samples (rounded down): the default
+    /// budget, as the gates' line names it; an input's own budget is not
+    /// shown.
     pub budget_samples: Option<u64>,
 }
 
@@ -158,7 +162,9 @@ fn samples_of_us(us: u64, rate: u64) -> u64 {
     us.saturating_mul(rate).div_ceil(1_000_000)
 }
 
-/// Whether a TX flow with slots carries an in-ear output.
+/// Whether a TX flow with slots carries an in-ear output. A flow with slots
+/// and no `tx_channels` (the gates' `tx_unmapped`, a dstack before v0.6.137)
+/// carries none here: this build's dstack always names them.
 fn in_ear(flow: &TxFlow, outputs: &[u64]) -> bool {
     flow.channels > 0
         && flow
@@ -235,18 +241,34 @@ pub fn judge(guard: &Guard, flows: Option<&Flows>) -> Judgment {
     Judgment { line, reasons }
 }
 
-/// The guard as the box has it, against the shown read's status line
-/// (`None` without one): the line's `latency` (`None` without a file) and
-/// the reasons. An unreadable file shows zeros and no budget.
-pub fn assess(guard: &GuardRead, status_line: Option<&str>) -> (Option<Line>, Vec<Reason>) {
+/// The status lines the guard judges ([`crate::health::reads`]): the read
+/// health shows and, when that is the second, the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Reads<'a> {
+    pub shown: Option<&'a str>,
+    pub before: Option<&'a str>,
+}
+
+/// The guard as the box has it, against the shown read (`None` without
+/// one): the line's `latency` (`None` without a file) and the reasons. An
+/// unreadable file shows zeros and no budget. An unread in-ear latency is a
+/// reason only when the read before shows one too (or there is none that
+/// reads as flows): a flow that started between the reads is not.
+pub fn assess(guard: &GuardRead, reads: Reads<'_>) -> (Option<Line>, Vec<Reason>) {
     match guard {
         GuardRead::Absent => (None, Vec::new()),
         GuardRead::Unreadable => (Some(Line::default()), vec![Reason::LatencyUnread]),
-        GuardRead::Read(guard) => match status_line {
+        GuardRead::Read(guard) => match reads.shown {
             // No read at all: health names it (`no_status`), nothing more here.
             None => (Some(judge(guard, Some(&Flows::default())).line), Vec::new()),
             Some(text) => {
-                let j = judge(guard, parse_flows(text).as_ref());
+                let mut j = judge(guard, parse_flows(text).as_ref());
+                let before = reads.before.and_then(parse_flows);
+                if j.line.unread_tx > 0
+                    && before.is_some_and(|b| judge(guard, Some(&b)).line.unread_tx == 0)
+                {
+                    j.reasons.retain(|&r| r != Reason::LatencyUnread);
+                }
                 (Some(j.line), j.reasons)
             }
         },

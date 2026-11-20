@@ -477,17 +477,16 @@ pub fn verdict(
 }
 
 impl Verdict {
-    /// The verdict with the latency guard's judgment (#122) of the shown
-    /// read's status line (`None` without one): its numbers on the line
-    /// whatever the state; its reasons only while the engine is active and
-    /// the box not stopped, each once, and they degrade a healthy box
-    /// (never fail it).
+    /// The verdict with the latency guard's judgment (#122) of the status
+    /// lines ([`reads`]): its numbers on the line whatever the state; its
+    /// reasons only while the engine is active and the box not stopped,
+    /// each once, and they degrade a healthy box (never fail it).
     pub fn with_latency(
         mut self,
         guard: &latency::GuardRead,
-        status_line: Option<&str>,
+        reads: latency::Reads<'_>,
     ) -> Verdict {
-        let (line, reasons) = latency::assess(guard, status_line);
+        let (line, reasons) = latency::assess(guard, reads);
         self.latency = line;
         if self.state == State::Stopped || self.units.engine.active != Active::Active {
             return self;
@@ -567,12 +566,23 @@ impl Verdict {
 #[cfg(target_os = "linux")]
 pub use glue::{ask_server, check, status_line};
 
-/// The status line the latency guard judges: the read the line shows, the
-/// second's when it reads as a status, else the first's when it does
-/// (`None` when neither does).
-pub fn shown_line<'a>(first: Option<&'a str>, second: Option<&'a str>) -> Option<&'a str> {
-    let reads = |line: &&str| iem_dante::health::parse_status(line).is_some();
-    second.filter(reads).or(first.filter(reads))
+/// The status lines the latency guard judges: the read the line shows, the
+/// second's when it reads as a status, with the first before it when that
+/// reads too; else the first's alone when it reads (nothing when neither
+/// does).
+pub fn reads<'a>(first: Option<&'a str>, second: Option<&'a str>) -> latency::Reads<'a> {
+    let status = |line: &&str| iem_dante::health::parse_status(line).is_some();
+    let (first, second) = (first.filter(status), second.filter(status));
+    match second {
+        Some(_) => latency::Reads {
+            shown: second,
+            before: first,
+        },
+        None => latency::Reads {
+            shown: first,
+            before: None,
+        },
+    }
 }
 
 /// The Linux glue: the `systemctl` call, the control socket's reads
@@ -632,7 +642,7 @@ mod glue {
         )
         .with_latency(
             &latency::read_guard(&opts.latency_guard),
-            super::shown_line(first_line.as_deref(), second_line.as_deref()),
+            super::reads(first_line.as_deref(), second_line.as_deref()),
         )
     }
 

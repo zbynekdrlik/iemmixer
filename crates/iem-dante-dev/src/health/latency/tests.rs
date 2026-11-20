@@ -358,26 +358,66 @@ fn a_status_line_reads_as_its_flows() {
     }
 }
 
+/// One read, none before it.
+fn one(line: &str) -> Reads<'_> {
+    Reads {
+        shown: Some(line),
+        before: None,
+    }
+}
+
 #[test]
 fn assess_skips_without_the_file_and_reads_the_shown_line() {
-    assert_eq!(assess(&GuardRead::Absent, Some(STATUS)), (None, vec![]));
+    assert_eq!(assess(&GuardRead::Absent, one(STATUS)), (None, vec![]));
     assert_eq!(
-        assess(&GuardRead::Unreadable, Some(STATUS)),
+        assess(&GuardRead::Unreadable, one(STATUS)),
         (Some(Line::default()), vec![Reason::LatencyUnread])
     );
     let read = GuardRead::Read(box_guard());
     assert_eq!(
-        assess(&read, Some(STATUS)),
+        assess(&read, one(STATUS)),
         (Some(line(3, 3, 0, 0, Some(128))), vec![])
     );
     // No read at all: health's own `no_status`, the guard's numbers unknown.
-    assert_eq!(assess(&read, None), (Some(line(3, 0, 0, 0, None)), vec![]));
     assert_eq!(
-        assess(&read, Some("{\"rx\":7}")),
+        assess(&read, Reads::default()),
+        (Some(line(3, 0, 0, 0, None)), vec![])
+    );
+    assert_eq!(
+        assess(&read, one("{\"rx\":7}")),
         (Some(line(3, 0, 0, 0, None)), vec![Reason::LatencyUnread])
     );
     let over = GuardRead::Read(guard(&[(&[2], 96)]));
-    assert_eq!(assess(&over, Some(STATUS)).1, [Reason::LatencyOverBudget]);
+    assert_eq!(assess(&over, one(STATUS)).1, [Reason::LatencyOverBudget]);
+    // An unread in-ear latency counts only when the read before shows one too.
+    let unread = STATUS.replacen(
+        "\"receiver_latency_us\":250",
+        "\"receiver_latency_us\":0",
+        1,
+    );
+    let both = |before| Reads {
+        shown: Some(unread.as_str()),
+        before,
+    };
+    assert_eq!(assess(&read, both(Some(STATUS))).1, []);
+    assert_eq!(
+        assess(&read, both(Some(&unread))).1,
+        [Reason::LatencyUnread]
+    );
+    assert_eq!(assess(&read, both(None)).1, [Reason::LatencyUnread]);
+    assert_eq!(assess(&read, both(Some("x"))).1, [Reason::LatencyUnread]);
+    // A status that does not read as flows stays unread whatever came before.
+    assert_eq!(
+        assess(
+            &read,
+            Reads {
+                shown: Some("{\"rx\":7}"),
+                before: Some(STATUS)
+            }
+        )
+        .1,
+        [Reason::LatencyUnread]
+    );
 }
 
 #[test]
