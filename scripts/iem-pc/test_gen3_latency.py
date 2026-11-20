@@ -69,9 +69,9 @@ MICS = [("mic1", [1]), ("mic2", [2]), ("mic3", [3])]
 
 
 def paths(doc: dict | None = None, subs: dict = SUBS, inputs=MICS, rate: int = RATE, exempt=None,
-          in_ear=IN_EAR, budgets=None) -> list[dict]:
+          in_ear=IN_EAR, budgets=None, optional=frozenset()) -> list[dict]:
     doc = status() if doc is None else doc
-    return lat.paths(doc, subs, inputs, rate, lat.tx_flows(doc, in_ear), exempt, budgets)
+    return lat.paths(doc, subs, inputs, rate, lat.tx_flows(doc, in_ear), exempt, budgets, optional)
 
 
 def verdict(rows: list[dict], doc: dict | None = None, rate: int = RATE, in_ear=IN_EAR) -> dict:
@@ -143,6 +143,43 @@ class PathTests(unittest.TestCase):
         # A flow without rx_channels (an older dstack) maps nothing.
         doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "delay": 16}])
         self.assertEqual(paths(doc, {"1": sub(STAGE)}, [("mic1", [1])])[0]["state"], "unknown")
+
+    def test_an_optional_channel_no_flow_carries_is_off_and_never_fails(self) -> None:
+        # A source a musician carries away (GEN3_OPTIONAL_RX), switched off:
+        # the soak of 2026-11-19 failed on such an input as unknown.
+        stage = [("mic1", [1]), ("mic3", [3]), ("keys", [5])]
+        rows = paths(subs={**SUBS, "5": sub(STAGE)}, inputs=stage, optional=frozenset({5}))
+        self.assertEqual((row(rows, "keys")["samples"], row(rows, "keys")["state"]), (None, "off"))
+        self.assertEqual(verdict(rows)["pass"], 1)
+        # Not optional: still unknown, still a fail.
+        rows = paths(subs={**SUBS, "5": sub(STAGE)}, inputs=stage)
+        self.assertEqual((row(rows, "keys")["state"], verdict(rows)["pass"]), ("unknown", 0))
+        # Optional and on: guarded like any other input, over fails.
+        doc = status(rx=[{"flow": 4, "device": STAGE, "channels": 8, "rx_channels": [5], "delay": 17}])
+        rows = paths(doc, {"5": sub(STAGE)}, [("keys", [5])], optional=frozenset({5}))
+        self.assertEqual((rows[0]["samples"], rows[0]["state"], verdict(rows, doc)["pass"]), (97, "over", 0))
+        # An input on an optional channel that is off and a required one: the
+        # required channel's path alone.
+        rows = paths(subs={**SUBS, "5": sub(STAGE)}, inputs=[("mic1", [1, 5])], optional=frozenset({5}))
+        self.assertEqual((rows[0]["samples"], rows[0]["state"]), (96, "ok"))
+        # Receiving but no flow maps it (an unreadable mapping): unknown, a
+        # fail, never off.
+        doc = status()
+        doc["channels"] = [{"rx": 5, "status": 0x01010009}]
+        rows = paths(doc, {**SUBS, "5": sub(STAGE)}, stage, optional=frozenset({5}))
+        self.assertEqual((row(rows, "keys")["state"], verdict(rows, doc)["pass"]), ("unknown", 0))
+        doc["channels"] = [{"rx": 5, "status": 0x0001000A}]   # multicast receiving
+        rows = paths(doc, {**SUBS, "5": sub(STAGE)}, stage, optional=frozenset({5}))
+        self.assertEqual(row(rows, "keys")["state"], "unknown")
+        doc["channels"] = [{"rx": 5, "status": 1}]   # Unresolved: off
+        rows = paths(doc, {**SUBS, "5": sub(STAGE)}, stage, optional=frozenset({5}))
+        self.assertEqual(row(rows, "keys")["state"], "off")
+        # Off without a subscription is still unsubscribed (the table is ours).
+        rows = paths(inputs=[("keys", [5])], optional=frozenset({5}))
+        self.assertEqual(rows[0]["state"], "unsubscribed")
+        # Only off inputs: nothing known, no pass.
+        rows = paths(subs={"5": sub(STAGE)}, inputs=[("keys", [5])], optional=frozenset({5}))
+        self.assertEqual(verdict(rows)["pass"], 0)
 
     def test_the_flow_is_matched_by_channel_never_by_the_device_s_name(self) -> None:
         # The subscription names another device than the flow's: the channel decides.

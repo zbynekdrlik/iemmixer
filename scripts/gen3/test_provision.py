@@ -495,9 +495,20 @@ elif name == "apt-get":
     db = load()
     if os.environ.get("DEBIAN_FRONTEND") != "noninteractive":
         fail("unexpected apt-get", 97)
-    if args[:2] == ["purge", "-y"]:
+    if args == ["update"]:
+        db["apt_updates"] = db.get("apt_updates", 0) + 1
+    elif args[:2] == ["purge", "-y"]:
         for package in args[2:]:
             db["packages"].pop(package, None)
+    elif args == ["install", "-y", "--no-install-recommends", "nftables"]:
+        if os.environ.get("FAKE_NFT_INSTALL") == "fail":
+            fail("E: Unable to locate package nftables", 100)
+        db["packages"]["nftables"] = "install ok installed"
+        if os.environ.get("FAKE_NFT_INSTALL") != "no-binary":
+            nft = os.path.join(ROOT, "usr", "sbin", "nft")
+            with open(nft, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\nexec nft-standin \"$@\"\n")
+            os.chmod(nft, 0o755)
     elif args == ["install", "-y", "--no-install-recommends", "linux-image-realtime"]:
         # The meta package, the kernel it depends on, and that kernel's image.
         kernel = db["realtime_kernel"]
@@ -712,7 +723,9 @@ elif name == "sudo":
         sys.exit(0)
     if rest[:2] == ["find", "-P"] and rest[-len(FOREIGN):] == FOREIGN and len(rest) > 2 + len(FOREIGN):
         find_foreign([ROOT + p for p in rest[2:-len(FOREIGN)]], lambda p: p[len(ROOT):])
-    if rest[:1] == ["nft"]:
+    if rest[:1] == ["/usr/sbin/nft"] and not os.access(ROOT + rest[0], os.X_OK):
+        fail(f"sudo: {rest[0]}: command not found")
+    if rest[:1] in (["nft"], ["/usr/sbin/nft"]):
         sys.exit(subprocess.run([os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "nft"),
                                  *rest[1:]]).returncode)
     if rest[:1] == ["cat"] and len(rest) == 2:
@@ -814,6 +827,9 @@ class World(unittest.TestCase):
         # The programs sudo-lines.txt names, where sudo's secure_path finds them.
         for program in self.template_programs():
             write(r / ("usr/sbin" if program in ("visudo", "nft") else "usr/bin") / program, "#!/bin/sh\n", 0o755)
+        # nftables installed (the mDNS cap's loader; its sudo line names it
+        # by its absolute path, so the loop above leaves it out).
+        write(r / "usr/sbin/nft", "#!/bin/sh\n", 0o755)
         write(r / "usr/local/bin/dantesync", "#!/bin/sh\n", 0o755)
         write(r / "etc/systemd/system/dantesync.service", "[Service]\nUser=root\nExecStart=/usr/local/bin/dantesync\n")
         write(r / "etc/dantesync/config.json", json.dumps({"ntp_server": NTP, "ntp_server_mode": {"enabled": False}}))
@@ -1032,6 +1048,7 @@ class ProvisionRootTests(World):
             ["install", "-d", "-m", "2755", "-o", "root", "-g", "systemd-journal", "--", "/var/log/journal"],
             ["systemctl", "restart", "systemd-journald.service"],
             ["apt-get", "purge", "-y", "rsyslog"],
+            ["apt-get", "update"],
             ["apt-get", "install", "-y", "--no-install-recommends", "linux-image-realtime"],
             [*tmp_install, GRUB],
             ["update-grub"],
@@ -1271,7 +1288,6 @@ class ProvisionRootTests(World):
             (lambda: self.set_unit("phc2sys.service", ActiveState="active"), "phc2sys.service is enabled or running"),
             (lambda: self.set_unit("iem-engine.service", ActiveState="active"), "iem-engine.service is active"),
             (lambda: self.set_unit("iem-dante.service", ActiveState="activating"), "iem-dante.service is activating"),
-            (lambda: (self.root / "usr/sbin/nft").unlink(), "nft is not installed"),
             (cpus(2), "the box has fewer than 4 CPUs"),
             (cpus(33), "the box has more than 32 CPUs"),
         ]
@@ -1524,6 +1540,37 @@ class MdnsCapTests(World):
         self.assert_capped()
         self.assertEqual(self.tables()[OTHER_TABLE], OTHER_TABLE_TEXT)
         self.assertEqual(sorted(self.tables()), sorted([OTHER_TABLE, MDNS_TABLE]))
+
+    def test_a_box_without_nft_gets_nftables_installed_then_the_cap(self) -> None:
+        # The live box of 2026-11-19 had no nft: provision installs it
+        # (Ubuntu leaves nftables.service disabled), then loads the cap.
+        (self.root / "usr/sbin/nft").unlink()
+        r = self.provisioned()
+        self.assertEqual(self.steps(r)["mdns_cap"], "changed")
+        writes = self.writes()
+        self.assertIn(["apt-get", "install", "-y", "--no-install-recommends", "nftables"], writes)
+        # The lists brought up to date first, once a run (the realtime step's
+        # install, before it in this world, shares it).
+        self.assertEqual(writes.count(["apt-get", "update"]), 1)
+        self.assertLess(writes.index(["apt-get", "update"]),
+                        writes.index(["apt-get", "install", "-y", "--no-install-recommends", "nftables"]))
+        self.assertEqual(self.db()["packages"]["nftables"], "install ok installed")
+        self.assertEqual(self.loads(), [MDNS_LOAD])
+        self.assert_capped()
+        # Installed once: a second run installs nothing.
+        self.clear_calls()
+        self.provisioned()
+        self.assertNotIn(["apt-get", "install", "-y", "--no-install-recommends", "nftables"], self.writes())
+
+    def test_a_failed_nftables_install_fails_the_run(self) -> None:
+        (self.root / "usr/sbin/nft").unlink()
+        for mode, want in (("fail", "apt-get install of nftables failed"),
+                           ("no-binary", "nft is not at /usr/sbin/nft after the install of nftables")):
+            with self.subTest(mode=mode):
+                r = self.provision(FAKE_NFT_INSTALL=mode)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn(want, r.stdout + r.stderr)
+                self.assertNotIn(MDNS_LOAD, self.loads())
 
     def test_the_second_run_loads_nothing(self) -> None:
         self.provisioned()
@@ -2095,7 +2142,7 @@ class VerifyTests(World):
             "idle": (lambda: write(self.root / "sys/devices/system/cpu/cpu0/cpuidle/state2/disable", "0\n"),
                      "a CPU may enter deep idle"),
             "mdns_cap": (db_change(lambda db: db["nft"].pop(MDNS_TABLE)),
-                         "the mDNS cap's table is not loaded (sudo -n nft list table)"),
+                         "the mDNS cap's table is not loaded (sudo -n /usr/sbin/nft list table)"),
             "realtime": (lambda: write(self.root / GRUB.lstrip("/"),
                                        GRUB_AFTER.replace(RT_CMDLINE, RT_CMDLINE + " quiet"), 0o644),
                          "/etc/default/grub does not boot the saved entry with the engine's CPUs isolated"),
@@ -2299,7 +2346,7 @@ class VerifyTests(World):
         self.verify()
         sent = [" ".join(c["argv"]) for c in self.calls() if c["argv"][0] == "sudo"]
         self.assertEqual(len(sent), 6)
-        self.assertIn("sudo -n nft list table " + MDNS_TABLE, sent)
+        self.assertIn("sudo -n /usr/sbin/nft list table " + MDNS_TABLE, sent)
         self.assertIn(" ".join(["sudo", "-n", *FIND_STATE]), sent)
         self.assertIn("sudo -n cat " + MENU, sent)
         allowed = {(runas, text) for runas, command in template_lines() for text in expand(command)}
