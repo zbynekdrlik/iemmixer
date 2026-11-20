@@ -57,7 +57,7 @@ RESET_UNIT = "sudo -n systemctl reset-failed iem-soak"
 BEFORE = [gt.LEFT, gt.HEALTH, VERSION, SERVER, RECEIVERS_HELP, UNIT_SHOW, gt.CTL, UNITS]
 TICK = [gt.CTL, RECEIVERS, HEALTH_ANY, UNITS, UNIT_SHOW]
 # After the run: the mic-to-ear guard's reads (#122; our RX table over ARC between them).
-LATENCY = [gt.CTL, gt.CAT_DEVICE, gt.CAT_SITE]
+LATENCY = [gt.CTL, gt.CAT_DEVICE, gt.CAT_SITE, gt.CAT_GUARD]
 AFTER = [CAT_SUMMARY, STOP_UNIT, RM_ENV, RM_SUMMARY, *LATENCY]
 
 
@@ -233,7 +233,10 @@ if line == f"{DANTE} receivers --ip @DANTE_IP@ --seconds 5":
 if line == f"{DANTE} health || true":
     d = restart_disturbs(since_restart())
     if os.environ.get("FAKE_SOAK_DEGRADED") and late():
-        print(json.dumps({"health": {"state": "degraded", "reasons": ["holdover", "zyxqword"], "units": []}}))
+        # "1": a holdover; else the reasons it names, comma-separated; an unknown word beside them.
+        named = os.environ["FAKE_SOAK_DEGRADED"]
+        reasons = ["holdover"] if named == "1" else named.split(",")
+        print(json.dumps({"health": {"state": "degraded", "reasons": [*reasons, "zyxqword"], "units": []}}))
     elif d["holdover"] or d["not_ready"]:
         reasons = ["holdover"] if d["holdover"] else ["clock_not_ready", "pump_free"]
         print(json.dumps({"health": {"state": "degraded", "reasons": reasons, "units": []}}))
@@ -504,6 +507,14 @@ class CriteriaTests(SoakBase):
         self.assertEqual(code, 1, err)
         self.assertEqual(self.line(docs)["health_reasons"], ["holdover"])
 
+    def test_a_health_degraded_by_the_latency_guard_names_its_reasons(self) -> None:
+        # iem-dante-dev health's own latency guard (#122): its two words are known reasons.
+        code, docs, err = self.gate_run(FAKE_SOAK_DEGRADED="latency_unread,latency_over_budget")
+        self.assertEqual(code, 1, err)
+        doc = self.line(docs)
+        self.assertEqual(doc["health_reasons"], ["latency_over_budget", "latency_unread"])
+        self.assertIn("health", doc["failed"])
+
     def test_an_engine_restart_by_itself_counts_in_the_hil_gate_s_budget(self) -> None:
         code, docs, err = self.gate_run(FAKE_UNIT_RESTART="iem-engine.service")
         self.assertEqual(code, 1, err)
@@ -538,7 +549,7 @@ class CriteriaTests(SoakBase):
         # A failed unit is cleared with reset-failed, not stopped.
         self.again()
         code, docs, err = self.gate_run(FAKE_CLIENT_EXIT="1")
-        self.assertEqual(self.calls()[-7:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
+        self.assertEqual(self.calls()[-8:], [CAT_SUMMARY, RESET_UNIT, RM_ENV, RM_SUMMARY, *LATENCY])
 
     def test_a_listen_gap_fails_the_harness(self) -> None:
         # #88: the listen ran 30 min with no gap at three times the gate's reads (2026-11-08); a gap fails it now.
@@ -582,7 +593,7 @@ class CriteriaTests(SoakBase):
         self.assertEqual((doc["failed"], doc["client_exit"], doc["client_result"]),
                          (["not_finished", "harness"], None, None))
         calls = self.calls()
-        self.assertEqual(calls[-7:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
+        self.assertEqual(calls[-8:], [STOP_UNIT, CAT_SUMMARY, RM_ENV, RM_SUMMARY, *LATENCY])
         self.assertEqual(self.soak_state()["unit"], None)
 
     def test_a_refused_status_post_fails_the_command_after_its_verdict(self) -> None:

@@ -1,6 +1,9 @@
 // Ported from dstack fdfc321 crates/dante-stack/src/health/tests.rs (#72).
 use super::*;
 
+// The latency guard on the verdict (#122).
+mod guard;
+
 /// This binary's build in the tests: 40 synthetic hex digits.
 const OWN: &str = "0123456789abcdef0123456789abcdef01234567";
 /// `CLOCK_MONOTONIC` at the check, µs: 100 s after boot.
@@ -525,6 +528,15 @@ const WORDS: &[&str] = &[
     "pump_rebootstrap",
     "server_down",
     "build_mismatch",
+    "latency_over_budget",
+    "latency_unread",
+    "latency",
+    "inputs",
+    "known",
+    "over",
+    "unread_tx",
+    "worst_samples",
+    "budget_samples",
     "engine",
     "device",
     "reloading",
@@ -608,6 +620,8 @@ fn the_line_is_numbers_and_fixed_words() {
             Reason::PumpRebootstrap,
             Reason::ServerDown,
             Reason::BuildMismatch,
+            Reason::LatencyOverBudget,
+            Reason::LatencyUnread,
         ])
         .unwrap(),
         serde_json::to_value([Build::Same, Build::Other]).unwrap(),
@@ -638,7 +652,7 @@ fn the_line_is_numbers_and_fixed_words() {
          {\"unit\":\"device\",\"active\":\"inactive\",\"result\":\"success\",\"restarts\":0}],\
          \"clock\":{\"ready\":1,\"holdover\":0,\"holdovers\":2,\"re_anchors\":1,\"freq_ppb\":-750},\
          \"pump\":{\"media\":1,\"blocks\":33000,\"late\":3,\"missed\":4,\"rebootstraps\":1,\
-         \"max_process_us\":217},\"server\":{\"answers\":1,\"build\":\"same\"}}}"
+         \"max_process_us\":217},\"server\":{\"answers\":1,\"build\":\"same\"},\"latency\":null}}"
     );
     assert_eq!(
         stopped.line(),
@@ -646,7 +660,7 @@ fn the_line_is_numbers_and_fixed_words() {
          {\"unit\":\"engine\",\"active\":\"inactive\",\"result\":\"success\",\"restarts\":0},\
          {\"unit\":\"server\",\"active\":\"inactive\",\"result\":\"success\",\"restarts\":0},\
          {\"unit\":\"device\",\"active\":\"inactive\",\"result\":\"success\",\"restarts\":0}],\
-         \"clock\":null,\"pump\":null,\"server\":{\"answers\":0,\"build\":null}}}"
+         \"clock\":null,\"pump\":null,\"server\":{\"answers\":0,\"build\":null},\"latency\":null}}"
     );
     assert!(
         v.line().contains(
@@ -666,7 +680,7 @@ fn the_line_is_numbers_and_fixed_words() {
     assert!(
         other
             .line()
-            .ends_with("\"server\":{\"answers\":1,\"build\":\"other\"}}}"),
+            .ends_with("\"server\":{\"answers\":1,\"build\":\"other\"},\"latency\":null}}"),
         "{}",
         other.line()
     );

@@ -38,7 +38,7 @@ root | ln -sfn slot-{slot}/bin /opt/iemmixer/bin.next
 root | mv -T /opt/iemmixer/bin.next /opt/iemmixer/bin
 
 # deploy.sh: the units, the device config, phase E's receiver of the band's
-# data, the test site and roster.
+# data, the test site and roster, the latency guard's numbers (#122).
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.service /etc/systemd/system/iem-dante.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-engine.service /etc/systemd/system/iem-engine.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-server.service /etc/systemd/system/iem-server.service
@@ -46,6 +46,7 @@ root | install -D -m 0644 .cache/iem-gen3-deploy/iem-alarm@.service /etc/systemd
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-restart-alarm@.service /etc/systemd/system/iem-restart-alarm@.service
 root | install -D -m 0644 .cache/iem-gen3-deploy/dante-device.toml /etc/iemmixer/dante-device.toml
 root | install -D -m 0644 .cache/iem-gen3-deploy/iem-dante.env /etc/iemmixer/iem-dante.env
+root | install -D -m 0644 .cache/iem-gen3-deploy/latency-guard.json /etc/iemmixer/latency-guard.json
 root | install -D -m 0755 .cache/iem-gen3-deploy/band_receive.py /opt/iemmixer/lib/band_receive.py
 root | install -D -m 0755 .cache/iem-gen3-deploy/band_send.py /opt/iemmixer/lib/band_send.py
 root | install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site

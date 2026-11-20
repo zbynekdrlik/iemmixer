@@ -5,7 +5,12 @@ Every value is synthetic (P6): invented device names, channel numbers within
 the test site's."""
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -350,6 +355,101 @@ class VerdictTests(unittest.TestCase):
         text = repr(doc)
         for value in (STAGE, WIRELESS, IEM, FOH, "'rx'", "device", "receiver'", "zyxqwreason"):
             self.assertNotIn(value, text)
+
+
+GUARD_SITE = """
+[engine]
+engineer = "engineer"
+inputs = [
+  { id = "mic1", rx = [1] },
+  { id = "zyxqwplay", rx = [7, 8] },
+  { id = "mic2", rx = [2] },
+  { id = "keys", rx = [5, 6] },
+]
+mixes = [
+  { id = "member2", tx = [3, 4] },
+  { id = "engineer", tx = [21, 22] },
+  { id = "member1", tx = [2, 1] },
+]
+"""
+DEVICE = 'name = "zyxqw-ours"\nsample_rate = 96000\n'
+
+
+class GuardTests(unittest.TestCase):
+    """`guard`: the numbers deploy.sh installs for `iem-dante-dev health`."""
+
+    def test_the_guard_holds_the_rate_the_in_ear_outputs_and_every_input_not_exempt(self) -> None:
+        doc = lat.guard(GUARD_SITE, DEVICE, {"zyxqwplay": "zyxqwreason"}, {"mic2": 128})
+        self.assertEqual(doc, {"rate": 96_000, "in_ear_tx": [1, 2, 3, 4],
+                               "inputs": [{"rx": [1], "budget": 96}, {"rx": [2], "budget": 128},
+                                          {"rx": [5, 6], "budget": 96}]})
+
+    def test_the_guard_s_default_budget_is_1_ms_at_the_device_s_rate(self) -> None:
+        doc = lat.guard(GUARD_SITE, 'sample_rate = 48000\n', {}, {})
+        self.assertEqual([i["budget"] for i in doc["inputs"]], [48, 48, 48, 48])
+        self.assertEqual(doc["rate"], 48_000)
+
+    def test_the_guard_names_no_input_id_device_or_reason(self) -> None:
+        text = repr(lat.guard(GUARD_SITE, DEVICE, {"zyxqwplay": "zyxqwreason"}, {}))
+        for value in ("mic1", "keys", "zyxqwplay", "zyxqwreason", "zyxqw-ours", "engineer", "member"):
+            self.assertNotIn(value, text)
+
+    def test_a_site_or_device_config_the_guard_cannot_read_is_refused(self) -> None:
+        for site, device in ((GUARD_SITE, 'name = "x"\n'), ("[engine]\n", DEVICE),
+                             (GUARD_SITE.replace('engineer = "engineer"', ""), DEVICE)):
+            with self.subTest(site=site, device=device), self.assertRaises(ValueError):
+                lat.guard(site, device, {}, {})
+
+
+class GuardCliTests(unittest.TestCase):
+    """`gen3_latency.py guard <site> <device config>` as deploy.sh runs it."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.site = self.tmp / "site.toml"
+        self.site.write_text(GUARD_SITE, encoding="utf-8")
+        self.device = self.tmp / "device.toml"
+        self.device.write_text(DEVICE, encoding="utf-8")
+
+    def run_cli(self, *args: str, **env: str):
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("GEN3_LATENCY_")}
+        return subprocess.run([sys.executable, "-I", str(HERE / "gen3_latency.py"), *args], env={**clean, **env},
+                              capture_output=True, text=True, check=False)
+
+    def test_it_prints_the_guard_from_the_files_and_the_env(self) -> None:
+        r = self.run_cli("guard", str(self.site), str(self.device), GEN3_LATENCY_EXEMPT="zyxqwplay:zyxqwreason",
+                         GEN3_LATENCY_BUDGET="mic2:128")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, '{"rate":96000,"in_ear_tx":[1,2,3,4],"inputs":[{"rx":[1],"budget":96},'
+                                   '{"rx":[2],"budget":128},{"rx":[5,6],"budget":96}]}\n')
+        r = self.run_cli("guard", str(self.site), str(self.device))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(json.loads(r.stdout)["inputs"]), 4)
+
+    def test_a_malformed_env_value_exits_1_naming_no_value(self) -> None:
+        for key, value in (("GEN3_LATENCY_EXEMPT", "zyxqwplay"), ("GEN3_LATENCY_BUDGET", "mic2:zyxqwnum")):
+            with self.subTest(key=key):
+                r = self.run_cli("guard", str(self.site), str(self.device), **{key: value})
+                self.assertEqual((r.returncode, r.stdout), (1, ""))
+                self.assertIn(key, r.stderr)
+                self.assertNotIn("zyxqw", r.stderr)
+
+    def test_a_file_that_does_not_read_exits_1(self) -> None:
+        self.device.write_text('name = "zyxqw-ours"\n', encoding="utf-8")
+        r = self.run_cli("guard", str(self.site), str(self.device))
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+        self.assertIn("does not read as the guard needs", r.stderr)
+        self.assertNotIn("zyxqw", r.stderr)
+        r = self.run_cli("guard", str(self.site), str(self.tmp / "none.toml"))
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+
+    def test_another_command_line_exits_2(self) -> None:
+        for args in ((), ("guard", str(self.site)), ("paths", str(self.site), str(self.device))):
+            with self.subTest(args=args):
+                r = self.run_cli(*args)
+                self.assertEqual((r.returncode, r.stdout), (2, ""))
+                self.assertEqual(r.stderr, lat.USAGE + "\n")
 
 
 if __name__ == "__main__":

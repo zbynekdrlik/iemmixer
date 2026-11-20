@@ -180,7 +180,8 @@ CLOCK_KEYS = ("ready", "epoch", "re_anchors", "holdovers", "holdover")
 ENGINE_KEYS = ("media", "blocks", "late", "missed", "overruns", "rebootstraps", "max_process_us")
 HEALTH_STATES = ("healthy", "degraded", "failed", "stopped")
 HEALTH_REASONS = frozenset({"unit_failed", "unit_down", "restarted", "no_status", "clock_not_ready", "holdover",
-                            "pump_free", "pump_stalled", "pump_rebootstrap", "server_down", "build_mismatch"})
+                            "pump_free", "pump_stalled", "pump_rebootstrap", "server_down", "build_mismatch",
+                            "latency_over_budget", "latency_unread"})   # the last two: #122
 RESULTS = frozenset({"success", "exit-code", "signal", "core-dump", "timeout", "watchdog", "start-limit-hit",
                      "resources", "protocol"})   # systemd's Result words; another reads `other`
 DESC_PASS = "the Gen 3 box's soak passed (iempc gen3-gate soak, {minutes} min{restart})"

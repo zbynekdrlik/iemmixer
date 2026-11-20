@@ -48,10 +48,18 @@ source switched off).
 Pure functions; `engine_inputs` and `in_ear_tx` read a site's text,
 `sample_rate` a device config's. Rows carry the RX channels (site data):
 `public` drops them before anything is printed; no device name is read into
-a row and an exemption's reason is never printed."""
+a row and an exemption's reason is never printed.
+
+The box's own health (`iem-dante-dev health`, run by the admin user, who
+reads neither the site nor iempc's env) judges the same paths from
+`guard`'s numbers, which deploy.sh builds with `gen3_latency.py guard <site>
+<device config>` and installs as `/etc/iemmixer/latency-guard.json`."""
 from __future__ import annotations
 
+import json
 import math
+import os
+import sys
 import tomllib
 
 FAILING = ("over", "unknown", "unsubscribed")
@@ -288,3 +296,56 @@ def public(rows: list[dict]) -> list[dict]:
     """The rows as a gate may print them: the input id and the numbers, never
     the channel numbers (P6) or an exemption's reason."""
     return [{k: r[k] for k in ("input", "samples", "ms", "over_budget", "state")} for r in rows]
+
+
+def guard(site_text: str, device_text: str, exempt: dict[str, str], budgets: dict[str, int]) -> dict:
+    """The numbers `iem-dante-dev health` judges the paths with: {rate,
+    in_ear_tx, inputs: [{rx, budget}]}: the device's rate, the in-ear TX
+    channels (sorted) and every input of the site but the exempt ones, each
+    with its own budget or 1 ms at the rate, in the site's order. No input
+    id, name or reason: health needs none. ValueError as the parsers raise
+    it."""
+    rate = sample_rate(device_text)
+    in_ear = sorted(in_ear_tx(site_text))
+    default = budget_samples(rate)
+    inputs = [{"rx": rx, "budget": budgets.get(ident, default)}
+              for ident, rx in engine_inputs(site_text) if ident not in exempt]
+    return {"rate": rate, "in_ear_tx": in_ear, "inputs": inputs}
+
+
+USAGE = "usage: gen3_latency.py guard <site> <device config>"
+
+
+def main(argv: list[str]) -> int:
+    """`gen3_latency.py guard <site> <device config>`: `guard`'s JSON line on
+    stdout, the exemptions and own budgets from the environment
+    (`GEN3_LATENCY_EXEMPT`, `GEN3_LATENCY_BUDGET`, as iempc's private env
+    names them; unset is none, never on a command line). Exit 1 naming the
+    part that did not read (never a value), 2 for the command line."""
+    if len(argv) != 3 or argv[0] != "guard":
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        exempt = parse_exempt(os.environ.get("GEN3_LATENCY_EXEMPT", ""))
+        budgets = parse_budgets(os.environ.get("GEN3_LATENCY_BUDGET", ""))
+    except ValueError as e:
+        print(f"gen3_latency.py: {e}", file=sys.stderr)
+        return 1
+    try:
+        with open(argv[1], "rb") as f:
+            site = f.read().decode("utf-8")
+        with open(argv[2], "rb") as f:
+            device = f.read().decode("utf-8")
+        doc = guard(site, device, exempt, budgets)
+    except (OSError, ValueError) as e:
+        # The parsers' texts name no value (tomllib's a line and column, a
+        # decode error a byte offset); an OSError's the caller's own path.
+        print(f"gen3_latency.py: the site or the device config does not read as the guard needs: {e}",
+              file=sys.stderr)
+        return 1
+    print(json.dumps(doc, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

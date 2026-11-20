@@ -22,7 +22,8 @@ pub const SOCKET: &str = "/run/iem-dante/control.sock";
 /// What `health`'s command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// `health [--socket <path>] [--server-port <n>]`: the box's health.
+    /// `health [--socket <path>] [--server-port <n>] [--latency-guard
+    /// <path>]`: the box's health.
     Health(health::Options),
     /// `health … --help` (or `-h`): the usage.
     Help,
@@ -30,9 +31,9 @@ pub enum Command {
 
 /// The command line (without the program's name): `None` when its first
 /// word is not `health` (the stack's command line, `daemon::cli::main`),
-/// else `health`'s own arguments, `--socket <path>` and `--server-port
-/// <n>` (1 to 65535), each at most once; `--help` or `-h` among them is
-/// the usage.
+/// else `health`'s own arguments, `--socket <path>`, `--server-port <n>`
+/// (1 to 65535) and `--latency-guard <path>`, each at most once; `--help`
+/// or `-h` among them is the usage.
 pub fn parse_args(args: &[String]) -> Option<Result<Command, String>> {
     match args.split_first() {
         Some((first, rest)) if first == "health" => Some(parse_health(rest)),
@@ -45,12 +46,14 @@ pub fn parse_args(args: &[String]) -> Option<Result<Command, String>> {
 fn parse_health(args: &[String]) -> Result<Command, String> {
     let mut socket = None;
     let mut port = None;
+    let mut guard = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let slot = match arg.as_str() {
             "--help" | "-h" => return Ok(Command::Help),
             "--socket" => &mut socket,
             "--server-port" => &mut port,
+            "--latency-guard" => &mut guard,
             other => return Err(format!("health: unknown argument {other:?}")),
         };
         let Some(value) = it.next() else {
@@ -76,27 +79,36 @@ fn parse_health(args: &[String]) -> Result<Command, String> {
             }
         },
     };
+    let latency_guard = match guard {
+        Some(path) if path.is_empty() => return Err("--latency-guard needs a path".into()),
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(health::latency::GUARD),
+    };
     Ok(Command::Health(health::Options {
         socket,
         server_port,
+        latency_guard,
     }))
 }
 
 /// `health`'s usage, for the binary called `name`.
 pub fn health_usage(name: &str) -> String {
     format!(
-        "usage: {name} health [--socket <path>] [--server-port <n>]
+        "usage: {name} health [--socket <path>] [--server-port <n>] [--latency-guard <path>]
 
 health: the box's health, one JSON line of numbers and fixed words: the
 state (healthy, degraded, failed, stopped), its reasons, the systemd states
 of iem-engine, iem-server and iem-dante, the device's clock and the
 engine's pump from two reads of the control socket (default
-{socket}) a second apart, and whether the server
-answers /api/version on 127.0.0.1 (default port {port}) with this build.
+{socket}) a second apart, whether the server
+answers /api/version on 127.0.0.1 (default port {port}) with this build,
+and the mic-to-ear paths against the latency guard's numbers (default
+{guard}; none there, none judged).
 Exit 0 healthy, 1 degraded or failed, 3 stopped (all three inactive), 2 for
 the command line.",
         socket = SOCKET,
         port = health::SERVER_PORT,
+        guard = health::latency::GUARD,
     )
 }
 

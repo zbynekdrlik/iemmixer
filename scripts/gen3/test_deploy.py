@@ -34,6 +34,10 @@ UNIT_FILES = ("iem-dante.service", "iem-engine.service", "iem-server.service", "
               "iem-restart-alarm@.service")
 TEMPLATE = HERE / "sudo-lines.txt"
 TEST_SITE = REPO / "config" / "test-site.toml"
+# The latency guard's builder deploy.sh runs (#122).
+LATENCY = REPO / "scripts" / "iem-pc" / "gen3_latency.py"
+# Every device config carries its rate: the latency guard's budget is 1 ms at it.
+RATE_LINE = "sample_rate = 96000\n"
 TEST_ROSTER = REPO / "config" / "test-roster.toml"
 HOST = "tester@gen3.test"
 BINARIES = ("iem-engine", "iem-server", "iem-dante-dev", "iem-soakclient")
@@ -516,11 +520,13 @@ class DeployTests(unittest.TestCase):
             shutil.copyfile(path, self.repo / "scripts" / "gen3" / path.name)
         for path in (TEST_SITE, TEST_ROSTER):
             shutil.copyfile(path, self.repo / "config" / path.name)
+        (self.repo / "scripts" / "iem-pc").mkdir()
+        shutil.copyfile(LATENCY, self.repo / "scripts" / "iem-pc" / LATENCY.name)
         self.git("init", "-q", "-b", "dev")
         self.sha = self.commit("the first build")
         self.bundle = self.make_bundle(self.sha)
         self.config = self.tmp / "dante-device.toml"
-        self.config.write_text('name = "test-device"\n', encoding="utf-8")
+        self.config.write_text('name = "test-device"\n' + RATE_LINE, encoding="utf-8")
         self.set_states({"iem-dante": "active", "iem-engine": "inactive", "iem-server": "inactive"})
 
     # The checkout and the bundles.
@@ -713,6 +719,7 @@ class DeployTests(unittest.TestCase):
         f"sudo -n install -D -m 0644 {STAGE}/iem-restart-alarm@.service /etc/systemd/system/iem-restart-alarm@.service",
         f"sudo -n install -D -m 0644 {STAGE}/dante-device.toml /etc/iemmixer/dante-device.toml",
         f"sudo -n install -D -m 0644 {STAGE}/iem-dante.env /etc/iemmixer/iem-dante.env",
+        f"sudo -n install -D -m 0644 {STAGE}/latency-guard.json /etc/iemmixer/latency-guard.json",
         f"sudo -n install -D -m 0755 {STAGE}/band_receive.py /opt/iemmixer/lib/band_receive.py",
         f"sudo -n install -D -m 0755 {STAGE}/band_send.py /opt/iemmixer/lib/band_send.py",
         "sudo -n install -d -o iemmixer -g iemmixer -m 0700 /var/lib/iemmixer/site",
@@ -782,6 +789,7 @@ class DeployTests(unittest.TestCase):
             "root root 0644 /opt/iemmixer/slot-a/bin/BUILD", "root root 0644 /opt/iemmixer/slot-a/bin/SHA256SUMS",
             *(f"root root 0644 /etc/systemd/system/{n}" for n in UNIT_FILES),
             "root root 0644 /etc/iemmixer/dante-device.toml", "root root 0644 /etc/iemmixer/iem-dante.env",
+            "root root 0644 /etc/iemmixer/latency-guard.json",
             "root root 0755 /opt/iemmixer/lib/band_receive.py", "root root 0755 /opt/iemmixer/lib/band_send.py",
             "dir iemmixer iemmixer 0700 /var/lib/iemmixer/site",
             "iemmixer iemmixer 0600 /var/lib/iemmixer/site/iemmixer.toml",
@@ -789,7 +797,8 @@ class DeployTests(unittest.TestCase):
         self.assertFalse(any(" enable " in command for command in self.remote()))
         # The copy: the bundle's six files and the box's own files, one scp.
         self.assertEqual(self.scp_names(), sorted([*SLOT_FILES, *UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "band_receive.py", "band_send.py", "iemmixer.toml", "roster.toml"]))
+                                                   "latency-guard.json", "band_receive.py", "band_send.py", "iemmixer.toml",
+                                                   "roster.toml"]))
         # The attestation of exactly the bundle's SHA256SUMS, by this
         # repository's CI workflow, before any call.
         self.assertEqual(self.gh_calls(), [{
@@ -938,7 +947,8 @@ class DeployTests(unittest.TestCase):
         # and the configs copied; no slot filled; no attestation asked.
         self.assertEqual(self.sequence(), self.expected("a", link="slot-b/bin", back=True))
         self.assertEqual(self.scp_names(), sorted([*UNIT_FILES, "dante-device.toml", "iem-dante.env",
-                                                   "band_receive.py", "band_send.py", "iemmixer.toml", "roster.toml"]))
+                                                   "latency-guard.json", "band_receive.py", "band_send.py", "iemmixer.toml",
+                                                   "roster.toml"]))
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(self.link(), "slot-a/bin")
         self.assert_slot_holds("a", first)
@@ -1667,7 +1677,8 @@ class DeployTests(unittest.TestCase):
         boot. Returns the arguments a deploy adds: the band's site and roster."""
         self.spare = False
         self.write_pc_env(f"GEN3_HOST={HOST}\n")
-        self.config.write_text('name = "zyxqw-serving"\nstate_file = "/var/lib/iem-dante/state.toml"\n', encoding="utf-8")
+        self.config.write_text('name = "zyxqw-serving"\nstate_file = "/var/lib/iem-dante/state.toml"\n' + RATE_LINE,
+                               encoding="utf-8")
         site, roster = self.site_files(TEST_SITE.read_text(encoding="utf-8"))
         self.set_states({"iem-dante": "inactive", "iem-engine": "active", "iem-server": "active"},
                         enabled=("iem-engine", "iem-server"))
@@ -1713,10 +1724,60 @@ class DeployTests(unittest.TestCase):
     def test_the_config_s_name_is_taken_as_it_is(self) -> None:
         # The private env holds no name to compare it with: the ops config alone is the identity.
         serving = self.serving_box()
-        self.config.write_text('name = "zyxqw-another"\n', encoding="utf-8")
+        self.config.write_text('name = "zyxqw-another"\n' + RATE_LINE, encoding="utf-8")
         r = self.deploy(*serving)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"), b'name = "zyxqw-another"\n')
+        self.assertEqual(self.installed("/etc/iemmixer/dante-device.toml"),
+                         ('name = "zyxqw-another"\n' + RATE_LINE).encode())
+
+    # The latency guard's numbers for the box's own health (#122).
+
+    def test_the_latency_guard_is_built_from_the_installed_site_config_and_env(self) -> None:
+        serving = self.serving_box()
+        self.write_pc_env(f"GEN3_HOST={HOST}\nGEN3_LATENCY_EXEMPT = \"click:zyxqwreason, mic4:zyxqwother\"\n"
+                          "GEN3_LATENCY_BUDGET=mic1:128\n")
+        r = self.deploy(*serving)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        guard = json.loads(self.installed("/etc/iemmixer/latency-guard.json"))
+        site = tomllib.loads(TEST_SITE.read_text(encoding="utf-8"))["engine"]
+        inputs = [i for i in site["inputs"] if i["id"] not in ("click", "mic4")]
+        self.assertEqual(len(inputs), len(site["inputs"]) - 2)
+        # The rate, the members' and the translator's TX (the engineer's left
+        # out), every input but the exempt ones in the site's order, mic1 at
+        # its own budget and the rest at 1 ms.
+        self.assertEqual(guard, {"rate": 96_000, "in_ear_tx": [*range(1, 19), 23],
+                                 "inputs": [{"rx": i["rx"], "budget": 128 if i["id"] == "mic1" else 96}
+                                            for i in inputs]})
+        # Numbers only, and nothing of the env in the output or on a box's command line.
+        text = self.installed("/etc/iemmixer/latency-guard.json").decode()
+        for word in ("mic", "click", "zyxqw", "engineer"):
+            self.assertNotIn(word, text)
+        for command in [*self.remote(), r.stdout, r.stderr]:
+            self.assertNotIn("zyxqw", command.replace("zyxqw-serving", ""))
+        self.assertEqual(self.sequence(), self.expected("a", serving=True, held=("iem-engine", "iem-server")))
+
+    def test_without_the_env_s_keys_every_input_is_guarded_at_1_ms(self) -> None:
+        # A spare's deploy of the test site, an env with neither key (a --back
+        # installs it too: `expected` holds the install line for every mode).
+        r = self.deploy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        guard = json.loads(self.installed("/etc/iemmixer/latency-guard.json"))
+        self.assertEqual(len(guard["inputs"]), 24)
+        self.assertEqual({i["budget"] for i in guard["inputs"]}, {96})
+
+    def test_a_latency_guard_that_does_not_build_is_refused_before_any_call(self) -> None:
+        for env, config in ((f"GEN3_HOST={OTHER}\nGEN3_LATENCY_EXEMPT=zyxqwnoreason\n", None),
+                            (f"GEN3_HOST={OTHER}\nGEN3_LATENCY_BUDGET=mic1:zyxqwnum\n", None),
+                            (f"GEN3_HOST={OTHER}\n", 'name = "test-device"\n')):
+            with self.subTest(env=env, config=config):
+                self.write_pc_env(env)
+                if config is not None:
+                    self.config.write_text(config, encoding="utf-8")
+                r = self.deploy()
+                self.assertEqual(r.returncode, 1, r.stderr)
+                self.assertIn("the latency guard's numbers could not be built", r.stderr)
+                self.assertNotIn("zyxqw", r.stdout + r.stderr)
+                self.assertEqual(self.calls(), [])
 
     def new_box(self) -> list[str]:
         """Another box serves the band; this host is a spare."""
@@ -1747,7 +1808,7 @@ class DeployTests(unittest.TestCase):
         added = self.new_box()
         ops = self.tmp / "ops-device.toml"
         self.write_pc_env(f"GEN3_HOST={OTHER}\nGEN3_DEVICE_CONFIG={ops}\n")
-        self.config.write_text('name = "Zyxqw-Band"\n', encoding="utf-8")
+        self.config.write_text('name = "Zyxqw-Band"\n' + RATE_LINE, encoding="utf-8")
         for text, code, want in (('name = "zyxqw-band"\n', 1, "the config's name is the serving device's"),
                                  ('name = [\n', 1, "could not be read as a device config"),
                                  ('name = "zyxqw-band-spare"\n', 0, "")):

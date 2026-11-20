@@ -23,6 +23,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import gen3_arc  # noqa: E402
+import gen3_latency  # noqa: E402
 import iempc_gen3_gate as gate  # noqa: E402
 from iempc_test_support import SHA, Base, ip  # noqa: E402
 from test_gen3_arc import FakeDante, Network  # noqa: E402
@@ -47,7 +48,7 @@ LATENCY_PASS = {"pass": 1, "budget_samples": 96, "rate": 96000, "paths": [
     *({"input": i, "samples": 96, "ms": 1.0, "over_budget": False, "state": "ok"} for i in LIVE_INPUTS),
     *({"input": i, "samples": None, "ms": None, "over_budget": False, "state": "exempt"} for i in PLAYBACK)],
     "tx": [{"receiver_latency_us": 250, "state": "in_ear"}, {"receiver_latency_us": 1000, "state": "non_inear"}],
-    "own_budgets": {}}
+    "guard": "same", "own_budgets": {}}
 SPARES = (61, 62)   # the test site's [guard] hil_tx
 RET = SPARES[0]   # the D5(b) loop's return: our RX 61 hears our TX 61
 TRIP = 77   # the self-loop's round trip, samples
@@ -392,6 +393,7 @@ DROPINS = "systemctl show --property=DropInPaths iem-engine.service"
 CAT_UNIT = "cat /etc/systemd/system/iem-engine.service"
 CAT_DEVICE = "cat /etc/iemmixer/dante-device.toml"
 CAT_SITE = "sudo -n -u iemmixer cat /var/lib/iemmixer/site/iemmixer.toml"
+CAT_GUARD = "cat /etc/iemmixer/latency-guard.json"
 CHECK_SITE = ("sudo -n -u iemmixer /opt/iemmixer/bin/iem-engine check-site --site "
               "/var/lib/iemmixer/site/iemmixer.toml")
 HEALTH = "/opt/iemmixer/bin/iem-dante-dev health"
@@ -460,6 +462,7 @@ class GateBase(Base):
                         self.box / "root/etc/systemd/system/iem-engine.service")
         shutil.copyfile(REPO / "config" / "test-site.toml", self.box / "root/var/lib/iemmixer/site/iemmixer.toml")
         self.write_device(device_config())
+        self.write_guard()
         (self.box / "calls.log").write_text("", encoding="utf-8")
         self.set_state()
         d = self.tmp / "bin"
@@ -497,6 +500,16 @@ class GateBase(Base):
 
     def write_device(self, text: str) -> None:
         (self.box / "root/etc/iemmixer/dante-device.toml").write_text(text, encoding="utf-8")
+
+    def write_guard(self, env: str = LATENCY_ENV) -> None:
+        """The guard file deploy.sh installs, built as it builds it from the
+        box's site and device config and the env's exemptions and budgets."""
+        values = dict(line.split("=", 1) for line in env.splitlines() if "=" in line)
+        site = (self.box / "root/var/lib/iemmixer/site/iemmixer.toml").read_text(encoding="utf-8")
+        device = (self.box / "root/etc/iemmixer/dante-device.toml").read_text(encoding="utf-8")
+        doc = gen3_latency.guard(site, device, gen3_latency.parse_exempt(values.get("GEN3_LATENCY_EXEMPT", "")),
+                                 gen3_latency.parse_budgets(values.get("GEN3_LATENCY_BUDGET", "")))
+        (self.box / "root/etc/iemmixer/latency-guard.json").write_text(json.dumps(doc), encoding="utf-8")
 
     def subscribe_mics(self) -> None:
         """Our RX 1-14 (the test site's live inputs, mic1-mic10, hand1-hand3
@@ -1102,7 +1115,7 @@ class LatencyTests(GateBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(docs, [{"gen3_gate": {"latency": LATENCY_PASS}}])
         # One status read, the device config and the site, our RX table over ARC; no change, no write, no post.
-        self.assertEqual(self.calls(), [CTL, CAT_DEVICE, CAT_SITE])
+        self.assertEqual(self.calls(), [CTL, CAT_DEVICE, CAT_SITE, CAT_GUARD])
         self.assertEqual((self.subscriptions(), self.posts(), self.ledger()), ([], [], []))
         self.assert_private(err + json.dumps(docs))
 
@@ -1140,6 +1153,29 @@ class LatencyTests(GateBase):
         code, docs, err = self.gate_run(FAKE_RX_UNMAPPED="4", FAKE_RX_OFF="1")
         self.assertNotEqual(code, 0, err)
         self.assertFalse(any(d["gen3_gate"]["latency"]["pass"] for d in docs), docs)
+
+    def test_a_guard_file_that_differs_from_the_live_env_or_is_absent_fails(self) -> None:
+        # Health judges with the guard deploy.sh installed: an exemption or
+        # budget changed since the last deploy makes the two disagree.
+        self.write_guard(LATENCY_ENV + "GEN3_LATENCY_BUDGET=mic1:200\n")
+        code, docs, err = self.gate_run()
+        doc = docs[0]["gen3_gate"]["latency"]
+        self.assertEqual((code, doc["pass"], doc["guard"]), (1, 0, "stale"), err)
+        self.assertEqual([p["state"] for p in doc["paths"]], [p["state"] for p in LATENCY_PASS["paths"]])
+        (self.box / "root/etc/iemmixer/latency-guard.json").write_text("{not json", encoding="utf-8")
+        self.again()
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["guard"]), (1, "stale"), err)
+        (self.box / "root/etc/iemmixer/latency-guard.json").unlink()
+        self.again()
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["guard"]), (1, "absent"), err)
+        self.assert_private(err + json.dumps(docs))
+        # Built again from the live env: the same, a pass.
+        self.write_guard()
+        self.again()
+        code, docs, err = self.gate_run()
+        self.assertEqual((code, docs[0]["gen3_gate"]["latency"]["guard"]), (0, "same"), err)
 
     def test_a_read_that_fails_is_a_failure_never_a_pass(self) -> None:
         with mock.patch.object(gen3_arc, "send", side_effect=OSError("timed out")):

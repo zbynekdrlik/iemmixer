@@ -78,6 +78,12 @@ set -euo pipefail
 #   install` puts the units, the config and the env in place, makes
 #   /var/lib/iemmixer/site the service user's (0700) and puts the site and the
 #   roster there as the service user's (0600).
+# - The mic-to-ear latency guard's numbers (#122), built on the dev box by
+#   scripts/iem-pc/gen3_latency.py guard from that site, the --config and
+#   GEN3_LATENCY_EXEMPT and GEN3_LATENCY_BUDGET of iempc's private env (a
+#   site, config or env value it cannot read refuses before any call), go
+#   with them and are installed as /etc/iemmixer/latency-guard.json (0644:
+#   numbers only), which `iem-dante-dev health` judges the paths with.
 # - --pins (the server is stopped): `iem-server pin set-engineer` and `pin
 #   set-member <id>` for every [[people]] id of the roster, each through
 #   `systemd-run` as the service user with the PIN pepper's systemd credential,
@@ -123,6 +129,8 @@ NEXT=$OPT/bin.next
 UNITDIR=/etc/systemd/system
 CONFIG=/etc/iemmixer/dante-device.toml
 ENVFILE=/etc/iemmixer/iem-dante.env
+# The latency guard's numbers for `iem-dante-dev health` (#122), 0644: no name in it.
+GUARD=/etc/iemmixer/latency-guard.json
 SITEDIR=/var/lib/iemmixer/site
 SITE=$SITEDIR/iemmixer.toml
 ROSTER=$SITEDIR/roster.toml
@@ -318,7 +326,9 @@ test_roster="${roster_file:-$repo/config/test-roster.toml}"
 for unit in "${UNITS[@]}" "$RECEIVER" "$SENDER"; do
   [ -f "$here/$unit" ] || die "$here/$unit is missing"
 done
-for path in "$test_site" "$test_roster"; do
+# The guard's builder, the gates' own parser (#122).
+LATENCY="$repo/scripts/iem-pc/gen3_latency.py"
+for path in "$test_site" "$test_roster" "$LATENCY"; do
   [ -f "$path" ] || die "$path is missing"
 done
 
@@ -400,6 +410,23 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 
+# The mic-to-ear latency guard's numbers for the box's own health (#122):
+# built here from the site and the device config this deploy installs and
+# the exemptions and own budgets of iempc's private env (none without the
+# env or a key), handed to the builder in its environment, never on a
+# command line, never printed.
+latency_exempt="" latency_budget=""
+if [ -f "$pc_env" ]; then
+  env_value=""
+  if env_value_of "$pc_env" GEN3_LATENCY_EXEMPT; then latency_exempt="$env_value"; fi
+  env_value=""
+  if env_value_of "$pc_env" GEN3_LATENCY_BUDGET; then latency_budget="$env_value"; fi
+  env_value=""
+fi
+GEN3_LATENCY_EXEMPT="$latency_exempt" GEN3_LATENCY_BUDGET="$latency_budget" \
+  python3 -I "$LATENCY" guard "$test_site" "$config" > "$work/latency-guard.json" ||
+  die "the latency guard's numbers could not be built from the site, the device config and iempc's private env (the reason above): nothing was copied"
+
 # This deploy and the live guard stop the stack with exactly this command: a
 # stack they could not stop is never installed.
 on_box "sudo -n -l $STOP" > /dev/null ||
@@ -476,7 +503,7 @@ if [ "$back" = 0 ]; then
     sources+=("$bundle/$name")
   done
 fi
-for name in "${UNITS[@]}" "$RECEIVER" "$SENDER" dante-device.toml iem-dante.env iemmixer.toml roster.toml; do
+for name in "${UNITS[@]}" "$RECEIVER" "$SENDER" dante-device.toml iem-dante.env latency-guard.json iemmixer.toml roster.toml; do
   sources+=("$work/$name")
 done
 scp -q "${SSH_OPTS[@]}" "${sources[@]}" "$host:$STAGE/"
@@ -555,6 +582,7 @@ for unit in "${UNITS[@]}"; do
 done
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/dante-device.toml $CONFIG"
 install+=$'\n'"sudo -n install -D -m 0644 $STAGE/iem-dante.env $ENVFILE"
+install+=$'\n'"sudo -n install -D -m 0644 $STAGE/latency-guard.json $GUARD"
 install+=$'\n'"sudo -n install -D -m 0755 $STAGE/$RECEIVER $LIBDIR/$RECEIVER"
 install+=$'\n'"sudo -n install -D -m 0755 $STAGE/$SENDER $LIBDIR/$SENDER"
 install+=$'\n'"sudo -n install -d -o $SERVICE_USER -g $SERVICE_USER -m 0700 $SITEDIR"

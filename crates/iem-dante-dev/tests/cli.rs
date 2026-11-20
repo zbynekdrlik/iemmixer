@@ -84,6 +84,39 @@ fn health_prints_one_line_and_exits_with_its_state() {
 }
 
 #[test]
+fn health_shows_the_latency_guard_s_numbers_from_its_file() {
+    // The build machine runs no engine: the numbers are shown, nothing is
+    // judged; no file there is `null`.
+    let dir = std::env::temp_dir().join(format!("iem-dante-dev-cli-guard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let guard = dir.join("latency-guard.json");
+    let socket = dir.join("none.sock");
+    let health = |guard: &std::path::Path| -> serde_json::Value {
+        let out = run(&[
+            "health",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--latency-guard",
+            guard.to_str().unwrap(),
+        ]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(text.trim_end()).expect("one JSON line")
+    };
+    assert_eq!(health(&guard)["health"]["latency"], serde_json::Value::Null);
+    std::fs::write(
+        &guard,
+        r#"{"rate":96000,"in_ear_tx":[1,2],"inputs":[{"rx":[1],"budget":96},{"rx":[2],"budget":128}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        health(&guard)["health"]["latency"],
+        serde_json::json!({"inputs": 2, "known": 0, "over": 0, "unread_tx": 0,
+                           "worst_samples": null, "budget_samples": 96})
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn ctl_without_a_socket_looks_at_the_box_s_socket() {
     // No device on the build machine: the error names the path it tried.
     let out = run(&["ctl", "status"]);

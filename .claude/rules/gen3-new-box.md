@@ -74,6 +74,7 @@ io_cpu = <N-2>
 
 D = B + P + W = 16 + 24 + 16 = 56 samples; mic to ear with the rack's 24 is 80 samples, 0.83 ms at 96 kHz (phase F's 32 + 36 + 48 was 140, 1.46 ms).
 
+- `sample_rate` must be there (96000): the latency guard's budget is 1 ms at it, and deploy.sh refuses a config without it (#122).
 - `pump_cpu`/`io_cpu` must be exactly the isolated pair, or the engine runs on housekeeping cores and the timing breaks.
 - The config refuses `tx_latency_ns` shorter than `tx_fpp_max` frames + `tx_margin_ns` + 50 µs.
 - `block` is 16 or 32 (left out: 32); 16 halves B (167 µs a block) and lets `work_margin` go down to 16, a W below the block is refused. Back to 32 is a config change and a restart, no build; a build before `block` refuses a config that has it.
