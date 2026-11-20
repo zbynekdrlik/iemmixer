@@ -43,10 +43,14 @@ jobs:
   gen3-scripts:
     # The Gen 3 box's scripts (provision, deploy, the installers, the live
     # guard) run their bash and Python fakes beside integrity's self-tests:
-    # together they outgrew integrity's 10 minutes (#72, 2026-10-28).
+    # together they outgrew integrity's 10 minutes (#72, 2026-10-28). 15
+    # minutes since 2026-11-20 (#130, #122, #127): the soak's --restart-clock
+    # cases and provision's nftables install (each a full provision run of
+    # ~7-10 s on the runner) took the step from ~400 s (cc92072f..cd2d3df3) to
+    # 476-614 s, and main's run of c9553db0 was cancelled at 10 minutes.
     name: gen3-scripts
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
