@@ -142,6 +142,7 @@ fn device(dir: &Path) -> Device {
         arc_rx_fpp: None,
         test_clock_ppm: None,
         spin_no_yield_tail: false,
+        mdns_bind_address: false,
         pump_cpu: None,
         io_cpu: None,
         rx_cpu: None,
