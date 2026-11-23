@@ -34,6 +34,11 @@ use super::state::MixerState;
 /// that does not connect now (its person does not play) shows no
 /// connection.
 pub(super) fn read_lineup(state: MixerState, page: String) {
+    // Without a valid token the page is on its way to the login (the auth
+    // guard redirects); the read would only be refused with a 401 (#138).
+    if crate::auth::is_token_expired() {
+        return;
+    }
     let (lineup, set_lineup) = state.lineup;
     let (connected, set_connected) = state.connected;
     let reads = state.lineup_reads;
