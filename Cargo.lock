@@ -1095,9 +1095,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dante-dev"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "dstack",
  "serde",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "assert_no_alloc",
  "iem-golden",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "assert_no_alloc",
  "dstack",
@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "iem-golden"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "assert_no_alloc",
  "iem-golden",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "3.0.14"
+version = "3.0.15"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -4391,9 +4391,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

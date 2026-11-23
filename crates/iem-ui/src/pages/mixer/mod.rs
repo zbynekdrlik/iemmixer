@@ -212,8 +212,10 @@ pub fn MixerPage() -> impl IntoView {
     // Mute All only on /engineer (engineer's own mixer)
     let is_engineer_own_mixer = is_engineer && member_id() == "engineer";
 
-    // Subscribe to Web Push for SOS alerts (engineer only, one-time) (reaperiem#133)
-    if is_engineer {
+    // Subscribe to Web Push for SOS alerts (engineer only, one-time)
+    // (reaperiem#133); never with an expired token: the page is on its way
+    // to the login (the auth guard), and the request would be refused (#138).
+    if is_engineer && !crate::auth::is_token_expired() {
         subscribe_to_push();
     }
 

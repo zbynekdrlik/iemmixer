@@ -20,25 +20,22 @@ enum LoadState {
 pub fn LandingPage() -> impl IntoView {
     let navigate = use_navigate();
 
-    // Auto-redirect: remember last member, get to mixer ASAP (reaperiem#84).
-    // - Valid token → straight to mixer
-    // - Expired token → PIN login for remembered member (skip member grid)
-    // - No auth → show member grid (first-time user)
-    // sessionStorage flag prevents re-redirect when user navigates back.
+    // Auto-redirect: remember the last login, get to the mixer ASAP
+    // (reaperiem#84): a valid token goes straight to that profile's mixer.
+    // An expired or missing one shows the profile grid and never jumps to a
+    // PIN page (#138): the remembered profile may be the engineer's (someone
+    // once logged in as the engineer on this phone), and a musician then
+    // types their own PIN on the engineer's page. The sessionStorage flag
+    // prevents a re-redirect when the user navigates back.
     Effect::new(move |_| {
         if let Some(auth) = get_auth() {
             let window = web_sys::window().unwrap();
             if let Ok(Some(storage)) = window.session_storage()
                 && storage.get_item("iem_redirected").ok().flatten().is_none()
+                && !is_token_expired()
             {
                 let _ = storage.set_item("iem_redirected", "1");
-                if !is_token_expired() {
-                    let target = format!("/{}", auth.member);
-                    navigate(&target, Default::default());
-                } else {
-                    let target = format!("/login?member={m}&next=/{m}", m = auth.member);
-                    navigate(&target, Default::default());
-                }
+                navigate(&format!("/{}", auth.member), Default::default());
             }
         }
     });

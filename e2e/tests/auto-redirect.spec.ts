@@ -51,50 +51,60 @@ test.describe("Auto-redirect authenticated users (#84)", () => {
     expect(page.url()).toContain(`/${member}`);
   });
 
-  test("expired token + fresh session → redirects to login with member param", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    const membersResp = await page.request.get("/api/members");
-    const members = await membersResp.json();
-    expect(members.length).toBeGreaterThanOrEqual(1);
+  // #138: a remembered login that expired never jumps to a PIN page. A
+  // phone on which someone once logged in as the engineer opened on the
+  // engineer's PIN page every time, and musicians typed their PIN there.
+  for (const remembered of ["member", "engineer"] as const) {
+    test(`expired ${remembered} token + fresh session → the profile grid, no PIN page (#138)`, async ({
+      page,
+    }) => {
+      await page.goto("/");
+      const membersResp = await page.request.get("/api/members");
+      const members = await membersResp.json();
+      expect(members.length).toBeGreaterThanOrEqual(1);
+      const member = remembered === "engineer" ? "engineer" : members[0].id;
 
-    const member = members[0].id;
+      // An expired JWT (exp in the past)
+      const expiredPayload = btoa(
+        JSON.stringify({
+          sub: member,
+          exp: Math.floor(Date.now() / 1000) - 3600,
+        }),
+      )
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+      const fakeToken = `eyJhbGciOiJIUzI1NiJ9.${expiredPayload}.fake_signature`;
 
-    // Create an expired JWT (exp in the past)
-    const expiredPayload = btoa(
-      JSON.stringify({
-        sub: member,
-        exp: Math.floor(Date.now() / 1000) - 3600,
-      }),
-    )
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
-    const fakeToken = `eyJhbGciOiJIUzI1NiJ9.${expiredPayload}.fake_signature`;
+      await page.evaluate(
+        ({ token, member, engineer }) => {
+          localStorage.setItem(
+            "iem_token",
+            JSON.stringify({ token, member, engineer }),
+          );
+          sessionStorage.removeItem("iem_redirected");
+        },
+        { token: fakeToken, member, engineer: remembered === "engineer" },
+      );
 
-    // Set expired auth in localStorage
-    await page.evaluate(
-      ({ token, member }) => {
-        localStorage.setItem(
-          "iem_token",
-          JSON.stringify({ token, member, engineer: false }),
-        );
-        sessionStorage.removeItem("iem_redirected");
-      },
-      { token: fakeToken, member },
-    );
+      await page.goto("/");
+      // The grid shows and stays: no redirect to any login page.
+      await expect(page.locator(".member-grid")).toBeVisible({
+        timeout: 10000,
+      });
+      await page.waitForTimeout(2000);
+      expect(page.url()).toMatch(/\/$/);
+      expect(page.url()).not.toContain("/login");
 
-    // Navigate to landing page — should redirect to login
-    await page.goto("/");
-
-    // Wait for redirect to login page with member param
-    await page.waitForURL(/\/login/, { timeout: 10000 });
-    const url = page.url();
-    expect(url).toContain("/login");
-    expect(url).toContain(`member=${member}`);
-    expect(url).toContain(`next=/${member}`);
-  });
+      // Choosing a profile there leads to that profile's own PIN page.
+      const target = members.find(
+        (m: { id: string }) => m.id !== "engineer",
+      ).id;
+      await page.locator(`a.member-card[href="/${target}"]`).click();
+      await page.waitForURL(/\/login/, { timeout: 10000 });
+      expect(page.url()).toContain(`member=${target}`);
+    });
+  }
 
   test("expired token opened directly on a mixer → login for that member, no socket", async ({
     page,
@@ -103,14 +113,20 @@ test.describe("Auto-redirect authenticated users (#84)", () => {
     // A JWT whose exp (1000) is long past; the page never trusts it.
     await page.evaluate(() => {
       const b64url = (o: object) =>
-        btoa(JSON.stringify(o)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        btoa(JSON.stringify(o))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/, "");
       const token = `${b64url({ alg: "HS256", typ: "JWT" })}.${b64url({
         sub: "member1",
         engineer: false,
         exp: 1000,
         iat: 900,
       })}.fakesignature`;
-      localStorage.setItem("iem_token", JSON.stringify({ token, member: "member1", engineer: false }));
+      localStorage.setItem(
+        "iem_token",
+        JSON.stringify({ token, member: "member1", engineer: false }),
+      );
     });
     const sockets: string[] = [];
     page.on("websocket", (ws) => sockets.push(ws.url()));
