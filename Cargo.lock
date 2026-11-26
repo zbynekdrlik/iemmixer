@@ -883,8 +883,8 @@ checksum = "669a445ee724c5c69b1b06fe0b63e70a1c84bc9bb7d9696cd4f4e3ec45050408"
 
 [[package]]
 name = "dstack"
-version = "0.6.215"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.215#83b67668ffb05fcf031551f1a8383a9ab9f60cda"
+version = "0.6.220"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.220#efb4f527bb5b7df0c6a9eba599daad0365fd2b0d"
 dependencies = [
  "dstack-audio-io",
  "dsync-ptp",
@@ -906,8 +906,8 @@ dependencies = [
 
 [[package]]
 name = "dstack-audio-io"
-version = "0.6.215"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.215#83b67668ffb05fcf031551f1a8383a9ab9f60cda"
+version = "0.6.220"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.220#efb4f527bb5b7df0c6a9eba599daad0365fd2b0d"
 
 [[package]]
 name = "dsync-ptp"
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "iem-audio-io"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "assert_no_alloc",
  "dstack-audio-io",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "iem-core"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dante-dev"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "dstack",
  "serde",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "iem-dsp"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "assert_no_alloc",
  "iem-golden",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "assert_no_alloc",
  "dstack",
@@ -1776,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "iem-engine-proto"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "iem-dsp",
  "serde",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "iem-golden"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "iem-limiter-mga"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "assert_no_alloc",
  "iem-golden",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "iem-server"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "iem-soakclient"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "iem-core",
  "iem-engine-proto",
@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "iem-ui"
-version = "3.0.17"
+version = "3.0.18"
 dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
@@ -2366,7 +2366,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mdns-sd"
 version = "0.21.6"
-source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.215#83b67668ffb05fcf031551f1a8383a9ab9f60cda"
+source = "git+https://github.com/zbynekdrlik/dstack?tag=v0.6.220#efb4f527bb5b7df0c6a9eba599daad0365fd2b0d"
 dependencies = [
  "fastrand",
  "flume",
