@@ -19,7 +19,12 @@ then only one ear, while every view said the patch was fine.
   exits 1 then); the ones to our device (the `name` of the box's device
   state file) are compared with the flows. The receivers are taken once the live ones held
   SETTLE_S; a subscription whose receiver has no live flow fails too; a
-  receiver netaudio cannot list (switched off) is not checked. A
+  receiver netaudio cannot list (switched off) is not checked.
+  Accepted limit: netaudio leaves out a device that does not answer and the
+  network always has some (a clean read is never required, or every deploy
+  would fail), so a receiver with NO live flow that netaudio also left out
+  is not seen; every receiver of a live flow is read until it is listed.
+  dcontroller#163 watches the network-wide case. A
   subscribed TX channel of ours that no live flow to that receiver carries,
   or a TX name our device does not have, is a channel without sound. Flows
   start a few seconds after an engine start (the device's clock), so the
