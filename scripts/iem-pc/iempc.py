@@ -43,6 +43,7 @@ import iempc_event
 import iempc_gen3_deploy
 import iempc_gen3_gate
 import iempc_gen3_newbox
+import iempc_gen3_roster
 from iempc_core import Ctx, EventNow, Refused, StepError, emit, event_now, load_env, state_lock
 
 # The modules iempc.py is split into (#36). `iempc.<name>` reads any of their
@@ -80,6 +81,12 @@ def cmd_gen3_deploy(ctx: Ctx) -> int:
     return iempc_gen3_deploy.run(ctx, sys.modules[__name__])
 
 
+def cmd_gen3_roster(ctx: Ctx) -> int:
+    """The roster to the box live, no deploy, then the after-checks;
+    the code lives in iempc_gen3_roster.py (#145)."""
+    return iempc_gen3_roster.run(ctx, sys.modules[__name__])
+
+
 def cmd_gen3_backup(ctx: Ctx) -> int:
     """The box's band data and pepper into the private store; the code lives in iempc_gen3_newbox.py (#72)."""
     return iempc_gen3_newbox.run_backup(ctx, sys.modules[__name__])
@@ -110,6 +117,8 @@ COMMANDS: dict[str, Spec] = {
     "gen3-gate": Spec(cmd_gen3_gate, dev_time=True, locked=True),
     # The box through deploy.sh (#72).
     "gen3-deploy": Spec(cmd_gen3_deploy, dev_time=True, locked=True),
+    # The roster only, live, no restart (#145): an owner's lineup fix also in an event.
+    "gen3-roster": Spec(cmd_gen3_roster, dev_time=False, locked=True),
     # The box over ssh, its data into the private store, a new box, a read of the drift (#72).
     "gen3-backup": Spec(cmd_gen3_backup, dev_time=True, locked=True),
     "gen3-new-box": Spec(cmd_gen3_new_box, dev_time=True, locked=True),
@@ -137,6 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="its commit, 40 hex: this checkout must be at it with a clean tree (deploy.sh's check)")
     deploy.add_argument("--dry-run", action="store_true",
                         help="the plan: deploy.sh's options; no call")
+    sub.add_parser("gen3-roster", help="GEN3_ROSTER_FILE to the box without a deploy, then the server's read and "
+                   "the flows checked")
     sub.add_parser("gen3-backup")
     sub.add_parser("gen3-drift")
     fresh = sub.add_parser("gen3-new-box")
