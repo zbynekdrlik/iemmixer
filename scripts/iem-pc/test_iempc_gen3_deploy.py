@@ -56,6 +56,18 @@ sys.exit(c.get("exit", 0))
 '''
 
 
+class Clock:
+    """A clock that moves only when slept."""
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.t += s
+
+
 class DeployBase(Base):
     def setUp(self) -> None:
         super().setUp()
@@ -79,6 +91,16 @@ class DeployBase(Base):
         script.write_text(STAND_IN, encoding="utf-8")
         self.box_calls: list[str] = []
         self.roster_ok = True
+        # netaudio (an external program) lists the one receiver's subscription; the
+        # after-checks' waits run on a clock that moves only when slept.
+        netaudio = self.tmp / "netaudio_stand_in.py"
+        netaudio.write_text('import json\nprint(json.dumps([{"rx_device": "zyxrecv", "rx_channel": "Q 1", '
+                            '"tx_channel": "ZYXA L", "tx_device": "zyxmixer"}]))\n', encoding="utf-8")
+        clock = Clock()
+        for module, name, fake in ((ro, "NETAUDIO", (sys.executable, str(netaudio))), (ro, "time", clock)):
+            patcher = mock.patch.object(module, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.box_reply = (0, f"IEM_DANTE_IFACE={IFACE}\n".encode(), b"")
         for module, name, fake in ((dep, "DEPLOY", (sys.executable, str(script), str(self.log), str(self.control))),
                                    (dep.data, "box", self.box)):
@@ -100,7 +122,7 @@ class DeployBase(Base):
         if command == ro.STATE_READ:
             return 0, b'name = "zyxmixer"\ntx = ["ZYXA L"]\n', b""
         if command == ro.CTL_STATUS:
-            return 0, b'{"tx": []}\n', b""
+            return 0, b'{"tx": [{"receiver": "zyxrecv", "live": 1, "tx_channels": [1]}]}\n', b""
         return self.box_reply
 
     def deploys(self) -> list[dict]:
@@ -130,8 +152,10 @@ class DeployTests(DeployBase):
         code, docs, err = self.run_deploy()
         self.assertEqual(code, 0, err)
         # The box's interface read, then one deploy, and no other device asked for anything.
-        self.assertEqual(self.box_calls, [f"{GEN3} cat /etc/iemmixer/iem-dante.env", f"{GEN3} {ro.STATUS_READ}",
-                                          f"{GEN3} {ro.STATE_READ}", f"{GEN3} {ro.CTL_STATUS}"])
+        # The interface read, the server's roster read, then only the device's own reads.
+        self.assertEqual(self.box_calls[:3], [f"{GEN3} cat /etc/iemmixer/iem-dante.env", f"{GEN3} {ro.STATUS_READ}",
+                                              f"{GEN3} {ro.STATE_READ}"])
+        self.assertEqual(set(self.box_calls[3:]), {f"{GEN3} {ro.CTL_STATUS}"})
         [seen] = self.deploys()
         self.assertEqual(seen["args"], self.options())
         # The device's whole identity is that file, byte for byte.
@@ -139,7 +163,7 @@ class DeployTests(DeployBase):
         self.assertEqual(seen["env"], {"IEMMIXER_EVENT_NOW": str(ip.EVENT_NOW), "IEMPC_STATE": None,
                                        "PC_ENV": str(ip.env_path())})
         self.assertEqual(docs, [{"gen3_deploy": {"sha": SHA, "deployed": True, "roster_applied": True,
-                                                 "subscriptions_carried": 0}}])
+                                                 "subscriptions_carried": 1}}])
         self.assertIn("deploy.sh: slot-b: synthetic build; health healthy", err)
         self.assertEqual(self.leftovers(), [])
         self.assert_private(json.dumps(docs))

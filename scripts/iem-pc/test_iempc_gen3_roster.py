@@ -167,7 +167,7 @@ class AfterStartTests(BoxBase):
     def test_a_status_that_turns_to_this_roster_passes(self) -> None:
         self.status_replies = [status("0" * 64), b"not json", status(ro.sha256(ROSTER))]
         self.assertEqual(self.check()["roster_applied"], True)
-        self.assertEqual(self.clock.sleeps, 2)
+        self.assertEqual([c for c, _ in self.calls].count(ro.STATUS_READ), 3)
 
     def test_an_empty_slot_that_stays_fails_naming_the_channel(self) -> None:
         self.ctl_replies = [ctl((RECV, 1, [None, 2]))]
@@ -193,9 +193,38 @@ class AfterStartTests(BoxBase):
         self.assertIn("NOT checked", str(e.exception))
         self.assertIn(RECV, str(e.exception))
 
-    def test_no_live_flow_reads_no_receiver(self) -> None:
+    def test_no_live_flow_by_the_bound_fails(self) -> None:
         self.ctl_replies = [ctl((RECV, 0, [1, 2]))]
-        self.assertEqual(self.check()["subscriptions_carried"], 0)
+        with self.assertRaises(ip.StepError) as e:
+            self.check()
+        self.assertIn("no live TX flow", str(e.exception))
+
+    def test_flows_that_come_up_after_the_start_are_waited_for(self) -> None:
+        # Right after an engine start no flow is live yet: never a pass on an empty set.
+        self.ctl_replies = [ctl(), ctl(), ctl((RECV, 1, [1, 2]))]
+        self.assertEqual(self.check()["subscriptions_carried"], 2)
+        self.assertGreaterEqual(self.clock.t, ro.SETTLE_S)
+
+    def test_a_receiver_whose_flow_comes_up_later_is_checked_too(self) -> None:
+        other = "zyxother"
+        self.netaudio([[sub(RECV, "Z 1", "ZYXA L"), sub(other, "Y 1", "ZYXB L")]])
+        # Settled on RECV alone; the other receiver's flow comes up with its slot empty and stays so.
+        self.ctl_replies = [ctl((RECV, 1, [1]))] * 8 + [ctl((RECV, 1, [1]), (other, 1, [None]))]
+        with self.assertRaises(ip.StepError) as e:
+            self.check()
+        self.assertIn("'ZYXB L' (our TX 3)", str(e.exception))
+
+    def test_a_subscribed_receiver_with_no_flow_at_all_fails(self) -> None:
+        self.netaudio([[sub(RECV, "Z 1", "ZYXA L"), sub("zyxother", "Y 1", "ZYXB L")]])
+        with self.assertRaises(ip.StepError) as e:
+            self.check()
+        self.assertIn("zyxother 'Y 1'", str(e.exception))
+
+    def test_live_receivers_with_no_subscription_to_our_device_fail(self) -> None:
+        self.netaudio([[sub(RECV, "Z 1", "ZYXA L", tx_device="zyxrenamed")]])
+        with self.assertRaises(ip.StepError) as e:
+            self.check()
+        self.assertIn("NOT checked", str(e.exception))
 
 
 class RosterCommandTests(BoxBase):

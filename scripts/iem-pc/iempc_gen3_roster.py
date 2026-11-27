@@ -17,8 +17,9 @@ then only one ear, while every view said the patch was fine.
   lists the subscriptions those receivers hold, read again until it holds
   every one of them (netaudio leaves out a device that does not answer, and
   exits 1 then); the ones to our device (the `name` of the box's device
-  state file) are compared with the flows. A receiver with no live flow at
-  all (switched off) is not checked. A
+  state file) are compared with the flows. The receivers are taken once the live ones held
+  SETTLE_S; a subscription whose receiver has no live flow fails too; a
+  receiver netaudio cannot list (switched off) is not checked. A
   subscribed TX channel of ours that no live flow to that receiver carries,
   or a TX name our device does not have, is a channel without sound. Flows
   start a few seconds after an engine start (the device's clock), so the
@@ -55,6 +56,7 @@ NETAUDIO_S = 120
 NETAUDIO_TRIES = 3
 ROSTER_S = 30.0
 FLOWS_S = 60.0
+SETTLE_S = 5.0
 POLL_S = 1.0
 
 
@@ -139,9 +141,10 @@ def _box(ip, host: str, command: str, what: str, stdin: bytes = b"") -> str:
     return out.decode(errors="replace")
 
 
-def await_roster(ip, host: str, text: str, cmd: str, clock=time) -> None:
+def await_roster(ip, host: str, text: str, cmd: str, clock=None) -> None:
     """Until the box's server has read this roster: StepError naming the
     problems when it refused it, or when it read none of it by ROSTER_S."""
+    clock = clock or time
     want, end = sha256(text), clock.monotonic() + ROSTER_S
     while True:
         try:
@@ -196,25 +199,55 @@ def subscriptions_of(ip, cmd: str, device: str, receivers: set[str]) -> list[tup
                        f"{NETAUDIO_TRIES} netaudio reads: the flows are NOT checked")
 
 
-def await_flows(ip, host: str, cmd: str, clock=time) -> int:
-    """Until every subscription to our device (of the receivers our live
-    flows go to) has a live flow carrying it; StepError naming the silent
-    ones at FLOWS_S. Returns their count."""
+def await_flows(ip, host: str, cmd: str, clock=None) -> int:
+    """Until every subscription to our device has a live flow carrying it;
+    StepError naming the silent ones at FLOWS_S. Returns their count.
+
+    Right after an engine start the flows come up one by one: the receivers
+    are taken once the set of live receivers held for SETTLE_S (none by
+    FLOWS_S fails: the box always serves a receiver), and a receiver that
+    turns up later has its subscriptions read too. Every subscription to our
+    device that netaudio lists counts, also one whose receiver has no live
+    flow (switched on, subscribed, silent); a receiver netaudio cannot list
+    (switched off) is not checked."""
+    clock = clock or time
     def flows() -> dict[str, set[int]]:
-        lines = _box(ip, host, CTL_STATUS, cmd).splitlines()
-        return carried(json.loads(lines[-1]) if lines else None)
+        try:
+            lines = _box(ip, host, CTL_STATUS, cmd).splitlines()
+            return carried(json.loads(lines[-1]) if lines else None)
+        except ValueError as e:
+            raise ip.StepError(f"{cmd}: {e}") from None
 
     try:
         device, tx_names = our_device(_box(ip, host, STATE_READ, cmd))
-        now = flows()
     except ValueError as e:
         raise ip.StepError(f"{cmd}: {e}") from None
-    receivers = set(now)
-    say(f"{cmd}: our live TX flows go to {len(receivers)} receiver(s): {', '.join(sorted(receivers)) or 'none'}")
-    subs = subscriptions_of(ip, cmd, device, receivers) if receivers else []
-    say(f"{cmd}: those receivers hold {len(subs)} subscriptions to our device")
     end = clock.monotonic() + FLOWS_S
+    now, seen, since = flows(), None, clock.monotonic()
     while True:
+        receivers = set(now)
+        if receivers != seen:
+            seen, since = receivers, clock.monotonic()
+        elif receivers and clock.monotonic() - since >= SETTLE_S:
+            break
+        if clock.monotonic() >= end:
+            if receivers:
+                break
+            raise ip.StepError(f"{cmd}: no live TX flow of our device within {FLOWS_S:g} s: no receiver plays it")
+        clock.sleep(POLL_S)
+        now = flows()
+    say(f"{cmd}: our live TX flows go to {len(seen)} receiver(s): {', '.join(sorted(seen))}")
+    subs = subscriptions_of(ip, cmd, device, seen)
+    if not subs:
+        raise ip.StepError(f"{cmd}: netaudio lists no subscription to our device ({device}) although "
+                           f"{len(seen)} receiver(s) play its flows: the flows are NOT checked")
+    say(f"{cmd}: netaudio lists {len(subs)} subscriptions to our device")
+    while True:
+        new = set(now) - seen
+        if new:
+            say(f"{cmd}: a live flow to {', '.join(sorted(new))} came up later: its subscriptions are read too")
+            seen |= new
+            subs = subscriptions_of(ip, cmd, device, seen)
         missing = silent(subs, tx_names, now)
         if not missing:
             say(f"{cmd}: {len(subs)} subscriptions to our device, each carried by a live flow")
@@ -226,14 +259,12 @@ def await_flows(ip, host: str, cmd: str, clock=time) -> int:
                                "dstack#504)")
         say(f"{cmd}: {len(missing)} subscribed channel(s) not carried yet, read again in {POLL_S:g} s")
         clock.sleep(POLL_S)
-        try:
-            now = flows()
-        except ValueError as e:
-            raise ip.StepError(f"{cmd}: {e}") from None
+        now = flows()
 
 
-def after_start(ip, host: str, roster_text: str, cmd: str, clock=time) -> dict:
+def after_start(ip, host: str, roster_text: str, cmd: str, clock=None) -> dict:
     """Both reads, the roster's first."""
+    clock = clock or time
     await_roster(ip, host, roster_text, cmd, clock)
     count = await_flows(ip, host, cmd, clock)
     return {"roster_applied": True, "subscriptions_carried": count}
