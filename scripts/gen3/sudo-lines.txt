@@ -207,3 +207,10 @@ root | systemctl stop iem-soak
 root | systemctl reset-failed iem-soak
 iemmixer | rm -f /var/lib/iemmixer/mint/soakclient.json
 iemmixer | cat /var/lib/iemmixer/mint/soakclient.json
+
+# iempc gen3-roster and gen3-deploy's after-check (#145): the roster to the
+# box without a deploy (written beside, then renamed over it), and the
+# server's read of it.
+iemmixer | tee /var/lib/iemmixer/site/roster.toml.new
+iemmixer | mv -T /var/lib/iemmixer/site/roster.toml.new /var/lib/iemmixer/site/roster.toml
+iemmixer | cat /var/lib/iemmixer/site/roster.status.json

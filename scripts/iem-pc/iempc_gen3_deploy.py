@@ -32,8 +32,12 @@ stopped), it runs to its end, then the event path (iempc main).
 `--dry-run`: deploy.sh's options with the host and every path shown only as
 its kind, no call of any kind.
 
-stdout: one JSON object `{"gen3_deploy": {...}}`: fixed words, the sha and
-booleans; no host, address, path, name or label (P6).
+After deploy.sh: iempc_gen3_roster.after_start (#145), the roster the server
+read and every subscription to our device carried by a live flow, else a
+failure naming them.
+
+stdout: one JSON object `{"gen3_deploy": {...}}`: fixed words, the sha,
+booleans and a count; no host, address, path, name or label (P6).
 
 iempc.py passes itself in (`ip`), so this module never imports it (#36)."""
 from __future__ import annotations
@@ -46,6 +50,7 @@ from pathlib import Path
 
 import iempc_gen3_data as data
 import iempc_gen3_gate as gate
+import iempc_gen3_roster as roster
 
 HERE = Path(__file__).resolve().parent
 # deploy.sh of this checkout, the program and its script (tests put a stand-in here).
@@ -160,7 +165,14 @@ def run(ctx, ip) -> int:
         raise
     finally:
         count_start(ip, mark, still_running)
-    sys.stderr.write(out)
-    sys.stderr.flush()
-    ip.emit({"gen3_deploy": {"sha": sha, "deployed": True}})
+    # deploy.sh's health says nothing of the roster or of the receivers (#145):
+    # a refused roster, or a subscribed channel no flow carries, fails the deploy here.
+    # deploy.sh's stdout follows the checks' lines, its closing line (the gates) last.
+    try:
+        checks = roster.after_start(ip, s["GEN3_HOST"], Path(s["GEN3_ROSTER_FILE"]).read_text(encoding="utf-8"),
+                                    "gen3-deploy")
+    finally:
+        sys.stderr.write(out)
+        sys.stderr.flush()
+    ip.emit({"gen3_deploy": {"sha": sha, "deployed": True, **checks}})
     return 0
